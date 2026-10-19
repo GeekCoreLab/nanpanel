@@ -84,10 +84,28 @@ EOF
     unset db_password admin_password db_encoded admin_encoded
 fi
 
-if ! ssh "$ssh_target" kubectl -n nanpanel get secret nanpanel-web-tls >/dev/null 2>&1; then
+tls_present=false
+tls_rotated=false
+if ssh "$ssh_target" kubectl -n nanpanel get secret nanpanel-web-tls >/dev/null 2>&1; then
+    tls_present=true
+    ssh "$ssh_target" kubectl -n nanpanel get secret nanpanel-web-tls \
+        -o 'jsonpath={.data.tls\\.crt}' | base64 --decode > "$tls_dir/existing-tls.crt"
+    if ! openssl x509 -in "$tls_dir/existing-tls.crt" -noout -ext basicConstraints |
+        grep -q 'CA:FALSE' ||
+        ! openssl x509 -in "$tls_dir/existing-tls.crt" -noout -ext extendedKeyUsage |
+            grep -q 'TLS Web Server Authentication'; then
+        tls_rotated=true
+    fi
+fi
+
+if [[ "$tls_present" != true || "$tls_rotated" == true ]]; then
     openssl req -x509 -nodes -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
         -days 825 -keyout "$tls_dir/tls.key" -out "$tls_dir/tls.crt" \
-        -subj "/CN=${tls_host}" -addext "subjectAltName=${tls_san}" >/dev/null 2>&1
+        -subj "/CN=${tls_host}" \
+        -addext "basicConstraints=critical,CA:FALSE" \
+        -addext "keyUsage=critical,digitalSignature" \
+        -addext "extendedKeyUsage=serverAuth" \
+        -addext "subjectAltName=${tls_san}" >/dev/null 2>&1
     chmod 600 "$tls_dir/tls.key"
     cert_data=$(base64 < "$tls_dir/tls.crt" | tr -d '\n')
     key_data=$(base64 < "$tls_dir/tls.key" | tr -d '\n')
@@ -103,6 +121,7 @@ data:
   tls.key: ${key_data}
 EOF
     unset cert_data key_data tls_san
+    tls_rotated=true
 fi
 unset tls_san
 
@@ -149,6 +168,15 @@ apply_file "$script_dir/postgres.yaml"
 ssh "$ssh_target" kubectl -n nanpanel rollout status statefulset/nanpanel-postgres --timeout=180s
 apply_file "$script_dir/core.yaml"
 apply_file "$script_dir/web.yaml"
+if [[ "$tls_rotated" == true ]]; then
+    ssh "$ssh_target" kubectl -n nanpanel rollout restart \
+        deployment/nanpanel-core deployment/nanpanel-web
+fi
 ssh "$ssh_target" kubectl -n nanpanel rollout status deployment/nanpanel-core --timeout=240s
 ssh "$ssh_target" kubectl -n nanpanel rollout status deployment/nanpanel-web --timeout=180s
+if [[ "$tls_rotated" == true ]] &&
+    ssh "$ssh_target" systemctl is-enabled nanpanel-agent >/dev/null 2>&1; then
+    ssh "$ssh_target" "install -o root -g root -m 0644 /dev/stdin /etc/nanpanel-agent/controller.pem && systemctl restart nanpanel-agent" \
+        < "$tls_dir/tls.crt"
+fi
 ssh "$ssh_target" kubectl -n nanpanel get pods,svc,pvc -o wide

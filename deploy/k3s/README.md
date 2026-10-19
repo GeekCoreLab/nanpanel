@@ -43,7 +43,10 @@ to use a DNS name instead of the default node IP. The script uses this value
 for the certificate and Core's allowed origin. If it changes later, delete the
 `nanpanel-web-tls` Secret before redeploying so the certificate matches. Existing
 database credentials, TLS certificate, and volumes are retained when the script
-is run again.
+is run again. The deploy script rotates a legacy serving certificate if it is
+marked as a CA or lacks the TLS server-auth usage required by Rustls. It restarts
+Core and Web after rotation and refreshes the local Agent's trust certificate if
+`nanpanel-agent.service` is installed.
 The first-run administrator password is printed once; sign in as `admin`,
 change it, then remove the one-time bootstrap secret:
 
