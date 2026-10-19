@@ -1595,6 +1595,7 @@ paths:
           - SUCCEEDED
           - DENIED
           - FAILED
+          - ACCEPTED
       - name: from
         in: query
         schema:
@@ -3088,6 +3089,7 @@ components:
           - SUCCEEDED
           - DENIED
           - FAILED
+          - ACCEPTED
         traceId:
           type: string
           minLength: 1

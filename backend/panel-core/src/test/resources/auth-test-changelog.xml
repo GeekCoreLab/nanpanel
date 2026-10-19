@@ -9,7 +9,7 @@
         <sqlFile path="db/changelog/003-admin-user-state.sql"/>
     </changeSet>
     <changeSet id="audit-test" author="nanpanel">
-        <sqlFile path="db/changelog/004-audit-event.sql"/>
+        <sqlFile path="db/changelog/004-audit-event-test.sql"/>
     </changeSet>
     <changeSet id="inventory-test" author="nanpanel">
         <sql>CREATE TABLE host (id UUID PRIMARY KEY, hostname VARCHAR(255) NOT NULL, os VARCHAR(255), arch VARCHAR(64), capabilities VARCHAR(4096) NOT NULL DEFAULT '[]', generation BIGINT NOT NULL DEFAULT 1, observed_generation BIGINT NOT NULL DEFAULT 0, status VARCHAR(16) NOT NULL DEFAULT 'UNKNOWN', created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP);</sql>

@@ -81,7 +81,7 @@ public class AdminAuditResource {
     if (action != null && !ACTION.matcher(action).matches())
       throw fail(400, "VALIDATION_FAILED", "action 格式无效");
     if (outcome != null &&
-        !Set.of("SUCCEEDED", "DENIED", "FAILED").contains(outcome))
+        !Set.of("SUCCEEDED", "DENIED", "FAILED", "ACCEPTED").contains(outcome))
       throw fail(400, "VALIDATION_FAILED", "outcome 无效");
     Long startTime = instant(from, "from");
     Long endTime = instant(to, "to");

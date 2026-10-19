@@ -92,6 +92,7 @@ jobs:
           context: .
           file: deploy/docker/Dockerfile.core
           push: true
+          build-args: NANPANEL_BUILD_VERSION=${{ github.sha }}
           tags: ${{ steps.core-meta.outputs.tags }}
           labels: ${{ steps.core-meta.outputs.labels }}
           cache-from: type=gha,scope=core

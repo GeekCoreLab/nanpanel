@@ -4,6 +4,8 @@ COPY . .
 RUN ./mvnw -B -ntp -pl backend/panel-core -am package -DskipTests
 
 FROM docker.io/library/rust:1.89-bookworm AS agent-build
+ARG NANPANEL_BUILD_VERSION=development
+ENV NANPANEL_BUILD_VERSION=${NANPANEL_BUILD_VERSION}
 RUN apt-get update && apt-get install -y --no-install-recommends musl-tools protobuf-compiler \
     && rm -rf /var/lib/apt/lists/* \
     && rustup target add x86_64-unknown-linux-musl

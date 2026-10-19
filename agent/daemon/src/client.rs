@@ -186,7 +186,7 @@ async fn connect_once(config: &AgentConfig, tls: ClientTlsConfig) -> Result<()> 
                 sequence,
                 sent_at_epoch_ms,
                 payload: Some(Payload::Heartbeat(Heartbeat {
-                    version: env!("CARGO_PKG_VERSION").to_owned(),
+                    version: env!("NANPANEL_AGENT_VERSION").to_owned(),
                     hostname: host.hostname.clone(),
                     os: host.os.clone(),
                     arch: host.arch.clone(),

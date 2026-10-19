@@ -170,6 +170,18 @@ class SystemResourceTest {
         .body("status", equalTo("ONLINE"))
         .body("helperStatus", equalTo("AVAILABLE"))
         .body("capabilities", hasItems("agent.self_update"));
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .contentType("application/json")
+        .body(Map.of())
+        .post("/api/v1/agents/" + agentId + "/updates")
+        .then().statusCode(503)
+        .body("code", equalTo("GATEWAY_UNAVAILABLE"));
+    given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/admin/audit-events?outcome=ACCEPTED")
+        .then().statusCode(200)
+        .body("items[0].action", equalTo("agent.update"))
+        .body("items[0].outcome", equalTo("ACCEPTED"));
     var sessions = given()
                        .cookie("nanpanel_session", restoredCookie)
                        .get("/api/v1/auth/sessions")

@@ -7,4 +7,5 @@
 <changeSet id="005-platform-settings" author="nanpanel"><sqlFile path="005-platform-settings.sql" relativeToChangelogFile="true"/></changeSet>
 <changeSet id="006-agent-enrollment" author="nanpanel"><sqlFile path="006-agent-enrollment.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE agent_enrollment; ALTER TABLE agent DROP COLUMN cert_fingerprint;</sql></rollback></changeSet>
 <changeSet id="007-agent-helper-control" author="nanpanel"><sqlFile path="007-agent-helper-control.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE agent_control_operation; ALTER TABLE agent DROP COLUMN helper_status;</sql></rollback></changeSet>
+<changeSet id="008-audit-accepted-outcome" author="nanpanel"><sqlFile path="008-audit-accepted-outcome.sql" relativeToChangelogFile="true"/><rollback><sql>ALTER TABLE audit_event DROP CONSTRAINT audit_event_outcome_check; ALTER TABLE audit_event ADD CONSTRAINT audit_event_outcome_check CHECK (outcome IN ('SUCCEEDED', 'DENIED', 'FAILED'));</sql></rollback></changeSet>
 </databaseChangeLog>
