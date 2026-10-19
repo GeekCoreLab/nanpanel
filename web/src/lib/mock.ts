@@ -1,8 +1,9 @@
+import { createUuid } from './uuid.ts';
 import { initialTopology, draftError } from './topology-model.ts';
 import type { TopologyDraft } from './types';
 import type { Host, SystemService, AdminUser, PlatformSettings, Operation, AuditEvent, WebSession } from './types';
 const now = () => new Date().toISOString();
-const id = () => crypto.randomUUID();
+const id = () => createUuid();
 const uuid = (n: number) => `8b395d24-5d5d-4f27-b70b-${String(n).padStart(12, '0')}`;
 export const DEMO_PASSWORD = 'nanpanel-demo-2026';
 const hosts: Host[] = ['gateway-sg-01', 'homelab-node-01', 'k3s-worker-01', 'edge-shanghai-02', 'backup-node-01', 'lab-arm-01'].map((hostname, i) => ({ id: uuid(i + 1), hostname, os: 'linux', arch: i === 5 ? 'aarch64' : 'x86_64', status: i === 4 ? 'OFFLINE' : i === 5 ? 'UNKNOWN' : 'ONLINE', capabilities: ['systemd.read', 'systemd.restart'], agentId: uuid(i + 21), lastSeenAt: i >= 4 ? new Date(Date.now() - 3600000).toISOString() : now(), createdAt: now() }));

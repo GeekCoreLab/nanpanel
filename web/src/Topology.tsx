@@ -5,6 +5,7 @@ import {
   type Node, type NodeProps, type Edge, type EdgeProps, type Connection, type IsValidConnection,
 } from '@xyflow/react';
 import { api, isMock } from './lib/api';
+import { createUuid } from './lib/uuid.ts';
 import { connectionError, createTopologyNode, draftError, nodePresets, validNodeShape } from './lib/topology-model';
 import type { TopologyDraft, TopologyDraftWrite, TopologyLink, TopologyNode, TopologyNodeKind } from './lib/types';
 
@@ -87,7 +88,7 @@ function Editor() {
     const model = createTopologyNode(kind, position);
     setNodes(current => [...current, asNode(model)]); setDirty(true); setMenu(undefined); setError(''); setMessage(`已添加${model.name}：${model.inputCount} 入 / ${model.outputCount} 出`); requestAnimationFrame(() => { void fitView({ padding: .2 }); });
   }
-  const candidate = (connection: Connection | Edge): TopologyLink => ({ id: crypto.randomUUID(), sourceNodeId: connection.source, sourcePort: connection.sourceHandle ?? '', targetNodeId: connection.target, targetPort: connection.targetHandle ?? '', status: 'UNVERIFIED' });
+  const candidate = (connection: Connection | Edge): TopologyLink => ({ id: createUuid(), sourceNodeId: connection.source, sourcePort: connection.sourceHandle ?? '', targetNodeId: connection.target, targetPort: connection.targetHandle ?? '', status: 'UNVERIFIED' });
   const validConnection: IsValidConnection = connection => loaded && !busy && edges.length < 800 && !connectionError(draft().nodes, edges.map(asLink), candidate(connection));
   function connect(connection: Connection) {
     if (edges.length >= 800) { setError('最多添加 800 条连接'); return; }

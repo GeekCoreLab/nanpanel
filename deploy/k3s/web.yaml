@@ -12,6 +12,10 @@ spec:
       port: 8080
       targetPort: 8080
       nodePort: 30081
+    - name: https
+      port: 8443
+      targetPort: 8443
+      nodePort: 30443
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -42,21 +46,26 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+            - name: https
+              containerPort: 8443
           startupProbe:
             httpGet:
               path: /
-              port: http
+              port: https
+              scheme: HTTPS
             periodSeconds: 5
             failureThreshold: 20
           readinessProbe:
             httpGet:
               path: /
-              port: http
+              port: https
+              scheme: HTTPS
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /
-              port: http
+              port: https
+              scheme: HTTPS
             periodSeconds: 20
           resources:
             requests:
@@ -73,6 +82,9 @@ spec:
             capabilities:
               drop: [ALL]
           volumeMounts:
+            - name: tls
+              mountPath: /etc/nginx/tls
+              readOnly: true
             - name: cache
               mountPath: /var/cache/nginx
             - name: run
@@ -80,6 +92,10 @@ spec:
             - name: tmp
               mountPath: /tmp
       volumes:
+        - name: tls
+          secret:
+            secretName: nanpanel-web-tls
+            defaultMode: 0440
         - name: cache
           emptyDir: {}
         - name: run

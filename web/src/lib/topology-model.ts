@@ -1,3 +1,4 @@
+import { createUuid } from './uuid.ts';
 import type { TopologyDraftWrite, TopologyLink, TopologyNode, TopologyNodeKind } from './types';
 
 export const nodePresets: Record<TopologyNodeKind, { name: string; inputs: number; outputs: number; description: string }> = {
@@ -11,7 +12,7 @@ export const nodePresets: Record<TopologyNodeKind, { name: string; inputs: numbe
 };
 export function createTopologyNode(kind: TopologyNodeKind, position: { x: number; y: number }): TopologyNode {
   const preset = nodePresets[kind];
-  return { id: crypto.randomUUID(), kind, name: preset.name, position, inputCount: preset.inputs, outputCount: preset.outputs };
+  return { id: createUuid(), kind, name: preset.name, position, inputCount: preset.inputs, outputCount: preset.outputs };
 }
 export function initialTopology(): TopologyDraftWrite {
   return { nodes: [createTopologyNode('GATEWAY', { x: 0, y: 100 }), createTopologyNode('HOST', { x: 350, y: 180 }), createTopologyNode('SERVICE', { x: 700, y: 100 })], links: [] };
