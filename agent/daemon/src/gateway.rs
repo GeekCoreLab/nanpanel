@@ -155,14 +155,11 @@ pub async fn serve_from_env() -> anyhow::Result<()> {
         .client_ca_root(tonic::transport::Certificate::from_pem(ca));
     let gateway = Gateway::from_env()?;
     info!(%address, "starting mTLS Agent Gateway");
-    let serving = tonic::transport::Server::builder()
+    tonic::transport::Server::builder()
         .tls_config(tls)?
         .add_service(AgentGatewayServer::new(gateway))
-        .serve_with_shutdown(address, shutdown_signal());
-    match tokio::time::timeout(Duration::from_secs(2), serving).await {
-        Ok(result) => result?,
-        Err(_) => warn!("Agent Gateway shutdown deadline reached; closing active streams"),
-    }
+        .serve_with_shutdown(address, shutdown_signal())
+        .await?;
     Ok(())
 }
 
