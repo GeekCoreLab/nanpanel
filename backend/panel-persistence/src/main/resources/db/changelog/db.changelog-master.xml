@@ -6,4 +6,5 @@
 <changeSet id="004-audit-event" author="nanpanel"><sqlFile path="004-audit-event.sql" relativeToChangelogFile="true"/></changeSet>
 <changeSet id="005-platform-settings" author="nanpanel"><sqlFile path="005-platform-settings.sql" relativeToChangelogFile="true"/></changeSet>
 <changeSet id="006-agent-enrollment" author="nanpanel"><sqlFile path="006-agent-enrollment.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE agent_enrollment; ALTER TABLE agent DROP COLUMN cert_fingerprint;</sql></rollback></changeSet>
+<changeSet id="007-agent-helper-control" author="nanpanel"><sqlFile path="007-agent-helper-control.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE agent_control_operation; ALTER TABLE agent DROP COLUMN helper_status;</sql></rollback></changeSet>
 </databaseChangeLog>

@@ -18,4 +18,7 @@
         <sql>CREATE TABLE platform_settings (id INTEGER PRIMARY KEY, site_name VARCHAR(100), default_timezone VARCHAR(64), host_offline_after_seconds INTEGER, operation_retention_days INTEGER, updated_at BIGINT, updated_by UUID);</sql>
         <sql>INSERT INTO platform_settings VALUES (1, 'NaNPanel', 'Asia/Shanghai', 90, 30, 0, NULL);</sql>
     </changeSet>
+    <changeSet id="agent-helper-control-test" author="nanpanel">
+        <sqlFile path="db/changelog/007-agent-helper-control.sql"/>
+    </changeSet>
 </databaseChangeLog>

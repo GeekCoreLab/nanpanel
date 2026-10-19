@@ -67,7 +67,8 @@ public class SessionFilter
       return;
     boolean agentDownload = r.getMethod().equals("GET") && Set.of(
         "api/v1/agent-installation", "api/v1/agent-controller-cert",
-        "api/v1/agent-download/linux-amd64").contains(path);
+        "api/v1/agent-download/linux-amd64",
+        "api/v1/helper-download/linux-amd64").contains(path);
     boolean agentRedemption = path.equals("api/v1/agent-enrollments/redeem") &&
         r.getMethod().equals("POST") && r.getCookies().get(COOKIE) == null &&
         Optional.ofNullable(r.getHeaderString("Authorization"))

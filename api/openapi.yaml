@@ -2,7 +2,7 @@ openapi: 3.1.1
 info:
   title: NaNPanel 管理 API
   version: 0.1.0-draft.2
-  description: 契约优先的 Web 平台 API。管理操作使用 HttpOnly Cookie 会话和写请求 CSRF；Agent 使用独立的一次性接入码、客户端证书和 mTLS/gRPC。主机/Agent 查询、受控 Agent 注册接入、心跳回写及 Cookie 保护的 /system 已实现；systemd 服务和操作任务仍待实现。
+  description: 契约优先的 Web 平台 API。管理操作使用 HttpOnly Cookie 会话和写请求 CSRF；Agent 使用独立的一次性接入码、客户端证书和 mTLS/gRPC。主机/Agent 查询、受控 Agent 注册接入、Helper 状态心跳及 Agent 异步自更新已实现；通用 systemd 服务和操作任务仍待实现。
   x-status: draft
 servers:
 - url: http://127.0.0.1:8080
@@ -181,7 +181,7 @@ paths:
       - Agents
       operationId: getAgent
       summary: 查询 Agent 状态与能力
-      description: 不返回证书私钥、注册码或凭据。状态按最近心跳和平台离线阈值计算；当前持久化模型没有 Helper 观测字段，因此 helperStatus 返回 UNKNOWN。初版不包含注册、吊销、升级和直接下发命令。登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回 401 或 403 PASSWORD_CHANGE_REQUIRED。
+      description: 不返回证书私钥、注册码或凭据。状态按最近心跳和平台离线阈值计算；helperStatus 来自 Agent 最近一次 Helper socket 探测，不能替代单次操作的授权检查。Agent 注册、Helper 控制和受限 Agent 自更新已实现；证书吊销与续期仍待实现。
       x-implementation-status: implemented
       responses:
         '200':
@@ -202,6 +202,7 @@ paths:
                     capabilities:
                     - systemd.read
                     - systemd.restart
+                    - agent.self_update
                     helperStatus: AVAILABLE
                 helperUnavailable:
                   value:
@@ -223,6 +224,67 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '500':
           $ref: '#/components/responses/InternalError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/agents/{agentId}/updates:
+    parameters:
+    - $ref: '#/components/parameters/AgentId'
+    post:
+      tags: [Agents]
+      operationId: requestAgentUpdate
+      summary: 请求 Agent 经 Helper 异步自更新
+      description: 需要在线 Agent 最近一次报告 Helper AVAILABLE 和 agent.self_update。Core 通过本地 Gateway 双向流发送固定 agent.update 指令；Helper 仅从安装时固定的 HTTPS 控制器下载 Agent 并原子替换，再请求 systemd 重启 Agent。没有在线会话或同 Agent 存在进行中的更新时返回 409。
+      x-implementation-status: implemented
+      responses:
+        '202':
+          description: 更新指令已发送，结果可通过任务资源轮询。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentUpdateOperation'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Agent 离线、Helper 不可用或已有更新执行中。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          description: Gateway 暂时无法接受控制指令。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /api/v1/agents/{agentId}/updates/{operationId}:
+    parameters:
+    - $ref: '#/components/parameters/AgentId'
+    - name: operationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    get:
+      tags: [Agents]
+      operationId: getAgentUpdate
+      summary: 查询 Agent 更新任务
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 当前异步更新状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentUpdateOperation'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
   /api/v1/hosts/{hostId}/services:
@@ -2195,7 +2257,7 @@ components:
     AgentInstallation:
       type: object
       additionalProperties: false
-      required: [controllerFingerprint, gatewayPort, installerPath, agentDownloadPath]
+      required: [controllerFingerprint, gatewayPort, installerPath, agentDownloadPath, helperDownloadPath]
       properties:
         controllerFingerprint:
           type: string
@@ -2206,6 +2268,32 @@ components:
           type: string
         agentDownloadPath:
           type: string
+        helperDownloadPath:
+          type: string
+    AgentUpdateOperation:
+      type: object
+      additionalProperties: false
+      required: [id, agentId, status, detail, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        agentId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [PENDING, RUNNING, SUCCEEDED, FAILED]
+        detail:
+          type:
+          - string
+          - 'null'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
     Agent:
       type: object
       additionalProperties: false

@@ -144,7 +144,8 @@ class SystemResourceTest {
         "certificateFingerprint", certificateFingerprint,
         "hostname", "panel-test-host-real", "os", "Ubuntu 24.04",
         "arch", "x86_64", "capabilities",
-        java.util.List.of("host.inventory", "agent.heartbeat"));
+        java.util.List.of("host.inventory", "agent.heartbeat", "agent.self_update"),
+        "helperStatus", "AVAILABLE");
     var forgedHeartbeat = new java.util.HashMap<>(heartbeat);
     forgedHeartbeat.put("certificateFingerprint", "0".repeat(64));
     given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
@@ -162,12 +163,13 @@ class SystemResourceTest {
         .then().statusCode(200)
         .body("hostname", equalTo("panel-test-host-real"))
         .body("status", equalTo("ONLINE"))
-        .body("capabilities", hasItems("host.inventory", "agent.heartbeat"));
+        .body("capabilities", hasItems("host.inventory", "agent.heartbeat", "agent.self_update"));
     given().cookie("nanpanel_session", restoredCookie)
         .get("/api/v1/agents/" + agentId)
         .then().statusCode(200)
         .body("status", equalTo("ONLINE"))
-        .body("helperStatus", equalTo("UNKNOWN"));
+        .body("helperStatus", equalTo("AVAILABLE"))
+        .body("capabilities", hasItems("agent.self_update"));
     var sessions = given()
                        .cookie("nanpanel_session", restoredCookie)
                        .get("/api/v1/auth/sessions")

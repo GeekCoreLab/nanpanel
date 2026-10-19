@@ -27,6 +27,9 @@ public class AgentEnrollmentResource {
   @ConfigProperty(name = "nanpanel.agent.binary")
   String agentBinary;
 
+  @ConfigProperty(name = "nanpanel.agent.helper-binary", defaultValue = "/work/nanpanel-helper")
+  String helperBinary;
+
   @ConfigProperty(name = "nanpanel.agent.gateway-port", defaultValue = "30444")
   int gatewayPort;
 
@@ -42,7 +45,8 @@ public class AgentEnrollmentResource {
       String hostname,
       String os,
       String arch,
-      List<String> capabilities) {}
+      List<String> capabilities,
+      String helperStatus) {}
 
   private String actor() {
     @SuppressWarnings("unchecked")
@@ -68,7 +72,8 @@ public class AgentEnrollmentResource {
     return Map.of("controllerFingerprint", authority.controllerFingerprint(),
                   "gatewayPort", gatewayPort,
                   "installerPath", "/agent-install.sh",
-                  "agentDownloadPath", "/api/v1/agent-download/linux-amd64");
+                  "agentDownloadPath", "/api/v1/agent-download/linux-amd64",
+                  "helperDownloadPath", "/api/v1/helper-download/linux-amd64");
   }
 
   @GET
@@ -91,6 +96,20 @@ public class AgentEnrollmentResource {
     return Response.ok((StreamingOutput)output -> Files.copy(binary, output),
                        MediaType.APPLICATION_OCTET_STREAM)
         .header("Content-Disposition", "attachment; filename=nanpanel-agent")
+        .header("Cache-Control", "public, max-age=300")
+        .build();
+  }
+
+  @GET
+  @Path("helper-download/linux-amd64")
+  @Produces(MediaType.APPLICATION_OCTET_STREAM)
+  public Response downloadHelper() {
+    java.nio.file.Path binary = java.nio.file.Path.of(helperBinary);
+    if (!Files.isRegularFile(binary) || !Files.isReadable(binary))
+      throw fail(503, "HELPER_BINARY_UNAVAILABLE", "当前版本未包含 Linux x86_64 Helper");
+    return Response.ok((StreamingOutput)output -> Files.copy(binary, output),
+                       MediaType.APPLICATION_OCTET_STREAM)
+        .header("Content-Disposition", "attachment; filename=nanpanel-helper")
         .header("Cache-Control", "public, max-age=300")
         .build();
   }

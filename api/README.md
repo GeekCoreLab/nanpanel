@@ -2,7 +2,7 @@
 
 [openapi.yaml](openapi.yaml) 是 Web → Core HTTP API 的设计基线，格式为 [OpenAPI 3.1.1](https://spec.openapis.org/oas/v3.1.1.html)。可导入支持该版本的 API 编辑器、文档或 Mock 工具。
 
-版本：`0.1.0-draft.2`。当前已实现 `/auth/*`、Cookie 保护的 `/system`、管理员账号/角色/设置、审计查询、主机和 Agent 查询、受控 Agent 接入及心跳回写；systemd 服务、操作任务和拓扑部署仍待实现。操作级 `x-implementation-status` 区分已有端点与规划端点。Agent 接入不授予远程命令或 root 操作。
+版本：`0.1.0-draft.2`。当前已实现 `/auth/*`、管理员与审计 API、主机和 Agent 查询、受控 Agent 接入、Helper 状态心跳及受限 Agent 异步自更新；通用 systemd 服务、操作任务和拓扑部署仍待实现。操作级 `x-implementation-status` 区分已有端点与规划端点。Agent 接入不授予任意远程命令或 root shell。
 
 ## 接口范围
 
@@ -21,6 +21,9 @@
 | GET | `/api/v1/agent-installation` | 查询 Gateway 端口和控制器 TLS 指纹 |
 | GET | `/api/v1/agent-controller-cert` | 下载控制器 TLS PEM 证书 |
 | GET | `/api/v1/agent-download/linux-amd64` | 下载随 Core 镜像发布的 Linux x86_64 Agent |
+| GET | `/api/v1/helper-download/linux-amd64` | 下载随 Core 镜像发布的 Linux x86_64 root Helper |
+| POST | `/api/v1/agents/{agentId}/updates` | 经本地 Gateway 请求在线 Agent 异步更新 |
+| GET | `/api/v1/agents/{agentId}/updates/{operationId}` | 查询 Agent 更新任务结果 |
 | GET | `/api/v1/hosts/{hostId}/services` | 主机 systemd 服务列表 |
 | GET | `/api/v1/hosts/{hostId}/services/{serviceId}` | 服务观测、可用动作及 ETag |
 | POST | `/api/v1/hosts/{hostId}/services/{serviceId}/restart` | 接受服务重启任务 |
@@ -29,7 +32,7 @@
 
 这里的 `SystemService` 是主机 systemd unit，与平台逻辑服务 `Service` 分开。URL 使用平台 UUID，服务端解析受管 unit，不接受任意命令或客户端指定的主机身份。
 
-Agent 接入码由数据库保存 SHA-256 哈希，明文仅在创建响应中出现一次，15 分钟到期且只能兑换一次。安装器在发出接入码前先用 UI 展示的证书 SHA-256 指纹校验控制器证书；Agent 在本机生成私钥和 CSR，Core 只签发 CN 与预分配 Agent UUID 一致的客户端证书。mTLS Gateway 校验证书链，并将证书指纹随心跳交给 Core 再次匹配登记记录。`host.inventory` 和 `agent.heartbeat` 是当前唯一上报能力，尚未实现证书吊销/续期、systemd 服务观测或特权执行。Agent gRPC 协议见 [agent.proto](../agent/protocol/agent.proto)。
+Agent 接入码由数据库保存 SHA-256 哈希，明文仅在创建响应中出现一次，15 分钟到期且只能兑换一次。安装器在发出接入码前先用 UI 展示的证书 SHA-256 指纹校验控制器证书；Agent 在本机生成私钥和 CSR，Core 只签发 CN 与预分配 Agent UUID 一致的客户端证书。mTLS Gateway 校验证书链，并将证书指纹随心跳交给 Core 再次匹配登记记录。Agent 还上报 Helper 状态和 `agent.self_update` 能力；更新任务经 Core 持久化并由本机 root Helper 从固定控制器下载、原子替换 Agent。证书吊销/续期、通用 systemd 服务观测和其他特权能力仍未实现。Agent gRPC 协议见 [agent.proto](../agent/protocol/agent.proto)。
 
 ## 认证、授权与读取
 

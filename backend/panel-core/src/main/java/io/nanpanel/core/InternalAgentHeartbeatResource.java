@@ -42,12 +42,18 @@ public class InternalAgentHeartbeatResource {
     if (report == null || report.agentId() == null || report.version() == null ||
         report.certificateFingerprint() == null || report.hostname() == null ||
         report.os() == null || report.arch() == null || report.capabilities() == null ||
+        report.helperStatus() == null ||
+        !Set.of("AVAILABLE", "UNAVAILABLE").contains(report.helperStatus()) ||
+        (report.capabilities() != null &&
+            report.capabilities().contains("agent.self_update") !=
+                "AVAILABLE".equals(report.helperStatus())) ||
         report.version().isBlank() || report.version().length() > 64 ||
         report.hostname().isBlank() || report.hostname().length() > 255 ||
         report.hostname().chars().anyMatch(Character::isISOControl) ||
         report.os().length() > 255 || report.arch().length() > 64 ||
         report.capabilities().size() > 16 || report.capabilities().stream().anyMatch(
-            capability -> !Set.of("host.inventory", "agent.heartbeat").contains(capability)) ||
+            capability -> !Set.of("host.inventory", "agent.heartbeat", "agent.self_update")
+                .contains(capability)) ||
         !report.certificateFingerprint().matches("[a-f0-9]{64}"))
       throw fail(400, "INVALID_HEARTBEAT", "Agent 心跳字段无效");
 
@@ -69,8 +75,9 @@ public class InternalAgentHeartbeatResource {
               report.certificateFingerprint().getBytes(StandardCharsets.US_ASCII)))
         throw fail(403, "AGENT_IDENTITY_MISMATCH", "Agent 证书与登记身份不匹配");
       UUID hostId = (UUID)rows.getFirst().get("host_id");
-      update(c, "UPDATE agent SET version=?,last_seen=? WHERE id=?",
-          report.version(), java.sql.Timestamp.from(Instant.now()), agentId);
+      update(c, "UPDATE agent SET version=?,last_seen=?,helper_status=? WHERE id=?",
+          report.version(), java.sql.Timestamp.from(Instant.now()),
+          report.helperStatus(), agentId);
       String capabilities = mapper.writeValueAsString(report.capabilities());
       String jsonParameter = c.getMetaData().getDatabaseProductName()
           .equalsIgnoreCase("PostgreSQL") ? "?::jsonb" : "?";

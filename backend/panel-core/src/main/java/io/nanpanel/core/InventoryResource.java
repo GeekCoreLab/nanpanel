@@ -216,7 +216,7 @@ public class InventoryResource {
     return store.transaction(c -> {
       var rows = query(
           c,
-          "SELECT a.id AS agent_id,a.host_id,a.version,a.last_seen," +
+          "SELECT a.id AS agent_id,a.host_id,a.version,a.last_seen,a.helper_status," +
               "h.capabilities" + (c.getMetaData().getDatabaseProductName()
                   .equalsIgnoreCase("PostgreSQL") ? "::text" : "") + " AS capabilities FROM agent a " +
               "JOIN host h ON h.id=a.host_id WHERE a.id=?",
@@ -233,7 +233,7 @@ public class InventoryResource {
       result.put("status", status(row.get("last_seen"), threshold, Instant.now()));
       result.put("lastSeenAt", timestamp(row.get("last_seen")));
       result.put("capabilities", capabilities(row.get("capabilities")));
-      result.put("helperStatus", "UNKNOWN");
+      result.put("helperStatus", row.get("helper_status"));
       return result;
     });
   }
