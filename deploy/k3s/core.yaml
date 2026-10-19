@@ -139,6 +139,8 @@ spec:
           env:
             - name: NANPANEL_GATEWAY_LISTEN
               value: 0.0.0.0:50051
+            - name: NANPANEL_GATEWAY_CONTROL_LISTEN
+              value: 127.0.0.1:50052
             - name: NANPANEL_GATEWAY_CLIENT_CA
               value: /etc/nanpanel/agent-ca/ca.crt
             - name: NANPANEL_GATEWAY_CERT

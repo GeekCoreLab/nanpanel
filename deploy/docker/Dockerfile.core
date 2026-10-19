@@ -11,6 +11,8 @@ WORKDIR /workspace
 COPY agent/ ./agent/
 RUN cargo build --locked --release --target x86_64-unknown-linux-musl \
     --manifest-path agent/Cargo.toml -p nanpanel-agent
+RUN cargo build --locked --release --target x86_64-unknown-linux-musl \
+    --manifest-path agent/Cargo.toml -p nanpanel-privileged-helper --bin nanpanel-helper
 
 FROM docker.io/library/eclipse-temurin:21-jre-jammy
 WORKDIR /work
@@ -21,6 +23,7 @@ COPY --from=build --chown=10001:0 /workspace/backend/panel-core/target/quarkus-a
 COPY --from=build --chown=10001:0 /workspace/backend/panel-core/target/quarkus-app/quarkus/ ./quarkus/
 COPY --from=build --chown=10001:0 /workspace/backend/panel-core/target/quarkus-app/quarkus-app-dependencies.txt ./
 COPY --from=agent-build --chown=10001:0 /workspace/agent/target/x86_64-unknown-linux-musl/release/nanpanel-agent ./nanpanel-agent
+COPY --from=agent-build --chown=10001:0 /workspace/agent/target/x86_64-unknown-linux-musl/release/nanpanel-helper ./nanpanel-helper
 ENV QUARKUS_HTTP_HOST=0.0.0.0
 EXPOSE 8080 50051
 USER 10001:0

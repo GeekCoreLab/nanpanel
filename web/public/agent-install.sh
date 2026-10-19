@@ -82,6 +82,7 @@ if ! getent passwd "$agent_user" >/dev/null; then
 fi
 install -d -o root -g root -m 0755 /etc/nanpanel-agent
 install -d -o "$agent_user" -g "$agent_user" -m 0750 /var/lib/nanpanel-agent
+install -d -o root -g root -m 0755 /etc/nanpanel/managed
 
 curl --cacert "$controller_cert" --fail --silent --show-error --location \
     --connect-timeout 10 --max-time 120 \
@@ -94,6 +95,17 @@ if pathlib.Path(sys.argv[1]).read_bytes()[:4] != b"\x7fELF":
     raise SystemExit("Agent download is not a Linux executable")
 PY
 install -o root -g root -m 0755 "$work_dir/nanpanel-agent" /usr/local/bin/nanpanel-agent
+curl --cacert "$controller_cert" --fail --silent --show-error --location \
+    --connect-timeout 10 --max-time 120 \
+    "$controller/api/v1/helper-download/linux-amd64" -o "$work_dir/nanpanel-helper"
+python3 - "$work_dir/nanpanel-helper" <<'PY'
+import pathlib
+import sys
+
+if pathlib.Path(sys.argv[1]).read_bytes()[:4] != b"\x7fELF":
+    raise SystemExit("Helper download is not a Linux executable")
+PY
+install -o root -g root -m 0755 "$work_dir/nanpanel-helper" /usr/local/bin/nanpanel-helper
 
 openssl req -new -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
     -keyout "$work_dir/agent.key" -out "$work_dir/agent.csr" \
@@ -141,6 +153,8 @@ fi
 install -o root -g root -m 0644 "$controller_cert" /etc/nanpanel-agent/controller.pem
 install -o root -g root -m 0644 "$work_dir/agent.crt" /etc/nanpanel-agent/agent.crt
 install -o root -g "$agent_user" -m 0640 "$work_dir/agent.key" /etc/nanpanel-agent/agent.key
+agent_uid=$(id -u "$agent_user")
+agent_gid=$(id -g "$agent_user")
 cat > /etc/nanpanel-agent/agent.env <<EOF
 NANPANEL_AGENT_ENDPOINT=$gateway_endpoint
 NANPANEL_AGENT_TLS_DOMAIN=$tls_domain
@@ -156,7 +170,8 @@ chmod 0640 /etc/nanpanel-agent/agent.env
 cat > /etc/systemd/system/nanpanel-agent.service <<'UNIT'
 [Unit]
 Description=NaNPanel host inventory Agent
-After=network-online.target
+Requires=nanpanel-helper.service
+After=network-online.target nanpanel-helper.service
 Wants=network-online.target
 
 [Service]
@@ -185,7 +200,41 @@ UMask=0077
 WantedBy=multi-user.target
 UNIT
 chmod 0644 /etc/systemd/system/nanpanel-agent.service
+cat > /etc/systemd/system/nanpanel-helper.service <<UNIT
+[Unit]
+Description=NaNPanel privileged maintenance Helper
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Group=$agent_user
+RuntimeDirectory=nanpanel
+RuntimeDirectoryMode=0750
+ExecStart=/usr/local/bin/nanpanel-helper /run/nanpanel/helper.sock $agent_uid $agent_gid /etc/nanpanel/managed $controller /etc/nanpanel-agent/controller.pem /usr/local/bin/nanpanel-agent
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/usr/local/bin /run/nanpanel
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_FOWNER CAP_CHOWN
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+chmod 0644 /etc/systemd/system/nanpanel-helper.service
 systemctl daemon-reload
-systemctl enable --now nanpanel-agent.service
+systemctl enable nanpanel-helper.service nanpanel-agent.service
+systemctl restart nanpanel-helper.service
+systemctl restart nanpanel-agent.service
+systemctl --no-pager --full status nanpanel-helper.service
 systemctl --no-pager --full status nanpanel-agent.service
 printf '\nNaNPanel Agent installed for host %s (Agent %s).\n' "$host_id" "$agent_id"
