@@ -2,7 +2,7 @@
 
 [openapi.yaml](openapi.yaml) 是 Web → Core HTTP API 的设计基线，格式为 [OpenAPI 3.1.1](https://spec.openapis.org/oas/v3.1.1.html)。可导入支持该版本的 API 编辑器、文档或 Mock 工具。
 
-版本：`0.1.0-draft.2`。当前已实现 `/auth/*`、Cookie 保护的 `/system`、管理员账号/角色/设置、审计查询、主机和 Agent 只读查询，以及仪表盘统计；systemd 服务、操作任务和拓扑接口仍待后端实现。操作级 `x-implementation-status` 区分已有端点与规划端点。本文不引入真实注册、远程执行或 root 操作。
+版本：`0.1.0-draft.2`。当前已实现 `/auth/*`、Cookie 保护的 `/system`、管理员账号/角色/设置、审计查询、主机和 Agent 查询、受控 Agent 接入及心跳回写；systemd 服务、操作任务和拓扑部署仍待实现。操作级 `x-implementation-status` 区分已有端点与规划端点。Agent 接入不授予远程命令或 root 操作。
 
 ## 接口范围
 
@@ -16,6 +16,11 @@
 | GET | `/api/v1/hosts` | 主机列表，支持状态筛选及游标分页 |
 | GET | `/api/v1/hosts/{hostId}` | 主机详情及 Agent 绑定 |
 | GET | `/api/v1/agents/{agentId}` | Agent 在线状态、能力及 Helper 可用性 |
+| POST | `/api/v1/agent-enrollments` | 创建主机资产和一次性 Agent 接入码（需 Cookie + CSRF） |
+| POST | `/api/v1/agent-enrollments/redeem` | 用一次性 Bearer 接入码兑换 Agent 客户端证书 |
+| GET | `/api/v1/agent-installation` | 查询 Gateway 端口和控制器 TLS 指纹 |
+| GET | `/api/v1/agent-controller-cert` | 下载控制器 TLS PEM 证书 |
+| GET | `/api/v1/agent-download/linux-amd64` | 下载随 Core 镜像发布的 Linux x86_64 Agent |
 | GET | `/api/v1/hosts/{hostId}/services` | 主机 systemd 服务列表 |
 | GET | `/api/v1/hosts/{hostId}/services/{serviceId}` | 服务观测、可用动作及 ETag |
 | POST | `/api/v1/hosts/{hostId}/services/{serviceId}/restart` | 接受服务重启任务 |
@@ -24,11 +29,11 @@
 
 这里的 `SystemService` 是主机 systemd unit，与平台逻辑服务 `Service` 分开。URL 使用平台 UUID，服务端解析受管 unit，不接受任意命令或客户端指定的主机身份。
 
-暂不包含主机/Agent 注册、证书签发、任意终端、软件包管理、拓扑部署和取消操作。Agent gRPC 草案的权威位置为 [agent.proto](../agent/protocol/agent.proto)，本文件不替代该协议。
+Agent 接入码由数据库保存 SHA-256 哈希，明文仅在创建响应中出现一次，15 分钟到期且只能兑换一次。安装器在发出接入码前先用 UI 展示的证书 SHA-256 指纹校验控制器证书；Agent 在本机生成私钥和 CSR，Core 只签发 CN 与预分配 Agent UUID 一致的客户端证书。mTLS Gateway 校验证书链，并将证书指纹随心跳交给 Core 再次匹配登记记录。`host.inventory` 和 `agent.heartbeat` 是当前唯一上报能力，尚未实现证书吊销/续期、systemd 服务观测或特权执行。Agent gRPC 协议见 [agent.proto](../agent/protocol/agent.proto)。
 
 ## 认证、授权与读取
 
-Web 使用服务端不透明 Cookie 会话与 CSRF 校验，已替换脚手架 Basic 认证；详见 [Web 平台 API](web-platform.md)。Agent 继续使用独立 mTLS 身份。
+Web 使用服务端不透明 Cookie 会话与 CSRF 校验，已替换脚手架 Basic 认证；详见 [Web 平台 API](web-platform.md)。管理员创建接入码需已完成首次改密；安装器兑换端点只接受无浏览器 Cookie 的 Bearer 接入码，不能访问 Web 管理资源。Agent 使用独立 mTLS 身份。
 
 Core 根据已认证主体执行 `subject/action/resource` 授权，Agent/root Helper 再验证本地操作范围。`allowedActions` 是 UI 提示，不能作为执行授权凭证。操作记录的 `requestedBy` 由 Core 填充，不接受客户端提供。
 
@@ -74,7 +79,7 @@ python -m venv /tmp/nanpanel-api-check
 /tmp/nanpanel-api-check/bin/python -m openapi_spec_validator api/openapi.yaml
 ```
 
-主机列表、主机详情和 Agent 详情从持久化 inventory 表读取；注册接入、心跳写入、Helper 观测、systemd 服务与操作任务仍按上述契约逐步实现。
+主机列表、主机详情和 Agent 详情从持久化 inventory 表读取；Agent 注册接入和心跳写入已实现。Helper 观测、systemd 服务与操作任务仍待实现。
 
 ## 拓扑期望草稿
 

@@ -11,4 +11,11 @@
     <changeSet id="audit-test" author="nanpanel">
         <sqlFile path="db/changelog/004-audit-event.sql"/>
     </changeSet>
+    <changeSet id="inventory-test" author="nanpanel">
+        <sql>CREATE TABLE host (id UUID PRIMARY KEY, hostname VARCHAR(255) NOT NULL, os VARCHAR(255), arch VARCHAR(64), capabilities VARCHAR(4096) NOT NULL DEFAULT '[]', generation BIGINT NOT NULL DEFAULT 1, observed_generation BIGINT NOT NULL DEFAULT 0, status VARCHAR(16) NOT NULL DEFAULT 'UNKNOWN', created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP);</sql>
+        <sql>CREATE TABLE agent (id UUID PRIMARY KEY, host_id UUID NOT NULL REFERENCES host(id), cert_identity VARCHAR(255) NOT NULL UNIQUE, version VARCHAR(64), last_seen TIMESTAMP WITH TIME ZONE, cert_fingerprint CHAR(64));</sql>
+        <sql>CREATE TABLE agent_enrollment (id UUID PRIMARY KEY, host_id UUID NOT NULL REFERENCES host(id), agent_id UUID NOT NULL UNIQUE REFERENCES agent(id), token_hash CHAR(64) NOT NULL UNIQUE, expires_at TIMESTAMP WITH TIME ZONE NOT NULL, consumed_at TIMESTAMP WITH TIME ZONE, created_by VARCHAR(36) NOT NULL REFERENCES panel_user(id), created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP);</sql>
+        <sql>CREATE TABLE platform_settings (id INTEGER PRIMARY KEY, site_name VARCHAR(100), default_timezone VARCHAR(64), host_offline_after_seconds INTEGER, operation_retention_days INTEGER, updated_at BIGINT, updated_by UUID);</sql>
+        <sql>INSERT INTO platform_settings VALUES (1, 'NaNPanel', 'Asia/Shanghai', 90, 30, 0, NULL);</sql>
+    </changeSet>
 </databaseChangeLog>

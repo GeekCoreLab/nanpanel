@@ -53,6 +53,16 @@ test('Mock auth, concurrency, idempotency and account lifecycle follow the API c
   assert.equal(result.result.activeState, 'ACTIVE');
   assert.ok(result.finishedAt);
   assert.equal(result.error, null);
+  const enrollment = await call('/agent-enrollments', 'POST', { hostname: 'new-demo-host' });
+  assert.equal(enrollment.response.status, 201);
+  assert.match(enrollment.data.token, /^[A-Za-z0-9_-]{40,128}$/);
+  assert.equal(enrollment.data.gatewayPort, 30444);
+  const enrolledHost = (await call('/hosts')).data.items.find(host => host.id === enrollment.data.hostId);
+  assert.equal(enrolledHost.status, 'UNKNOWN');
+  assert.equal(enrolledHost.agentId, enrollment.data.agentId);
+  const overview = (await call('/admin/overview')).data;
+  assert.equal(overview.hosts.total, 7);
+  assert.equal(overview.hosts.unknown, 2);
   await call('/auth/logout', 'POST');
   await call('/auth/csrf');
   const initialLogin = await call('/auth/login', 'POST', { username: 'tester', password: 'test-initial-password-2026' });

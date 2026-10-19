@@ -3,6 +3,15 @@ WORKDIR /workspace
 COPY . .
 RUN ./mvnw -B -ntp -pl backend/panel-core -am package -DskipTests
 
+FROM docker.io/library/rust:1.89-bookworm AS agent-build
+RUN apt-get update && apt-get install -y --no-install-recommends musl-tools protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/* \
+    && rustup target add x86_64-unknown-linux-musl
+WORKDIR /workspace
+COPY agent/ ./agent/
+RUN cargo build --locked --release --target x86_64-unknown-linux-musl \
+    --manifest-path agent/Cargo.toml -p nanpanel-agent
+
 FROM docker.io/library/eclipse-temurin:21-jre-jammy
 WORKDIR /work
 LABEL org.opencontainers.image.source="https://github.com/GeekCoreLab/nanpanel"
@@ -11,7 +20,8 @@ COPY --from=build --chown=10001:0 /workspace/backend/panel-core/target/quarkus-a
 COPY --from=build --chown=10001:0 /workspace/backend/panel-core/target/quarkus-app/app/ ./app/
 COPY --from=build --chown=10001:0 /workspace/backend/panel-core/target/quarkus-app/quarkus/ ./quarkus/
 COPY --from=build --chown=10001:0 /workspace/backend/panel-core/target/quarkus-app/quarkus-app-dependencies.txt ./
+COPY --from=agent-build --chown=10001:0 /workspace/agent/target/x86_64-unknown-linux-musl/release/nanpanel-agent ./nanpanel-agent
 ENV QUARKUS_HTTP_HOST=0.0.0.0
-EXPOSE 8080
+EXPOSE 8080 50051
 USER 10001:0
 ENTRYPOINT ["java", "-jar", "quarkus-run.jar"]

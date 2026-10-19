@@ -2,9 +2,7 @@ openapi: 3.1.1
 info:
   title: NaNPanel 管理 API
   version: 0.1.0-draft.2
-  description: 契约优先的 Web 平台与系统运维 API：登录/会话、管理员账号、内置角色、仪表盘、平台设置、审计，以及主机 → systemd 服务 → 重启任务。Web 目标认证为 HttpOnly Cookie
-    会话 + 写请求 CSRF 校验，不能用 Basic 绕过。当前已实现 /auth/*、管理员账号 CRUD、内置角色、平台设置、审计查询、主机和 Agent 只读查询、仪表盘统计及 Cookie 保护的 /system；systemd 服务和操作任务仍待实现。本文件不描述 Core
-    ↔ Rust Agent 的 mTLS/gRPC 协议。
+  description: 契约优先的 Web 平台 API。管理操作使用 HttpOnly Cookie 会话和写请求 CSRF；Agent 使用独立的一次性接入码、客户端证书和 mTLS/gRPC。主机/Agent 查询、受控 Agent 注册接入、心跳回写及 Cookie 保护的 /system 已实现；systemd 服务和操作任务仍待实现。
   x-status: draft
 servers:
 - url: http://127.0.0.1:8080
@@ -1661,6 +1659,121 @@ paths:
           $ref: '#/components/responses/UnsupportedMediaType'
         '422':
           $ref: '#/components/responses/Unprocessable'
+  /api/v1/agent-installation:
+    get:
+      tags: [Agents]
+      operationId: getAgentInstallation
+      summary: 查询 Agent 安装信息
+      description: 返回公开的控制器 TLS SHA-256 指纹、Gateway NodePort 和静态安装入口，不返回机密。
+      x-implementation-status: implemented
+      security: []
+      responses:
+        '200':
+          description: Agent 安装信息。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentInstallation'
+  /api/v1/agent-controller-cert:
+    get:
+      tags: [Agents]
+      operationId: downloadAgentControllerCertificate
+      summary: 下载控制器 TLS 证书
+      description: 安装引导使用预先展示的 SHA-256 指纹校验证书，再用其验证后续 HTTPS 请求。
+      x-implementation-status: implemented
+      security: []
+      responses:
+        '200':
+          description: PEM 编码的控制器 TLS 证书。
+          content:
+            application/x-pem-file:
+              schema:
+                type: string
+                format: binary
+  /api/v1/agent-download/linux-amd64:
+    get:
+      tags: [Agents]
+      operationId: downloadLinuxAmd64Agent
+      summary: 下载 Linux x86_64 Agent
+      description: 获取与当前 Core 镜像一同发布的 Rust Agent。
+      x-implementation-status: implemented
+      security: []
+      responses:
+        '200':
+          description: Linux ELF Agent 可执行文件。
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/agent-enrollments:
+    post:
+      tags: [Agents]
+      operationId: createAgentEnrollment
+      summary: 创建一次性 Agent 接入码
+      description: 创建 UNKNOWN 主机资产和待接入 Agent。接入码仅返回一次，15 分钟后过期，首次兑换后立即失效。
+      x-implementation-status: implemented
+      security:
+        - cookieAuth: []
+          csrfToken: []
+      parameters:
+        - name: X-CSRF-Token
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAgentEnrollmentRequest'
+      responses:
+        '201':
+          description: 新主机资产及一次性接入信息。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentEnrollmentCreated'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v1/agent-enrollments/redeem:
+    post:
+      tags: [Agents]
+      operationId: redeemAgentEnrollment
+      summary: 使用一次性接入码兑换客户端证书
+      description: 安装器提交本机生成的 Agent CSR；Core 验证 CSR CN 与预登记 Agent UUID 相同后签发客户端证书。
+      x-implementation-status: implemented
+      security:
+        - agentEnrollmentToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RedeemAgentEnrollmentRequest'
+      responses:
+        '200':
+          description: 一次性接入码兑换成功。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentEnrollmentRedeemed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
 components:
   securitySchemes:
     basicAuth:
@@ -1682,6 +1795,10 @@ components:
       in: header
       name: X-CSRF-Token
       description: 与 Cookie 绑定的同步 CSRF token；所有 POST/PUT/PATCH/DELETE 都要求验证，登录也不例外。
+    agentEnrollmentToken:
+      type: http
+      scheme: bearer
+      description: 15 分钟有效且只能兑换一次的安装器接入码，不用于浏览器管理会话。
   parameters:
     HostId:
       name: hostId
@@ -2012,6 +2129,83 @@ components:
         createdAt:
           type: string
           format: date-time
+    CreateAgentEnrollmentRequest:
+      type: object
+      additionalProperties: false
+      required: [hostname]
+      properties:
+        hostname:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: 初始资产名；Agent 首次心跳后以主机实测 hostname 更新。
+    AgentEnrollmentCreated:
+      type: object
+      additionalProperties: false
+      required: [enrollmentId, hostId, agentId, token, expiresAt, controllerFingerprint, gatewayPort]
+      properties:
+        enrollmentId:
+          type: string
+          format: uuid
+        hostId:
+          type: string
+          format: uuid
+        agentId:
+          type: string
+          format: uuid
+        token:
+          type: string
+          minLength: 40
+          maxLength: 128
+          description: 明文接入码仅在创建响应中返回；数据库只保存 SHA-256 哈希。
+        expiresAt:
+          type: string
+          format: date-time
+        controllerFingerprint:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+        gatewayPort:
+          type: integer
+          minimum: 1
+          maximum: 65535
+    RedeemAgentEnrollmentRequest:
+      type: object
+      additionalProperties: false
+      required: [csrPem]
+      properties:
+        csrPem:
+          type: string
+          minLength: 100
+          maxLength: 16384
+          description: Agent 本地生成的 PEM CSR，主题 CN 必须与登记的 Agent UUID 相同。
+    AgentEnrollmentRedeemed:
+      type: object
+      additionalProperties: false
+      required: [agentId, hostId, certificatePem]
+      properties:
+        agentId:
+          type: string
+          format: uuid
+        hostId:
+          type: string
+          format: uuid
+        certificatePem:
+          type: string
+          description: 由 NaNPanel Agent CA 签发的客户端证书 PEM。
+    AgentInstallation:
+      type: object
+      additionalProperties: false
+      required: [controllerFingerprint, gatewayPort, installerPath, agentDownloadPath]
+      properties:
+        controllerFingerprint:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+        gatewayPort:
+          type: integer
+        installerPath:
+          type: string
+        agentDownloadPath:
+          type: string
     Agent:
       type: object
       additionalProperties: false

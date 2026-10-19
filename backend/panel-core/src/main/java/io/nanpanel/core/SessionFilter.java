@@ -65,6 +65,13 @@ public class SessionFilter
     String path = r.getUriInfo().getPath().replaceFirst("^/", "");
     if (!path.startsWith("api/"))
       return;
+    boolean agentDownload = r.getMethod().equals("GET") && Set.of(
+        "api/v1/agent-installation", "api/v1/agent-controller-cert",
+        "api/v1/agent-download/linux-amd64").contains(path);
+    boolean agentRedemption = path.equals("api/v1/agent-enrollments/redeem") &&
+        r.getMethod().equals("POST") && r.getCookies().get(COOKIE) == null &&
+        Optional.ofNullable(r.getHeaderString("Authorization"))
+            .orElse("").startsWith("Bearer ");
     boolean csrf =
         path.equals("api/v1/auth/csrf") && r.getMethod().equals("GET");
     boolean login =
@@ -76,6 +83,10 @@ public class SessionFilter
          "cross-site".equals(r.getHeaderString("Sec-Fetch-Site"))))
       throw reject(r, "CSRF_REJECTED", "请求来源不受信任",
                    "security.origin.reject", "请求来源校验拒绝");
+    if (agentDownload || agentRedemption) {
+      r.setProperty("session", null);
+      return;
+    }
     if (login || path.equals("api/v1/auth/password") && write)
       limit("ip:" + http.remoteAddress().host());
     if (csrf)

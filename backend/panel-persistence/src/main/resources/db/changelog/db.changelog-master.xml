@@ -5,4 +5,5 @@
 <changeSet id="003-admin-user-state" author="nanpanel"><sqlFile path="003-admin-user-state.sql" relativeToChangelogFile="true"/></changeSet>
 <changeSet id="004-audit-event" author="nanpanel"><sqlFile path="004-audit-event.sql" relativeToChangelogFile="true"/></changeSet>
 <changeSet id="005-platform-settings" author="nanpanel"><sqlFile path="005-platform-settings.sql" relativeToChangelogFile="true"/></changeSet>
+<changeSet id="006-agent-enrollment" author="nanpanel"><sqlFile path="006-agent-enrollment.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE agent_enrollment; ALTER TABLE agent DROP COLUMN cert_fingerprint;</sql></rollback></changeSet>
 </databaseChangeLog>

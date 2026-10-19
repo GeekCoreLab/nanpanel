@@ -1,0 +1,26 @@
+[package]
+name = "nanpanel-agent"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+
+[dependencies]
+anyhow.workspace = true
+futures-core.workspace = true
+futures-util.workspace = true
+prost.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+sha2.workspace = true
+hex.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
+tonic-prost.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[build-dependencies]
+tonic-prost-build = "0.14"

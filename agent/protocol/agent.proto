@@ -1,8 +1,42 @@
 syntax = "proto3";
 package nanpanel.agent.v1;
+
 option java_package = "io.nanpanel.agent.protocol.v1";
 option java_multiple_files = true;
-// Draft only: mTLS identity binding, replay checks and enrollment remain to implement.
-service AgentGateway { rpc Connect(stream AgentMessage) returns (stream ControlMessage); }
-message AgentMessage { string agent_id = 1; uint64 sequence = 2; int64 sent_at_epoch_ms = 3; }
-message ControlMessage { string operation_id = 1; string idempotency_key = 2; string capability = 3; int64 deadline_epoch_ms = 4; }
+
+service AgentGateway {
+  rpc Session(stream AgentMessage) returns (stream ControlMessage);
+}
+
+message AgentMessage {
+  string agent_id = 1;
+  uint64 sequence = 2;
+  int64 sent_at_epoch_ms = 3;
+  oneof payload {
+    Heartbeat heartbeat = 4;
+    OperationResult operation_result = 5;
+  }
+}
+
+message Heartbeat {
+  string version = 1;
+  string hostname = 2;
+  string os = 3;
+  string arch = 4;
+  repeated string capabilities = 5;
+}
+
+message OperationResult {
+  string operation_id = 1;
+  string idempotency_key = 2;
+  string status = 3;
+  string detail = 4;
+}
+
+message ControlMessage {
+  string operation_id = 1;
+  string idempotency_key = 2;
+  string capability = 3;
+  string target = 4;
+  int64 deadline_epoch_ms = 5;
+}

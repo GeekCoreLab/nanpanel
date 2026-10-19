@@ -76,6 +76,17 @@ spec:
                   name: nanpanel-admin-bootstrap
                   key: NANPANEL_ADMIN_PASSWORD
                   optional: true
+            - name: NANPANEL_AGENT_GATEWAY_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: nanpanel-agent-gateway
+                  key: NANPANEL_AGENT_GATEWAY_TOKEN
+            - name: NANPANEL_AGENT_CA_CERT
+              value: /etc/nanpanel/agent-ca/ca.crt
+            - name: NANPANEL_AGENT_CA_KEY
+              value: /etc/nanpanel/agent-ca/ca.key
+            - name: NANPANEL_AGENT_SERVING_CERT
+              value: /etc/nanpanel/agent-serving/tls.crt
           startupProbe:
             httpGet:
               path: /q/health/ready
@@ -111,6 +122,108 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            - name: agent-ca-signing
+              mountPath: /etc/nanpanel/agent-ca
+              readOnly: true
+            - name: agent-serving-cert
+              mountPath: /etc/nanpanel/agent-serving
+              readOnly: true
+        - name: agent-gateway
+          image: ghcr.io/geekcorelab/nanpanel-core:__NANPANEL_IMAGE_TAG__
+          imagePullPolicy: IfNotPresent
+          command: ["/work/nanpanel-agent", "gateway"]
+          ports:
+            - name: grpc
+              containerPort: 50051
+              protocol: TCP
+          env:
+            - name: NANPANEL_GATEWAY_LISTEN
+              value: 0.0.0.0:50051
+            - name: NANPANEL_GATEWAY_CLIENT_CA
+              value: /etc/nanpanel/agent-ca/ca.crt
+            - name: NANPANEL_GATEWAY_CERT
+              value: /etc/nanpanel/agent-serving/tls.crt
+            - name: NANPANEL_GATEWAY_KEY
+              value: /etc/nanpanel/agent-serving/tls.key
+            - name: NANPANEL_GATEWAY_CALLBACK_URL
+              value: http://127.0.0.1:8080/internal/agent-heartbeats
+            - name: NANPANEL_GATEWAY_CALLBACK_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: nanpanel-agent-gateway
+                  key: NANPANEL_AGENT_GATEWAY_TOKEN
+          startupProbe:
+            tcpSocket:
+              port: grpc
+            periodSeconds: 5
+            failureThreshold: 12
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: agent-ca-trust
+              mountPath: /etc/nanpanel/agent-ca
+              readOnly: true
+            - name: agent-serving-keypair
+              mountPath: /etc/nanpanel/agent-serving
+              readOnly: true
       volumes:
         - name: tmp
           emptyDir: {}
+        - name: agent-ca-signing
+          secret:
+            secretName: nanpanel-agent-ca
+            defaultMode: 0440
+        - name: agent-ca-trust
+          secret:
+            secretName: nanpanel-agent-ca
+            items:
+              - key: ca.crt
+                path: ca.crt
+            defaultMode: 0444
+        - name: agent-serving-cert
+          secret:
+            secretName: nanpanel-web-tls
+            items:
+              - key: tls.crt
+                path: tls.crt
+            defaultMode: 0444
+        - name: agent-serving-keypair
+          secret:
+            secretName: nanpanel-web-tls
+            defaultMode: 0440
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: nanpanel-agent-gateway
+  namespace: nanpanel
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: nanpanel-core
+  ports:
+    - name: grpc
+      protocol: TCP
+      port: 50051
+      targetPort: grpc
+      nodePort: 30444

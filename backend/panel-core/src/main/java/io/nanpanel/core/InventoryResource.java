@@ -15,12 +15,6 @@ import java.util.*;
 @Path("/api/v1")
 @Produces(MediaType.APPLICATION_JSON)
 public class InventoryResource {
-  private static final String HOST_SELECT =
-      "SELECT h.id,h.hostname,h.os,h.arch,h.capabilities::text AS capabilities," +
-      "h.created_at,a.id AS agent_id,a.version,a.last_seen " +
-      "FROM host h LEFT JOIN LATERAL (SELECT id,version,last_seen FROM agent " +
-      "WHERE host_id=h.id ORDER BY last_seen DESC NULLS LAST,id LIMIT 1) a " +
-      "ON TRUE";
   @Inject AuthStore store;
   @Inject ObjectMapper mapper;
   @Context jakarta.ws.rs.container.ContainerRequestContext request;
@@ -50,6 +44,24 @@ public class InventoryResource {
         ? 90
         : ((Number)settings.getFirst().get("host_offline_after_seconds"))
               .intValue();
+  }
+
+  private String hostSelect(java.sql.Connection connection) throws java.sql.SQLException {
+    boolean postgres = connection.getMetaData().getDatabaseProductName()
+        .equalsIgnoreCase("PostgreSQL");
+    String capabilities = postgres ? "h.capabilities::text" : "h.capabilities";
+    String host = "SELECT h.id,h.hostname,h.os,h.arch," + capabilities +
+        " AS capabilities,h.created_at,";
+    if (postgres)
+      return host + "a.id AS agent_id,a.version,a.last_seen FROM host h " +
+          "LEFT JOIN LATERAL (SELECT id,version,last_seen FROM agent " +
+          "WHERE host_id=h.id ORDER BY last_seen DESC NULLS LAST,id LIMIT 1) a " +
+          "ON TRUE";
+    String latestAgent = " FROM agent a WHERE a.host_id=h.id " +
+        "ORDER BY a.last_seen DESC NULLS LAST,a.id LIMIT 1)";
+    return host + "(SELECT a.id" + latestAgent + " AS agent_id," +
+        "(SELECT a.version" + latestAgent + " AS version," +
+        "(SELECT a.last_seen" + latestAgent + " AS last_seen FROM host h";
   }
 
   private Instant instant(Object value) {
@@ -164,7 +176,7 @@ public class InventoryResource {
       }
       String where = clauses.isEmpty() ? "" : " WHERE " + String.join(" AND ", clauses);
       values.add(pageSize + 1);
-      var rows = query(c, HOST_SELECT + where + " ORDER BY h.id LIMIT ?",
+      var rows = query(c, hostSelect(c) + where + " ORDER BY h.id LIMIT ?",
                        values.toArray());
       boolean more = rows.size() > pageSize;
       var selected = rows.stream().limit(pageSize).toList();
@@ -189,7 +201,7 @@ public class InventoryResource {
     authenticated();
     UUID id = uuid(hostId, "hostId");
     return store.transaction(c -> {
-      var rows = query(c, HOST_SELECT + " WHERE h.id=?", id);
+      var rows = query(c, hostSelect(c) + " WHERE h.id=?", id);
       if (rows.isEmpty())
         throw fail(404, "NOT_FOUND", "主机不存在");
       return host(rows.getFirst(), offlineAfter(c), Instant.now());
@@ -205,7 +217,8 @@ public class InventoryResource {
       var rows = query(
           c,
           "SELECT a.id AS agent_id,a.host_id,a.version,a.last_seen," +
-              "h.capabilities::text AS capabilities FROM agent a " +
+              "h.capabilities" + (c.getMetaData().getDatabaseProductName()
+                  .equalsIgnoreCase("PostgreSQL") ? "::text" : "") + " AS capabilities FROM agent a " +
               "JOIN host h ON h.id=a.host_id WHERE a.id=?",
           id);
       if (rows.isEmpty())
