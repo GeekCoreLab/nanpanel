@@ -54,3 +54,5 @@ Core 提供认证后的系统信息、管理员账号/角色、平台设置、�
 ## API 契约
 
 首条主机运维功能链的 [OpenAPI 文档](api/openapi.yaml) 与 [接口语义说明](api/README.md) 已建立，覆盖 Web 登录与会话、管理员账号、内置角色、仪表盘、设置、审计、Agent 接入与心跳，以及尚未实现的 systemd 服务和异步重启任务。登录、本人改密、会话管理、管理员账号 CRUD、内置角色、设置、认证/管理员审计查询、主机/Agent 查询、Agent 接入及仪表盘统计已接入数据库；systemd 服务/操作任务端点仍待实现。前端默认真实认证配合部分业务 Mock，纯演示设置 `VITE_API_MODE=mock`。首次管理员密码须 15–128 字符，首次登录强制改密。部署设置 `NANPANEL_ORIGIN` 为对外 HTTPS 来源，开发使用 `http://127.0.0.1:5173`。登录语义见 [Web 平台 API](api/web-platform.md)。
+
+目标通信架构新增 Agent/Core 双向拨号、Rust 主控代理反向长连接、Cloudflare 每节点 DNS 与保留入口 CNAME 故障切换，以及 Agent 直查公共 DNS 恢复；详见 [设计文档](docs/architecture/control-connectivity.md)。这些扩展尚未实现。

@@ -81,6 +81,8 @@ flowchart TB
     CORE <--> PG
     CORE <--> PLUG
     CORE <--> AGW
+    AGW <--> CR[公网 Rust Control Relay / 主备]
+    CR <--> H2
     CORE <--> KCON
     CORE <--> NC
     CORE <--> REL
@@ -99,7 +101,7 @@ flowchart TB
 ### 4.1 职责边界
 
 - **Core**：身份认证、资产和服务注册、期望状态、插件生命周期、任务与事件、API、审计。
-- **Agent Gateway**：Agent 身份、指令下发、上报、重连、会话；不直接代替网络数据面。
+- **Agent Gateway**：Core 内部身份、指令、会话与路由协调；独立 Rust Control Relay 接受 Core/Agent 出站双向流，支持受限 NAT 后的主控。详见 [ADR-011](docs/adr/ADR-011-control-relay-dns-failover.md)。
 - **Host Agent**：系统状态、容器运行时驱动、网络配置执行、受限特权操作。
 - **Kubernetes Connector**：集群发现、K8s 资源访问、控制器协调；不直接修改 K8s 托管容器。
 - **Network Controller**：将拓扑意图编译成设备级配置计划，协调多 Provider。
@@ -143,12 +145,12 @@ flowchart TB
 ### 6.1 接入模式
 
 - **Agentless（SSH）**：临时管理、初始化接入、恢复；能力受限，凭据必须加密并审计。
-- **Managed Agent**：主机主动建立 mTLS 连接，支持 NAT 内在线管理、实时状态与异步任务。
+- **Managed Agent**：支持 Agent 主动连接主控、主控主动连接可达 Agent，以及双方各自出站连接公网主控代理；通道建立后均支持双方主动发送数据。多代理与 DNS 切换为待实现设计，见 [双向通道设计](docs/architecture/control-connectivity.md)。
 - **Dual Mode**：Agent 故障时，在已配置的可信管理网络中可用 SSH 救援；不保证所有 NAT 场景可 SSH。
 
 ### 6.2 Agent 设计
 
-- 自研 Agent 守护进程、边缘控制器、运行时驱动和 `privileged-helper` 统一使用 Rust；Core 内的编排、Agent Gateway 与 PF4J 插件仍使用 Java。
+- 自研 Agent 守护进程、边缘控制器、运行时驱动和 `privileged-helper` 统一使用 Rust；Core 内的编排、Agent Gateway 逻辑协调与 PF4J 插件仍使用 Java；独立公网 Control Relay 使用 Rust。
 - Agent 主进程默认以专用普通用户运行，负责 mTLS 通信、任务校验、状态采集及本地状态持久化；系统级特权操作由独立的 root `privileged-helper` 通过受控本地 IPC 执行。
 - 面向替代传统运维面板的需求，支持经授权的软件包安装、systemd 服务管理、防火墙与路由配置、受保护文件管理以及系统级容器管理；非 root Agent 不意味着仅能管理用户级资源。
 - 只暴露明确的能力，例如 `systemd.read/restart`、`container.list/start`、`net.route.apply`、`file.read.allowed`；不将任意 Shell 作为默认插件 API。
@@ -430,6 +432,7 @@ hybrid-infrastructure-platform/
 - [ ] Host/Agent/Operation 实体和数据库迁移。
 - [ ] 单管理员认证、Agent 身份、审计日志。
 - [ ] Rust Agent：Linux 主机信息、systemd、journal、SSH/Agent 接入。
+- [ ] 按 ADR-011 实现双向拨号、双主控代理预连接、Cloudflare 节点 DNS/CNAME 单写切换及 Agent 公共 DNS 直查恢复；完成限制型 NAT 与代理故障验收。
 - [ ] Rust root Helper：受控软件包安装、服务管理、受保护文件及网络操作，具备授权、审计和超时。
 - [ ] Docker/Podman 列表、日志、启停、受限部署。
 

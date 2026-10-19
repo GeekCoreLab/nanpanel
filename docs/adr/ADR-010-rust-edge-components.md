@@ -17,3 +17,7 @@ Core 内部的 Java Network Reconciler、Cluster Connector 和 Agent Gateway 属
 ## 代价
 
 维护 Java / Rust 两套工具链及跨语言协议；可复用的 JVM 库不能直接用于边缘执行端。Rust 不自动保证低占用、无漏洞或插件隔离，仍需实测与授权设计。
+
+## 通信部署边界补充
+
+[ADR-011](ADR-011-control-relay-dns-failover.md) 明确：Core 内 Agent Gateway 为 Java 逻辑协调职责，独立公网主控代理 Control Relay 采用 Rust。现有 Rust Gateway 是传输实现起点；双向拨号和 DNS 故障切换仍待实现。

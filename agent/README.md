@@ -5,3 +5,5 @@
 Agent 接入、Helper 状态回报和 Agent 自更新任务已接入 Core；更新只从安装时配置的 HTTPS 控制器取包，Helper 限定目标路径与 systemd unit，不提供任意 root 命令。P0 隔离实验不代表宿主机 root 部署；证书吊销/续期、通用 systemd 管理、软件包/网络驱动仍未实现。
 
 主控 Core 使用 Java；Agent 与 mTLS/gRPC Gateway 使用 Rust。默认普通用户 Agent + root Helper；每项提权仍须经过 Core 控制消息和 Helper 本地能力白名单。`backend/panel-agent-gateway` 目前尚未承接生产 Gateway 运行时。可复现实验见 [P0 验收说明](../tests/p0/README.md)。详见 [ADR-009](../docs/adr/ADR-009-agent-privilege-boundary.md) 与 [ADR-010](../docs/adr/ADR-010-rust-edge-components.md)。
+
+目标通信架构新增 Agent/Core 双向拨号、Rust 主控代理反向长连接、Cloudflare 每节点 DNS 与保留入口 CNAME 故障切换，以及 Agent 直查公共 DNS 恢复；详见 [设计文档](../docs/architecture/control-connectivity.md)。这些扩展尚未实现。
