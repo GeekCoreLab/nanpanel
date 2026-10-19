@@ -412,14 +412,18 @@ hybrid-infrastructure-platform/
 
 ### P0｜架构可行性验证
 
-- [ ] 创建 Quarkus + PF4J 动态加载/卸载 PoC，验证卸载后任务及引用清理。
-- [ ] 验证 Rust Agent gRPC mTLS 在 NAT 后建立长连接、断线自动恢复。
-- [ ] 验证普通用户 Agent → root Rust Helper 的本地 IPC：允许操作成功，越权操作、非法参数与非可信调用方被拒绝。
-- [ ] 验证 NetBird 或替代组网在 UDP 受限时能否 TCP/443 中继。
-- [ ] 验证 FRP 原配置导入 → 差异 → 应用 → 验证 → 补偿。
-- [ ] 跑通 React Flow 图编辑器到单条实际服务路由的闭环。
+- [x] 创建 Quarkus + PF4J 动态加载/卸载 PoC，验证卸载后任务及引用清理。
+- [x] 验证 Rust Agent gRPC mTLS 在隔离容器网络中建立出站长连接、断线自动恢复。
+- [x] 验证普通用户 Agent → root Rust Helper 的本地 IPC：允许操作成功，未授权能力、路径逃逸、符号链接及非可信调用方被拒绝。
+- [x] 在隔离 rootless Podman 实验中封锁两端 eth0 的 UDP 入/出站，验证 NetBird peer 通过 TCP/443 Relay 建立连接并访问 overlay HTTP 服务。
+- [x] 验证 FRP 原配置导入 → 差异 → 应用 → 验证 → 补偿。
+- [x] 跑通 React Flow 图编辑器到单条实际服务路由的隔离实验闭环。
+- [x] 在真实 NAT Docker 主机与 `k3s-1` 间封锁双方 Peer 的 UDP 入/出站，验证 NetBird TCP/443 Relay 及 K3s 工作负载 HTTP 响应。
+- [x] 通过 React Flow 拓扑应用更新真实 NAT Docker 主机上的 FRP 配置，从公网 VPS 经 HTTPS 实际访问 `k3s-1` 上的 Service。
 
-**验收**：公网 VPS、NAT Docker 主机、K3s 服务之间经受控网关完成 HTTP 访问；修改拓扑后能看到实际路由同步及连通性证据。
+**验收**：公网 VPS、NAT Docker 主机、K3s 服务之间经受控网关完成 HTTP 访问；修改拓扑后能看到实际路由同步及连通性证据。已通过真实 HTTPS/FRP 拓扑闭环和跨主机 UDP 受限 NetBird Relay 验证，详细边界与命令见 [P0 验收说明](tests/p0/README.md)。
+
+**当前门槛**：P0 阶段验收已完成。各单项隔离组件 PoC 均通过；`k3s-1` 的真实 Service 经 SSH 隧道和公网 VPS → NAT Docker 主机 → K3s 的 React Flow/FRP 链路均有 HTTP 证据。NetBird 0.75.1 的 Docker 主机 Peer 与 K3s 工作负载 Peer 在双方 eth0 UDP 入/出站受阻时均报告 Relay，且 overlay HTTP 请求返回 K3s 测试内容。公网测试通过 `--resolve` 和临时 Host 映射验证指定 VPS IP，不代表 DNS 传播验收。
 
 ### P1｜基础管理 MVP
 

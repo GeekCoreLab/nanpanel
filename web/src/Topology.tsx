@@ -4,16 +4,26 @@ import {
   BaseEdge, getBezierPath, MarkerType, useNodesState, useEdgesState, useReactFlow, useUpdateNodeInternals,
   type Node, type NodeProps, type Edge, type EdgeProps, type Connection, type IsValidConnection,
 } from '@xyflow/react';
-import { api, isMock } from './lib/api';
+import { api, isMock, isP0Lab } from './lib/api';
 import { createUuid } from './lib/uuid.ts';
 import { connectionError, createTopologyNode, draftError, nodePresets, validNodeShape } from './lib/topology-model';
 import type { TopologyDraft, TopologyDraftWrite, TopologyLink, TopologyNode, TopologyNodeKind } from './lib/types';
 
 type DeviceNode = Node<{ model: TopologyNode }, 'device'>;
+type P0RouteEvidence = { status: 'VERIFIED'; route: string; httpStatus: number; responseBody: string; configSha256: string; diff: string; verifiedAt: string };
 const virtualKinds: TopologyNodeKind[] = ['SWITCH', 'MERGE', 'SPLIT', 'FORWARDER'];
 const asNode = (model: TopologyNode): DeviceNode => ({ id: model.id, type: 'device', position: model.position, data: { model } });
 const asEdge = (link: TopologyLink): Edge => ({ id: link.id, source: link.sourceNodeId, sourceHandle: link.sourcePort, target: link.targetNodeId, targetHandle: link.targetPort, type: 'directed', markerEnd: { type: MarkerType.ArrowClosed, color: '#4a86ed' }, data: { status: 'UNVERIFIED' }, ariaLabel: '期望连接，未验证' });
 const asLink = (edge: Edge): TopologyLink => ({ id: edge.id, sourceNodeId: edge.source, sourcePort: edge.sourceHandle ?? '', targetNodeId: edge.target, targetPort: edge.targetHandle ?? '', status: 'UNVERIFIED' });
+
+function p0RouteError(graph: TopologyDraftWrite): string | null {
+  if (graph.nodes.length !== 3 || graph.links.length !== 2) return 'P0 实验要求一条 Gateway → NAT Host → Service 路径';
+  const byKind = new Map(graph.nodes.map(node => [node.kind, node]));
+  if (!byKind.has('GATEWAY') || !byKind.has('HOST') || !byKind.has('SERVICE')) return 'P0 实验要求一个 Gateway、一个 NAT Host 和一个 Service';
+  const [gateway, host, service] = (['GATEWAY', 'HOST', 'SERVICE'] as const).map(kind => byKind.get(kind)!);
+  const connects = (source: TopologyNode, target: TopologyNode) => graph.links.some(link => link.sourceNodeId === source.id && link.targetNodeId === target.id && link.sourcePort === 'out-1' && link.targetPort === 'in-1');
+  return connects(gateway, host) && connects(host, service) ? null : '请连接 Gateway 出口 → NAT Host 入口，再连接 NAT Host 出口 → Service 入口';
+}
 
 function Device({ data, selected }: NodeProps<DeviceNode>) {
   const node = data.model;
@@ -42,6 +52,7 @@ function Editor() {
   const [etag, setEtag] = useState(''); const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false); const [dirty, setDirty] = useState(false);
   const [message, setMessage] = useState(''); const [error, setError] = useState('');
+  const [routeEvidence, setRouteEvidence] = useState<P0RouteEvidence>();
   const [menu, setMenu] = useState<Menu>(); const menuRef = useRef<HTMLDivElement>(null); const canvasRef = useRef<HTMLElement>(null);
   const { screenToFlowPosition, fitView } = useReactFlow<DeviceNode>();
   const draft = (): TopologyDraftWrite => ({ nodes: nodes.map(n => ({ ...n.data.model, position: n.position })), links: edges.map(asLink) });
@@ -65,6 +76,15 @@ function Editor() {
     try { const r = await api<TopologyDraft>('/topology/draft', 'PUT', payload, { 'If-Match': etag }); setEtag(r.etag ?? ''); setDirty(false); setMessage(`${isMock ? 'Mock ' : ''}草稿已保存；未部署、未验证`); }
     catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   }
+  async function applyP0Route() {
+    const payload = draft(); const invalid = draftError(payload) ?? p0RouteError(payload);
+    if (invalid) { setError(invalid); return; }
+    setBusy(true); setError(''); setRouteEvidence(undefined);
+    try {
+      const result = await api<P0RouteEvidence>('/topology/apply', 'POST', payload);
+      setRouteEvidence(result.data); setMessage(`实际 FRP 路由已验证：HTTP ${result.data.httpStatus} · ${result.data.route}`);
+    } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  }
   function openMenu(event: { preventDefault(): void; clientX: number; clientY: number }, nodeId?: string, edgeId?: string, insertionPoint?: { x: number; y: number }) {
     event.preventDefault(); if (!loaded || busy) return;
     setMenu({ x: Math.max(8, Math.min(event.clientX, window.innerWidth - 278)), y: Math.max(8, Math.min(event.clientY, window.innerHeight - 450)), point: screenToFlowPosition(insertionPoint ?? { x: event.clientX, y: event.clientY }), nodeId, edgeId });
@@ -86,7 +106,7 @@ function Editor() {
     }
     if (!position) { setError('附近没有可用位置，请平移画布后重试'); return; }
     const model = createTopologyNode(kind, position);
-    setNodes(current => [...current, asNode(model)]); setDirty(true); setMenu(undefined); setError(''); setMessage(`已添加${model.name}：${model.inputCount} 入 / ${model.outputCount} 出`); requestAnimationFrame(() => { void fitView({ padding: .2 }); });
+    setNodes(current => [...current, asNode(model)]); setDirty(true); setRouteEvidence(undefined); setMenu(undefined); setError(''); setMessage(`已添加${model.name}：${model.inputCount} 入 / ${model.outputCount} 出`); requestAnimationFrame(() => { void fitView({ padding: .2 }); });
   }
   const candidate = (connection: Connection | Edge): TopologyLink => ({ id: createUuid(), sourceNodeId: connection.source, sourcePort: connection.sourceHandle ?? '', targetNodeId: connection.target, targetPort: connection.targetHandle ?? '', status: 'UNVERIFIED' });
   const validConnection: IsValidConnection = connection => loaded && !busy && edges.length < 800 && !connectionError(draft().nodes, edges.map(asLink), candidate(connection));
@@ -94,29 +114,30 @@ function Editor() {
     if (edges.length >= 800) { setError('最多添加 800 条连接'); return; }
     const link = candidate(connection); const invalid = connectionError(draft().nodes, edges.map(asLink), link);
     if (invalid) { setError(invalid); return; }
-    setEdges(current => [...current, asEdge(link)]); setDirty(true); setError(''); setMessage('已添加绿色出口 → 蓝色入口的期望连接');
+    setEdges(current => [...current, asEdge(link)]); setDirty(true); setRouteEvidence(undefined); setError(''); setMessage('已添加绿色出口 → 蓝色入口的期望连接');
   }
-  function removeNode(id: string) { setNodes(current => current.filter(n => n.id !== id)); setEdges(current => current.filter(e => e.source !== id && e.target !== id)); setDirty(true); setMenu(undefined); setMessage('节点及关联连接已删除'); }
+  function removeNode(id: string) { setNodes(current => current.filter(n => n.id !== id)); setEdges(current => current.filter(e => e.source !== id && e.target !== id)); setDirty(true); setRouteEvidence(undefined); setMenu(undefined); setMessage('节点及关联连接已删除'); }
   function changePorts(node: TopologyNode, direction: 'inputCount' | 'outputCount', delta: number) {
     const model = { ...node, [direction]: node[direction] + delta }; if (!validNodeShape(model)) return;
     if (delta < 0 && edges.some(e => direction === 'inputCount' ? e.target === node.id && e.targetHandle === `in-${node.inputCount}` : e.source === node.id && e.sourceHandle === `out-${node.outputCount}`)) { setError('最后一个端口仍有连接，请先删除关联连线'); setMenu(undefined); return; }
-    setNodes(current => current.map(n => n.id === node.id ? { ...n, data: { model } } : n)); setDirty(true); setMenu(undefined); setMessage('端口数量已更新');
+    setNodes(current => current.map(n => n.id === node.id ? { ...n, data: { model } } : n)); setDirty(true); setRouteEvidence(undefined); setMenu(undefined); setMessage('端口数量已更新');
   }
   const contextNode = nodes.find(n => n.id === menu?.nodeId)?.data.model;
   return <>
-    <div className="page-heading"><div><h1>网络拓扑实验室</h1><p>绿色出口 → 蓝色入口，用多端口节点组织期望转发路径。</p></div><div className="topology-actions"><button className="secondary" disabled={busy} onClick={load}>{dirty ? '重新读取（丢弃未保存）' : '↻ 重新读取'}</button><button className="primary" disabled={!loaded || busy || !dirty || !etag} onClick={save}>{busy ? '处理中…' : '保存草稿'}</button></div></div>
-    <div className="alert">右键画布添加交换机与转发器，右键节点调整端口，右键连线删除。每个端口仅连接一条线；同色连接、自连接与环路均不允许。草稿不执行真实转发。</div>
+    <div className="page-heading"><div><h1>{isP0Lab ? '拓扑到实际路由 P0 实验' : '网络拓扑实验室'}</h1><p>绿色出口 → 蓝色入口，用多端口节点组织期望转发路径。</p></div><div className="topology-actions"><button className="secondary" disabled={busy} onClick={load}>{dirty ? '重新读取（丢弃未保存）' : '↻ 重新读取'}</button><button className="primary" disabled={!loaded || busy || !dirty || !etag} onClick={save}>{busy ? '处理中…' : '保存草稿'}</button>{isP0Lab && <button className="primary" disabled={!loaded || busy || !!draftError(draft()) || !!p0RouteError(draft())} onClick={applyP0Route}>{busy ? '处理中…' : '应用到 FRP 实际路由'}</button>}</div></div>
+    <div className="alert">右键画布添加交换机与转发器，右键节点调整端口，右键连线删除。每个端口仅连接一条线；同色连接、自连接与环路均不允许。{isP0Lab ? 'P0 实验仅接受 Gateway → NAT Host → Service，并把配置部署到隔离 FRP 容器。' : '草稿不执行真实转发。'}</div>
     {error && <div className="alert error" role="alert">{error}</div>}
-    <div className="topology-tools"><div className="port-legend"><span><i className="input-dot" />蓝色：入口</span><span><i className="output-dot" />绿色：出口</span><span>⇢ 虚线：未验证</span></div><div className="topology-actions"><button className="secondary" disabled={!loaded || busy} onClick={e => { const rect = e.currentTarget.getBoundingClientRect(); const canvas = canvasRef.current?.getBoundingClientRect(); openMenu({ preventDefault() {}, clientX: rect.left, clientY: rect.bottom + 8 }, undefined, undefined, canvas ? { x: canvas.left + canvas.width / 2, y: canvas.top + canvas.height / 2 } : undefined); }}>＋ 添加节点</button><button className="secondary" disabled={busy || !edges.length} onClick={() => { setEdges([]); setDirty(true); }}>清空连接</button></div></div>
+    {routeEvidence && <div className="alert" role="status"><strong>实际路由已验证</strong> · {routeEvidence.route} · HTTP {routeEvidence.httpStatus} · 响应 {routeEvidence.responseBody} · SHA-256 {routeEvidence.configSha256}<pre className="p0-route-diff">{routeEvidence.diff}</pre></div>}
+    <div className="topology-tools"><div className="port-legend"><span><i className="input-dot" />蓝色：入口</span><span><i className="output-dot" />绿色：出口</span><span>⇢ 虚线：未验证</span></div><div className="topology-actions"><button className="secondary" disabled={!loaded || busy} onClick={e => { const rect = e.currentTarget.getBoundingClientRect(); const canvas = canvasRef.current?.getBoundingClientRect(); openMenu({ preventDefault() {}, clientX: rect.left, clientY: rect.bottom + 8 }, undefined, undefined, canvas ? { x: canvas.left + canvas.width / 2, y: canvas.top + canvas.height / 2 } : undefined); }}>＋ 添加节点</button><button className="secondary" disabled={busy || !edges.length} onClick={() => { setEdges([]); setDirty(true); setRouteEvidence(undefined); }}>清空连接</button></div></div>
     <section className="topology card" aria-label="拓扑编辑器" ref={canvasRef}>
       <ReactFlow<DeviceNode> nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
-        onNodesChange={changes => { onNodesChange(changes); if (changes.some(c => c.type === 'position' && c.position || c.type === 'remove')) setDirty(true); }}
-        onEdgesChange={changes => { onEdgesChange(changes); if (changes.some(c => c.type === 'remove')) setDirty(true); }}
+        onNodesChange={changes => { onNodesChange(changes); if (changes.some(c => c.type === 'position' && c.position || c.type === 'remove')) { setDirty(true); setRouteEvidence(undefined); } }}
+        onEdgesChange={changes => { onEdgesChange(changes); if (changes.some(c => c.type === 'remove')) { setDirty(true); setRouteEvidence(undefined); } }}
         onConnect={connect} isValidConnection={validConnection} connectionMode={ConnectionMode.Strict}
         onConnectEnd={(_, state) => { if (state.toHandle && !state.isValid) setError('连接无效：仅允许未占用的绿色出口 → 蓝色入口，且不能形成自连接或环路'); }}
         onPaneContextMenu={e => openMenu(e)} onNodeContextMenu={(e, node) => openMenu(e, node.id)} onEdgeContextMenu={(e, edge) => openMenu(e, undefined, edge.id)}
         onPaneClick={() => setMenu(undefined)} onMoveStart={() => setMenu(undefined)}
-        onNodesDelete={deleted => setEdges(current => current.filter(e => !deleted.some(n => n.id === e.source || n.id === e.target)))}
+        onNodesDelete={deleted => { setEdges(current => current.filter(e => !deleted.some(n => n.id === e.source || n.id === e.target))); setRouteEvidence(undefined); }}
         nodesDraggable={!busy} nodesConnectable={loaded && !busy} elementsSelectable={!busy} deleteKeyCode={busy ? null : ['Backspace', 'Delete']}
         fitView minZoom={.2} maxZoom={1.7} translateExtent={[[-11000, -11000], [11000, 11000]]} nodeExtent={[[-10000, -10000], [10000, 10000]]}>
         <Background color="#dbe3ee" gap={24} /><Controls />
@@ -124,7 +145,7 @@ function Editor() {
     </section>
     <div className="topology-caption"><span>{nodes.length} 个节点 · {edges.length} 条未验证连接 · {dirty ? '有未保存的修改' : '草稿未修改'}</span><span role="status">{message || (busy ? '正在读取草稿…' : '')}</span></div>
     {menu && <div className="topology-menu" role="menu" aria-label="拓扑右键菜单" ref={menuRef} style={{ left: menu.x, top: menu.y } as CSSProperties}>
-      {contextNode ? <><strong>{contextNode.name} · {contextNode.inputCount} 入 / {contextNode.outputCount} 出</strong>{(['inputCount', 'outputCount'] as const).map(direction => <div key={direction} className="menu-port-actions">{[1, -1].map(delta => <button role="menuitem" key={delta} disabled={!validNodeShape({ ...contextNode, [direction]: contextNode[direction] + delta })} onClick={() => changePorts(contextNode, direction, delta)}>{delta > 0 ? '增加' : '减少'}{direction === 'inputCount' ? '入口' : '出口'}</button>)}</div>)}<button role="menuitem" className="danger" onClick={() => removeNode(contextNode.id)}>删除节点及关联连接</button></> : menu.edgeId ? <><strong>期望连接 · 未验证</strong><button role="menuitem" className="danger" onClick={() => { setEdges(current => current.filter(e => e.id !== menu.edgeId)); setDirty(true); setMenu(undefined); }}>删除连接</button></> : <><strong>添加虚拟节点</strong>{(Object.keys(nodePresets) as TopologyNodeKind[]).map(kind => <button role="menuitem" key={kind} onClick={() => addNode(kind)}><span>{nodePresets[kind].name}</span><small>{nodePresets[kind].inputs} 入 / {nodePresets[kind].outputs} 出</small></button>)}</>}
+      {contextNode ? <><strong>{contextNode.name} · {contextNode.inputCount} 入 / {contextNode.outputCount} 出</strong>{(['inputCount', 'outputCount'] as const).map(direction => <div key={direction} className="menu-port-actions">{[1, -1].map(delta => <button role="menuitem" key={delta} disabled={!validNodeShape({ ...contextNode, [direction]: contextNode[direction] + delta })} onClick={() => changePorts(contextNode, direction, delta)}>{delta > 0 ? '增加' : '减少'}{direction === 'inputCount' ? '入口' : '出口'}</button>)}</div>)}<button role="menuitem" className="danger" onClick={() => removeNode(contextNode.id)}>删除节点及关联连接</button></> : menu.edgeId ? <><strong>期望连接 · 未验证</strong><button role="menuitem" className="danger" onClick={() => { setEdges(current => current.filter(e => e.id !== menu.edgeId)); setDirty(true); setRouteEvidence(undefined); setMenu(undefined); }}>删除连接</button></> : <><strong>添加虚拟节点</strong>{(Object.keys(nodePresets) as TopologyNodeKind[]).map(kind => <button role="menuitem" key={kind} onClick={() => addNode(kind)}><span>{nodePresets[kind].name}</span><small>{nodePresets[kind].inputs} 入 / {nodePresets[kind].outputs} 出</small></button>)}</>}
       <button role="menuitem" className="menu-cancel" onClick={() => setMenu(undefined)}>关闭菜单 · Esc</button>
     </div>}
   </>;

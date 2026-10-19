@@ -1,0 +1,19 @@
+FROM docker.io/library/rust:1.99-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY . .
+RUN cargo build --release --workspace
+
+FROM docker.io/library/debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates passwd util-linux \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 20000 nanpanel-helper-clients \
+    && useradd --uid 10001 --gid nanpanel-helper-clients --create-home agent \
+    && useradd --uid 10002 --gid nanpanel-helper-clients --create-home untrusted
+COPY --from=build /src/target/release/nanpanel-agent /usr/local/bin/nanpanel-agent
+COPY --from=build /src/target/release/nanpanel-helper /usr/local/bin/nanpanel-helper
+COPY --from=build /src/target/release/nanpanel-helper-client /usr/local/bin/nanpanel-helper-client
+COPY p0-lab/helper-smoke.sh /usr/local/bin/helper-smoke
+RUN chmod 0755 /usr/local/bin/helper-smoke
+ENTRYPOINT ["/usr/local/bin/nanpanel-agent"]

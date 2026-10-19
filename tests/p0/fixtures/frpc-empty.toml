@@ -1,0 +1,6 @@
+serverAddr = "frps"
+serverPort = 7000
+
+[auth]
+method = "token"
+token = "nanpanel-p0-fixture-token"

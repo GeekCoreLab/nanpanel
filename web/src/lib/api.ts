@@ -1,6 +1,7 @@
 import { mockRequest } from './mock';
 export const isMock = import.meta.env.VITE_API_MODE === 'mock';
 export const mockBusiness = import.meta.env.VITE_API_MODE !== 'live';
+export const isP0Lab = import.meta.env.VITE_P0_LAB === 'true';
 let csrfToken = '';
 export class ApiError extends Error {
   constructor(public code: string, message: string, public status = 400) { super(message); }
