@@ -57,7 +57,7 @@ export function agentMaintenanceCommand(
     ...(mode === 'reinstall' ? [
       'chown root:nanpanel-agent /etc/nanpanel-agent/agent.env /etc/nanpanel-agent/agent.key && chmod 0640 /etc/nanpanel-agent/agent.env /etc/nanpanel-agent/agent.key && chown root:root /etc/nanpanel-agent/agent.crt /etc/nanpanel-agent/controller.pem && chmod 0644 /etc/nanpanel-agent/agent.crt /etc/nanpanel-agent/controller.pem',
     ] : []),
-    `agent_uid=$(id -u nanpanel-agent); agent_gid=$(id -g nanpanel-agent); cat > /etc/systemd/system/nanpanel-helper.service <<'UNIT'
+    `agent_uid=$(id -u nanpanel-agent); agent_gid=$(id -g nanpanel-agent); cat > /etc/systemd/system/nanpanel-helper.service <<UNIT
 [Unit]
 Description=NaNPanel privileged maintenance Helper
 After=network-online.target

@@ -8,12 +8,16 @@ const fingerprint = 'a'.repeat(64);
 const downloadPath = '/api/v1/agent-download/linux-amd64';
 const helperDownloadPath = '/api/v1/helper-download/linux-amd64';
 
-function assertValidBash(command) {
+function bashBody(command) {
   const prefix = 'sudo bash -c ';
   assert.ok(command.startsWith(prefix));
   const quoted = command.slice(prefix.length);
   assert.ok(quoted.startsWith("'") && quoted.endsWith("'"));
-  const script = quoted.slice(1, -1).replaceAll("'\\''", "'");
+  return quoted.slice(1, -1).replaceAll("'\\''", "'");
+}
+
+function assertValidBash(command) {
+  const script = bashBody(command);
   const result = spawnSync('bash', ['-n', '-c', script], { encoding: 'utf8' });
   assert.equal(result.status, 0, result.stderr);
 }
@@ -37,6 +41,8 @@ test('Agent reinstall repairs its systemd unit without replacing enrollment iden
   const command = agentMaintenanceCommand('reinstall', origin, fingerprint, downloadPath, helperDownloadPath);
   assert.match(command, /EnvironmentFile=\/etc\/nanpanel-agent\/agent\.env/);
   assert.match(command, /Requires=nanpanel-helper\.service/);
+  assert.match(bashBody(command), /cat > \/etc\/systemd\/system\/nanpanel-helper\.service <<UNIT/);
+  assert.match(bashBody(command), /cat > \/etc\/systemd\/system\/nanpanel-agent\.service <<'UNIT'/);
   assert.match(command, /systemctl daemon-reload/);
   assert.match(command, /systemctl enable nanpanel-helper\.service nanpanel-agent\.service/);
   assert.match(command, /agent\.key/);
