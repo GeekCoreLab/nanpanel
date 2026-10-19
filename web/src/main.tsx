@@ -6,10 +6,10 @@ import { api, ApiError, isMock, mockBusiness } from './lib/api';
 import { DEMO_PASSWORD } from './lib/mock';
 import { createUuid } from './lib/uuid.ts';
 import { agentMaintenanceCommand, type AgentMaintenanceMode } from './lib/agent-maintenance.ts';
-import type { Host, HostPage, Agent, AgentInstallation, AgentUpdateOperation, SystemService, SystemServicePage, Operation, OperationPage, SessionContext, AdminOverview, AdminUser, AdminUserPage, PlatformSettings, AuditEventPage, WebSessionList, BuiltinRoleList, AgentEnrollmentCreated } from './lib/types';
+import type { Host, HostPage, Agent, AgentInstallation, AgentUpdateOperation, SystemService, SystemServicePage, Operation, OperationPage, SessionContext, AdminOverview, AdminUser, AdminUserPage, PlatformSettings, AuditEventPage, WebSessionList, BuiltinRoleList, AgentEnrollmentCreated, HostHelperOperationRequest, SshProbeResult, SshSystemdStatusResult, SshSystemdJournalResult } from './lib/types';
 import './style.css';
 const nav = [['overview', '◫', '总览'], ['hosts', '▤', '主机资产'], ['topology', '⌘', '网络拓扑'], ['operations', '◷', '操作任务'], ['users', '♙', '管理员'], ['audit', '☷', '审计日志'], ['settings', '⚙', '平台设置'], ['account', '◎', '账号与会话']];
-const labels: Record<string, string> = { ONLINE: '在线', OFFLINE: '离线', UNKNOWN: '未知', ACTIVE: '运行中', INACTIVE: '未运行', AVAILABLE: '可用', UNAVAILABLE: '不可用', SUCCEEDED: '成功', ACCEPTED: '已受理', FAILED: '失败', RUNNING: '执行中', PENDING: '等待中', CANCELLED: '已取消', DISABLED: '已禁用', DENIED: '已拒绝' };
+const labels: Record<string, string> = { ONLINE: '在线', OFFLINE: '离线', UNKNOWN: '未知 / 结果未知', ACTIVE: '运行中', INACTIVE: '未运行', AVAILABLE: '可用', UNAVAILABLE: '不可用', SUCCEEDED: '成功', ACCEPTED: '已受理', FAILED: '失败', RUNNING: '执行中', PENDING: '等待中', CANCELLED: '已取消', DISABLED: '已禁用', DENIED: '已拒绝' };
 function Badge({ value }: { value: string }) { return <span className={`badge ${value.toLowerCase()}`}><i />{labels[value] ?? value}</span>; }
 function Empty({ children = '暂无数据' }: { children?: ReactNode }) { return <div className="empty"><span>▧</span><p>{children}</p></div>; }
 function Field({ label, children }: { label: string; children: ReactNode }) { return <label className="field"><span>{label}</span>{children}</label>; }
@@ -29,7 +29,7 @@ function App() {
  if (!ready) return <div className="boot">NaNPanel <span>正在初始化控制台…</span></div>;
  if (!session) return <Login onLogin={setSession} />;
  const forced = session.user.mustChangePassword;
- return <div className="app"><aside className="sidebar"><a className="brand" href="#overview"><b className="brand-icon">N</b><strong>NaNPanel<span>INFRASTRUCTURE CONSOLE</span></strong></a><div className="workspace"><span className="workspace-icon">⌂</span><div>我的基础设施<small>个人工作空间</small></div><span className="muted">⌄</span></div><p className="nav-label">工作空间</p><nav>{nav.slice(0, 4).map(n => <a aria-current={page === n[0] ? 'page' : undefined} className={page === n[0] ? 'selected' : ''} href={`#${n[0]}`} key={n[0]}><span>{n[1]}</span>{n[2]}{n[0] === 'topology' && <small>LAB</small>}</a>)}<p className="nav-label">平台管理</p>{nav.slice(4).map(n => <a aria-current={page === n[0] ? 'page' : undefined} className={page === n[0] ? 'selected' : ''} href={`#${n[0]}`} key={n[0]}><span>{n[1]}</span>{n[2]}</a>)}</nav><div className="sidebar-bottom"><div className="mode-dot" />{isMock ? 'Mock 演示环境' : mockBusiness ? '真实登录 · 业务模拟' : '真实 API 模式'}<small>v0.1.0 · {isMock ? '数据仅保存在内存' : '同源 Cookie 会话'}</small></div><div className="profile"><div className="avatar">{session.user.displayName.slice(0, 1)}</div><div>{session.user.displayName}<small>ADMIN 管理员</small></div><button className="icon-button" title="退出登录" onClick={logout}>↪</button></div></aside><div className="shell"><header className="topbar"><div><span className="muted">工作空间</span><span className="slash">/</span>{nav.find(n => n[0] === page)?.[2] ?? '总览'}</div><div className="top-actions"><span className="environment">{isMock ? '◉ Mock 模式' : mockBusiness ? '◉ 真实认证 / 业务 Mock' : '◉ Live API'}</span><span className="avatar small">{session.user.displayName.slice(0, 1)}</span></div></header><main><div className="demo-banner"><span>◇</span><div>{isMock ? '当前为独立演示环境，所有主机、服务与操作均为模拟数据。刷新页面后重置。' : mockBusiness ? '登录与会话使用真实后端；主机、任务、拓扑、仪表盘和设置仍为模拟数据；管理员、审计和登录使用真实后端。' : '已连接真实 API。尚未实现的业务接口会返回错误。'}</div><span className="mono">{isMock ? 'MOCK' : 'LIVE'}</span></div>{forced ? <><div className="alert">请先修改初始密码，完成后重新登录。</div><Account onLogout={() => setSession(null)} /></> : <>{page === 'overview' && <Overview />}{page === 'hosts' && <Hosts notify={setMessage} />}{page === 'topology' && <Topology />}{page === 'operations' && <Operations />}{page === 'users' && <Users self={session.user.id} notify={setMessage} />}{page === 'audit' && <Audit />}{page === 'settings' && <Settings notify={setMessage} />}{page === 'account' && <Account onLogout={() => setSession(null)} />}{!nav.some(n => n[0] === page) && <Empty>页面不存在，请通过左侧导航访问。</Empty>}</>}<footer>NaNPanel <span>控制面与数据面分离 · 让基础设施清晰可见</span><span>API 0.1.0-draft.2</span></footer></main></div>{message && <div className="toast" role="status">{message}</div>}{reauth && <div className="modal-backdrop"><div className="modal"><h2>重新验证身份</h2><p>此操作需要最近 5 分钟内的密码验证。验证后请重新读取资源，并手动确认提交。</p><Login compact username={session.user.username} onLogin={s => { setSession(s); setReauth(false); setMessage('验证成功，请刷新资源后重新确认操作'); }} /><button className="secondary" onClick={() => setReauth(false)}>取消</button></div></div>}</div>;
+ return <div className="app"><aside className="sidebar"><a className="brand" href="#overview"><b className="brand-icon">N</b><strong>NaNPanel<span>INFRASTRUCTURE CONSOLE</span></strong></a><div className="workspace"><span className="workspace-icon">⌂</span><div>我的基础设施<small>个人工作空间</small></div><span className="muted">⌄</span></div><p className="nav-label">工作空间</p><nav>{nav.slice(0, 4).map(n => <a aria-current={page === n[0] ? 'page' : undefined} className={page === n[0] ? 'selected' : ''} href={`#${n[0]}`} key={n[0]}><span>{n[1]}</span>{n[2]}{n[0] === 'topology' && <small>LAB</small>}</a>)}<p className="nav-label">平台管理</p>{nav.slice(4).map(n => <a aria-current={page === n[0] ? 'page' : undefined} className={page === n[0] ? 'selected' : ''} href={`#${n[0]}`} key={n[0]}><span>{n[1]}</span>{n[2]}</a>)}</nav><div className="sidebar-bottom"><div className="mode-dot" />{isMock ? 'Mock 演示环境' : mockBusiness ? '真实认证与主机服务 · 其他业务模拟' : '真实 API 模式'}<small>v0.1.0 · {isMock ? '数据仅保存在内存' : '同源 Cookie 会话'}</small></div><div className="profile"><div className="avatar">{session.user.displayName.slice(0, 1)}</div><div>{session.user.displayName}<small>ADMIN 管理员</small></div><button className="icon-button" title="退出登录" onClick={logout}>↪</button></div></aside><div className="shell"><header className="topbar"><div><span className="muted">工作空间</span><span className="slash">/</span>{nav.find(n => n[0] === page)?.[2] ?? '总览'}</div><div className="top-actions"><span className="environment">{isMock ? '◉ Mock 模式' : mockBusiness ? '◉ 真实认证与主机服务 / 其他业务 Mock' : '◉ Live API'}</span><span className="avatar small">{session.user.displayName.slice(0, 1)}</span></div></header><main><div className="demo-banner"><span>◇</span><div>{isMock ? '当前为独立演示环境，所有主机、服务与操作均为模拟数据。刷新页面后重置。' : mockBusiness ? '登录、主机、Agent、systemd 观测与重启任务使用真实后端；拓扑仍为模拟数据。' : '已连接真实 API。尚未实现的业务接口会返回错误。'}</div><span className="mono">{isMock ? 'MOCK' : 'LIVE'}</span></div>{forced ? <><div className="alert">请先修改初始密码，完成后重新登录。</div><Account onLogout={() => setSession(null)} /></> : <>{page === 'overview' && <Overview />}{page === 'hosts' && <Hosts notify={setMessage} />}{page === 'topology' && <Topology />}{page === 'operations' && <Operations />}{page === 'users' && <Users self={session.user.id} notify={setMessage} />}{page === 'audit' && <Audit />}{page === 'settings' && <Settings notify={setMessage} />}{page === 'account' && <Account onLogout={() => setSession(null)} />}{!nav.some(n => n[0] === page) && <Empty>页面不存在，请通过左侧导航访问。</Empty>}</>}<footer>NaNPanel <span>控制面与数据面分离 · 让基础设施清晰可见</span><span>API 0.1.0-draft.2</span></footer></main></div>{message && <div className="toast" role="status">{message}</div>}{reauth && <div className="modal-backdrop"><div className="modal"><h2>重新验证身份</h2><p>此操作需要最近 5 分钟内的密码验证。验证后请重新读取资源，并手动确认提交。</p><Login compact username={session.user.username} onLogin={s => { setSession(s); setReauth(false); setMessage('验证成功，请刷新资源后重新确认操作'); }} /><button className="secondary" onClick={() => setReauth(false)}>取消</button></div></div>}</div>;
 }
 function Login({ onLogin, compact = false, username }: { onLogin: (s: SessionContext) => void; compact?: boolean; username?: string }) {
  const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
@@ -39,9 +39,9 @@ function Login({ onLogin, compact = false, username }: { onLogin: (s: SessionCon
 }
 function PageHeading({ title, description, action }: { title: string; description: string; action?: ReactNode }) { return <div className="page-heading"><div><h1>{title}</h1><p>{description}</p></div>{action}</div>; }
 function Overview() {
- const r = useResource<AdminOverview>('/admin/overview', 5000, true); const h = useResource<HostPage>('/hosts', 0, true); const o = useResource<OperationPage>(isMock ? '/operations' : '', 2000); const a = useResource<AuditEventPage>('/admin/audit-events');
+ const r = useResource<AdminOverview>('/admin/overview', 5000, true); const h = useResource<HostPage>('/hosts', 0, true); const o = useResource<OperationPage>('/operations', 2000, true); const a = useResource<AuditEventPage>('/admin/audit-events');
  const total = r.data?.hosts.total ?? 0; const online = r.data?.hosts.online ?? 0; const offline = r.data?.hosts.offline ?? 0; const unknown = r.data?.hosts.unknown ?? 0; const onlinePercent = total ? online / total * 100 : 0; const offlinePercent = total ? (online + offline) / total * 100 : 0;
- return <><PageHeading title="基础设施总览" description="你好，管理员。你的云端与边缘，一览无余。" action={<button className="secondary" onClick={() => { r.refresh(); h.refresh(); a.refresh(); }}>↻ 刷新数据</button>} /><ResourceState {...r} /><div className="stats">{[['主机总数', r.data?.hosts.total ?? '—', `${r.data?.hosts.online ?? '—'} 台在线`, '▤', 'blue'], ['在线主机', r.data?.hosts.online ?? '—', '管理通道已连接', '◎', 'green'], ['离线 / 未知', r.data ? r.data.hosts.offline + r.data.hosts.unknown : '—', '需要关注的节点', '△', 'amber'], ['进行中的任务', r.data ? r.data.operations.pending + r.data.operations.running : '—', `${r.data?.operations.unknown ?? 0} 个结果未知`, '◷', 'purple']].map(x => <div className="stat" key={String(x[0])}><div><span>{x[0]}</span><b className={`stat-icon ${x[4]}`}>{x[3]}</b></div><strong>{x[1]}</strong><small>{x[2]}</small></div>)}</div><div className="overview-grid"><section className="card"><div className="card-title"><div><h2>主机分布</h2><p>管理通道状态 · 最近观测</p></div><a href="#hosts">查看全部 ↗</a></div><ResourceState {...h} />{r.data && h.data && <div className="host-distribution"><div className="donut" style={{ background: `conic-gradient(#5387f4 0 ${onlinePercent}%, #e7b65b 0 ${offlinePercent}%, #e9edf4 0)` }}><div><strong>{total}</strong><span>主机节点</span></div></div><div className="legend">{[['ONLINE', '管理通道在线', online], ['OFFLINE', '管理通道离线', offline], ['UNKNOWN', '尚未确认状态', unknown]].map(([s, text, amount]) => <div key={String(s)}><Badge value={String(s)} /><span>{text}</span><b>{amount}</b></div>)}</div></div>}<div className="card-note">ⓘ 管理通道状态不代表业务流量健康状态</div></section><section className="card"><div className="card-title"><div><h2>控制面信息</h2><p>轻量控制，按需扩展</p></div><span className="square-icon">⌘</span></div><dl className="info-list"><div><dt>运行环境</dt><dd>{isMock ? '浏览器内 Mock' : '同源 API'}</dd></div><div><dt>主控架构</dt><dd>Java / Quarkus JVM</dd></div><div><dt>边缘组件</dt><dd>Rust Agent + root Helper</dd></div><div><dt>管理员账号</dt><dd>{r.data?.activeAdminUsers ?? '—'} 个 ACTIVE</dd></div><div><dt>最近观测</dt><dd>{time(r.data?.observedAt)}</dd></div></dl></section></div><section className="card"><div className="card-title"><div><h2>主机资产</h2><p>异构节点，统一管理</p></div><a href="#hosts">管理主机 →</a></div><HostTable hosts={h.data?.items ?? []} /></section><div className="overview-grid lower"><section className="card"><div className="card-title"><h2>最近操作</h2><a href="#operations">全部任务 ↗</a></div>{isMock ? (!o.data?.items.length ? <Empty>还没有操作任务，前往主机资产体验服务重启</Empty> : o.data.items.slice(0, 4).map(op => <div className="activity" key={op.id}><span className="activity-icon">↻</span><div><b>systemd 服务重启</b><small>{op.reason}</small></div><Badge value={op.status} /></div>)) : <Empty>操作任务 API 尚待接入</Empty>}</section><section className="card"><div className="card-title"><h2>平台动态</h2><a href="#audit">审计日志 ↗</a></div>{a.data?.items.slice(0, 4).map(e => <div className="activity" key={e.id}><span className="activity-icon green">✓</span><div><b>{e.summary}</b><small>{time(e.occurredAt)}</small></div></div>)}</section></div></>;
+ return <><PageHeading title="基础设施总览" description="你好，管理员。你的云端与边缘，一览无余。" action={<button className="secondary" onClick={() => { r.refresh(); h.refresh(); a.refresh(); }}>↻ 刷新数据</button>} /><ResourceState {...r} /><div className="stats">{[['主机总数', r.data?.hosts.total ?? '—', `${r.data?.hosts.online ?? '—'} 台在线`, '▤', 'blue'], ['在线主机', r.data?.hosts.online ?? '—', '管理通道已连接', '◎', 'green'], ['离线 / 未知', r.data ? r.data.hosts.offline + r.data.hosts.unknown : '—', '需要关注的节点', '△', 'amber'], ['进行中的任务', r.data ? r.data.operations.pending + r.data.operations.running : '—', `${r.data?.operations.unknown ?? 0} 个结果未知`, '◷', 'purple']].map(x => <div className="stat" key={String(x[0])}><div><span>{x[0]}</span><b className={`stat-icon ${x[4]}`}>{x[3]}</b></div><strong>{x[1]}</strong><small>{x[2]}</small></div>)}</div><div className="overview-grid"><section className="card"><div className="card-title"><div><h2>主机分布</h2><p>管理通道状态 · 最近观测</p></div><a href="#hosts">查看全部 ↗</a></div><ResourceState {...h} />{r.data && h.data && <div className="host-distribution"><div className="donut" style={{ background: `conic-gradient(#5387f4 0 ${onlinePercent}%, #e7b65b 0 ${offlinePercent}%, #e9edf4 0)` }}><div><strong>{total}</strong><span>主机节点</span></div></div><div className="legend">{[['ONLINE', '管理通道在线', online], ['OFFLINE', '管理通道离线', offline], ['UNKNOWN', '尚未确认状态', unknown]].map(([s, text, amount]) => <div key={String(s)}><Badge value={String(s)} /><span>{text}</span><b>{amount}</b></div>)}</div></div>}<div className="card-note">ⓘ 管理通道状态不代表业务流量健康状态</div></section><section className="card"><div className="card-title"><div><h2>控制面信息</h2><p>轻量控制，按需扩展</p></div><span className="square-icon">⌘</span></div><dl className="info-list"><div><dt>运行环境</dt><dd>{isMock ? '浏览器内 Mock' : '同源 API'}</dd></div><div><dt>主控架构</dt><dd>Java / Quarkus JVM</dd></div><div><dt>边缘组件</dt><dd>Rust Agent + root Helper</dd></div><div><dt>管理员账号</dt><dd>{r.data?.activeAdminUsers ?? '—'} 个 ACTIVE</dd></div><div><dt>最近观测</dt><dd>{time(r.data?.observedAt)}</dd></div></dl></section></div><section className="card"><div className="card-title"><div><h2>主机资产</h2><p>异构节点，统一管理</p></div><a href="#hosts">管理主机 →</a></div><HostTable hosts={h.data?.items ?? []} /></section><div className="overview-grid lower"><section className="card"><div className="card-title"><h2>最近操作</h2><a href="#operations">全部任务 ↗</a></div>{!o.data?.items.length ? <Empty>还没有操作任务，前往主机资产体验服务重启</Empty> : o.data.items.slice(0, 4).map(op => <div className="activity" key={op.id}><span className="activity-icon">↻</span><div><b>systemd 服务重启</b><small>{op.reason}</small></div><Badge value={op.status} /></div>)}</section><section className="card"><div className="card-title"><h2>平台动态</h2><a href="#audit">审计日志 ↗</a></div>{a.data?.items.slice(0, 4).map(e => <div className="activity" key={e.id}><span className="activity-icon green">✓</span><div><b>{e.summary}</b><small>{time(e.occurredAt)}</small></div></div>)}</section></div></>;
 }
 function HostTable({ hosts, onSelect }: { hosts: Host[]; onSelect?: (h: Host) => void }) { return <div className="table-wrap"><table><thead><tr><th>主机名称</th><th>状态</th><th>操作系统 / 架构</th><th>能力</th><th>最近心跳</th><th /></tr></thead><tbody>{hosts.map((h, i) => <tr key={h.id}><td><div className="host-name"><span className={`host-icon ${i % 2 ? 'purple' : 'blue'}`}>▤</span><div><b>{h.hostname}</b><small className="mono">{h.id.slice(0, 8)}</small></div></div></td><td><Badge value={h.status} /></td><td>{h.os ?? '未知'} <span className="muted">/ {h.arch ?? '未知'}</span></td><td>{h.capabilities.length ? h.capabilities.map(capability => <span className="chip" key={capability}>{capability}</span>) : <span className="muted">—</span>}</td><td className="muted">{time(h.lastSeenAt)}</td><td>{onSelect ? <button className="link" onClick={() => onSelect(h)}>查看详情 →</button> : <a href="#hosts">详情 ↗</a>}</td></tr>)}</tbody></table>{!hosts.length && <Empty>没有符合条件的主机</Empty>}</div>; }
 function shellQuote(value: string) { return "'" + value.replaceAll("'", "'\\''") + "'"; }
@@ -55,7 +55,7 @@ function enrollmentInstallCommand(enrollment: AgentEnrollmentCreated) {
   `fingerprint=$(openssl x509 -in "$work/controller.pem" -noout -fingerprint -sha256 | sed 's/.*=//' | tr -d ':' | tr '[:upper:]' '[:lower:]')`,
   `test "$fingerprint" = ${shellQuote(fingerprint)} || { printf "Controller certificate fingerprint mismatch\\n" >&2; exit 1; }`,
   `curl --cacert "$work/controller.pem" --fail --silent --show-error --location ${shellQuote(origin + '/agent-install.sh')} -o "$work/agent-install.sh"`,
-  `bash "$work/agent-install.sh" ${[origin, enrollment.hostId, enrollment.agentId, enrollment.token, fingerprint, String(enrollment.gatewayPort)].map(shellQuote).join(' ')}`,
+  `bash "$work/agent-install.sh" ${[origin, enrollment.hostId, enrollment.agentId, enrollment.token, fingerprint, String(enrollment.gatewayPort), (enrollment.relayEndpoints ?? []).join(','), (enrollment.relayFallback?.endpoints ?? []).join(','), enrollment.relayFallback?.signature ?? '', enrollment.relayFallback?.publicKey ?? ''].map(shellQuote).join(' ')}`,
  ].join('; ');
  return `sudo bash -c ${shellQuote(inner)}`;
 }
@@ -64,16 +64,263 @@ function Hosts({ notify }: { notify: (s: string) => void }) {
  return <><PageHeading title="主机资产" description="统一查看 Linux 主机、Agent 能力与系统服务。" action={<div className="host-heading-actions"><button className="primary" onClick={() => setAdding(true)}>＋ 添加主机</button><button className="secondary" onClick={r.refresh}>↻ 刷新</button></div>} /><section className="card"><div className="toolbar"><input aria-label="搜索主机" placeholder="⌕ 搜索当前页主机名称…" value={query} onChange={e => setQuery(e.target.value)} /><select aria-label="主机状态" value={status} onChange={e => { setStatus(e.target.value); setCursors([null]); }}><option value="">全部状态</option>{['ONLINE', 'OFFLINE', 'UNKNOWN'].map(s => <option key={s} value={s}>{labels[s]}</option>)}</select><span className="muted">本页 {visibleHosts.length} 台</span></div><ResourceState {...r} /><HostTable hosts={visibleHosts} onSelect={setSelected} /><div className="form-actions"><button className="secondary" disabled={cursors.length < 2} onClick={() => setCursors(value => value.slice(0, -1))}>上一页</button><span className="muted">第 {cursors.length} 页 · 默认每页 20 台</span><button className="secondary" disabled={!r.data?.nextCursor} onClick={() => { if (r.data?.nextCursor) setCursors(value => [...value, r.data!.nextCursor]); }}>下一页</button></div></section>{selected && <HostDetail host={selected} close={() => setSelected(undefined)} notify={notify} />}{adding && <HostEnrollmentDialog close={() => setAdding(false)} onCreated={() => { setStatus(''); setCursors([null]); r.refresh(); }} />}</>;
 }
 function HostEnrollmentDialog({ close, onCreated }: { close: () => void; onCreated: () => void }) {
- const [hostname, setHostname] = useState(window.location.hostname); const [enrollment, setEnrollment] = useState<AgentEnrollmentCreated>(); const [error, setError] = useState(''); const [busy, setBusy] = useState(false); const [copied, setCopied] = useState(false);
- async function create(e: FormEvent) { e.preventDefault(); setBusy(true); setError(''); try { await api('/auth/csrf'); const result = await api<AgentEnrollmentCreated>('/agent-enrollments', 'POST', { hostname: hostname.trim() }, {}, true); setEnrollment(result.data); onCreated(); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } }
- async function copyCommand() { if (!enrollment) return; try { await navigator.clipboard.writeText(enrollmentInstallCommand(enrollment)); setCopied(true); } catch { setError('浏览器未允许剪贴板访问，请选择下方命令并手动复制。'); } }
- return <div className="modal-backdrop"><section className="modal host-enrollment-modal" role="dialog" aria-modal="true" aria-labelledby="host-enrollment-title"><div className="card-title"><div><span className="eyebrow">HOST ENROLLMENT</span><h2 id="host-enrollment-title">添加主机</h2></div><button className="icon-button" aria-label="关闭添加主机" onClick={close}>×</button></div>{isMock && <div className="alert">当前为 Mock 演示，生成的接入码不能用于实际安装。</div>}{!enrollment ? <form onSubmit={create}><p className="muted">为目标主机创建一条资产记录和 15 分钟有效的一次性接入码。首次心跳会自动补齐主机名、系统和架构。</p><Field label="资产名称"><input autoFocus required maxLength={255} value={hostname} onChange={e => setHostname(e.target.value)} placeholder="例如 k3s-1" /></Field><div className="alert">Agent 使用独立 mTLS 证书接入，只上报主机清单和心跳；当前不会开放 systemd 或 root Helper 操作。</div>{error && <div className="alert error" role="alert">{error}</div>}<div className="form-actions"><button type="button" className="secondary" onClick={close}>取消</button><button className="primary" disabled={busy || !hostname.trim()}>{busy ? '正在创建接入码…' : '生成安装命令'}</button></div></form> : <div className="enrollment-result"><p>在目标 Linux x86_64 主机上以管理员身份运行下面的命令。下载脚本前会先核对控制面板证书指纹，接入码只在首次兑换时发送。</p><dl className="info-list"><div><dt>主机资产 ID</dt><dd className="mono">{enrollment.hostId}</dd></div><div><dt>接入码有效期至</dt><dd>{time(enrollment.expiresAt)}</dd></div><div><dt>控制面板证书 SHA-256</dt><dd className="mono fingerprint">{enrollment.controllerFingerprint}</dd></div></dl>{!isMock && <><textarea className="install-command" aria-label="Agent 安装命令" readOnly value={enrollmentInstallCommand(enrollment)} onFocus={e => e.currentTarget.select()} /><div className="form-actions"><button className="secondary" onClick={copyCommand}>{copied ? '已复制' : '复制安装命令'}</button><button className="primary" onClick={close}>完成</button></div></>}{isMock && <div className="form-actions"><button className="primary" onClick={close}>完成</button></div>}</div>}</section></div>;
+ const [hostname, setHostname] = useState(window.location.hostname);
+ const [enrollment, setEnrollment] = useState<AgentEnrollmentCreated>();
+ const [error, setError] = useState('');
+ const [busy, setBusy] = useState(false);
+ const [copied, setCopied] = useState(false);
+ const [sshAlias, setSshAlias] = useState('');
+ const [sshReason, setSshReason] = useState('');
+ const [sshBusy, setSshBusy] = useState(false);
+ const [sshError, setSshError] = useState('');
+ const [sshOperation, setSshOperation] = useState<Operation>();
+ const [sshKey, setSshKey] = useState('');
+
+ useEffect(() => {
+  if (!sshOperation || ['SUCCEEDED', 'FAILED', 'CANCELLED', 'UNKNOWN'].includes(sshOperation.status)) return;
+  let active = true;
+  const timer = window.setInterval(async () => {
+   try {
+    const result = await api<Operation>(`/operations/${sshOperation.id}`, 'GET', undefined, {}, true);
+    if (active) {
+     setSshOperation(result.data);
+     if (result.data.status === 'FAILED') setSshKey('');
+    }
+   } catch { /* The operation remains available in the task list. */ }
+  }, 2000);
+  return () => { active = false; window.clearInterval(timer); };
+ }, [sshOperation?.id, sshOperation?.status]);
+
+ async function create(e: FormEvent) {
+  e.preventDefault(); setBusy(true); setError('');
+  try {
+   await api('/auth/csrf');
+   const result = await api<AgentEnrollmentCreated>('/agent-enrollments', 'POST', { hostname: hostname.trim() }, {}, true);
+   setEnrollment(result.data); onCreated();
+  } catch (e) { setError((e as Error).message); }
+  finally { setBusy(false); }
+ }
+
+ async function copyCommand() {
+  if (!enrollment) return;
+  try { await navigator.clipboard.writeText(enrollmentInstallCommand(enrollment)); setCopied(true); }
+  catch { setError('浏览器未允许剪贴板访问，请选择下方命令并手动复制。'); }
+ }
+
+ async function installOverSsh(e: FormEvent) {
+  e.preventDefault(); if (!enrollment) return;
+  setSshBusy(true); setSshError('');
+  const key = sshKey || createUuid(); setSshKey(key);
+  try {
+   await api('/auth/csrf');
+   const result = await api<Operation>(`/hosts/${enrollment.hostId}/ssh/agent/install`, 'POST', {
+    enrollmentId: enrollment.enrollmentId, agentId: enrollment.agentId,
+    alias: sshAlias.trim(), token: enrollment.token, reason: sshReason.trim(),
+   }, { 'Idempotency-Key': key }, true);
+   setSshOperation(result.data);
+   if (result.data.status === 'FAILED') setSshKey('');
+  } catch (e) { setSshError((e as Error).message); }
+  finally { setSshBusy(false); }
+ }
+
+ return <div className="modal-backdrop"><section className="modal host-enrollment-modal" role="dialog" aria-modal="true" aria-labelledby="host-enrollment-title">
+  <div className="card-title"><div><span className="eyebrow">HOST ENROLLMENT</span><h2 id="host-enrollment-title">添加主机</h2></div><button className="icon-button" aria-label="关闭添加主机" onClick={close}>×</button></div>
+  {isMock && <div className="alert">当前为 Mock 演示，生成的接入码不能用于实际安装。</div>}
+  {!enrollment ? <form onSubmit={create}>
+   <p className="muted">为目标主机创建一条资产记录和 15 分钟有效的一次性接入码。首次心跳会自动补齐主机名、系统和架构。</p>
+   <Field label="资产名称"><input autoFocus required maxLength={255} value={hostname} onChange={e => setHostname(e.target.value)} placeholder="例如 node-01" /></Field>
+   <div className="alert">Agent 使用独立 mTLS 证书接入并上报主机清单、systemd 服务观测；root Helper 只执行系统管理员配置白名单中的操作。</div>
+   {error && <div className="alert error" role="alert">{error}</div>}
+   <div className="form-actions"><button type="button" className="secondary" onClick={close}>取消</button><button className="primary" disabled={busy || !hostname.trim()}>{busy ? '正在创建接入码…' : '生成安装命令'}</button></div>
+  </form> : <div className="enrollment-result">
+   <p>目标主机可运行以下命令自行安装；下载前会核对控制面板证书指纹，接入码仅在首次兑换时发送。</p>
+   <dl className="info-list"><div><dt>主机资产 ID</dt><dd className="mono">{enrollment.hostId}</dd></div><div><dt>接入码有效期至</dt><dd>{time(enrollment.expiresAt)}</dd></div><div><dt>控制面板证书 SHA-256</dt><dd className="mono fingerprint">{enrollment.controllerFingerprint}</dd></div></dl>
+   {!isMock && <>
+    <textarea className="install-command" aria-label="Agent 安装命令" readOnly value={enrollmentInstallCommand(enrollment)} onFocus={e => e.currentTarget.select()} />
+    <div className="form-actions"><button className="secondary" onClick={copyCommand}>{copied ? '已复制' : '复制安装命令'}</button><button className="primary" onClick={close}>完成</button></div>
+    <form className="ssh-install-form" onSubmit={installOverSsh}>
+     <h3>通过受限 SSH 初始化</h3>
+     <p className="muted">只使用主控上的 root-managed host alias 和固定安装脚本。Core 必须配置 HTTPS 公网 Origin；未知结果需先到操作任务对账。</p>
+     <Field label="SSH 别名"><input required maxLength={100} value={sshAlias} onChange={e => setSshAlias(e.target.value)} placeholder="例如 host-b" /></Field>
+     <Field label="SSH 初始化原因"><input required maxLength={500} value={sshReason} onChange={e => setSshReason(e.target.value)} placeholder="说明授权的初始化目的" /></Field>
+     {sshError && <div className="alert error" role="alert">{sshError}</div>}
+     {sshOperation && <div className="alert" role="status">SSH 初始化任务 {labels[sshOperation.status] ?? sshOperation.status} · {sshOperation.id}{sshOperation.status === 'UNKNOWN' ? '；请对账后再处理接入码。' : ''}</div>}
+     <div className="form-actions"><button className="primary" disabled={sshBusy || !sshAlias.trim() || !sshReason.trim() || Boolean(sshOperation && ['RUNNING', 'PENDING', 'UNKNOWN', 'SUCCEEDED'].includes(sshOperation.status))}>{sshBusy ? '正在提交 SSH 初始化…' : '通过 SSH 安装 Agent'}</button></div>
+    </form>
+   </>}
+   {isMock && <div className="form-actions"><button className="primary" onClick={close}>完成</button></div>}
+  </div>}
+ </section></div>;
 }
 function HostDetail({ host, close, notify }: { host: Host; close: () => void; notify: (s: string) => void }) {
- const details = useResource<Host>(`/hosts/${host.id}`, 0, true); const currentHost = details.data ?? host; const r = useResource<SystemServicePage>(isMock ? `/hosts/${host.id}/services` : ''); const agent = useResource<Agent>(currentHost.agentId ? `/agents/${currentHost.agentId}` : '', 0, true); const installation = useResource<AgentInstallation>(!isMock && currentHost.agentId ? '/agent-installation' : '', 0, true); const [service, setService] = useState<SystemService>(); const [tag, setTag] = useState(''); const [key, setKey] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [reason, setReason] = useState(''); const [maintenance, setMaintenance] = useState<AgentMaintenanceMode>();
- async function prepare(s: SystemService) { try { const result = await api<SystemService>(`/hosts/${host.id}/services/${s.id}`); setService(result.data); setTag(result.etag ?? ''); setKey(createUuid()); setError(''); } catch (e) { notify((e as Error).message); } }
- async function restart(e: FormEvent) { e.preventDefault(); if (!service) return; setBusy(true); try { await api<Operation>(`/hosts/${host.id}/services/${service.id}/restart`, 'POST', { reason, timeoutSeconds: 60 }, { 'If-Match': tag, 'Idempotency-Key': key }); notify(`${isMock ? '模拟' : ''}重启任务已接受，可在操作任务中查看执行结果`); setService(undefined); setReason(''); r.refresh(); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } }
- return <div className="modal-backdrop"><section className="drawer"><div className="card-title"><div><span className="eyebrow">HOST DETAILS</span><h2>{currentHost.hostname}</h2></div><button className="icon-button" aria-label="关闭主机详情" onClick={close}>×</button></div><ResourceState {...details} /><Badge value={currentHost.status} /><p className="muted mono">{currentHost.id}</p><div className="alert">离线状态来自最近心跳；Helper 状态和 Agent 能力来自最近一次在线观测。</div><h3>Agent 与权限边界</h3>{currentHost.agentId ? <><ResourceState {...agent} />{agent.data && <><dl className="info-list"><div><dt>版本 / 实现</dt><dd>{agent.data.version ?? '未知'} / Rust</dd></div><div><dt>Helper 状态</dt><dd><Badge value={agent.data.helperStatus} /></dd></div><div><dt>已报告能力</dt><dd>{agent.data.capabilities.join(', ') || '—'}</dd></div></dl><div className="agent-maintenance-actions"><button className="secondary" onClick={() => setMaintenance('reinstall')}>重新安装 Agent</button><button className="secondary" onClick={() => setMaintenance('update')}>更新 Agent</button></div></>}</> : <p className="muted">尚未绑定 Agent</p>}<h3>systemd 服务</h3>{isMock ? <><ResourceState {...r} />{r.data?.items.map(s => <div className="service" key={s.id}><div><b>{s.unitName}</b><small>{s.displayName}</small>{s.observationStale && <small className="warning">历史观测 · 可能过期</small>}</div><Badge value={s.activeState} /><button className="secondary" disabled={!s.allowedActions.includes('RESTART') || agent.data?.helperStatus !== 'AVAILABLE'} onClick={() => prepare(s)}>↻ 重启</button></div>)}{r.data?.items.length === 0 && <Empty>尚无服务观测</Empty>}</> : <p className="muted">服务观测与操作 API 尚待接入。</p>}{service && <form className="restart-form" onSubmit={restart}><h3>确认重启 {service.unitName}</h3><p className="muted">仅在 Mock 演示中模拟服务重启。ACTIVE 仅证明 systemd 状态，不证明业务健康。</p><Field label="操作原因"><textarea required maxLength={500} value={reason} onChange={e => setReason(e.target.value)} placeholder="请填写本次重启的原因" /></Field><small className="muted">超时 60 秒 · 请求失败后保留原幂等键</small>{error && <div className="alert error">{error}</div>}<div className="form-actions"><button type="button" className="secondary" onClick={() => { setService(undefined); setReason(''); }}>取消</button><button className="primary" disabled={busy || !reason.trim() || !tag}>{busy ? '正在提交…' : '确认提交'}</button></div></form>}</section>{maintenance && <AgentMaintenanceDialog agentId={currentHost.agentId ?? ''} mode={maintenance} installation={installation.data} installationError={installation.error} selfUpdateSupported={agent.data?.status === 'ONLINE' && agent.data.helperStatus === 'AVAILABLE' && agent.data.capabilities.includes('agent.self_update')} close={() => setMaintenance(undefined)} />}</div>;
+ const details = useResource<Host>(`/hosts/${host.id}`, 0, true);
+ const currentHost = details.data ?? host;
+ const r = useResource<SystemServicePage>(`/hosts/${host.id}/services`, 0, true);
+ const agent = useResource<Agent>(currentHost.agentId ? `/agents/${currentHost.agentId}` : '', 0, true);
+ const installation = useResource<AgentInstallation>(!isMock && currentHost.agentId ? '/agent-installation' : '', 0, true);
+ const [service, setService] = useState<SystemService>();
+ const [journalService, setJournalService] = useState<SystemService>();
+ const [tag, setTag] = useState('');
+ const [key, setKey] = useState('');
+ const [busy, setBusy] = useState(false);
+ const [error, setError] = useState('');
+ const [reason, setReason] = useState('');
+ const [maintenance, setMaintenance] = useState<AgentMaintenanceMode>();
+ async function freshService(s: SystemService) {
+  const result = await api<SystemService>(`/hosts/${host.id}/services/${s.id}`, 'GET', undefined, {}, true);
+  setTag(result.etag ?? '');
+  setKey(createUuid());
+  setError('');
+  setReason('');
+  return result.data;
+ }
+ async function prepare(s: SystemService) {
+  try { setService(await freshService(s)); setJournalService(undefined); }
+  catch (e) { notify((e as Error).message); }
+ }
+ async function prepareJournal(s: SystemService) {
+  try { setJournalService(await freshService(s)); setService(undefined); }
+  catch (e) { notify((e as Error).message); }
+ }
+ async function restart(e: FormEvent) {
+  e.preventDefault();
+  if (!service) return;
+  setBusy(true);
+  try {
+   await api<Operation>(`/hosts/${host.id}/services/${service.id}/restart`, 'POST',
+    { reason, timeoutSeconds: 60 }, { 'If-Match': tag, 'Idempotency-Key': key }, true);
+   notify(`${isMock ? '模拟' : ''}重启任务已接受，可在操作任务中查看执行结果`);
+   setService(undefined); setReason(''); r.refresh();
+  } catch (e) { setError((e as Error).message); }
+  finally { setBusy(false); }
+ }
+ async function readJournal(e: FormEvent) {
+  e.preventDefault();
+  if (!journalService) return;
+  setBusy(true);
+  try {
+   await api<Operation>(`/hosts/${host.id}/services/${journalService.id}/journal`, 'POST',
+    { reason }, { 'If-Match': tag, 'Idempotency-Key': key }, true);
+   notify(`${isMock ? '模拟' : ''}日志查询已接受，可在操作任务中查看结果`);
+   setJournalService(undefined); setReason(''); r.refresh();
+  } catch (e) { setError((e as Error).message); }
+  finally { setBusy(false); }
+ }
+ function cancelAction() { setService(undefined); setJournalService(undefined); setReason(''); setError(''); }
+ return <div className="modal-backdrop"><section className="drawer">
+  <div className="card-title"><div><span className="eyebrow">HOST DETAILS</span><h2>{currentHost.hostname}</h2></div><button className="icon-button" aria-label="关闭主机详情" onClick={close}>×</button></div>
+  <ResourceState {...details} /><Badge value={currentHost.status} /><p className="muted mono">{currentHost.id}</p>
+  <div className="alert">离线状态来自最近心跳；Helper 状态和 Agent 能力来自最近一次在线观测。</div>
+  <h3>Agent 与权限边界</h3>{currentHost.agentId ? <><ResourceState {...agent} />{agent.data && <><dl className="info-list"><div><dt>版本 / 实现</dt><dd>{agent.data.version ?? '未知'} / Rust</dd></div><div><dt>Helper 状态</dt><dd><Badge value={agent.data.helperStatus} /></dd></div><div><dt>已报告能力</dt><dd>{agent.data.capabilities.join(', ') || '—'}</dd></div></dl><div className="agent-maintenance-actions"><button className="secondary" onClick={() => setMaintenance('reinstall')}>重新安装 Agent</button><button className="secondary" onClick={() => setMaintenance('update')}>更新 Agent</button></div></>}</> : <p className="muted">尚未绑定 Agent</p>}
+  <h3>systemd 服务</h3><ResourceState {...r} />
+  {r.data?.items.map(s => <div className="service" key={s.id}><div><b>{s.unitName}</b><small>{s.displayName}</small>{s.observationStale && <small className="warning">历史观测 · 可能过期</small>}</div><Badge value={s.activeState} /><div className="form-actions"><button className="secondary" disabled={!s.allowedActions.includes('READ_JOURNAL') || agent.data?.helperStatus !== 'AVAILABLE'} onClick={() => void prepareJournal(s)}>查看日志</button><button className="secondary" disabled={!s.allowedActions.includes('RESTART') || agent.data?.helperStatus !== 'AVAILABLE'} onClick={() => void prepare(s)}>↻ 重启</button></div></div>)}
+  {r.data?.items.length === 0 && <Empty>尚无服务观测</Empty>}
+  <SshAccessPanel host={currentHost} notify={notify} />
+  {agent.data && <HelperOperationPanel host={currentHost} agent={agent.data} notify={notify} refresh={() => { details.refresh(); agent.refresh(); }} />}
+  {service && <form className="restart-form" onSubmit={restart}><h3>确认重启 {service.unitName}</h3><p className="muted">重启会经 Core 授权并由 root Helper 执行；ACTIVE 仅证明 systemd 状态，不证明业务健康。</p><Field label="操作原因"><textarea required maxLength={500} value={reason} onChange={e => setReason(e.target.value)} placeholder="请填写本次重启的原因" /></Field><small className="muted">超时 60 秒 · 请求失败后保留原幂等键</small>{error && <div className="alert error">{error}</div>}<div className="form-actions"><button type="button" className="secondary" onClick={cancelAction}>取消</button><button className="primary" disabled={busy || !reason.trim() || !tag}>{busy ? '正在提交…' : '确认提交'}</button></div></form>}
+  {journalService && <form className="restart-form" onSubmit={readJournal}><h3>查询 {journalService.unitName} 的服务日志</h3><p className="muted">读取最近 12 行，结果会写入受权限保护的操作记录。</p><Field label="查询原因"><textarea required maxLength={500} value={reason} onChange={e => setReason(e.target.value)} placeholder="请填写本次查询的原因" /></Field>{error && <div className="alert error">{error}</div>}<div className="form-actions"><button type="button" className="secondary" onClick={cancelAction}>取消</button><button className="primary" disabled={busy || !reason.trim() || !tag}>{busy ? '正在提交…' : '查询日志'}</button></div></form>}
+ </section>{maintenance && <AgentMaintenanceDialog agentId={currentHost.agentId ?? ''} mode={maintenance} installation={installation.data} installationError={installation.error} selfUpdateSupported={agent.data?.status === 'ONLINE' && agent.data.helperStatus === 'AVAILABLE' && agent.data.capabilities.includes('agent.self_update')} close={() => setMaintenance(undefined)} />}</div>;
+}
+function SshAccessPanel({ host, notify }: { host: Host; notify: (s: string) => void }) {
+ const [alias, setAlias] = useState(''); const [reason, setReason] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
+ const [unitName, setUnitName] = useState(''); const [restartReason, setRestartReason] = useState(''); const [restartBusy, setRestartBusy] = useState(false); const [restartError, setRestartError] = useState(''); const [restartKey, setRestartKey] = useState(createUuid());
+ const [diagnosticReason, setDiagnosticReason] = useState(''); const [journalLines, setJournalLines] = useState('50'); const [diagnosticBusy, setDiagnosticBusy] = useState(false); const [diagnosticError, setDiagnosticError] = useState(''); const [status, setStatus] = useState<SshSystemdStatusResult>(); const [journal, setJournal] = useState<SshSystemdJournalResult>();
+ async function probe(event: FormEvent) {
+  event.preventDefault(); setBusy(true); setError('');
+  try {
+   const result = await api<SshProbeResult>(`/hosts/${host.id}/ssh/probe`, 'POST', { alias: alias.trim(), reason }, {}, true);
+   notify(`${isMock ? '模拟' : ''}SSH host key 验证成功：${result.data.alias}`); setReason('');
+  } catch (e) { setError((e as Error).message); }
+  finally { setBusy(false); }
+ }
+ async function restart(event: FormEvent) {
+  event.preventDefault(); setRestartBusy(true); setRestartError('');
+  try {
+   const result = await api<Operation>(`/hosts/${host.id}/ssh/systemd/restart`, 'POST', { unitName: unitName.trim(), reason: restartReason }, { 'Idempotency-Key': restartKey }, true);
+   notify(`${isMock ? '模拟' : ''}SSH 救援任务 ${result.data.status}：${unitName.trim()}`);
+   setRestartReason('');
+   if (['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(result.data.status)) setRestartKey(createUuid());
+  } catch (e) { setRestartError((e as Error).message); }
+  finally { setRestartBusy(false); }
+ }
+ async function readStatus() {
+  setDiagnosticBusy(true); setDiagnosticError('');
+  try { const result = await api<SshSystemdStatusResult>(`/hosts/${host.id}/ssh/systemd/status`, 'POST', { unitName: unitName.trim(), reason: diagnosticReason }, {}, true); setStatus(result.data); setJournal(undefined); notify(`SSH 状态：${unitName.trim()} ${result.data.activeState}/${result.data.subState}`); }
+  catch (e) { setDiagnosticError((e as Error).message); }
+  finally { setDiagnosticBusy(false); }
+ }
+ async function readJournal() {
+  setDiagnosticBusy(true); setDiagnosticError('');
+  try { const result = await api<SshSystemdJournalResult>(`/hosts/${host.id}/ssh/systemd/journal`, 'POST', { unitName: unitName.trim(), lines: Number(journalLines), reason: diagnosticReason }, {}, true); setJournal(result.data); setStatus(undefined); notify(`SSH 日志已读取：${unitName.trim()}`); }
+  catch (e) { setDiagnosticError((e as Error).message); }
+  finally { setDiagnosticBusy(false); }
+ }
+ return <><h3>SSH 救援通道</h3><form className="restart-form" onSubmit={probe}>
+  <p className="muted">只探测主控 root allowlist 中的别名，强制校验固定 known_hosts，只运行无副作用的 true 命令。SSH 私钥留在主控的 OpenSSH 配置中，不保存到数据库；别名 allowlist 默认为空。</p>
+  <Field label="SSH 别名"><input required maxLength={100} value={alias} onChange={event => setAlias(event.target.value)} placeholder="例如 host-b" /></Field>
+  <Field label="SSH 探测原因"><textarea required maxLength={500} value={reason} onChange={event => setReason(event.target.value)} placeholder="记录本次 SSH 连通性检查的原因" /></Field>
+  {error && <div className="alert error" role="alert">{error}</div>}
+  <div className="form-actions"><button className="primary" disabled={busy || !alias.trim() || !reason.trim()}>{busy ? '正在验证…' : '验证 SSH 通道'}</button></div>
+ </form><form className="restart-form" onSubmit={restart}>
+  <p className="muted">只执行固定的 systemctl restart 和 active 状态校验。unit 必须由 Core 主机上的 root 管理员写入 /etc/nanpanel/ssh-units.allowlist；默认无授权项，不开放 SSH shell。</p>
+  <Field label="allowlist systemd unit"><input required maxLength={256} value={unitName} onChange={event => setUnitName(event.target.value)} placeholder="例如 nanpanel-agent.service" /></Field>
+  <Field label="SSH 救援原因"><textarea required maxLength={500} value={restartReason} onChange={event => setRestartReason(event.target.value)} placeholder="记录本次 SSH 救援原因" /></Field>
+  {restartError && <div className="alert error" role="alert">{restartError}</div>}
+  <div className="form-actions"><button className="primary" disabled={restartBusy || !unitName.trim() || !restartReason.trim()}>{restartBusy ? '正在执行…' : '重启 allowlist 服务'}</button></div>
+ </form><section className="restart-form"><h4>SSH 只读诊断</h4><p className="muted">读取固定 systemctl 状态或最多 100 行 journal。unit 必须显式列入主控 root 管理的 host-bound SSH allowlist；命令输出有字节和时间上限，内容不会写入审计摘要。</p>
+  <Field label="SSH 诊断 unit"><input required maxLength={256} value={unitName} onChange={event => setUnitName(event.target.value)} placeholder="例如 nanpanel-agent.service" /></Field>
+  <Field label="日志行数"><input type="number" min="1" max="100" value={journalLines} onChange={event => setJournalLines(event.target.value)} /></Field>
+  <Field label="SSH 诊断原因"><textarea required maxLength={500} value={diagnosticReason} onChange={event => setDiagnosticReason(event.target.value)} placeholder="说明读取服务状态或日志的目的" /></Field>
+  {diagnosticError && <div className="alert error" role="alert">{diagnosticError}</div>}
+  <div className="form-actions"><button type="button" className="secondary" disabled={diagnosticBusy || !unitName.trim() || !diagnosticReason.trim()} onClick={() => void readStatus()}>{diagnosticBusy ? '读取中…' : '读取服务状态'}</button><button type="button" className="secondary" disabled={diagnosticBusy || !unitName.trim() || !diagnosticReason.trim() || Number(journalLines) < 1 || Number(journalLines) > 100} onClick={() => void readJournal()}>{diagnosticBusy ? '读取中…' : '读取服务日志'}</button></div>
+  {status && <div className="alert" role="status">{status.unitName} · {status.loadState} / {status.activeState} / {status.subState}</div>}
+  {journal && <div className="ssh-journal"><p className="muted">最多 {journal.requestedLines} 行{journal.truncated ? ' · 输出已截断' : ''}</p><pre>{journal.output || '（没有日志内容）'}</pre></div>}
+ </section></>;
+}
+function HelperOperationPanel({ host, agent, notify, refresh }: { host: Host; agent: Agent; notify: (s: string) => void; refresh: () => void }) {
+ const actionLabels: Record<HostHelperOperationRequest['capability'], string> = {
+  'package.install': '安装 allowlist 软件包', 'file.write.protected': '写入受保护文件',
+  'container.list': '列出受管容器', 'container.logs': '读取容器日志',
+  'container.start': '启动受管容器', 'container.stop': '停止受管容器',
+  'container.deploy': '部署预设容器', 'network.firewall.expose': '临时开放 allowlist 防火墙端口'
+ };
+ const supported = (['package.install', 'file.write.protected', 'container.list', 'container.logs', 'container.start', 'container.stop', 'container.deploy', 'network.firewall.expose'] as const)
+  .filter(capability => agent.capabilities.includes(capability));
+ const helperReady = agent.status === 'ONLINE' && agent.helperStatus === 'AVAILABLE';
+ const [capability, setCapability] = useState<HostHelperOperationRequest['capability']>(supported[0] ?? 'container.list');
+ const [target, setTarget] = useState(''); const [packages, setPackages] = useState(''); const [content, setContent] = useState(''); const [rollbackSeconds, setRollbackSeconds] = useState('90');
+ const [reason, setReason] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [key, setKey] = useState(createUuid());
+ useEffect(() => { if (!supported.includes(capability)) setCapability(supported[0] ?? 'container.list'); }, [agent.capabilities.join(','), capability]);
+ const needsTarget = capability === 'file.write.protected' || capability === 'network.firewall.expose' || ['container.logs', 'container.start', 'container.stop', 'container.deploy'].includes(capability);
+ async function submit(event: FormEvent) {
+  event.preventDefault(); if (!supported.includes(capability) || !helperReady) return;
+  const payload = capability === 'package.install' ? { packages: packages.split(',').map(name => name.trim()).filter(Boolean) }
+   : capability === 'file.write.protected' ? { content }
+   : capability === 'network.firewall.expose' ? { rollbackSeconds: Number(rollbackSeconds) } : undefined;
+  const body: HostHelperOperationRequest = { capability, target: needsTarget ? target.trim() : '', reason, timeoutSeconds: capability === 'package.install' ? 300 : 60, expectedGeneration: host.generation, ...(payload ? { payload } : {}) };
+  setBusy(true); setError('');
+  try {
+   await api<Operation>(`/hosts/${host.id}/operations`, 'POST', body, { 'Idempotency-Key': key }, true);
+   notify(`${isMock ? '模拟' : ''}Helper 任务已接受，可在操作任务中查看结果`);
+   setReason(''); setTarget(''); setPackages(''); setContent(''); setRollbackSeconds('90'); setKey(createUuid()); refresh();
+  } catch (e) { setError((e as Error).message); }
+  finally { setBusy(false); }
+ }
+ if (supported.length === 0) return <><h3>受限 Helper 操作</h3><p className="muted">主机尚未上报可用的 allowlist 操作；本机默认授权清单为空。</p></>;
+ return <><h3>受限 Helper 操作</h3><form className="restart-form" onSubmit={submit}>
+  <p className="muted">只执行主机 root 管理 allowlist 中的类型化操作；没有任意命令或任意路径入口。</p>
+  <Field label="操作类型"><select value={capability} onChange={event => { setCapability(event.target.value as HostHelperOperationRequest['capability']); setKey(createUuid()); setError(''); }}>
+   {supported.map(item => <option key={item} value={item}>{actionLabels[item]}</option>)}
+  </select></Field>
+  {needsTarget && <Field label={capability === 'file.write.protected' ? 'allowlist 文件名' : capability === 'network.firewall.expose' ? 'allowlist 网络规则名' : 'allowlist 容器名'}><input required maxLength={128} value={target} onChange={event => setTarget(event.target.value)} placeholder={capability === 'file.write.protected' ? '例如 app.conf' : capability === 'network.firewall.expose' ? '例如 ssh-test' : '例如 web-gateway'} /></Field>}
+  {capability === 'package.install' && <Field label="软件包名（逗号分隔）"><input required maxLength={512} value={packages} onChange={event => setPackages(event.target.value)} placeholder="例如 curl, jq" /></Field>}
+  {capability === 'file.write.protected' && <Field label="文件内容"><textarea required maxLength={32768} value={content} onChange={event => setContent(event.target.value)} placeholder="最多 32 KiB；写入主机 root 管理的固定目录" /></Field>}
+  {capability === 'network.firewall.expose' && <Field label="自动回滚秒数"><input required type="number" min={30} max={300} step={1} value={rollbackSeconds} onChange={event => setRollbackSeconds(event.target.value)} /><small className="muted">仅临时开放主机 root allowlist 中指定接口、协议和端口；执行前会挂载 systemd 定时回滚。</small></Field>}
+  <Field label="操作原因"><textarea required maxLength={500} value={reason} onChange={event => setReason(event.target.value)} placeholder="记录本次运维操作的原因" /></Field>
+  {capability === 'container.deploy' && <small className="muted">部署规格、镜像和 loopback 端口取自主机 allowlist；运行时资源与 Linux capabilities 受限。</small>}
+  {error && <div className="alert error" role="alert">{error}</div>}
+  <div className="form-actions"><span className="muted">主机版本 {host.generation} · 截止 60–300 秒</span><button className="primary" disabled={busy || !helperReady || !reason.trim() || (needsTarget && !target.trim())}>{busy ? '正在下发…' : '提交受限操作'}</button></div>
+ </form></>;
 }
 function AgentMaintenanceDialog({ agentId, mode, installation, installationError, selfUpdateSupported, close }: { agentId: string; mode: AgentMaintenanceMode; installation?: AgentInstallation; installationError: string; selfUpdateSupported: boolean; close: () => void }) {
  const [copied, setCopied] = useState(false);
@@ -113,9 +360,20 @@ function AgentMaintenanceDialog({ agentId, mode, installation, installationError
  const automaticUpdate = mode === 'update' && selfUpdateSupported && !isMock;
  return <div className="modal-backdrop agent-maintenance-backdrop"><section className="modal host-enrollment-modal agent-maintenance-modal" role="dialog" aria-modal="true" aria-labelledby="agent-maintenance-title"><div className="card-title"><div><span className="eyebrow">AGENT MAINTENANCE</span><h2 id="agent-maintenance-title">{title}</h2></div><button className="icon-button" aria-label={`关闭${title}`} onClick={close}>×</button></div><p className="muted">{automaticUpdate ? '更新任务会异步发送到在线 Agent，由 root Helper 从固定的 HTTPS 控制器下载并替换 Agent，然后重启服务。' : '在目标 Linux x86_64 主机上以 root 身份运行命令。命令会核对控制面板证书指纹，再安装当前版本。'}</p>{mode === 'reinstall' ? <div className="alert">重新安装会修复 Agent 与 Helper 的 systemd 服务定义并替换程序，保留现有主机身份、证书和配置，不会创建重复主机资产。</div> : selfUpdateSupported ? <div className="alert">当前 Agent 在线，Helper 可用，支持在后台自行更新。</div> : <div className="alert">当前 Agent 未报告可用的自更新能力，需要在目标主机手动执行更新命令。</div>}{isMock ? <div className="alert">Mock 演示不提供可执行命令或远程更新任务。</div> : automaticUpdate ? <>{operation ? <><div className="form-actions"><span>任务状态</span><Badge value={operation.status} /></div><p className="muted">{operation.detail ?? (operation.status === 'RUNNING' ? '等待 Agent 下载并安装更新…' : '任务已创建')}</p><p className="muted">任务 ID：<span className="mono">{operation.id}</span></p>{operation.status === 'SUCCEEDED' && <div className="alert">Agent 已报告程序替换成功，正在重启；关闭后可刷新主机详情查看新心跳。</div>}{operation.status === 'FAILED' && <div className="alert error">Agent 更新失败：{operation.detail}</div>}</> : <>{updateError && <div className="alert error" role="alert">{updateError}</div>}<div className="form-actions"><button className="secondary" onClick={close}>取消</button><button className="primary" disabled={updating} onClick={() => void startUpdate()}>{updating ? '正在下发…' : '开始异步更新'}</button></div></>}</> : installationError ? <div className="alert error" role="alert">无法读取安装信息：{installationError}</div> : commandError ? <div className="alert error" role="alert">{commandError}</div> : !command ? <p className="muted">正在读取控制面板安装信息…</p> : <><textarea className="install-command" aria-label={`${title}命令`} readOnly value={command} onFocus={e => e.currentTarget.select()} /><div className="form-actions"><button className="secondary" onClick={copyCommand}>{copied ? '已复制' : '复制命令'}</button><button className="primary" onClick={close}>完成</button></div>{copied && <small className="muted">命令已复制；请在目标主机终端粘贴执行。</small>}</>}</section></div>;
 }
+function operationTitle(operation: Operation) {
+ if (operation.kind === 'SYSTEMD_JOURNAL_READ') return 'systemd 日志查询';
+ if (operation.kind === 'SYSTEM_SERVICE_RESTART') return 'systemd 服务重启';
+ if (operation.kind === 'SSH_SYSTEMD_RESTART') return 'SSH systemd 救援';
+ if (operation.kind === 'SSH_AGENT_INSTALL') return 'SSH Agent 初始化';
+ const titles: Record<string, string> = { 'package.install': '安装 allowlist 软件包', 'file.write.protected': '写入受保护文件', 'container.list': '列出受管容器', 'container.logs': '读取容器日志', 'container.start': '启动受管容器', 'container.stop': '停止受管容器', 'container.deploy': '部署预设容器', 'network.firewall.expose': '临时开放 allowlist 防火墙端口' };
+ return titles[operation.capability ?? ''] ?? operation.capability ?? '受限 Helper 操作';
+}
 function Operations() {
- const [status, setStatus] = useState(''); const r = useResource<OperationPage>(`/operations${status ? `?status=${status}` : ''}`, 1500); const [selected, setSelected] = useState<string>(); const op = r.data?.items.find(x => x.id === selected);
- return <><PageHeading title="操作任务" description="跟踪已持久化任务的执行、验证与最终结果。" /><div className="alert">UNKNOWN 表示执行结果不确定，需要对账；不能视作失败或自动重新执行。</div><section className="card"><div className="toolbar"><select aria-label="任务状态" value={status} onChange={e => setStatus(e.target.value)}><option value="">全部状态</option>{['PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED', 'UNKNOWN', 'CANCELLED'].map(s => <option key={s} value={s}>{labels[s]}</option>)}</select><span className="muted">每 1.5 秒自动更新</span></div><ResourceState {...r} /><div className="table-wrap"><table><thead><tr><th>任务 / 原因</th><th>主机</th><th>状态</th><th>阶段</th><th>创建时间</th><th /></tr></thead><tbody>{r.data?.items.map(o => <tr key={o.id}><td><b>systemd 服务重启</b><small>{o.reason}</small></td><td className="mono">{o.hostId.slice(0, 8)}</td><td><Badge value={o.status} /></td><td className="mono">{o.phase}</td><td>{time(o.createdAt)}</td><td><button className="link" onClick={() => setSelected(o.id)}>查看详情</button></td></tr>)}</tbody></table>{!r.data?.items.length && !r.loading && <Empty>暂无任务。前往主机资产，选择在线主机并重启服务。</Empty>}</div></section>{op && <div className="modal-backdrop"><div className="modal"><div className="card-title"><h2>任务详情</h2><button className="icon-button" aria-label="关闭任务详情" onClick={() => setSelected(undefined)}>×</button></div><Badge value={op.status} /><dl className="info-list">{[['任务 ID', op.id], ['执行阶段', op.phase], ['创建时间', time(op.createdAt)], ['结束时间', time(op.finishedAt)], ['执行依据', op.result?.evidence ?? op.error?.message ?? '等待执行与验证结果']].map(([k, v]) => <div key={k}><dt>{k}</dt><dd>{v}</dd></div>)}</dl><div className="alert">{op.status === 'UNKNOWN' ? '结果未知，保持互斥锁，等待执行记录与观测对账。' : '任务成功仅确认服务状态，不代表业务端到端健康。'}</div></div></div>}</>;
+ const [status, setStatus] = useState(''); const r = useResource<OperationPage>(`/operations${status ? `?status=${status}` : ''}`, 1500, true); const [selected, setSelected] = useState<string>(); const op = r.data?.items.find(x => x.id === selected);
+ const evidence = op?.result && 'evidence' in op.result ? op.result.evidence : undefined;
+ const journal = op?.result && 'journal' in op.result ? op.result.journal : undefined;
+ const helperOutput = op?.result && 'output' in op.result ? op.result.output : undefined;
+ return <><PageHeading title="操作任务" description="跟踪已持久化任务的执行、验证与最终结果。" /><div className="alert">UNKNOWN 表示执行结果不确定，需要对账；不能视作失败或自动重新执行。</div><section className="card"><div className="toolbar"><select aria-label="任务状态" value={status} onChange={e => setStatus(e.target.value)}><option value="">全部状态</option>{['PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED', 'UNKNOWN', 'CANCELLED'].map(s => <option key={s} value={s}>{labels[s]}</option>)}</select><span className="muted">每 1.5 秒自动更新</span></div><ResourceState {...r} /><div className="table-wrap"><table><thead><tr><th>任务 / 原因</th><th>主机</th><th>状态</th><th>阶段</th><th>创建时间</th><th /></tr></thead><tbody>{r.data?.items.map(o => <tr key={o.id}><td><b>{operationTitle(o)}</b><small>{o.target || o.reason}</small></td><td className="mono">{o.hostId.slice(0, 8)}</td><td><Badge value={o.status} /></td><td className="mono">{o.phase}</td><td>{time(o.createdAt)}</td><td><button className="link" onClick={() => setSelected(o.id)}>查看详情</button></td></tr>)}</tbody></table>{!r.data?.items.length && !r.loading && <Empty>暂无任务。前往主机资产查看服务操作。</Empty>}</div></section>{op && <div className="modal-backdrop"><div className="modal"><div className="card-title"><h2>任务详情</h2><button className="icon-button" aria-label="关闭任务详情" onClick={() => setSelected(undefined)}>×</button></div><Badge value={op.status} /><dl className="info-list">{[['任务 ID', op.id], ['执行阶段', op.phase], ['创建时间', time(op.createdAt)], ['结束时间', time(op.finishedAt)], ['执行依据', evidence ?? op.error?.message ?? '等待执行与验证结果']].map(([k, v]) => <div key={k}><dt>{k}</dt><dd>{v}</dd></div>)}</dl>{journal && <pre className="journal-output">{journal}</pre>}{helperOutput && <pre className="journal-output">{helperOutput}</pre>}<div className="alert">{op.status === 'UNKNOWN' ? '结果未知，保持互斥锁，等待 Agent 执行记录对账。' : op.kind === 'SYSTEMD_JOURNAL_READ' || op.kind === 'HOST_HELPER_OPERATION' ? '输出可能包含敏感信息，请按管理员权限保护操作记录。' : '任务成功仅确认服务状态，不代表业务端到端健康。'}</div></div></div>}</>;
 }
 function Users({ self, notify }: { self: string; notify: (s: string) => void }) {
  const r = useResource<AdminUserPage>('/admin/users'); const roles = useResource<BuiltinRoleList>('/admin/roles'); const [create, setCreate] = useState(false); const [error, setError] = useState(''); const [busy, setBusy] = useState(false); const [editing, setEditing] = useState<{ user: AdminUser; etag: string }>(); const [editMode, setEditMode] = useState<'profile' | 'password'>('profile');
@@ -136,7 +394,7 @@ function Audit() {
  const params = new URLSearchParams(); if (filters.outcome) params.set('outcome', filters.outcome); if (filters.actorId) params.set('actorId', filters.actorId); if (filters.action) params.set('action', filters.action); if (filters.from) params.set('from', new Date(filters.from).toISOString()); if (filters.to) params.set('to', new Date(filters.to).toISOString()); const cursor = cursors[cursors.length - 1]; if (cursor) params.set('cursor', cursor);
  const serialized = params.toString(); const r = useResource<AuditEventPage>('/admin/audit-events' + (serialized ? '?' + serialized : ''));
  function apply(e: FormEvent) { e.preventDefault(); setFilters({ outcome, actorId: actorDraft.trim(), action: actionDraft.trim(), from: fromDraft, to: toDraft }); setCursors([null]); }
- return <><PageHeading title="审计日志" description="查看认证、管理员管理和安全拒绝事件；主机运维审计将在运维接口接入后提供。" action={<button className="secondary" onClick={r.refresh}>↻ 刷新</button>} /><section className="card"><form className="toolbar" onSubmit={apply}><input aria-label="搜索审计" placeholder="搜索当前页动作或摘要…" value={query} onChange={e => setQuery(e.target.value)} /><Field label="主体 ID"><input aria-label="审计主体 ID" value={actorDraft} onChange={e => setActorDraft(e.target.value)} placeholder="UUID" /></Field><Field label="动作"><input aria-label="审计动作" value={actionDraft} onChange={e => setActionDraft(e.target.value)} placeholder="auth.login" /></Field><Field label="开始时间"><input aria-label="审计开始时间" type="datetime-local" value={fromDraft} onChange={e => setFromDraft(e.target.value)} /></Field><Field label="结束时间"><input aria-label="审计结束时间" type="datetime-local" value={toDraft} onChange={e => setToDraft(e.target.value)} /></Field><select aria-label="审计结果" value={outcome} onChange={e => setOutcome(e.target.value)}><option value="">全部结果</option>{['SUCCEEDED', 'DENIED', 'FAILED', 'ACCEPTED'].map(s => <option key={s} value={s}>{labels[s]}</option>)}</select><button className="secondary">应用筛选</button></form><ResourceState {...r} /><div className="table-wrap"><table><thead><tr><th>时间 / Trace ID</th><th>动作</th><th>摘要</th><th>来源</th><th>结果</th><th /></tr></thead><tbody>{r.data?.items.filter(e => (e.action + ' ' + e.summary).includes(query)).map(e => <tr key={e.id}><td>{time(e.occurredAt)}<small className="mono">{e.traceId}</small></td><td className="mono">{e.action}</td><td>{e.summary}</td><td>{e.clientIp ?? '—'}</td><td><Badge value={e.outcome} /></td><td><button className="link" onClick={() => setSelected(e.id)}>详情</button></td></tr>)}</tbody></table>{!r.data?.items.filter(e => (e.action + ' ' + e.summary).includes(query)).length && !r.loading && <Empty>没有符合条件的审计事件</Empty>}</div><div className="form-actions"><button className="secondary" disabled={cursors.length < 2} onClick={() => setCursors(value => value.slice(0, -1))}>上一页</button><span className="muted">第 {cursors.length} 页</span><button className="secondary" disabled={!r.data?.nextCursor} onClick={() => { if (r.data?.nextCursor) setCursors([...cursors, r.data.nextCursor]); }}>下一页</button></div></section>{selected && <AuditDetail id={selected} onClose={() => setSelected(undefined)} />}</>;
+ return <><PageHeading title="审计日志" description="查看认证、管理员管理和安全拒绝事件；包含认证、管理员变更和主机运维结果；UNKNOWN 表示任务执行结果尚未确认。" action={<button className="secondary" onClick={r.refresh}>↻ 刷新</button>} /><section className="card"><form className="toolbar" onSubmit={apply}><input aria-label="搜索审计" placeholder="搜索当前页动作或摘要…" value={query} onChange={e => setQuery(e.target.value)} /><Field label="主体 ID"><input aria-label="审计主体 ID" value={actorDraft} onChange={e => setActorDraft(e.target.value)} placeholder="UUID" /></Field><Field label="动作"><input aria-label="审计动作" value={actionDraft} onChange={e => setActionDraft(e.target.value)} placeholder="auth.login" /></Field><Field label="开始时间"><input aria-label="审计开始时间" type="datetime-local" value={fromDraft} onChange={e => setFromDraft(e.target.value)} /></Field><Field label="结束时间"><input aria-label="审计结束时间" type="datetime-local" value={toDraft} onChange={e => setToDraft(e.target.value)} /></Field><select aria-label="审计结果" value={outcome} onChange={e => setOutcome(e.target.value)}><option value="">全部结果</option>{['SUCCEEDED', 'DENIED', 'FAILED', 'ACCEPTED', 'UNKNOWN'].map(s => <option key={s} value={s}>{labels[s]}</option>)}</select><button className="secondary">应用筛选</button></form><ResourceState {...r} /><div className="table-wrap"><table><thead><tr><th>时间 / Trace ID</th><th>动作</th><th>摘要</th><th>来源</th><th>结果</th><th /></tr></thead><tbody>{r.data?.items.filter(e => (e.action + ' ' + e.summary).includes(query)).map(e => <tr key={e.id}><td>{time(e.occurredAt)}<small className="mono">{e.traceId}</small></td><td className="mono">{e.action}</td><td>{e.summary}</td><td>{e.clientIp ?? '—'}</td><td><Badge value={e.outcome} /></td><td><button className="link" onClick={() => setSelected(e.id)}>详情</button></td></tr>)}</tbody></table>{!r.data?.items.filter(e => (e.action + ' ' + e.summary).includes(query)).length && !r.loading && <Empty>没有符合条件的审计事件</Empty>}</div><div className="form-actions"><button className="secondary" disabled={cursors.length < 2} onClick={() => setCursors(value => value.slice(0, -1))}>上一页</button><span className="muted">第 {cursors.length} 页</span><button className="secondary" disabled={!r.data?.nextCursor} onClick={() => { if (r.data?.nextCursor) setCursors([...cursors, r.data.nextCursor]); }}>下一页</button></div></section>{selected && <AuditDetail id={selected} onClose={() => setSelected(undefined)} />}</>;
 }
 function AuditDetail({ id, onClose }: { id: string; onClose: () => void }) {
  const r = useResource<import('./lib/types').AuditEvent>('/admin/audit-events/' + id);

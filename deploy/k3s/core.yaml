@@ -188,6 +188,9 @@ spec:
             - name: agent-serving-keypair
               mountPath: /etc/nanpanel/agent-serving
               readOnly: true
+            - name: relay-fallback-signing-key
+              mountPath: /etc/nanpanel/relay-signing
+              readOnly: true
       volumes:
         - name: tmp
           emptyDir: {}
@@ -213,6 +216,14 @@ spec:
           secret:
             secretName: nanpanel-web-tls
             defaultMode: 0440
+        - name: relay-fallback-signing-key
+          secret:
+            secretName: nanpanel-relay-signing
+            optional: true
+            defaultMode: 0440
+            items:
+              - key: RELAY_FALLBACK_PRIVATE_KEY
+                path: key.pem
 ---
 apiVersion: v1
 kind: Service

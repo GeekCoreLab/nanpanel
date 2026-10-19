@@ -1,5 +1,5 @@
-所有 /api/* 路由要求认证。基础阶段使用显式提供的管理员密码，仅监听回环地址；生产身份认证、密钥加密、审计及 Agent mTLS 尚待实现。
+管理型 `/api/v1` 路由要求 Cookie 会话和写请求 CSRF；一次性 Agent 接入使用独立 Bearer 接入码，内部 Agent/Gateway 路由要求 Gateway 凭据，Agent 控制连接使用 mTLS。Core 使用数据库账号与会话，不再接受 Basic 认证；生产 Cookie 默认 Secure/HttpOnly/SameSite=Lax。认证、管理与主机操作审计已持久化。
 
-边缘权限基线为普通用户 Rust Agent + root Rust Helper。Helper 仅开放本地受控 IPC，验证调用方身份、操作级授权、能力白名单、参数与路径，记录审计并限制超时；不默认接收任意 Shell。rootful/rootless 容器按工作负载配置，与 Agent 身份独立。当前 Helper 和相关授权机制尚未实现，详见 [ADR-009](../adr/ADR-009-agent-privilege-boundary.md)。
+边缘权限基线为普通用户 Rust Agent + root Rust Helper。Helper 仅开放本地受控 IPC，验证调用方身份、操作级授权、能力白名单、参数与路径，记录操作结果并限制超时；不接收任意 Shell。软件包、受保护文件、容器和网络规则使用独立 root allowlist，安装器创建的 allowlist 默认为空。临时防火墙规则需先启动 systemd 回滚定时器，并由只获得 `CAP_NET_ADMIN` 的瞬时 worker 执行。rootful/rootless 容器按工作负载配置，与 Agent 身份独立，详见 [ADR-009](../adr/ADR-009-agent-privilege-boundary.md)。
 
-Web 目标认证已在 [Web 平台 API](../../api/web-platform.md) 定义为服务端 Cookie 会话 + CSRF 校验，并补充强制改密、会话撤销、重新认证、平台管理授权与审计。登录已迁移为数据库账号与 Cookie 会话，生产默认 Secure/HttpOnly/SameSite=Lax；完整审计和多实例共享限流仍待实现；Agent mTLS 和 root Helper 的权限边界保持独立。
+SSH 操作限定为 host-bound alias 下的固定探测、显式 allowlist systemd 状态/日志读取与重启，以及固定脚本 Agent 初始化；alias 和 unit allowlist 默认为空，不保存 SSH 私钥或密码。剩余安全工作包括 Agent 证书吊销/续期、跨实例共享登录限流、完整泄露密码检查，以及真实双主机和故障场景验收。具体接口和状态见 [Web 平台 API](../../api/web-platform.md) 与 [项目计划](../../PROJECT_PLAN.md)。

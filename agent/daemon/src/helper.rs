@@ -15,6 +15,8 @@ struct HelperRequest<'a> {
     capability: &'a str,
     target: &'a str,
     deadline_epoch_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    payload_json: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -35,6 +37,7 @@ pub async fn status(socket_path: &Path) -> Result<bool> {
         "helper.status",
         "",
         now + 5_000,
+        None,
     )
     .await
     {
@@ -51,6 +54,27 @@ pub async fn update(
     target: &str,
     deadline_epoch_ms: i64,
 ) -> Result<String> {
+    update_with_payload(
+        socket_path,
+        operation_id,
+        idempotency_key,
+        capability,
+        target,
+        deadline_epoch_ms,
+        None,
+    )
+    .await
+}
+
+pub async fn update_with_payload(
+    socket_path: &Path,
+    operation_id: &str,
+    idempotency_key: &str,
+    capability: &str,
+    target: &str,
+    deadline_epoch_ms: i64,
+    payload_json: Option<&str>,
+) -> Result<String> {
     request(
         socket_path,
         operation_id,
@@ -58,8 +82,24 @@ pub async fn update(
         capability,
         target,
         deadline_epoch_ms,
+        payload_json,
     )
     .await
+}
+
+pub async fn capabilities(socket_path: &Path) -> Result<Vec<String>> {
+    let now = epoch_ms()?;
+    let response = request(
+        socket_path,
+        &Uuid::new_v4().to_string(),
+        &Uuid::new_v4().to_string(),
+        "helper.capabilities",
+        "",
+        now + 5_000,
+        None,
+    )
+    .await?;
+    serde_json::from_str(&response).context("parse Helper capability report")
 }
 
 async fn request(
@@ -69,6 +109,7 @@ async fn request(
     capability: &str,
     target: &str,
     deadline_epoch_ms: i64,
+    payload_json: Option<&str>,
 ) -> Result<String> {
     let now = epoch_ms()?;
     if deadline_epoch_ms <= now || deadline_epoch_ms > now + 10 * 60 * 1000 {
@@ -77,16 +118,17 @@ async fn request(
     let stream = tokio::time::timeout(Duration::from_secs(5), UnixStream::connect(socket_path))
         .await
         .context("timed out connecting to Helper")??;
-    let mut framed = Framed::new(stream, LinesCodec::new_with_max_length(16 * 1024));
+    let mut framed = Framed::new(stream, LinesCodec::new_with_max_length(128 * 1024));
     let request = HelperRequest {
         operation_id,
         idempotency_key,
         capability,
         target,
         deadline_epoch_ms,
+        payload_json,
     };
     framed.send(serde_json::to_string(&request)?).await?;
-    let response = tokio::time::timeout(Duration::from_secs(125), framed.next())
+    let response = tokio::time::timeout(Duration::from_secs(305), framed.next())
         .await
         .context("timed out waiting for Helper")?
         .ok_or_else(|| anyhow!("Helper closed without a response"))??;

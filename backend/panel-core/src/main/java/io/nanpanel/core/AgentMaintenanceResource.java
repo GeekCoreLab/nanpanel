@@ -42,9 +42,11 @@ public class AgentMaintenanceResource {
   @Context jakarta.ws.rs.container.ContainerRequestContext request;
   @Context io.vertx.core.http.HttpServerRequest http;
 
+  @Inject
   @ConfigProperty(name = "nanpanel.agent.gateway-control-url")
   String gatewayControlUrl;
 
+  @Inject
   @ConfigProperty(name = "nanpanel.agent.gateway-token")
   String gatewayToken;
 

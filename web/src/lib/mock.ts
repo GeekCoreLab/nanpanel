@@ -6,8 +6,10 @@ const now = () => new Date().toISOString();
 const id = () => createUuid();
 const uuid = (n: number) => `8b395d24-5d5d-4f27-b70b-${String(n).padStart(12, '0')}`;
 export const DEMO_PASSWORD = 'nanpanel-demo-2026';
-const hosts: Host[] = ['gateway-sg-01', 'homelab-node-01', 'k3s-worker-01', 'edge-shanghai-02', 'backup-node-01', 'lab-arm-01'].map((hostname, i) => ({ id: uuid(i + 1), hostname, os: 'linux', arch: i === 5 ? 'aarch64' : 'x86_64', status: i === 4 ? 'OFFLINE' : i === 5 ? 'UNKNOWN' : 'ONLINE', capabilities: ['systemd.read', 'systemd.restart'], agentId: uuid(i + 21), lastSeenAt: i >= 4 ? new Date(Date.now() - 3600000).toISOString() : now(), createdAt: now() }));
-const services: SystemService[] = hosts.flatMap((h, i) => ['nginx', 'nanpanel-agent', 'frpc'].map((unit, j) => ({ id: uuid(100 + i * 3 + j), hostId: h.id, unitName: `${unit}.service`, displayName: ['Nginx Web Server', 'NaNPanel Rust Agent', 'FRP Tunnel Client'][j], activeState: 'ACTIVE', subState: 'running', generation: 1, observedAt: h.lastSeenAt, allowedActions: h.status === 'ONLINE' && i !== 3 ? ['RESTART'] : [], observationStale: h.status !== 'ONLINE' })));
+const hosts: Host[] = ['gateway-sg-01', 'homelab-node-01', 'k3s-worker-01', 'edge-shanghai-02', 'backup-node-01', 'lab-arm-01'].map((hostname, i) => ({ id: uuid(i + 1), hostname, os: 'linux', arch: i === 5 ? 'aarch64' : 'x86_64', generation: 1, status: i === 4 ? 'OFFLINE' : i === 5 ? 'UNKNOWN' : 'ONLINE', capabilities: ['systemd.read', 'systemd.restart', 'systemd.journal.read', ...(i < 2 ? ['package.install', 'file.write.protected', 'container.list', 'container.logs', 'container.start', 'container.stop', 'container.deploy', 'network.firewall.expose'] : [])], agentId: uuid(i + 21), lastSeenAt: i >= 4 ? new Date(Date.now() - 3600000).toISOString() : now(), createdAt: now() }));
+const sshAliases = new Map([[uuid(1), 'host-b'], [uuid(2), 'homelab_2']]);
+const sshSystemdUnits = new Map([[uuid(1), new Set(['nanpanel-agent.service'])], [uuid(2), new Set(['ssh.service'])]]);
+const services: SystemService[] = hosts.flatMap((h, i) => ['nginx', 'nanpanel-agent', 'frpc'].map((unit, j) => ({ id: uuid(100 + i * 3 + j), hostId: h.id, unitName: `${unit}.service`, displayName: ['Nginx Web Server', 'NaNPanel Rust Agent', 'FRP Tunnel Client'][j], activeState: 'ACTIVE', subState: 'running', generation: 1, observedAt: h.lastSeenAt, allowedActions: h.status === 'ONLINE' && i !== 3 ? ['RESTART', 'READ_JOURNAL'] : [], observationStale: h.status !== 'ONLINE' })));
 const users: AdminUser[] = [{ id: uuid(50), username: 'admin', displayName: '实验室管理员', roles: ['ADMIN'], status: 'ACTIVE', mustChangePassword: false, createdAt: now(), updatedAt: now(), lastLoginAt: now() }, { id: uuid(51), username: 'operator', displayName: '运维管理员', roles: ['ADMIN'], status: 'ACTIVE', mustChangePassword: false, createdAt: now(), updatedAt: now(), lastLoginAt: null }];
 const passwords = new Map(users.map(u => [u.id, DEMO_PASSWORD]));
 let settings: PlatformSettings = { siteName: 'NaNPanel', defaultTimezone: 'Asia/Shanghai', hostOfflineAfterSeconds: 90, operationRetentionDays: 30, updatedAt: now(), updatedBy: users[0].id };
@@ -59,14 +61,50 @@ export async function mockRequest(path: string, options: RequestInit, authentica
  if (p === '/agent-enrollments' && method === 'POST') {
   const name = String(b.hostname ?? '').trim(); if (!name || name.length > 255) return fail(422, 'VALIDATION_FAILED', '主机名称无效');
   const hostId = id(); const agentId = id(); const expiresAt = new Date(Date.now() + 900000).toISOString();
-  hosts.unshift({ id: hostId, hostname: name, os: null, arch: null, status: 'UNKNOWN', capabilities: [], agentId, lastSeenAt: null, createdAt: now() });
+  hosts.unshift({ id: hostId, hostname: name, os: null, arch: null, generation: 1, status: 'UNKNOWN', capabilities: [], agentId, lastSeenAt: null, createdAt: now() });
   log('AGENT_ENROLLMENT_CREATED', 'host', hostId, 'Mock 演示创建 Agent 接入码');
-  return ok({ enrollmentId: id(), hostId, agentId, token: `${id().replaceAll('-', '')}${id().slice(0, 8)}`, expiresAt, controllerFingerprint: 'a'.repeat(64), gatewayPort: 30444 }, 201, { 'Cache-Control': 'no-store' });
+  return ok({ enrollmentId: id(), hostId, agentId, token: `${id().replaceAll('-', '')}${id().slice(0, 8)}`, expiresAt, controllerFingerprint: 'a'.repeat(64), gatewayPort: 30444, relayEndpoints: [], relayFallback: { endpoints: [], signature: '', publicKey: '' } }, 201, { 'Cache-Control': 'no-store' });
  }
  const host = hosts.find(h => h.id === p.split('/')[2]);
  if (p.startsWith('/hosts/') && !host) return fail(404, 'NOT_FOUND', '主机不存在');
  if (/^\/hosts\/[^/]+$/.test(p)) return ok(host);
+ if (/^\/hosts\/[^/]+\/ssh\/probe$/.test(p) && method === 'POST') { if (!/^[A-Za-z0-9][A-Za-z0-9_.@-]{0,99}$/.test(String(b.alias ?? '')) || !b.reason?.trim() || b.reason.length > 500) return fail(422, 'VALIDATION_FAILED', 'SSH 别名或操作原因无效'); if (sshAliases.get(host!.id) !== b.alias) return fail(422, 'SSH_ALIAS_NOT_ALLOWED', 'SSH 别名未绑定到该主机资产'); log('SSH_ACCESS_PROBED', 'host', host!.id, `Mock SSH alias ${String(b.alias)} probe: ${b.reason}`); return ok({ hostId: host!.id, alias: b.alias, status: 'SUCCEEDED', verifiedAt: now(), evidence: 'Mock: StrictHostKeyChecking and fixed true command succeeded' }); }
+ if (/^\/hosts\/[^/]+\/ssh\/systemd\/restart$/.test(p) && method === 'POST') {
+  const key = headers.get('Idempotency-Key'); if (!key) return fail(400, 'IDEMPOTENCY_KEY_REQUIRED', '缺少幂等键');
+  const fingerprint = JSON.stringify([current.id, p, b]); const previous = replay.get(key);
+  if (previous) return previous.fingerprint === fingerprint ? ok(previous.operation, 200, { 'Idempotency-Replayed': 'true' }) : fail(409, 'IDEMPOTENCY_KEY_REUSED', '幂等键已被其他请求使用');
+  const unitName = String(b.unitName ?? '').trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,247}\.service$/.test(unitName) || !b.reason?.trim() || b.reason.length > 500) return fail(422, 'VALIDATION_FAILED', 'SSH systemd unit 或操作原因无效');
+  if (!sshAliases.has(host!.id)) return fail(422, 'SSH_ALIAS_NOT_ALLOWED', '该主机未绑定 SSH alias');
+  if (!sshSystemdUnits.get(host!.id)?.has(unitName)) return fail(422, 'SSH_UNIT_NOT_ALLOWED', '该 unit 未获 root allowlist 授权');
+  const stamp = now(); const op: Operation = { id: id(), kind: 'SSH_SYSTEMD_RESTART', hostId: host!.id, agentId: null, serviceId: null, capability: 'systemd.restart', target: unitName, idempotencyKey: key, requestedBy: current.id, reason: b.reason, expectedGeneration: null, phase: 'VERIFY', status: 'SUCCEEDED', createdAt: stamp, startedAt: stamp, updatedAt: stamp, deadlineAt: stamp, finishedAt: stamp, result: { unitName, active: true, verifiedAt: stamp }, error: null };
+  operations.unshift(op); replay.set(key, { fingerprint, operation: op }); log('SSH_SYSTEMD_RESTART', 'host', host!.id, `Mock SSH restarted ${unitName}: ${b.reason}`);
+  return ok(op, 200, { Location: `/api/v1/operations/${op.id}`, 'Idempotency-Replayed': 'false' });
+ }
+ if (/^\/hosts\/[^/]+\/ssh\/systemd\/(status|journal)$/.test(p) && method === 'POST') {
+  const unitName = String(b.unitName ?? '').trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,247}\.service$/.test(unitName) || !b.reason?.trim() || b.reason.length > 500) return fail(422, 'VALIDATION_FAILED', 'SSH systemd unit 或操作原因无效');
+  if (!sshAliases.has(host!.id)) return fail(422, 'SSH_ALIAS_NOT_ALLOWED', '该主机未绑定 SSH alias');
+  if (!sshSystemdUnits.get(host!.id)?.has(unitName)) return fail(422, 'SSH_UNIT_NOT_ALLOWED', '该 unit 未获 root allowlist 授权');
+  if (p.endsWith('/status')) { log('SSH_SYSTEMD_STATUS_READ', 'host', host!.id, `Mock SSH status read for ${unitName}: ${b.reason}`); return ok({ hostId: host!.id, unitName, loadState: 'loaded', activeState: 'active', subState: 'running', observedAt: now() }); }
+  const lines = Number(b.lines); if (!Number.isInteger(lines) || lines < 1 || lines > 100) return fail(422, 'VALIDATION_FAILED', 'SSH journal 行数须为 1–100');
+  log('SSH_SYSTEMD_JOURNAL_READ', 'host', host!.id, `Mock SSH journal read for ${unitName}, at most ${lines} lines: ${b.reason}`);
+  return ok({ hostId: host!.id, unitName, requestedLines: lines, output: `Mock journal output for ${unitName}`, truncated: false, observedAt: now() });
+ }
  if (p.startsWith('/agents/')) { const h = hosts.find(x => x.agentId === p.split('/')[2]); return h ? ok({ id: h.agentId, hostId: h.id, version: '0.1.0', implementation: 'rust', status: h.status, lastSeenAt: h.lastSeenAt, capabilities: h.capabilities, helperStatus: h === hosts[3] ? 'UNAVAILABLE' : h.status === 'ONLINE' ? 'AVAILABLE' : 'UNKNOWN' }) : fail(404, 'NOT_FOUND', 'Agent 不存在'); }
+ if (/^\/hosts\/[^/]+\/operations$/.test(p) && method === 'POST') {
+  const key = headers.get('Idempotency-Key'); if (!key) return fail(400, 'IDEMPOTENCY_KEY_REQUIRED', '缺少幂等键');
+  const fingerprint = JSON.stringify([current.id, p, b]); const previous = replay.get(key);
+  if (previous) return previous.fingerprint === fingerprint ? ok(previous.operation, ['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(previous.operation.status) ? 200 : 202, { 'Idempotency-Replayed': 'true' }) : fail(409, 'IDEMPOTENCY_KEY_REUSED', '幂等键已被其他请求使用');
+  if (!b.reason?.trim() || b.reason.length > 500 || !Number.isInteger(b.expectedGeneration)) return fail(422, 'VALIDATION_FAILED', '操作原因或主机版本无效');
+  if (b.expectedGeneration !== host!.generation) return fail(412, 'PRECONDITION_FAILED', '主机版本已变化，请刷新后重试');
+  if (!host!.capabilities.includes(b.capability) || host!.status !== 'ONLINE') return fail(503, 'HELPER_UNAVAILABLE', 'Agent 或 Helper 不可用');
+  if (operations.some(o => o.hostId === host!.id && o.kind === 'HOST_HELPER_OPERATION' && ['PENDING', 'RUNNING', 'UNKNOWN'].includes(o.status))) return fail(409, 'OPERATION_IN_PROGRESS', '该主机有等待对账的 Helper 操作');
+  const stamp = now(); const op: Operation = { id: id(), kind: 'HOST_HELPER_OPERATION', hostId: host!.id, agentId: host!.agentId!, serviceId: null, capability: String(b.capability), target: String(b.target ?? ''), idempotencyKey: key, requestedBy: current.id, reason: b.reason, expectedGeneration: host!.generation, phase: 'APPLY', status: 'RUNNING', createdAt: stamp, startedAt: stamp, updatedAt: stamp, deadlineAt: new Date(Date.now() + (b.timeoutSeconds ?? 60) * 1000).toISOString(), finishedAt: null, result: null, error: null };
+  operations.unshift(op); replay.set(key, { fingerprint, operation: op }); log(String(b.capability), 'host', host!.id, b.reason);
+  setTimeout(() => { op.status = 'SUCCEEDED'; op.phase = 'COMMIT'; op.finishedAt = now(); op.updatedAt = now(); op.result = { capability: String(b.capability), target: String(b.target ?? ''), output: b.capability === 'container.list' ? '[{"name":"web-gateway","state":"running"}]' : b.capability === 'network.firewall.expose' ? JSON.stringify({ rule: String(b.target), interface: 'eth0', protocol: 'tcp', port: 2222, verified: true, automaticRollback: true, rollbackAfterSeconds: b.payload.rollbackSeconds }) : `Mock ${String(b.capability)} completed`, completedAt: now() }; }, 1500);
+  return ok(op, 202, { Location: `/api/v1/operations/${op.id}`, 'Retry-After': '1', 'Idempotency-Replayed': 'false' });
+ }
  if (/\/services$/.test(p)) return ok(page(services.filter(s => s.hostId === host!.id)));
  if (p.includes('/services/')) {
   const service = services.find(s => s.id === p.split('/')[4] && s.hostId === host!.id); if (!service) return fail(404, 'NOT_FOUND', '服务不存在');
@@ -80,10 +118,24 @@ export async function mockRequest(path: string, options: RequestInit, authentica
    if (!b.reason?.trim() || b.reason.length > 500 || (b.timeoutSeconds && (b.timeoutSeconds < 5 || b.timeoutSeconds > 300))) return fail(422, 'VALIDATION_FAILED', '请提供操作原因和有效超时');
    if (!service.allowedActions.includes('RESTART') || host!.status !== 'ONLINE') return fail(503, 'AGENT_UNAVAILABLE', 'Agent 或 Helper 不可用');
    if (operations.some(o => o.serviceId === service.id && ['PENDING', 'RUNNING', 'UNKNOWN'].includes(o.status))) return fail(409, 'OPERATION_IN_PROGRESS', '该服务有在途或结果未知的任务');
-   const stamp = now(); const op: Operation = { id: id(), kind: 'SYSTEM_SERVICE_RESTART', hostId: host!.id, agentId: host!.agentId!, serviceId: service.id, idempotencyKey: key, requestedBy: current.id, reason: b.reason, expectedGeneration: service.generation, phase: 'VALIDATE', status: 'PENDING', createdAt: stamp, startedAt: null, updatedAt: stamp, deadlineAt: new Date(Date.now() + (b.timeoutSeconds ?? 60) * 1000).toISOString(), finishedAt: null, result: null, error: null };
+   const stamp = now(); const op: Operation = { id: id(), kind: 'SYSTEM_SERVICE_RESTART', hostId: host!.id, agentId: host!.agentId!, serviceId: service.id, capability: null, target: null, idempotencyKey: key, requestedBy: current.id, reason: b.reason, expectedGeneration: service.generation, phase: 'VALIDATE', status: 'PENDING', createdAt: stamp, startedAt: null, updatedAt: stamp, deadlineAt: new Date(Date.now() + (b.timeoutSeconds ?? 60) * 1000).toISOString(), finishedAt: null, result: null, error: null };
    operations.unshift(op); replay.set(key, { fingerprint, operation: op }); log('SYSTEM_SERVICE_RESTART', 'service', service.id, b.reason);
    setTimeout(() => { op.status = 'RUNNING'; op.phase = 'APPLY'; op.startedAt = now(); op.updatedAt = now(); }, 900);
    setTimeout(() => { op.status = 'SUCCEEDED'; op.phase = 'COMMIT'; op.finishedAt = now(); op.updatedAt = now(); op.result = { serviceId: service.id, unitName: service.unitName, activeState: 'ACTIVE', verifiedAt: now(), evidence: 'Mock：模拟执行与 systemd ACTIVE 观测；不证明业务健康' }; service.observedAt = now(); bump(service.id); }, 3500);
+   return ok(op, 202, { Location: `/api/v1/operations/${op.id}`, 'Retry-After': '1', 'Idempotency-Replayed': 'false' });
+  }
+  if (p.endsWith('/journal') && method === 'POST') {
+   const key = headers.get('Idempotency-Key'); if (!key) return fail(400, 'IDEMPOTENCY_KEY_REQUIRED', '缺少幂等键');
+   const fingerprint = JSON.stringify([current.id, p, b, headers.get('If-Match')]); const previous = replay.get(key);
+   if (previous) return previous.fingerprint === fingerprint ? ok(previous.operation, ['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(previous.operation.status) ? 200 : 202, { 'Idempotency-Replayed': 'true' }) : fail(409, 'IDEMPOTENCY_KEY_REUSED', '幂等键已被其他请求使用');
+   if (!headers.has('If-Match')) return fail(428, 'PRECONDITION_REQUIRED', '请先读取服务版本');
+   if (!match(service.id)) return fail(412, 'PRECONDITION_FAILED', '服务版本变化，请刷新后确认');
+   if (!b.reason?.trim() || b.reason.length > 500) return fail(422, 'VALIDATION_FAILED', '请提供查询原因');
+   if (!service.allowedActions.includes('READ_JOURNAL') || host!.status !== 'ONLINE') return fail(503, 'AGENT_UNAVAILABLE', 'Agent 或 Helper 不可用');
+   if (operations.some(o => o.serviceId === service.id && ['PENDING', 'RUNNING', 'UNKNOWN'].includes(o.status))) return fail(409, 'OPERATION_IN_PROGRESS', '该服务有在途或结果未知的任务');
+   const stamp = now(); const op: Operation = { id: id(), kind: 'SYSTEMD_JOURNAL_READ', hostId: host!.id, agentId: host!.agentId!, serviceId: service.id, capability: 'systemd.journal.read', target: service.unitName, idempotencyKey: key, requestedBy: current.id, reason: b.reason, expectedGeneration: service.generation, phase: 'APPLY', status: 'RUNNING', createdAt: stamp, startedAt: stamp, updatedAt: stamp, deadlineAt: new Date(Date.now() + 30000).toISOString(), finishedAt: null, result: null, error: null };
+   operations.unshift(op); replay.set(key, { fingerprint, operation: op }); log('SYSTEMD_JOURNAL_READ', 'service', service.id, b.reason);
+   setTimeout(() => { op.status = 'SUCCEEDED'; op.phase = 'COMMIT'; op.finishedAt = now(); op.updatedAt = now(); op.result = { serviceId: service.id, unitName: service.unitName, journal: `Mock journal for ${service.unitName}\nOct 19 00:00:01 host service[123]: started\nOct 19 00:00:02 host service[123]: ready`, retrievedAt: now() }; }, 1600);
    return ok(op, 202, { Location: `/api/v1/operations/${op.id}`, 'Retry-After': '1', 'Idempotency-Replayed': 'false' });
   }
  }

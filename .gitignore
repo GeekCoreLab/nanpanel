@@ -5,6 +5,7 @@ web/dist/
 .env
 .env.*
 !.env.example
+/deploy/relay/certs/
 .idea/
 .vscode/
 *.log

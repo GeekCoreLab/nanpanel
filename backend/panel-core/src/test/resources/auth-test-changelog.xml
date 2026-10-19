@@ -14,11 +14,40 @@
     <changeSet id="inventory-test" author="nanpanel">
         <sql>CREATE TABLE host (id UUID PRIMARY KEY, hostname VARCHAR(255) NOT NULL, os VARCHAR(255), arch VARCHAR(64), capabilities VARCHAR(4096) NOT NULL DEFAULT '[]', generation BIGINT NOT NULL DEFAULT 1, observed_generation BIGINT NOT NULL DEFAULT 0, status VARCHAR(16) NOT NULL DEFAULT 'UNKNOWN', created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP);</sql>
         <sql>CREATE TABLE agent (id UUID PRIMARY KEY, host_id UUID NOT NULL REFERENCES host(id), cert_identity VARCHAR(255) NOT NULL UNIQUE, version VARCHAR(64), last_seen TIMESTAMP WITH TIME ZONE, cert_fingerprint CHAR(64));</sql>
+        <sql>CREATE TABLE operation (id UUID PRIMARY KEY, idempotency_key VARCHAR(128) NOT NULL UNIQUE, phase VARCHAR(32) NOT NULL, status VARCHAR(16) NOT NULL DEFAULT 'PENDING', error TEXT, created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP);</sql>
         <sql>CREATE TABLE agent_enrollment (id UUID PRIMARY KEY, host_id UUID NOT NULL REFERENCES host(id), agent_id UUID NOT NULL UNIQUE REFERENCES agent(id), token_hash CHAR(64) NOT NULL UNIQUE, expires_at TIMESTAMP WITH TIME ZONE NOT NULL, consumed_at TIMESTAMP WITH TIME ZONE, created_by VARCHAR(36) NOT NULL REFERENCES panel_user(id), created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP);</sql>
         <sql>CREATE TABLE platform_settings (id INTEGER PRIMARY KEY, site_name VARCHAR(100), default_timezone VARCHAR(64), host_offline_after_seconds INTEGER, operation_retention_days INTEGER, updated_at BIGINT, updated_by UUID);</sql>
         <sql>INSERT INTO platform_settings VALUES (1, 'NaNPanel', 'Asia/Shanghai', 90, 30, 0, NULL);</sql>
     </changeSet>
     <changeSet id="agent-helper-control-test" author="nanpanel">
         <sqlFile path="db/changelog/007-agent-helper-control.sql"/>
+    </changeSet>
+    <changeSet id="systemd-observation-test" author="nanpanel">
+        <sqlFile path="db/changelog/009-systemd-observation.sql"/>
+    </changeSet>
+    <changeSet id="systemd-operations-test" author="nanpanel">
+        <sqlFile path="db/changelog/010-systemd-operations.sql"/>
+    </changeSet>
+    <changeSet id="audit-unknown-outcome-test" author="nanpanel">
+        <sqlFile path="db/changelog/011-audit-unknown-outcome.sql"/>
+    </changeSet>
+    <changeSet id="systemd-journal-read-test" author="nanpanel">
+        <sqlFile path="db/changelog/012-systemd-journal-read.sql"/>
+    </changeSet>
+    <changeSet id="host-helper-operations-test" author="nanpanel">
+        <sqlFile path="db/changelog/013-host-helper-operations.sql"/>
+    </changeSet>
+    <changeSet id="agent-gateway-fencing-test" author="nanpanel">
+        <sqlFile path="db/changelog/014-agent-gateway-fencing.sql"/>
+    </changeSet>
+    <changeSet id="relay-dns-coordination-test" author="nanpanel">
+        <sql>CREATE TABLE agent_relay_status (relay_id VARCHAR(64) PRIMARY KEY, cluster_id VARCHAR(128) NOT NULL, target_name VARCHAR(253) NOT NULL, epoch BIGINT NOT NULL, healthy BOOLEAN NOT NULL, healthy_count INTEGER NOT NULL DEFAULT 0 CHECK (healthy_count&gt;=0), unhealthy_count INTEGER NOT NULL DEFAULT 0 CHECK (unhealthy_count&gt;=0), last_seen TIMESTAMP WITH TIME ZONE NOT NULL, last_counted_at TIMESTAMP WITH TIME ZONE NOT NULL, updated_at TIMESTAMP WITH TIME ZONE NOT NULL);</sql>
+        <sql>CREATE TABLE dns_writer_lease (id INTEGER PRIMARY KEY CHECK (id=1), owner_id VARCHAR(36), epoch BIGINT NOT NULL DEFAULT 0 CHECK (epoch&gt;=0), lease_until TIMESTAMP WITH TIME ZONE);</sql>
+        <sql>INSERT INTO dns_writer_lease (id,epoch) VALUES (1,0);</sql>
+        <sql>CREATE TABLE dns_managed_record (record_name VARCHAR(253) PRIMARY KEY, host_id UUID REFERENCES host(id), record_id VARCHAR(128) NOT NULL, content VARCHAR(253) NOT NULL, ttl INTEGER NOT NULL, proxied BOOLEAN NOT NULL, state VARCHAR(32) NOT NULL, detail VARCHAR(512), last_verified_at TIMESTAMP WITH TIME ZONE, content_changed_at TIMESTAMP WITH TIME ZONE, switch_count INTEGER NOT NULL DEFAULT 0 CHECK (switch_count&gt;=0), updated_at TIMESTAMP WITH TIME ZONE NOT NULL);</sql>
+    </changeSet>
+    <changeSet id="agent-gateway-lease-test" author="nanpanel">
+        <sql>ALTER TABLE agent_gateway_fencing ADD COLUMN owner_id VARCHAR(128);</sql>
+        <sql>ALTER TABLE agent_gateway_fencing ADD COLUMN lease_until TIMESTAMP WITH TIME ZONE;</sql>
     </changeSet>
 </databaseChangeLog>

@@ -13,38 +13,458 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::{RwLock, mpsc};
 use tokio_stream::wrappers::ReceiverStream;
+use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
 use tonic::{Request, Response, Status};
 use tracing::{info, warn};
 
 use crate::v1::{
-    AgentMessage, ControlMessage,
+    AgentMessage, ControlMessage, CoreMessage,
     agent_gateway_server::{AgentGateway, AgentGatewayServer},
     agent_message::Payload,
+    control_relay_client::ControlRelayClient,
+    core_message::Payload as CorePayload,
+    relay_message::Payload as RelayPayload,
 };
 
-type ActiveSession = (String, mpsc::Sender<ControlMessage>);
-type ActiveSessions = Arc<RwLock<HashMap<String, ActiveSession>>>;
+#[derive(Clone)]
+enum ActiveRoute {
+    Direct(mpsc::Sender<ControlMessage>),
+    Relay(mpsc::Sender<CoreMessage>),
+}
+
+#[derive(Clone)]
+struct ActiveSession {
+    session_id: String,
+    route: ActiveRoute,
+    last_seen: std::time::Instant,
+}
+
+type ActiveSessions = Arc<RwLock<HashMap<String, Vec<ActiveSession>>>>;
+
+async fn register_active_session(
+    sessions: &ActiveSessions,
+    agent_id: &str,
+    session_id: &str,
+    route: ActiveRoute,
+) {
+    let mut active = sessions.write().await;
+    let routes = active.entry(agent_id.to_owned()).or_default();
+    if let Some(session) = routes
+        .iter_mut()
+        .find(|route| route.session_id == session_id)
+    {
+        session.route = route;
+        session.last_seen = std::time::Instant::now();
+    } else {
+        routes.push(ActiveSession {
+            session_id: session_id.to_owned(),
+            route,
+            last_seen: std::time::Instant::now(),
+        });
+    }
+}
+
+async fn remove_active_session(sessions: &ActiveSessions, agent_id: &str, session_id: &str) {
+    let mut active = sessions.write().await;
+    if let Some(routes) = active.get_mut(agent_id) {
+        routes.retain(|route| route.session_id != session_id);
+        if routes.is_empty() {
+            active.remove(agent_id);
+        }
+    }
+}
+
+#[derive(Clone)]
+struct RelayConfig {
+    endpoints: Vec<String>,
+    tls_domain: String,
+    ca_path: String,
+    cert_path: String,
+    key_path: String,
+    cluster_id: String,
+    epoch: u64,
+}
 
 #[derive(Clone)]
 pub struct Gateway {
     callback: reqwest::Client,
     callback_url: String,
     callback_token: String,
+    core_id: String,
     sessions: ActiveSessions,
+    relay: Option<RelayConfig>,
 }
 
 impl Gateway {
     fn from_env() -> anyhow::Result<Self> {
         let callback_url = required("NANPANEL_GATEWAY_CALLBACK_URL")?;
         let callback_token = required("NANPANEL_GATEWAY_CALLBACK_TOKEN")?;
+        let relay = relay_config_from_env()?;
         Ok(Self {
             callback: reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
                 .build()?,
             callback_url,
             callback_token,
+            core_id: uuid::Uuid::new_v4().to_string(),
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            relay,
         })
+    }
+
+    async fn start_relay_connectors(&self) -> anyhow::Result<()> {
+        let Some(config) = self.relay.clone() else {
+            return Ok(());
+        };
+        let ca = tokio::fs::read(&config.ca_path).await?;
+        let cert = tokio::fs::read(&config.cert_path).await?;
+        let key = tokio::fs::read(&config.key_path).await?;
+        let tls = ClientTlsConfig::new()
+            .domain_name(config.tls_domain.clone())
+            .ca_certificate(Certificate::from_pem(ca))
+            .identity(Identity::from_pem(cert, key));
+        let endpoints = config
+            .endpoints
+            .iter()
+            .map(|endpoint| Arc::<str>::from(endpoint.as_str()))
+            .collect::<Vec<_>>();
+        for endpoint in endpoints {
+            let gateway = self.clone();
+            let relay_config = config.clone();
+            let endpoint_tls = tls.clone();
+            tokio::spawn(async move {
+                let mut backoff = std::time::Duration::from_secs(1);
+                loop {
+                    let lease = match gateway.acquire_core_lease(&relay_config.cluster_id).await {
+                        Ok(lease) => lease,
+                        Err(error) => {
+                            warn!(%endpoint, %error, "unable to acquire Core Relay leader lease");
+                            tokio::time::sleep(backoff).await;
+                            backoff = backoff
+                                .saturating_mul(2)
+                                .min(std::time::Duration::from_secs(60));
+                            continue;
+                        }
+                    };
+                    let mut relay_config = relay_config.clone();
+                    relay_config.epoch = lease.epoch;
+                    match gateway
+                        .run_relay_session(&relay_config, &endpoint, endpoint_tls.clone())
+                        .await
+                    {
+                        Ok(()) => warn!(%endpoint, "Control Relay stream closed"),
+                        Err(error) => warn!(%endpoint, %error, "Control Relay connection failed"),
+                    }
+                    tokio::time::sleep(backoff).await;
+                    backoff = backoff
+                        .saturating_mul(2)
+                        .min(std::time::Duration::from_secs(60));
+                }
+            });
+        }
+        Ok(())
+    }
+
+    async fn acquire_core_lease(&self, cluster_id: &str) -> anyhow::Result<RelayLeaseReport> {
+        let url = self.relay_callback_url("lease/acquire")?;
+        let response = self
+            .callback
+            .post(url)
+            .header("X-NanPanel-Gateway-Token", &self.callback_token)
+            .json(&RelayLeaseRequest {
+                owner_id: self.core_id.clone(),
+                cluster_id: cluster_id.to_owned(),
+                epoch: 0,
+            })
+            .send()
+            .await?
+            .error_for_status()?;
+        let lease = response.json::<RelayLeaseReport>().await?;
+        if lease.epoch == 0 || !(15..=120).contains(&lease.lease_seconds) {
+            anyhow::bail!("Core returned an invalid Relay leader lease")
+        }
+        Ok(lease)
+    }
+
+    async fn renew_core_lease(&self, config: &RelayConfig) -> anyhow::Result<()> {
+        let url = self.relay_callback_url("lease/renew")?;
+        let response = self
+            .callback
+            .post(url)
+            .header("X-NanPanel-Gateway-Token", &self.callback_token)
+            .json(&RelayLeaseRequest {
+                owner_id: self.core_id.clone(),
+                cluster_id: config.cluster_id.clone(),
+                epoch: config.epoch,
+            })
+            .send()
+            .await?
+            .error_for_status()?;
+        let lease = response.json::<RelayLeaseReport>().await?;
+        if lease.epoch != config.epoch || !(15..=120).contains(&lease.lease_seconds) {
+            anyhow::bail!("Core returned a mismatched Relay leader lease")
+        }
+        Ok(())
+    }
+
+    fn relay_callback_url(&self, path: &str) -> anyhow::Result<String> {
+        self.callback_url
+            .strip_suffix("/internal/agent-heartbeats")
+            .map(|prefix| format!("{prefix}/internal/agent-relay/{path}"))
+            .ok_or_else(|| anyhow::anyhow!("invalid Gateway callback URL"))
+    }
+
+    async fn run_relay_session(
+        &self,
+        config: &RelayConfig,
+        endpoint: &str,
+        tls: ClientTlsConfig,
+    ) -> anyhow::Result<()> {
+        let channel = Endpoint::from_shared(endpoint.to_owned())?
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .tcp_keepalive(Some(std::time::Duration::from_secs(30)))
+            .keep_alive_while_idle(true)
+            .tls_config(tls)?
+            .connect()
+            .await?;
+        let mut client = ControlRelayClient::new(channel);
+        let (sender, receiver) = mpsc::channel(8);
+        sender
+            .send(CoreMessage {
+                payload: Some(CorePayload::Hello(crate::v1::RelayCoreHello {
+                    cluster_id: config.cluster_id.clone(),
+                    epoch: config.epoch,
+                })),
+            })
+            .await?;
+        let mut stream = client
+            .core_session(ReceiverStream::new(receiver))
+            .await?
+            .into_inner();
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let mut relay_id: Option<String> = None;
+        let stream_result: anyhow::Result<()> = async {
+            let mut hello_acknowledged = false;
+            let mut status_tick = tokio::time::interval(std::time::Duration::from_secs(10));
+            status_tick.tick().await;
+            loop {
+                tokio::select! {
+                    received = stream.message() => {
+                        let Some(message) = received? else { break; };
+                        match message.payload {
+                    Some(RelayPayload::HelloAck(ack)) => {
+                        if hello_acknowledged
+                            || ack.cluster_id != config.cluster_id
+                            || ack.core_epoch != config.epoch
+                            || ack.relay_id.is_empty()
+                            || ack.max_frame_bytes == 0
+                        {
+                            anyhow::bail!(
+                                "Control Relay returned an invalid hello acknowledgement"
+                            )
+                        }
+                        hello_acknowledged = true;
+                        relay_id = Some(ack.relay_id.clone());
+                        info!(%endpoint, relay_id = %ack.relay_id, "Core established its outbound Relay path");
+                        if let Err(error) = self.report_relay_status(
+                            config, endpoint, &ack.relay_id, true
+                        ).await {
+                            warn!(%endpoint, %error, "unable to publish healthy Relay status to Core");
+                        }
+                    }
+                    Some(RelayPayload::AgentMessage(relayed)) if hello_acknowledged => {
+                        self.forward_relay_agent_message(&sender, &session_id, relayed)
+                            .await?;
+                    }
+                    Some(RelayPayload::AgentMessage(_)) => {
+                        anyhow::bail!("Control Relay sent Agent data before hello acknowledgement")
+                    }
+                    Some(RelayPayload::Control(_)) | None => {
+                        anyhow::bail!("Control Relay sent an invalid Core stream message")
+                    }
+                }
+                    }
+                    _ = status_tick.tick(), if hello_acknowledged => {
+                        self.renew_core_lease(config).await?;
+                        if let Some(relay_id) = relay_id.as_deref()
+                            && let Err(error) = self.report_relay_status(
+                                config, endpoint, relay_id, true
+                            ).await {
+                            warn!(%endpoint, %error, "unable to refresh healthy Relay status");
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        .await;
+        let mut active = self.sessions.write().await;
+        for routes in active.values_mut() {
+            routes.retain(|route| route.session_id != session_id);
+        }
+        active.retain(|_, routes| !routes.is_empty());
+        drop(active);
+        if let Some(relay_id) = relay_id.as_deref()
+            && let Err(error) = self
+                .report_relay_status(config, endpoint, relay_id, false)
+                .await
+        {
+            warn!(%endpoint, %error, "unable to publish disconnected Relay status");
+        }
+        stream_result
+    }
+
+    async fn report_relay_status(
+        &self,
+        config: &RelayConfig,
+        endpoint: &str,
+        relay_id: &str,
+        healthy: bool,
+    ) -> anyhow::Result<()> {
+        let url = self
+            .callback_url
+            .strip_suffix("/internal/agent-heartbeats")
+            .map(|prefix| format!("{prefix}/internal/agent-relay/status"))
+            .ok_or_else(|| anyhow::anyhow!("invalid Gateway callback URL"))?;
+        self.callback
+            .post(url)
+            .header("X-NanPanel-Gateway-Token", &self.callback_token)
+            .json(&RelayStatusReport {
+                relay_id: relay_id.to_owned(),
+                cluster_id: config.cluster_id.clone(),
+                epoch: config.epoch,
+                endpoint: endpoint.to_owned(),
+                healthy,
+            })
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
+    async fn forward_relay_agent_message(
+        &self,
+        relay_sender: &mpsc::Sender<CoreMessage>,
+        session_id: &str,
+        relayed: crate::v1::RelayedAgentMessage,
+    ) -> anyhow::Result<()> {
+        let agent_id = relayed.agent_id;
+        let fingerprint = relayed.certificate_fingerprint;
+        let message = relayed
+            .message
+            .ok_or_else(|| anyhow::anyhow!("Relay sent an empty Agent message"))?;
+        if agent_id.is_empty()
+            || agent_id.len() > 64
+            || message.agent_id != agent_id
+            || fingerprint.len() != 64
+            || !fingerprint.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            anyhow::bail!("Relay sent an invalid Agent identity envelope")
+        }
+        match message.payload {
+            Some(Payload::Heartbeat(heartbeat)) => {
+                let report = HeartbeatReport {
+                    agent_id: agent_id.clone(),
+                    version: heartbeat.version,
+                    certificate_fingerprint: fingerprint.clone(),
+                    hostname: heartbeat.hostname,
+                    os: heartbeat.os,
+                    arch: heartbeat.arch,
+                    capabilities: heartbeat.capabilities,
+                    helper_status: heartbeat.helper_status,
+                    systemd_observed_at_epoch_ms: heartbeat.systemd_observed_at_epoch_ms,
+                    systemd_services: heartbeat
+                        .systemd_services
+                        .into_iter()
+                        .map(|service| SystemdServiceReport {
+                            unit_name: service.unit_name,
+                            display_name: service.display_name,
+                            active_state: service.active_state,
+                            sub_state: service.sub_state,
+                            restart_allowed: service.restart_allowed,
+                            journal_read_allowed: service.journal_read_allowed,
+                        })
+                        .collect(),
+                };
+                let response = self
+                    .callback
+                    .post(&self.callback_url)
+                    .header("X-NanPanel-Gateway-Token", &self.callback_token)
+                    .json(&report)
+                    .send()
+                    .await?;
+                let allowed = response.status().is_success();
+                if allowed {
+                    register_active_session(
+                        &self.sessions,
+                        &agent_id,
+                        session_id,
+                        ActiveRoute::Relay(relay_sender.clone()),
+                    )
+                    .await;
+                } else {
+                    warn!(%agent_id, status = %response.status(), "Core rejected relayed Agent heartbeat");
+                    remove_active_session(&self.sessions, &agent_id, session_id).await;
+                }
+                relay_sender
+                    .send(CoreMessage {
+                        payload: Some(CorePayload::AgentAuthorization(
+                            crate::v1::RelayAgentAuthorization {
+                                agent_id,
+                                certificate_fingerprint: fingerprint,
+                                allowed,
+                            },
+                        )),
+                    })
+                    .await?;
+            }
+            Some(Payload::OperationResult(result)) => {
+                let result_url = self
+                    .callback_url
+                    .strip_suffix("/internal/agent-heartbeats")
+                    .map(|prefix| format!("{prefix}/internal/agent-control-results"))
+                    .ok_or_else(|| anyhow::anyhow!("invalid Gateway callback URL"))?;
+                let report = OperationResultReport {
+                    agent_id,
+                    operation_id: result.operation_id,
+                    idempotency_key: result.idempotency_key,
+                    status: result.status,
+                    detail: result.detail,
+                };
+                let response = self
+                    .callback
+                    .post(result_url)
+                    .header("X-NanPanel-Gateway-Token", &self.callback_token)
+                    .json(&report)
+                    .send()
+                    .await?;
+                if response.status().is_success()
+                    && response
+                        .headers()
+                        .get("X-NanPanel-Result-Ack")
+                        .and_then(|value| value.to_str().ok())
+                        == Some("true")
+                {
+                    relay_sender
+                        .send(CoreMessage {
+                            payload: Some(CorePayload::Acknowledge(crate::v1::RelayAcknowledge {
+                                agent_id: report.agent_id,
+                                operation_id: report.operation_id,
+                                idempotency_key: report.idempotency_key,
+                            })),
+                        })
+                        .await?;
+                } else if !response.status().is_success() {
+                    warn!(
+                        operation_id = %report.operation_id,
+                        status = %response.status(),
+                        "Core rejected relayed Agent operation result"
+                    );
+                }
+            }
+            None => anyhow::bail!("Relay delivered an empty Agent payload"),
+        }
+        Ok(())
     }
 }
 
@@ -59,6 +479,19 @@ struct HeartbeatReport {
     arch: String,
     capabilities: Vec<String>,
     helper_status: String,
+    systemd_observed_at_epoch_ms: i64,
+    systemd_services: Vec<SystemdServiceReport>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemdServiceReport {
+    unit_name: String,
+    display_name: String,
+    active_state: String,
+    sub_state: String,
+    restart_allowed: bool,
+    journal_read_allowed: bool,
 }
 
 #[derive(Serialize)]
@@ -71,6 +504,31 @@ struct OperationResultReport {
     detail: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayLeaseRequest {
+    owner_id: String,
+    cluster_id: String,
+    epoch: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RelayLeaseReport {
+    epoch: u64,
+    lease_seconds: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayStatusReport {
+    relay_id: String,
+    cluster_id: String,
+    epoch: u64,
+    endpoint: String,
+    healthy: bool,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct DispatchRequest {
@@ -80,6 +538,13 @@ struct DispatchRequest {
     capability: String,
     target: String,
     deadline_epoch_ms: i64,
+    payload_json: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct NetworkFirewallPayload {
+    rollback_seconds: u16,
 }
 
 async fn dispatch_control(
@@ -100,8 +565,13 @@ async fn dispatch_control(
         || request.operation_id.len() > 128
         || request.idempotency_key.is_empty()
         || request.idempotency_key.len() > 128
-        || request.capability != "agent.update"
-        || !request.target.is_empty()
+        || request.target.len() > 255
+        || request
+            .payload_json
+            .as_ref()
+            .is_some_and(|payload| payload.len() > 48 * 1024)
+        || !valid_dispatch_target(&request.capability, &request.target)
+        || !valid_dispatch_payload(&request.capability, request.payload_json.as_deref())
     {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -112,21 +582,112 @@ async fn dispatch_control(
     if request.deadline_epoch_ms <= now || request.deadline_epoch_ms > now + 10 * 60 * 1000 {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let sessions = gateway.sessions.read().await;
-    let Some((_, sender)) = sessions.get(&request.agent_id) else {
-        return Err(StatusCode::NOT_FOUND);
-    };
-    sender
-        .send(ControlMessage {
-            operation_id: request.operation_id,
-            idempotency_key: request.idempotency_key,
-            capability: request.capability,
-            target: request.target,
-            deadline_epoch_ms: request.deadline_epoch_ms,
-        })
+    let now = std::time::Instant::now();
+    let mut routes = gateway
+        .sessions
+        .read()
         .await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    Ok(StatusCode::ACCEPTED)
+        .get(&request.agent_id)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|session| now.duration_since(session.last_seen) <= Duration::from_secs(20))
+        .collect::<Vec<_>>();
+    routes.sort_by_key(|session| std::cmp::Reverse(session.last_seen));
+    if routes.is_empty() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let agent_id = request.agent_id;
+    let control = ControlMessage {
+        operation_id: request.operation_id,
+        idempotency_key: request.idempotency_key,
+        capability: request.capability,
+        target: request.target,
+        deadline_epoch_ms: request.deadline_epoch_ms,
+        operation_result_ack: false,
+        payload_json: request.payload_json.unwrap_or_default(),
+    };
+    for session in routes {
+        let result = match session.route {
+            ActiveRoute::Direct(sender) => sender.send(control.clone()).await.map_err(|_| ()),
+            ActiveRoute::Relay(sender) => sender
+                .send(CoreMessage {
+                    payload: Some(CorePayload::Control(crate::v1::RelayControl {
+                        agent_id: agent_id.clone(),
+                        control: Some(control.clone()),
+                    })),
+                })
+                .await
+                .map_err(|_| ()),
+        };
+        if result.is_ok() {
+            return Ok(StatusCode::ACCEPTED);
+        }
+        remove_active_session(&gateway.sessions, &agent_id, &session.session_id).await;
+    }
+    Err(StatusCode::SERVICE_UNAVAILABLE)
+}
+
+fn valid_dispatch_target(capability: &str, target: &str) -> bool {
+    match capability {
+        "agent.update" | "package.install" | "container.list" => target.is_empty(),
+        "systemd.restart" | "systemd.journal.read" => valid_service_unit(target),
+        "file.write.protected" => valid_file_target(target),
+        "container.logs" | "container.start" | "container.stop" | "container.deploy" => {
+            valid_container_target(target)
+        }
+        "network.firewall.expose" => valid_container_target(target),
+        _ => false,
+    }
+}
+
+fn valid_dispatch_payload(capability: &str, payload: Option<&str>) -> bool {
+    match (capability, payload) {
+        ("package.install" | "file.write.protected", Some(json)) => {
+            serde_json::from_str::<serde_json::Value>(json).is_ok_and(|value| value.is_object())
+        }
+        ("network.firewall.expose", Some(json)) => {
+            serde_json::from_str::<NetworkFirewallPayload>(json)
+                .is_ok_and(|payload| (30..=300).contains(&payload.rollback_seconds))
+        }
+        (
+            "agent.update"
+            | "systemd.restart"
+            | "systemd.journal.read"
+            | "container.list"
+            | "container.logs"
+            | "container.start"
+            | "container.stop"
+            | "container.deploy",
+            None,
+        ) => true,
+        _ => false,
+    }
+}
+
+fn valid_file_target(target: &str) -> bool {
+    !target.is_empty()
+        && target.len() <= 128
+        && target
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+}
+
+fn valid_container_target(target: &str) -> bool {
+    !target.is_empty()
+        && target.len() <= 63
+        && target.as_bytes()[0].is_ascii_alphanumeric()
+        && target
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+}
+
+fn valid_service_unit(unit_name: &str) -> bool {
+    unit_name.len() <= 255
+        && unit_name.ends_with(".service")
+        && unit_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_.@:-".contains(&byte))
 }
 
 fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
@@ -193,6 +754,20 @@ impl AgentGateway for Gateway {
                                     arch: heartbeat.arch,
                                     capabilities: heartbeat.capabilities,
                                     helper_status: heartbeat.helper_status,
+                                    systemd_observed_at_epoch_ms: heartbeat
+                                        .systemd_observed_at_epoch_ms,
+                                    systemd_services: heartbeat
+                                        .systemd_services
+                                        .into_iter()
+                                        .map(|service| SystemdServiceReport {
+                                            unit_name: service.unit_name,
+                                            display_name: service.display_name,
+                                            active_state: service.active_state,
+                                            sub_state: service.sub_state,
+                                            restart_allowed: service.restart_allowed,
+                                            journal_read_allowed: service.journal_read_allowed,
+                                        })
+                                        .collect(),
                                 };
                                 match callback
                                     .post(&callback_url)
@@ -202,11 +777,13 @@ impl AgentGateway for Gateway {
                                     .await
                                 {
                                     Ok(response) if response.status().is_success() => {
-                                        let mut active = sessions.write().await;
-                                        active.insert(
-                                            report.agent_id.clone(),
-                                            (session_id.clone(), sender.clone()),
-                                        );
+                                        register_active_session(
+                                            &sessions,
+                                            &report.agent_id,
+                                            &session_id,
+                                            ActiveRoute::Direct(sender.clone()),
+                                        )
+                                        .await;
                                         registered_agent_id = Some(report.agent_id.clone());
                                     }
                                     Ok(response) => warn!(
@@ -244,7 +821,34 @@ impl AgentGateway for Gateway {
                                         .send()
                                         .await
                                     {
-                                        Ok(response) if response.status().is_success() => {}
+                                        Ok(response) if response.status().is_success() => {
+                                            let acknowledged = response
+                                                .headers()
+                                                .get("X-NanPanel-Result-Ack")
+                                                .and_then(|value| value.to_str().ok())
+                                                == Some("true");
+                                            if acknowledged
+                                                && let Err(error) = sender
+                                                    .send(ControlMessage {
+                                                        operation_id: report.operation_id.clone(),
+                                                        idempotency_key: report
+                                                            .idempotency_key
+                                                            .clone(),
+                                                        capability: String::new(),
+                                                        target: String::new(),
+                                                        deadline_epoch_ms: 0,
+                                                        operation_result_ack: true,
+                                                        payload_json: String::new(),
+                                                    })
+                                                    .await
+                                            {
+                                                warn!(
+                                                    operation_id = %report.operation_id,
+                                                    %error,
+                                                    "unable to acknowledge Agent operation result"
+                                                );
+                                            }
+                                        }
                                         Ok(response) => warn!(
                                             operation_id = %report.operation_id,
                                             status = %response.status(),
@@ -272,13 +876,7 @@ impl AgentGateway for Gateway {
                 }
             }
             if let Some(agent_id) = registered_agent_id {
-                let mut active = sessions.write().await;
-                if active
-                    .get(&agent_id)
-                    .is_some_and(|(active_session, _)| active_session == &session_id)
-                {
-                    active.remove(&agent_id);
-                }
+                remove_active_session(&sessions, &agent_id, &session_id).await;
             }
         });
         Ok(Response::new(Box::pin(
@@ -299,6 +897,7 @@ pub async fn serve_from_env() -> anyhow::Result<()> {
         .identity(identity)
         .client_ca_root(tonic::transport::Certificate::from_pem(ca));
     let gateway = Gateway::from_env()?;
+    gateway.start_relay_connectors().await?;
     let control_address: std::net::SocketAddr = std::env::var("NANPANEL_GATEWAY_CONTROL_LISTEN")
         .unwrap_or_else(|_| "127.0.0.1:50052".to_owned())
         .parse()?;
@@ -324,6 +923,54 @@ pub async fn serve_from_env() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn relay_config_from_env() -> anyhow::Result<Option<RelayConfig>> {
+    let value = match std::env::var("NANPANEL_GATEWAY_RELAY_ENDPOINTS") {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let endpoints = parse_core_relay_endpoints(&value)?;
+    Ok(Some(RelayConfig {
+        endpoints,
+        tls_domain: required("NANPANEL_GATEWAY_RELAY_TLS_DOMAIN")?,
+        ca_path: required("NANPANEL_GATEWAY_RELAY_CA")?,
+        cert_path: required("NANPANEL_GATEWAY_RELAY_CERT")?,
+        key_path: required("NANPANEL_GATEWAY_RELAY_KEY")?,
+        cluster_id: required("NANPANEL_GATEWAY_CLUSTER_ID")?,
+        epoch: 0,
+    }))
+}
+
+fn parse_core_relay_endpoints(value: &str) -> anyhow::Result<Vec<String>> {
+    let mut endpoints = Vec::new();
+    for raw in value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let parsed = reqwest::Url::parse(raw)?;
+        if parsed.scheme() != "https"
+            || parsed.host_str().is_none()
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.path() != "/"
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            anyhow::bail!("Core Relay endpoints must be HTTPS origins without paths or credentials")
+        }
+        let endpoint = parsed.origin().ascii_serialization();
+        if endpoints.contains(&endpoint) {
+            anyhow::bail!("Core Relay endpoints must be unique")
+        }
+        endpoints.push(endpoint);
+    }
+    if !(2..=8).contains(&endpoints.len()) {
+        anyhow::bail!("Core Relay configuration requires between two and eight endpoints")
+    }
+    Ok(endpoints)
+}
+
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
@@ -347,4 +994,80 @@ async fn shutdown_signal() {
 
 fn required(name: &str) -> anyhow::Result<String> {
     std::env::var(name).map_err(|_| anyhow::anyhow!("missing required environment variable {name}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn agent_keeps_distinct_relay_routes_and_removes_only_the_disconnected_one() {
+        let sessions = Arc::new(RwLock::new(HashMap::new()));
+        let (relay_a, _receiver_a) = mpsc::channel(1);
+        let (relay_b, _receiver_b) = mpsc::channel(1);
+        register_active_session(
+            &sessions,
+            "agent-1",
+            "relay-session-a",
+            ActiveRoute::Relay(relay_a),
+        )
+        .await;
+        register_active_session(
+            &sessions,
+            "agent-1",
+            "relay-session-b",
+            ActiveRoute::Relay(relay_b),
+        )
+        .await;
+        assert_eq!(sessions.read().await["agent-1"].len(), 2);
+
+        remove_active_session(&sessions, "agent-1", "relay-session-a").await;
+        let active = sessions.read().await;
+        let remaining = &active["agent-1"];
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].session_id, "relay-session-b");
+    }
+
+    #[test]
+    fn dispatch_only_accepts_bounded_allowlisted_firewall_requests() {
+        assert!(valid_dispatch_target("network.firewall.expose", "ssh-test"));
+        assert!(!valid_dispatch_target(
+            "network.firewall.expose",
+            "ssh-test;id"
+        ));
+        assert!(valid_dispatch_payload(
+            "network.firewall.expose",
+            Some(r#"{"rollbackSeconds":90}"#),
+        ));
+        assert!(!valid_dispatch_payload(
+            "network.firewall.expose",
+            Some(r#"{"rollbackSeconds":301}"#),
+        ));
+        assert!(!valid_dispatch_payload(
+            "network.firewall.expose",
+            Some(r#"{"rollbackSeconds":90,"command":"id"}"#),
+        ));
+        assert!(!valid_dispatch_payload("network.firewall.expose", None));
+    }
+
+    #[test]
+    fn core_relay_pool_requires_distinct_https_origins() {
+        assert_eq!(
+            parse_core_relay_endpoints("https://relay-a.example, https://relay-b.example:9443")
+                .ok(),
+            Some(vec![
+                "https://relay-a.example".to_owned(),
+                "https://relay-b.example:9443".to_owned(),
+            ])
+        );
+        assert!(parse_core_relay_endpoints("https://relay-a.example").is_err());
+        assert!(
+            parse_core_relay_endpoints("https://relay-a.example,https://RELAY-A.example:443/")
+                .is_err()
+        );
+        assert!(
+            parse_core_relay_endpoints("https://relay-a.example/control,https://relay-b.example")
+                .is_err()
+        );
+    }
 }

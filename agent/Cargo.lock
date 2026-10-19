@@ -782,8 +782,11 @@ dependencies = [
  "futures-core",
  "futures-util",
  "hex",
+ "hyper-util",
+ "nix",
  "prost",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "sha2",
@@ -793,9 +796,29 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "nanpanel-control-relay"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures-core",
+ "futures-util",
+ "hex",
+ "prost",
+ "sha2",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

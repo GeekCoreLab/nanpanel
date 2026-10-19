@@ -1,6 +1,7 @@
 package io.nanpanel.core;
 
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -15,12 +16,15 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 @ApplicationScoped
 public class AgentCertificateAuthority {
+  @Inject
   @ConfigProperty(name = "nanpanel.agent.ca-cert")
   String caCertificate;
 
+  @Inject
   @ConfigProperty(name = "nanpanel.agent.ca-key")
   String caPrivateKey;
 
+  @Inject
   @ConfigProperty(name = "nanpanel.agent.serving-cert")
   String servingCertificate;
 

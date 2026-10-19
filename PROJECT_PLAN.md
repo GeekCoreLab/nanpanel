@@ -145,7 +145,7 @@ flowchart TB
 ### 6.1 接入模式
 
 - **Agentless（SSH）**：临时管理、初始化接入、恢复；能力受限，凭据必须加密并审计。
-- **Managed Agent**：支持 Agent 主动连接主控、主控主动连接可达 Agent，以及双方各自出站连接公网主控代理；通道建立后均支持双方主动发送数据。多代理与 DNS 切换为待实现设计，见 [双向通道设计](docs/architecture/control-connectivity.md)。
+- **Managed Agent**：支持 Agent 主动连接主控、主控主动连接可达 Agent，以及双方各自出站连接公网主控代理；通道建立后均支持双方主动发送数据。双向 Relay 与 DNS 切换已有代码切片，真实 DNS 传播和故障场景仍需验收，见 [双向通道设计](docs/architecture/control-connectivity.md)。
 - **Dual Mode**：Agent 故障时，在已配置的可信管理网络中可用 SSH 救援；不保证所有 NAT 场景可 SSH。
 
 ### 6.2 Agent 设计
@@ -345,7 +345,7 @@ FRP 的 `frpc reload` 可以更新代理相关配置，但不能无条件热更�
 
 ## 12. 安全与权限
 
-Web HTTP 契约见 [OpenAPI](api/openapi.yaml) 与 [Web 平台 API](api/web-platform.md)：目标采用 Cookie 会话 + CSRF，涵盖登录、本人会话、管理员账号、内置角色、仪表盘、非机密设置与审计。首期角色仅 ADMIN，可管理多个管理员账号；不包含公开注册、自定义角色或多租户。当前 Core 的环境变量 Basic 认证仅为脚手架过渡实现，目标能力仍待实现。
+Web HTTP 契约见 [OpenAPI](api/openapi.yaml) 与 [Web 平台 API](api/web-platform.md)：Cookie 会话 + CSRF、登录与本人会话、管理员账号、内置角色、仪表盘、非机密设置和持久化审计已实现。首期角色仅 ADMIN，可管理多个管理员账号；不包含公开注册、自定义角色或多租户。Core 不再接受 Basic 认证；Agent mTLS 身份校验已实现，证书吊销/轮换、多实例共享限流和完整泄露密码库仍待实现。
 
 - **最小权限**：初期可只有管理员角色；除预认证 CSRF 与登录流程外，业务 API 强制认证；为未来 RBAC 留下 `subject/action/resource` 授权接口。
 - **设备身份**：Agent 一次性注册码 + mTLS 独立证书；支持吊销、轮换、重放保护。
@@ -392,7 +392,7 @@ hybrid-infrastructure-platform/
 │   └── panel-persistence/      # PostgreSQL / Liquibase
 ├── agent/
 │   ├── protocol/
-│   ├── Cargo.toml              # 规划中的 Rust workspace（待实现）
+│   ├── Cargo.toml              # 已建立的 Rust workspace
 │   ├── daemon/                 # Rust 普通用户 Agent
 │   ├── runtime-drivers/        # Rust Docker/Podman 驱动
 │   └── privileged-helper/     # Rust root Helper，受控本地 IPC
@@ -429,12 +429,22 @@ hybrid-infrastructure-platform/
 
 ### P1｜基础管理 MVP
 
-- [ ] Host/Agent/Operation 实体和数据库迁移。
-- [ ] 单管理员认证、Agent 身份、审计日志。
-- [ ] Rust Agent：Linux 主机信息、systemd、journal、SSH/Agent 接入。
-- [ ] 按 ADR-011 实现双向拨号、双主控代理预连接、Cloudflare 节点 DNS/CNAME 单写切换及 Agent 公共 DNS 直查恢复；完成限制型 NAT 与代理故障验收。
-- [ ] Rust root Helper：受控软件包安装、服务管理、受保护文件及网络操作，具备授权、审计和超时。
-- [ ] Docker/Podman 列表、日志、启停、受限部署。
+- [x] Host/Agent/Operation 实体和数据库迁移（systemd 观测及通用操作字段迁移已补齐）。
+- [x] 单管理员认证、Agent mTLS 身份、审计日志与结果未知记录。
+- [x] Rust Agent：Linux 主机信息、systemd 服务观测；systemd unit 重启已接入 Core → Gateway → Agent → root Helper。
+- [x] Rust Agent：systemd 重启的跨进程本地持久化去重与结果确认/重放。
+- [x] Rust Agent：通过单独 root-managed allowlist 进行有界 systemd journal 查询，结果进入持久化操作日志并回执确认。
+- [x] SSH 固定只读可达性探测：主机 UUID 绑定 root-managed alias，强制固定 known_hosts、BatchMode 和 true 命令，不保存私钥或密码。
+- [x] SSH 救援恢复：对 host-bound unit allowlist 提交固定 systemctl restart/active 校验，操作幂等、审计并将断线结果标为 UNKNOWN；默认无授权 unit。
+- [x] P1 固定范围的 agentless SSH 管理/恢复代码：host-bound alias 探测、allowlist systemd 状态/有界日志读取与重启，以及固定安装脚本初始化 Agent；alias 和 unit allowlist 默认均为空。
+- [ ] 在两台非 K3s Linux 主机上验收真实 SSH 通道、拒绝路径和恢复流程。
+- [x] Agent 侧恢复基元：1–8 个 HTTPS 端点规范化轮询、有限退避，以及系统 DNS 失败后的 Cloudflare A/AAAA 直查（UDP 截断回退 TCP、受限重试、公网地址过滤）。
+- [x] ADR-011 代码切片：Core/Agent 双向拨号、双 Relay 预连接、安装时 Ed25519 签名备用名单、Cloudflare DNS 单写租约/写后读回、Relay 三次健康/失败滞回、120 秒切换冷却和周期性 API 对账。
+- [ ] 在 Cloudflare 测试 Zone 验证 TTL/公共解析恢复，并完成限制型 NAT、Relay 故障与 Core 掉线场景验收。
+- [x] Rust root Helper：allowlist 软件包安装、受保护文件原子写入、临时 nftables 规则及 30–300 秒可验证 systemd 定时回滚已接入异步 Operation；每条网络规则限定接口/协议/端口，`CAP_NET_ADMIN` 仅授予瞬时 worker，默认 allowlist 为空。
+- [x] Docker/Podman allowlist 容器列表、日志、启停和受限部署已接入类型化 Helper Operation；真实宿主机验收待完成。
+
+**阶段边界**：systemd 与通用 Helper 服务链有数据库集成测试，覆盖操作幂等键重放、结果回调去重、未知结果审计、受限 journal 查询、临时防火墙规则验证/定时回滚，以及 Agent 本地日志跨重启恢复。Helper 操作使用独立空白默认 allowlist；软件包只允许显式列出的名称，文件写入限制为固定目录的单层文件名，容器只允许预设镜像/loopback 端口，防火墙只允许预设接口/协议/端口。SSH 已实现主机绑定的固定只读探测、allowlist systemd 状态/有界 journal 读取、固定 systemd 重启，以及经固定安装脚本执行的异步 Agent 初始化；status/journal/restart 共用空白默认的 host-bound unit allowlist，token 经 SSH stdin 传递，等待首次 mTLS 心跳确认，断线或无心跳时结果未知。固定操作范围之外的 agentless 管理能力不属于当前 P1 MVP；两台非 K3s 主机的真实 SSH 验收仍未完成。ADR-011 已有 Agent 端点轮询、受限 DNS 直查、Rust 双向 Relay 流、Core 数据库单调 epoch、Relay 持久 fencing 和 Core Gateway 多 Relay 出站和数据库 leader 租约代码、Agent 双 Relay 同时预连接代码，签名备用名单由 Core Ed25519 签发并由 Agent 本地校验；Cloudflare DNS 三次健康/失败滞回、120 秒切换冷却和 API 周期读回对账已有代码；TTL/公共 DNS 传播验证、限制型 NAT/代理故障真实验收仍未完成。因此 P1 尚未通过整体验收。真实环境步骤和证据要求见 [P1 验收手册](tests/p1/README.md)。
 
 **验收**：无 K3s 的两台 Linux 主机可独立被管理；非 root Agent 可通过 Helper 完成授权的系统级运维，越权请求被拒绝并记录审计；断网重连后的任务幂等和状态恢复正确。
 

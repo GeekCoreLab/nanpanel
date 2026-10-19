@@ -20,4 +20,4 @@ Core 内部的 Java Network Reconciler、Cluster Connector 和 Agent Gateway 属
 
 ## 通信部署边界补充
 
-[ADR-011](ADR-011-control-relay-dns-failover.md) 明确：Core 内 Agent Gateway 为 Java 逻辑协调职责，独立公网主控代理 Control Relay 采用 Rust。现有 Rust Gateway 是传输实现起点；双向拨号和 DNS 故障切换仍待实现。
+[ADR-011](ADR-011-control-relay-dns-failover.md) 明确：Core 内 Agent Gateway 为控制面协调职责，独立公网主控代理 Control Relay 采用 Rust。Rust Relay 与 Gateway 的双向流、数据库租约、Agent 双 Relay 预连接及安装时签名备用名单已有代码；真实 DNS 与限制型 NAT 故障验收仍待完成。

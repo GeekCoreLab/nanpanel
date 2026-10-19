@@ -10,6 +10,7 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.StreamingOutput;
+import java.net.URI;
 import java.nio.file.Files;
 import java.time.Instant;
 import java.util.*;
@@ -20,19 +21,28 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 public class AgentEnrollmentResource {
   @Inject AuthStore store;
   @Inject AgentCertificateAuthority authority;
+  @Inject RelayFallbackSigner relayFallbackSigner;
   @Inject SessionFilter limits;
   @Context jakarta.ws.rs.container.ContainerRequestContext request;
   @Context io.vertx.core.http.HttpServerRequest http;
 
+  @Inject
   @ConfigProperty(name = "nanpanel.agent.binary")
   String agentBinary;
 
+  @Inject
   @ConfigProperty(name = "nanpanel.agent.helper-binary", defaultValue = "/work/nanpanel-helper")
   String helperBinary;
 
+  @Inject
   @ConfigProperty(name = "nanpanel.agent.gateway-port", defaultValue = "30444")
   int gatewayPort;
 
+  @Inject
+  @ConfigProperty(name = "nanpanel.agent.relay-endpoints", defaultValue = "disabled")
+  String relayEndpointConfiguration;
+
+  @Inject
   @ConfigProperty(name = "nanpanel.agent.enrollment-validity-seconds", defaultValue = "900")
   int enrollmentValiditySeconds;
 
@@ -46,7 +56,13 @@ public class AgentEnrollmentResource {
       String os,
       String arch,
       List<String> capabilities,
-      String helperStatus) {}
+      String helperStatus,
+      Long systemdObservedAtEpochMs,
+      List<SystemdServiceReport> systemdServices) {}
+  public record SystemdServiceReport(String unitName, String displayName,
+                                     String activeState, String subState,
+                                     boolean restartAllowed,
+                                     boolean journalReadAllowed) {}
 
   private String actor() {
     @SuppressWarnings("unchecked")
@@ -71,6 +87,8 @@ public class AgentEnrollmentResource {
   public Object installation() {
     return Map.of("controllerFingerprint", authority.controllerFingerprint(),
                   "gatewayPort", gatewayPort,
+                  "relayEndpoints", relayEndpoints(),
+                  "relayFallback", relayFallbackSigner.manifest(),
                   "installerPath", "/agent-install.sh",
                   "agentDownloadPath", "/api/v1/agent-download/linux-amd64",
                   "helperDownloadPath", "/api/v1/helper-download/linux-amd64");
@@ -126,6 +144,9 @@ public class AgentEnrollmentResource {
         hostname.chars().anyMatch(Character::isISOControl))
       throw fail(422, "VALIDATION_FAILED", "主机名称须为 1–255 个可见字符");
 
+    List<String> configuredRelays = relayEndpoints();
+    RelayFallbackSigner.Manifest relayFallback = relayFallbackSigner.manifest();
+    String controllerFingerprint = authority.controllerFingerprint();
     String token = AuthStore.token();
     UUID enrollmentId = UUID.randomUUID();
     UUID hostId = UUID.randomUUID();
@@ -157,10 +178,59 @@ public class AgentEnrollmentResource {
         .entity(Map.of("enrollmentId", enrollmentId.toString(),
                        "hostId", hostId.toString(), "agentId", agentId.toString(),
                        "token", token, "expiresAt", expiresAt.toString(),
-                       "controllerFingerprint", authority.controllerFingerprint(),
-                       "gatewayPort", gatewayPort))
+                       "controllerFingerprint", controllerFingerprint,
+                       "gatewayPort", gatewayPort,
+                       "relayEndpoints", configuredRelays,
+                       "relayFallback", relayFallback))
         .header("Cache-Control", "no-store")
         .build();
+  }
+
+  private List<String> relayEndpoints() {
+    try {
+      return parseRelayEndpoints(relayEndpointConfiguration);
+    } catch (IllegalArgumentException invalid) {
+      throw fail(500, "RELAY_CONFIGURATION_INVALID",
+                 "Relay 地址配置必须是 2–8 个唯一的 HTTPS 源站");
+    }
+  }
+
+  static List<String> parseRelayEndpoints(String configuration) {
+    if (configuration == null || configuration.isBlank() ||
+        configuration.trim().equalsIgnoreCase("disabled"))
+      return List.of();
+    var endpoints = new ArrayList<String>();
+    var unique = new HashSet<String>();
+    for (String raw : configuration.split(",")) {
+      String value = raw.trim();
+      if (value.isEmpty()) continue;
+      try {
+        String origin = normalizeRelayEndpoint(value);
+        if (!unique.add(origin)) throw new IllegalArgumentException();
+        endpoints.add(origin);
+      } catch (RuntimeException invalid) {
+        throw new IllegalArgumentException("invalid Relay HTTPS origin", invalid);
+      }
+    }
+    if (!endpoints.isEmpty() && (endpoints.size() < 2 || endpoints.size() > 8))
+      throw new IllegalArgumentException("Relay endpoint count must be between two and eight");
+    return List.copyOf(endpoints);
+  }
+
+  static String normalizeRelayEndpoint(String value) {
+    URI uri = URI.create(value);
+    if (!"https".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null ||
+        uri.getPort() == 0 || uri.getPort() > 65535 || uri.getRawUserInfo() != null ||
+        (uri.getRawPath() != null && !uri.getRawPath().isEmpty() &&
+         !uri.getRawPath().equals("/")) || uri.getRawQuery() != null ||
+        uri.getRawFragment() != null)
+      throw new IllegalArgumentException("Relay endpoint must be a plain HTTPS origin");
+    String host = uri.getHost().replace("[", "").replace("]", "")
+        .toLowerCase(Locale.ROOT);
+    String authority = host.contains(":") ? "[" + host + "]" : host;
+    if (uri.getPort() > 0 && uri.getPort() != 443)
+      authority += ":" + uri.getPort();
+    return "https://" + authority;
   }
 
   @POST

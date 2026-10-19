@@ -1,6 +1,6 @@
 # ADR-011：双向建连、主控代理与 DNS 故障切换
 
-状态：接受（目标设计，待实现）。
+状态：接受；Agent 端点轮换、受限 Cloudflare DNS 直查、Rust Control Relay、Core Gateway 双 Relay 出站连接和 Agent 双 Relay 并行连接已实现代码。数据库单调 fencing epoch、Core Gateway 有界 leader 租约和 Relay 持久 epoch 已接入；Core 默认关闭的 Cloudflare DNS 协调器支持 Zone 内受管 CNAME、数据库租约、冲突拒绝、写后读回、Relay 健康/失败三次滞回、120 秒切换冷却和周期性 API 对账。Core Ed25519 签名的安装备用名单和 Agent 本地验签已实现；在线更新名单以及 Cloudflare DNS 传播/真实故障验收仍待实现。
 
 ## 决策
 

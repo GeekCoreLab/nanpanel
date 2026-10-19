@@ -1,0 +1,24 @@
+services:
+  control-relay:
+    build:
+      context: ../..
+      dockerfile: deploy/relay/Containerfile
+    image: localhost/nanpanel-control-relay:development
+    env_file:
+      - .env
+    ports:
+      - "443:50053/tcp"
+    volumes:
+      - ./certs:/run/nanpanel-relay/certs:ro
+      - relay-state:/var/lib/nanpanel-relay
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  relay-state:

@@ -1,0 +1,2 @@
+ALTER TABLE operation ADD COLUMN capability VARCHAR(64);
+ALTER TABLE operation ADD COLUMN target VARCHAR(255);

@@ -2,12 +2,16 @@
 set -Eeuo pipefail
 umask 077
 
-controller=${1:?Usage: agent-install.sh HTTPS_ORIGIN HOST_ID AGENT_ID TOKEN FINGERPRINT GATEWAY_PORT}
+controller=${1:?Usage: agent-install.sh HTTPS_ORIGIN HOST_ID AGENT_ID TOKEN FINGERPRINT GATEWAY_PORT [RELAYS FALLBACK_RELAYS SIGNATURE PUBLIC_KEY]}
 host_id=${2:?Missing host ID}
 agent_id=${3:?Missing agent ID}
 enrollment_token=${4:?Missing one-time enrollment token}
 expected_fingerprint=${5:?Missing controller certificate fingerprint}
 gateway_port=${6:?Missing Agent Gateway port}
+relay_endpoints=${7-}
+relay_fallback_endpoints=${8-}
+relay_fallback_signature=${9-}
+relay_fallback_public_key=${10-}
 controller=${controller%/}
 
 if [[ "$EUID" -ne 0 ]]; then
@@ -27,20 +31,30 @@ if ((gateway_port < 1 || gateway_port > 65535)); then
     printf 'Invalid Agent Gateway port.\n' >&2
     exit 2
 fi
+if [[ -z "$relay_fallback_endpoints" ]]; then
+    if [[ -n "$relay_fallback_signature" || -n "$relay_fallback_public_key" ]]; then
+        printf 'Relay fallback signature material requires a non-empty endpoint list.\n' >&2
+        exit 2
+    fi
+elif [[ ! "$relay_fallback_signature" =~ ^[a-fA-F0-9]{128}$ ||
+        ! "$relay_fallback_public_key" =~ ^[a-fA-F0-9]{64}$ ]]; then
+    printf 'Relay fallback signature or public key is malformed.\n' >&2
+    exit 2
+fi
 case "$(uname -m)" in
     x86_64|amd64) ;;
     *) printf 'This release currently supports Linux x86_64 only.\n' >&2; exit 2 ;;
 esac
-for command in curl openssl python3 systemctl useradd getent install; do
+for command in curl openssl python3 systemctl systemd-run useradd getent install; do
     if ! command -v "$command" >/dev/null 2>&1; then
         printf 'Required command is missing: %s\n' "$command" >&2
         exit 2
     fi
 done
 
-mapfile -t network_config < <(python3 - "$controller" "$gateway_port" <<'PY'
+mapfile -t network_config < <(python3 - "$controller" "$gateway_port" "$relay_endpoints" "$relay_fallback_endpoints" <<'PY'
 import sys
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 url = urlsplit(sys.argv[1])
 if url.scheme != "https" or not url.hostname or url.username or url.password:
@@ -53,14 +67,46 @@ if any(not (char.isalnum() or char in ".-:%") for char in hostname):
 host = f"[{hostname}]" if ":" in hostname else hostname
 print(hostname)
 print(f"https://{host}:{int(sys.argv[2])}")
+
+def normalize_relays(relay_value, label):
+    if not relay_value:
+        return ""
+    relay_urls = relay_value.split(",")
+    if not 2 <= len(relay_urls) <= 8:
+        raise SystemExit(f"{label} list must contain two to eight URLs")
+    normalized = []
+    for relay in relay_urls:
+        candidate = urlsplit(relay)
+        if (candidate.scheme != "https" or not candidate.hostname or
+                candidate.username or candidate.password or candidate.path not in ("", "/") or
+                candidate.query or candidate.fragment):
+            raise SystemExit(f"{label} endpoints must be HTTPS origins")
+        relay_host = candidate.hostname.lower()
+        if any(not (char.isalnum() or char in ".-:%") for char in relay_host):
+            raise SystemExit(f"{label} hostname contains unsupported characters")
+        port = candidate.port
+        if port is not None and not 1 <= port <= 65535:
+            raise SystemExit(f"{label} port is outside the valid range")
+        authority = f"[{relay_host}]" if ":" in relay_host else relay_host
+        if port is not None and port != 443:
+            authority += f":{port}"
+        normalized.append(urlunsplit(("https", authority, "", "", "")))
+    if len(set(normalized)) != len(normalized):
+        raise SystemExit(f"{label} list contains a duplicate origin")
+    return ",".join(normalized)
+
+print(normalize_relays(sys.argv[3], "relay"))
+print(normalize_relays(sys.argv[4], "signed fallback relay"))
 PY
 )
-if (( ${#network_config[@]} != 2 )); then
+if (( ${#network_config[@]} != 4 )); then
     printf 'Unable to parse the controller address.\n' >&2
     exit 2
 fi
 tls_domain=${network_config[0]}
 gateway_endpoint=${network_config[1]}
+relay_endpoints=${network_config[2]}
+relay_fallback_endpoints=${network_config[3]}
 
 work_dir=$(mktemp -d /tmp/nanpanel-agent-install.XXXXXX)
 trap 'rm -rf -- "$work_dir"' EXIT
@@ -82,7 +128,43 @@ if ! getent passwd "$agent_user" >/dev/null; then
 fi
 install -d -o root -g root -m 0755 /etc/nanpanel-agent
 install -d -o "$agent_user" -g "$agent_user" -m 0750 /var/lib/nanpanel-agent
-install -d -o root -g root -m 0755 /etc/nanpanel/managed
+install -d -o root -g "$agent_user" -m 0750 /etc/nanpanel/managed
+install -d -o root -g root -m 0700 /etc/nanpanel/managed/files
+if [[ -L /etc/nanpanel/managed/systemd-units.allowlist ]]; then
+    printf 'Refusing a symlinked systemd allowlist.\n' >&2
+    exit 1
+fi
+if [[ ! -e /etc/nanpanel/managed/systemd-units.allowlist ]]; then
+    install -o root -g "$agent_user" -m 0640 /dev/null \
+        /etc/nanpanel/managed/systemd-units.allowlist
+else
+    chown root:"$agent_user" /etc/nanpanel/managed/systemd-units.allowlist
+    chmod 0640 /etc/nanpanel/managed/systemd-units.allowlist
+fi
+if [[ -L /etc/nanpanel/managed/journal-units.allowlist ]]; then
+    printf 'Refusing a symlinked systemd journal allowlist.\n' >&2
+    exit 1
+fi
+if [[ ! -e /etc/nanpanel/managed/journal-units.allowlist ]]; then
+    install -o root -g "$agent_user" -m 0640 /dev/null \
+        /etc/nanpanel/managed/journal-units.allowlist
+else
+    chown root:"$agent_user" /etc/nanpanel/managed/journal-units.allowlist
+    chmod 0640 /etc/nanpanel/managed/journal-units.allowlist
+fi
+for allowlist in packages.allowlist files.allowlist containers.allowlist network.allowlist container-runtime; do
+    path="/etc/nanpanel/managed/$allowlist"
+    if [[ -L "$path" ]]; then
+        printf 'Refusing a symlinked Helper allowlist: %s\n' "$allowlist" >&2
+        exit 1
+    fi
+    if [[ ! -e "$path" ]]; then
+        install -o root -g root -m 0600 /dev/null "$path"
+    else
+        chown root:root "$path"
+        chmod 0600 "$path"
+    fi
+done
 
 curl --cacert "$controller_cert" --fail --silent --show-error --location \
     --connect-timeout 10 --max-time 120 \
@@ -157,11 +239,16 @@ agent_uid=$(id -u "$agent_user")
 agent_gid=$(id -g "$agent_user")
 cat > /etc/nanpanel-agent/agent.env <<EOF
 NANPANEL_AGENT_ENDPOINT=$gateway_endpoint
+NANPANEL_AGENT_RELAY_ENDPOINTS=$relay_endpoints
+NANPANEL_AGENT_RELAY_FALLBACK_ENDPOINTS=$relay_fallback_endpoints
+NANPANEL_AGENT_RELAY_FALLBACK_SIGNATURE=$relay_fallback_signature
+NANPANEL_AGENT_RELAY_FALLBACK_PUBLIC_KEY=${relay_fallback_public_key,,}
 NANPANEL_AGENT_TLS_DOMAIN=$tls_domain
 NANPANEL_AGENT_ID=$agent_id
 NANPANEL_AGENT_CA=/etc/nanpanel-agent/controller.pem
 NANPANEL_AGENT_CERT=/etc/nanpanel-agent/agent.crt
 NANPANEL_AGENT_KEY=/etc/nanpanel-agent/agent.key
+NANPANEL_AGENT_STATE_DIR=/var/lib/nanpanel-agent
 NANPANEL_AGENT_HEARTBEAT_SECS=15
 EOF
 chown root:"$agent_user" /etc/nanpanel-agent/agent.env
@@ -218,6 +305,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ReadWritePaths=/usr/local/bin /run/nanpanel
+ReadWritePaths=/etc/nanpanel/managed/files
+ReadWritePaths=/usr /etc /var
 ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true

@@ -2,7 +2,7 @@ openapi: 3.1.1
 info:
   title: NaNPanel 管理 API
   version: 0.1.0-draft.2
-  description: 契约优先的 Web 平台 API。管理操作使用 HttpOnly Cookie 会话和写请求 CSRF；Agent 使用独立的一次性接入码、客户端证书和 mTLS/gRPC。主机/Agent 查询、受控 Agent 注册接入、Helper 状态心跳及 Agent 异步自更新已实现；通用 systemd 服务和操作任务仍待实现。
+  description: 契约优先的 Web 平台 API。管理操作使用 HttpOnly Cookie 会话和写请求 CSRF；Agent 使用独立的一次性接入码、客户端证书和 mTLS/gRPC。受 allowlist 限制的 systemd、journal、软件包、受保护文件、容器及带自动回滚的临时防火墙操作已接入；SSH 支持 host UUID 绑定的固定探测、显式 allowlist 的 systemd 状态/有界日志读取和恢复；其他 agentless 管理仍待实现。ADR-011 安装时签名备用名单已实现；真实 DNS/故障验收仍待完成。
   x-status: draft
 servers:
 - url: http://127.0.0.1:8080
@@ -18,6 +18,8 @@ tags:
   description: Rust Agent 会话与能力
 - name: SystemServices
   description: 主机 systemd 服务管理
+- name: SshAccess
+  description: root allowlist 管理的 SSH 探测及固定 systemd 恢复操作
 - name: Operations
   description: 持久化异步操作与结果
 - name: Auth
@@ -295,9 +297,8 @@ paths:
       - SystemServices
       operationId: listSystemServices
       summary: 列出主机 systemd 服务
-      description: 这里的 SystemService 是主机 systemd unit，不是领域模型中的逻辑 Service。读取 Core 已有观测，不在 GET 中触发远程执行；主机离线可返回 observationStale=true
-        的历史结果。尚无观测返回空列表，不能据此断言主机没有服务。 登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回 401 或 403 PASSWORD_CHANGE_REQUIRED。
-      x-implementation-status: planned
+      description: 这里的 SystemService 是主机 systemd unit，不是领域模型中的逻辑 Service。读取 Core 已有观测，不在 GET 中触发远程执行；Agent 每 30 秒采集主机 systemd unit，主机离线或观测超过在线阈值时历史结果标记 observationStale=true。尚无观测返回空列表，不能据此断言主机没有服务。
+      x-implementation-status: implemented
       responses:
         '200':
           description: 成功。
@@ -347,9 +348,8 @@ paths:
       - SystemServices
       operationId: getSystemService
       summary: 查询 systemd 服务详情
-      description: 返回最近观测和平台配置版本。后续重启需将响应 ETag 原样传入 If-Match。此查询不接受任意 unit 名称或文件路径。 登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回
-        401 或 403 PASSWORD_CHANGE_REQUIRED。
-      x-implementation-status: planned
+      description: 返回最近观测和平台配置版本及 ETag。此查询不接受任意 unit 名称或文件路径。 登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回 401 或 403 PASSWORD_CHANGE_REQUIRED。
+      x-implementation-status: implemented
       responses:
         '200':
           description: 成功。
@@ -406,10 +406,10 @@ paths:
       operationId: restartSystemService
       summary: 提交服务重启任务
       description: 仅管理员且经 Core 授权的主体可操作。Core 将 UUID 映射为受管 unit，Rust Agent 经 root Helper 的本地授权执行，客户端不能传入 Shell、unit
-        名称或 root 身份。先认证授权，再检查幂等记录；匹配重放不重复执行且不因原 ETag 变化或后来离线被拒绝。新任务检查版本、能力、Agent 会话及单服务在途操作互斥，通过后持久化操作与幂等记录再下发。202
+        名称或 root 身份。先认证授权，再检查幂等记录；匹配重放不重复执行且不因原 ETag 变化或后来离线被拒绝。新任务检查版本、观测新鲜度、能力、Agent 会话及单服务在途操作互斥，通过后持久化操作与幂等记录再下发。202
         仅表示接受，不表示已重启或验证成功。接受后的断线、执行权限变化或 Helper 拒绝记录在 Operation 中。详细语义见 API README。 登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回
         401 或 403 PASSWORD_CHANGE_REQUIRED。
-      x-implementation-status: planned
+      x-implementation-status: implemented
       responses:
         '202':
           description: 新操作已接受，或重放仍未结束/结果未知的原操作。
@@ -523,6 +523,385 @@ paths:
       security:
       - cookieAuth: []
         csrfToken: []
+  /api/v1/hosts/{hostId}/services/{serviceId}/journal:
+    parameters:
+    - $ref: '#/components/parameters/HostId'
+    - $ref: '#/components/parameters/ServiceId'
+    post:
+      tags:
+      - SystemServices
+      operationId: readSystemdJournal
+      summary: 查询服务的最近 journal 记录
+      description: 仅对 root Helper 管理的 journal allowlist 中的 unit 开放。Core 检查新鲜观测、Agent/Helper 状态和已报告能力，持久化审计任务后通过 mTLS Agent 路径读取最多 12 行；结果截断并在 Operation.result 中返回。需携带 If-Match 与 Idempotency-Key。查询不会执行任意命令。
+      x-implementation-status: implemented
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SystemdJournalRequest'
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      responses:
+        '202':
+          description: 查询任务已接受。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            Retry-After:
+              $ref: '#/components/headers/RetryAfter'
+            Idempotency-Replayed:
+              $ref: '#/components/headers/IdempotencyReplayed'
+        '200':
+          description: 返回同一幂等请求的已完成任务。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+          headers:
+            Idempotency-Replayed:
+              $ref: '#/components/headers/IdempotencyReplayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '428':
+          $ref: '#/components/responses/PreconditionRequired'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/hosts/{hostId}/ssh/probe:
+    parameters:
+    - $ref: '#/components/parameters/HostId'
+    post:
+      tags: [SshAccess]
+      operationId: probeHostSshAccess
+      summary: 使用 root allowlist SSH 别名探测主机可达性
+      description: alias 必须与此 hostId 在 root 管理的 /etc/nanpanel/ssh-aliases.allowlist 中精确绑定；每行格式为 <host-UUID> <alias>，默认为空。Core 不保存私钥或密码；OpenSSH 从 root 管理的固定配置和密钥代理读取凭据，使用固定 known_hosts，强制 BatchMode 与 StrictHostKeyChecking，并只执行固定的 true 命令。操作结果写入审计。此端点只验证连通性，不提供任意 SSH 命令。
+      x-implementation-status: implemented
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SshProbeRequest'
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      responses:
+        '200':
+          description: SSH host key 验证及固定探测成功。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SshProbeResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '502':
+          description: SSH 连通性、host key 或固定命令验证失败。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/hosts/{hostId}/ssh/systemd/restart:
+    parameters:
+    - $ref: '#/components/parameters/HostId'
+    post:
+      tags: [SshAccess]
+      operationId: restartHostSystemdOverSsh
+      summary: 通过受限 SSH 通道恢复 allowlist systemd unit
+      description: 仅执行固定的 sudo systemctl restart 与 is-active 校验，不接受远程命令文本。hostId 必须绑定 root 管理的 SSH alias，unit 必须在 /etc/nanpanel/ssh-units.allowlist 中以 <host-UUID> <unit.service> 显式授权；文件缺失或为空时默认禁用。强制使用固定 known_hosts、BatchMode、无转发和无 TTY。操作持久化为 Operation 并审计；连接超时或 SSH 返回 255 时置为 UNKNOWN，不得换新幂等键重试。
+      x-implementation-status: implemented
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SshSystemdRestartRequest'
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      responses:
+        '200':
+          description: SSH 重启任务已有可靠终态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+        '202':
+          description: 操作结果仍在等待或需要人工对账。
+          headers:
+            Location:
+              schema: { type: string }
+            Retry-After:
+              schema: { type: integer }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/hosts/{hostId}/ssh/systemd/status:
+    parameters:
+    - $ref: '#/components/parameters/HostId'
+    post:
+      tags: [SshAccess]
+      operationId: readHostSystemdStatusOverSsh
+      summary: 通过受限 SSH 读取 allowlist 服务状态
+      description: 仅执行固定 systemctl show 命令，unit 必须同时获 host-bound SSH alias 和 root 管理的 ssh-units.allowlist 授权。SSH 输出限制为 4 KiB，连接超时 10 秒；仅写审计，不创建可执行操作。
+      x-implementation-status: implemented
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SshSystemdDiagnosticRequest'
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      responses:
+        '200':
+          description: 返回固定 systemd 属性。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SshSystemdStatusResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '502':
+          description: SSH 或远端 systemd 状态读取失败。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/hosts/{hostId}/ssh/systemd/journal:
+    parameters:
+    - $ref: '#/components/parameters/HostId'
+    post:
+      tags: [SshAccess]
+      operationId: readHostSystemdJournalOverSsh
+      summary: 通过受限 SSH 读取 allowlist 服务日志
+      description: 仅执行固定 journalctl 命令；unit 必须同时获 host-bound SSH alias 和 root 管理 allowlist 授权。请求最多 100 行，响应最多 24 KiB，连接超时 12 秒；日志内容不会写入审计摘要。
+      x-implementation-status: implemented
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SshSystemdJournalRequest'
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      responses:
+        '200':
+          description: 返回有界日志和截断标记。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SshSystemdJournalResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '502':
+          description: SSH 或远端 journal 读取失败。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/hosts/{hostId}/ssh/agent/install:
+    parameters:
+    - $ref: '#/components/parameters/HostId'
+    post:
+      tags: [SshAccess]
+      operationId: installAgentOverHostSsh
+      summary: 使用一次性接入码通过受限 SSH 初始化 Agent
+      description: 仅允许 hostId 对应的 root-managed SSH alias。Core 通过固定 SSH 命令执行随镜像打包且 root 拥有的 agent-install.sh；脚本内容不可由请求控制，controller origin 只能来自服务端配置。一次性 token 通过 SSH stdin 传递，不进入 ssh argv、Operation、审计或日志。任务持久化并等待首次 mTLS 心跳；超时或已兑换但未能验证时标记 UNKNOWN，必须先对账。alias allowlist 默认空，Controller origin 未配置为 HTTPS 时功能关闭。
+      x-implementation-status: implemented
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SshAgentInstallRequest'
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      responses:
+        '202':
+          description: SSH 初始化已排队或等待 Agent 首次心跳确认。
+          headers:
+            Location:
+              schema: { type: string }
+            Retry-After:
+              schema: { type: integer }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+        '200':
+          description: 相同幂等请求已有可靠终态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/hosts/{hostId}/operations:
+    parameters:
+    - $ref: '#/components/parameters/HostId'
+    post:
+      tags: [Operations]
+      operationId: submitHostHelperOperation
+      summary: 提交受 allowlist 限制的主机 Helper 操作
+      description: 支持 allowlist 软件包安装、受保护文件原子写入、受限 Docker/Podman 容器操作和限定接口/协议/端口的临时防火墙放行。网络规则必须先成功调度 systemd 定时回滚，并由最小权限工作进程核验；本地 allowlist 默认为空。Core 检查主机版本、Agent 能力、在线状态和 Helper 状态；Helper 再独立检查 root 管理的本地 allowlist。无任意 Shell、任意路径、任意镜像或任意网络参数入口。结果通过 durable Operation 回传。
+      x-implementation-status: implemented
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HostHelperOperationRequest'
+            examples:
+              installAllowlistedPackage:
+                value:
+                  capability: package.install
+                  target: ''
+                  payload:
+                    packages: [curl]
+                  reason: Install an approved diagnostic utility
+                  timeoutSeconds: 300
+                  expectedGeneration: 1
+              listAllowedContainers:
+                value:
+                  capability: container.list
+                  target: ''
+                  reason: Inspect managed workload state
+                  timeoutSeconds: 60
+                  expectedGeneration: 1
+              temporaryFirewallAllow:
+                value:
+                  capability: network.firewall.expose
+                  target: ssh-test
+                  payload:
+                    rollbackSeconds: 90
+                  reason: Verify a restricted management path
+                  timeoutSeconds: 60
+                  expectedGeneration: 1
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      responses:
+        '202':
+          description: 新的 Helper 操作已接受。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            Retry-After:
+              $ref: '#/components/headers/RetryAfter'
+            Idempotency-Replayed:
+              $ref: '#/components/headers/IdempotencyReplayed'
+        '200':
+          description: 幂等键命中的已完成操作。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+          headers:
+            Idempotency-Replayed:
+              $ref: '#/components/headers/IdempotencyReplayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/operations:
   /api/v1/operations:
     get:
       tags:
@@ -531,7 +910,7 @@ paths:
       summary: 列出操作任务
       description: 仅返回当前主体有权查看的操作。按 UUID 升序分页，不承诺数据库快照；界面需要最近操作时可按返回字段自行展示，不依赖列表默认时间倒序。 登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回
         401 或 403 PASSWORD_CHANGE_REQUIRED。
-      x-implementation-status: planned
+      x-implementation-status: implemented
       responses:
         '200':
           description: 成功。
@@ -599,7 +978,7 @@ paths:
       summary: 查询操作执行与验证结果
       description: 轮询建议间隔 2 秒。FAILED / UNKNOWN 仍返回 200，HTTP 成功不等于操作成功。SUCCEEDED / FAILED / CANCELLED 为终态；UNKNOWN
         等待 Agent 持久化执行记录对账，不得当成可安全重试的失败。 登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回 401 或 403 PASSWORD_CHANGE_REQUIRED。
-      x-implementation-status: planned
+      x-implementation-status: implemented
       responses:
         '200':
           description: 成功。
@@ -1538,7 +1917,7 @@ paths:
       - AdminAudit
       operationId: listAuditEvents
       summary: 查询审计事件
-      description: 只读且按事件 UUID 升序游标分页，UI 不得假设默认时间倒序。当前记录认证、会话、密码和管理员账号/平台设置变更，以及登录、来源、CSRF、未认证和账号状态拒绝；主机服务操作审计待运维 API 实现后接入。不记录密码、Cookie、CSRF、私钥或原始请求体。时间范围为
+      description: 只读且按事件 UUID 升序游标分页，UI 不得假设默认时间倒序。记录认证、会话、密码、管理员账号/平台设置及主机服务操作；UNKNOWN 表示任务是否执行尚未确认。不记录密码、Cookie、CSRF、私钥或原始请求体。时间范围为
         [from,to)，from 必须早于 to。 登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回 401 或 403 PASSWORD_CHANGE_REQUIRED。
       x-implementation-status: implemented
       responses:
@@ -1596,6 +1975,7 @@ paths:
           - DENIED
           - FAILED
           - ACCEPTED
+          - UNKNOWN
       - name: from
         in: query
         schema:
@@ -2152,6 +2532,7 @@ components:
       - agentId
       - lastSeenAt
       - createdAt
+      - generation
       properties:
         id:
           type: string
@@ -2167,6 +2548,11 @@ components:
           type:
           - string
           - 'null'
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+          description: 平台配置代次；提交 Helper 操作时必须回传，防止基于过期能力快照执行。
         status:
           type: string
           enum:
@@ -2205,7 +2591,7 @@ components:
     AgentEnrollmentCreated:
       type: object
       additionalProperties: false
-      required: [enrollmentId, hostId, agentId, token, expiresAt, controllerFingerprint, gatewayPort]
+      required: [enrollmentId, hostId, agentId, token, expiresAt, controllerFingerprint, gatewayPort, relayEndpoints, relayFallback]
       properties:
         enrollmentId:
           type: string
@@ -2231,6 +2617,16 @@ components:
           type: integer
           minimum: 1
           maximum: 65535
+        relayEndpoints:
+          type: array
+          maxItems: 8
+          items:
+            type: string
+            format: uri
+            pattern: '^https://'
+          description: 配置的 Control Relay HTTPS 源站；空数组表示仅使用直接 Gateway。
+        relayFallback:
+          $ref: '#/components/schemas/RelayFallbackManifest'
     RedeemAgentEnrollmentRequest:
       type: object
       additionalProperties: false
@@ -2258,19 +2654,47 @@ components:
     AgentInstallation:
       type: object
       additionalProperties: false
-      required: [controllerFingerprint, gatewayPort, installerPath, agentDownloadPath, helperDownloadPath]
+      required: [controllerFingerprint, gatewayPort, relayEndpoints, relayFallback, installerPath, agentDownloadPath, helperDownloadPath]
       properties:
         controllerFingerprint:
           type: string
           pattern: '^[a-f0-9]{64}$'
         gatewayPort:
           type: integer
+        relayEndpoints:
+          type: array
+          maxItems: 8
+          items:
+            type: string
+            format: uri
+            pattern: '^https://'
+        relayFallback:
+          $ref: '#/components/schemas/RelayFallbackManifest'
         installerPath:
           type: string
         agentDownloadPath:
           type: string
         helperDownloadPath:
           type: string
+    RelayFallbackManifest:
+      type: object
+      additionalProperties: false
+      required: [endpoints, signature, publicKey]
+      properties:
+        endpoints:
+          type: array
+          maxItems: 8
+          items:
+            type: string
+            format: uri
+            pattern: '^https://'
+          description: Root-configured fallback Relay origins signed over their normalized ordered list with Ed25519.
+        signature:
+          type: string
+          pattern: '^(|[a-fA-F0-9]{128})$'
+        publicKey:
+          type: string
+          pattern: '^(|[a-fA-F0-9]{64})$'
     AgentUpdateOperation:
       type: object
       additionalProperties: false
@@ -2403,6 +2827,7 @@ components:
             type: string
             enum:
             - RESTART
+            - READ_JOURNAL
           description: 结合调用者权限与最近能力信息的 UI 提示；执行时必须重新授权。
         observationStale:
           type: boolean
@@ -2424,6 +2849,238 @@ components:
           maximum: 300
           default: 60
           description: 包含排队、执行与验证的总期限。截止时间由服务端在首次接受请求时计算，重试不延长。
+    SystemdJournalRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - reason
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: 审计用途，去除首尾空白后不得为空。
+    HostHelperOperationRequest:
+      type: object
+      additionalProperties: false
+      required: [capability, target, reason, expectedGeneration]
+      properties:
+        capability:
+          type: string
+          enum:
+          - package.install
+          - file.write.protected
+          - container.list
+          - container.logs
+          - container.start
+          - container.stop
+          - container.deploy
+          - network.firewall.expose
+        target:
+          type: string
+          maxLength: 128
+          description: 容器和网络操作为 allowlist 名称；文件写入为单一文件名；其余能力为空字符串。
+        payload:
+          oneOf:
+          - $ref: '#/components/schemas/PackageInstallPayload'
+          - $ref: '#/components/schemas/ProtectedFilePayload'
+          - $ref: '#/components/schemas/NetworkFirewallPayload'
+          - type: 'null'
+          description: 软件包、受保护文件和临时防火墙操作接受对应参数对象。
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+        timeoutSeconds:
+          type: integer
+          minimum: 5
+          maximum: 300
+          default: 60
+        expectedGeneration:
+          type: integer
+          format: int64
+          minimum: 1
+          description: 来自主机详情快照；变化时拒绝执行并要求刷新。
+    SshProbeRequest:
+      type: object
+      additionalProperties: false
+      required: [alias, reason]
+      properties:
+        alias:
+          type: string
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_.@-]{0,99}$'
+          description: 必须在主控 root 管理的 alias allowlist 中绑定到路径 hostId 的唯一 SSH 别名。
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+    SshProbeResult:
+      type: object
+      additionalProperties: false
+      required: [hostId, alias, status, verifiedAt, evidence]
+      properties:
+        hostId:
+          type: string
+          format: uuid
+        alias:
+          type: string
+        status:
+          type: string
+          const: SUCCEEDED
+        verifiedAt:
+          type: string
+          format: date-time
+        evidence:
+          type: string
+    SshSystemdRestartRequest:
+      type: object
+      additionalProperties: false
+      required: [unitName, reason]
+      properties:
+        unitName:
+          type: string
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,247}\.service$'
+          description: Must exactly match a unit in the root-managed host-bound SSH allowlist.
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: Audited operator reason; control characters are rejected.
+    SshSystemdRestartResult:
+      type: object
+      additionalProperties: false
+      required: [unitName, active, verifiedAt]
+      properties:
+        unitName:
+          type: string
+        active:
+          type: boolean
+          const: true
+        verifiedAt:
+          type: string
+          format: date-time
+    SshSystemdDiagnosticRequest:
+      type: object
+      additionalProperties: false
+      required: [unitName, reason]
+      properties:
+        unitName:
+          type: string
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,247}\.service$'
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+    SshSystemdJournalRequest:
+      type: object
+      additionalProperties: false
+      required: [unitName, reason, lines]
+      properties:
+        unitName:
+          type: string
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,247}\.service$'
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+        lines:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+    SshSystemdStatusResult:
+      type: object
+      additionalProperties: false
+      required: [hostId, unitName, loadState, activeState, subState, observedAt]
+      properties:
+        hostId: { type: string, format: uuid }
+        unitName: { type: string }
+        loadState: { type: string }
+        activeState: { type: string }
+        subState: { type: string }
+        observedAt: { type: string, format: date-time }
+    SshSystemdJournalResult:
+      type: object
+      additionalProperties: false
+      required: [hostId, unitName, requestedLines, output, truncated, observedAt]
+      properties:
+        hostId: { type: string, format: uuid }
+        unitName: { type: string }
+        requestedLines: { type: integer, minimum: 1, maximum: 100 }
+        output: { type: string, maxLength: 24576 }
+        truncated: { type: boolean }
+        observedAt: { type: string, format: date-time }
+    SshAgentInstallResult:
+      type: object
+      additionalProperties: false
+      required: [agentId, status, verifiedAt]
+      properties:
+        agentId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          const: ONLINE
+        verifiedAt:
+          type: string
+          format: date-time
+    SshAgentInstallRequest:
+      type: object
+      additionalProperties: false
+      required: [enrollmentId, agentId, alias, token, reason]
+      properties:
+        enrollmentId:
+          type: string
+          format: uuid
+        agentId:
+          type: string
+          format: uuid
+        alias:
+          type: string
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_.@-]{0,99}$'
+          description: Must match the root-managed alias bound to hostId.
+        token:
+          type: string
+          minLength: 40
+          maxLength: 128
+          pattern: '^[A-Za-z0-9_-]{40,128}$'
+          description: 仅匹配数据库中的一次性 enrollment token 哈希；请求结束后不持久化。
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+    PackageInstallPayload:
+      type: object
+      additionalProperties: false
+      required: [packages]
+      properties:
+        packages:
+          type: array
+          minItems: 1
+          maxItems: 16
+          uniqueItems: true
+          items:
+            type: string
+            pattern: '^[A-Za-z0-9][A-Za-z0-9+_.:-]{0,127}$'
+    ProtectedFilePayload:
+      type: object
+      additionalProperties: false
+      required: [content]
+      properties:
+        content:
+          type: string
+          maxLength: 32768
+          description: UTF-8 文件内容；目标文件名须在 root-managed files.allowlist 中。
+    NetworkFirewallPayload:
+      type: object
+      additionalProperties: false
+      required: [rollbackSeconds]
+      properties:
+        rollbackSeconds:
+          type: integer
+          minimum: 30
+          maximum: 300
+          description: 网络规则自动回滚时间；Helper 在应用规则前先启动受限 systemd 回滚单元。
     OperationError:
       type: object
       additionalProperties: false
@@ -2474,6 +3131,43 @@ components:
           type: string
           minLength: 1
           description: 脱敏后的执行与验证摘要。ACTIVE 仅证明 systemd 服务状态，不证明 HTTP 或其他业务端到端健康。
+    SystemdJournalReadResult:
+      type: object
+      additionalProperties: false
+      required:
+      - serviceId
+      - unitName
+      - journal
+      - retrievedAt
+      properties:
+        serviceId:
+          type: string
+          format: uuid
+        unitName:
+          type: string
+        journal:
+          type: string
+          maxLength: 2000
+          description: 最多 12 行，并受 Agent 结果大小限制；内容可能含敏感数据，按管理员权限保护。
+        retrievedAt:
+          type: string
+          format: date-time
+    HostHelperOperationResult:
+      type: object
+      additionalProperties: false
+      required: [capability, target, output, completedAt]
+      properties:
+        capability:
+          type: string
+        target:
+          type: string
+        output:
+          type: string
+          maxLength: 2000
+          description: Bounded Helper output; package or container logs may include sensitive values.
+        completedAt:
+          type: string
+          format: date-time
     Operation:
       type: object
       additionalProperties: false
@@ -2483,6 +3177,8 @@ components:
       - hostId
       - agentId
       - serviceId
+      - capability
+      - target
       - idempotencyKey
       - requestedBy
       - reason
@@ -2502,16 +3198,33 @@ components:
           format: uuid
         kind:
           type: string
-          const: SYSTEM_SERVICE_RESTART
+          enum:
+          - SYSTEM_SERVICE_RESTART
+          - SYSTEMD_JOURNAL_READ
+          - HOST_HELPER_OPERATION
+          - SSH_SYSTEMD_RESTART
+          - SSH_AGENT_INSTALL
         hostId:
           type: string
           format: uuid
         agentId:
-          type: string
+          type:
+          - string
+          - 'null'
           format: uuid
         serviceId:
-          type: string
+          type:
+          - string
+          - 'null'
           format: uuid
+        capability:
+          type:
+          - string
+          - 'null'
+        target:
+          type:
+          - string
+          - 'null'
         idempotencyKey:
           type: string
           minLength: 1
@@ -2522,7 +3235,9 @@ components:
           type: string
           minLength: 1
         expectedGeneration:
-          type: integer
+          type:
+          - integer
+          - 'null'
           minimum: 1
         phase:
           type: string
@@ -2564,6 +3279,10 @@ components:
         result:
           oneOf:
           - $ref: '#/components/schemas/ServiceRestartResult'
+          - $ref: '#/components/schemas/SystemdJournalReadResult'
+          - $ref: '#/components/schemas/HostHelperOperationResult'
+          - $ref: '#/components/schemas/SshSystemdRestartResult'
+          - $ref: '#/components/schemas/SshAgentInstallResult'
           - type: 'null'
         error:
           oneOf:
@@ -2602,7 +3321,12 @@ components:
         then:
           properties:
             result:
-              $ref: '#/components/schemas/ServiceRestartResult'
+              oneOf:
+              - $ref: '#/components/schemas/ServiceRestartResult'
+              - $ref: '#/components/schemas/SystemdJournalReadResult'
+              - $ref: '#/components/schemas/HostHelperOperationResult'
+              - $ref: '#/components/schemas/SshSystemdRestartResult'
+              - $ref: '#/components/schemas/SshAgentInstallResult'
             error:
               type: 'null'
             finishedAt:
@@ -3090,6 +3814,7 @@ components:
           - DENIED
           - FAILED
           - ACCEPTED
+          - UNKNOWN
         traceId:
           type: string
           minLength: 1

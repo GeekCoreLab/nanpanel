@@ -8,6 +8,11 @@ service AgentGateway {
   rpc Session(stream AgentMessage) returns (stream ControlMessage);
 }
 
+service ControlRelay {
+  rpc AgentSession(stream AgentMessage) returns (stream RelayMessage);
+  rpc CoreSession(stream CoreMessage) returns (stream RelayMessage);
+}
+
 message AgentMessage {
   string agent_id = 1;
   uint64 sequence = 2;
@@ -25,6 +30,17 @@ message Heartbeat {
   string arch = 4;
   repeated string capabilities = 5;
   string helper_status = 6;
+  repeated SystemdService systemd_services = 7;
+  int64 systemd_observed_at_epoch_ms = 8;
+}
+
+message SystemdService {
+  string unit_name = 1;
+  string display_name = 2;
+  string active_state = 3;
+  string sub_state = 4;
+  bool restart_allowed = 5;
+  bool journal_read_allowed = 6;
 }
 
 message OperationResult {
@@ -40,4 +56,58 @@ message ControlMessage {
   string capability = 3;
   string target = 4;
   int64 deadline_epoch_ms = 5;
+  bool operation_result_ack = 6;
+  string payload_json = 7;
+}
+
+message CoreMessage {
+  oneof payload {
+    RelayCoreHello hello = 1;
+    RelayControl control = 2;
+    RelayAcknowledge acknowledge = 3;
+    RelayAgentAuthorization agent_authorization = 4;
+  }
+}
+
+message RelayCoreHello {
+  string cluster_id = 1;
+  uint64 epoch = 2;
+}
+
+message RelayControl {
+  string agent_id = 1;
+  ControlMessage control = 2;
+}
+
+message RelayAcknowledge {
+  string agent_id = 1;
+  string operation_id = 2;
+  string idempotency_key = 3;
+}
+
+message RelayAgentAuthorization {
+  string agent_id = 1;
+  string certificate_fingerprint = 2;
+  bool allowed = 3;
+}
+
+message RelayMessage {
+  oneof payload {
+    RelayHelloAck hello_ack = 1;
+    RelayedAgentMessage agent_message = 2;
+    ControlMessage control = 3;
+  }
+}
+
+message RelayHelloAck {
+  string relay_id = 1;
+  string cluster_id = 2;
+  uint64 core_epoch = 3;
+  uint32 max_frame_bytes = 4;
+}
+
+message RelayedAgentMessage {
+  string agent_id = 1;
+  string certificate_fingerprint = 2;
+  AgentMessage message = 3;
 }

@@ -2,7 +2,7 @@
 
 [openapi.yaml](openapi.yaml) 是 Web → Core HTTP API 的设计基线，格式为 [OpenAPI 3.1.1](https://spec.openapis.org/oas/v3.1.1.html)。可导入支持该版本的 API 编辑器、文档或 Mock 工具。
 
-版本：`0.1.0-draft.2`。当前已实现 `/auth/*`、管理员与审计 API、主机和 Agent 查询、受控 Agent 接入、Helper 状态心跳及受限 Agent 异步自更新；通用 systemd 服务、操作任务和拓扑部署仍待实现。操作级 `x-implementation-status` 区分已有端点与规划端点。Agent 接入不授予任意远程命令或 root shell。
+版本：`0.1.0-draft.2`。当前已实现 `/auth/*`、管理员与审计 API、主机和 Agent 查询、受控 Agent 接入、Helper 状态心跳、systemd 服务观测、allowlist 重启与有界 journal 查询、通用受限 Helper 操作、限时防火墙放行、host-bound SSH 固定探测/allowlist systemd 状态和有界日志读取/系统服务救援/固定脚本 Agent 初始化及操作任务查询；Relay 双向流、安装时签名备用名单和 DNS 故障滞回/冷却/恢复对账已有代码实现，Cloudflare 公共 DNS 传播与真实故障验收、其他 agentless 管理和拓扑部署仍待完成。操作级 `x-implementation-status` 区分已有端点与规划端点。Agent 接入不授予任意远程命令或 root shell。
 
 ## 接口范围
 
@@ -27,18 +27,25 @@
 | GET | `/api/v1/hosts/{hostId}/services` | 主机 systemd 服务列表 |
 | GET | `/api/v1/hosts/{hostId}/services/{serviceId}` | 服务观测、可用动作及 ETag |
 | POST | `/api/v1/hosts/{hostId}/services/{serviceId}/restart` | 接受服务重启任务 |
+| POST | `/api/v1/hosts/{hostId}/services/{serviceId}/journal` | 查询 allowlist 中服务最近 12 行 journal |
+| POST | `/api/v1/hosts/{hostId}/operations` | 提交 allowlist 软件包、受保护文件、受限容器或带自动回滚的临时防火墙操作 |
+| POST | `/api/v1/hosts/{hostId}/ssh/probe` | 使用与 host UUID 绑定的 root-managed alias、固定 `known_hosts` 执行只读 SSH 可达性探测 |
+| POST | `/api/v1/hosts/{hostId}/ssh/systemd/status` | 对 host-bound allowlist unit 执行固定 `systemctl show`，返回固定状态字段 |
+| POST | `/api/v1/hosts/{hostId}/ssh/systemd/journal` | 对 host-bound allowlist unit 执行固定、有行数和字节上限的 journal 查询 |
+| POST | `/api/v1/hosts/{hostId}/ssh/systemd/restart` | 仅对 `/etc/nanpanel/ssh-units.allowlist` 中 host-bound unit 执行固定 SSH systemd 重启及 active 校验 |
+| POST | `/api/v1/hosts/{hostId}/ssh/agent/install` | 使用同一 host-bound alias、一次性 enrollment token 和镜像内固定安装脚本初始化 Agent |
 | GET | `/api/v1/operations` | 操作列表，支持主机、状态筛选 |
 | GET | `/api/v1/operations/{operationId}` | 查询执行与验证结果 |
 
 这里的 `SystemService` 是主机 systemd unit，与平台逻辑服务 `Service` 分开。URL 使用平台 UUID，服务端解析受管 unit，不接受任意命令或客户端指定的主机身份。
 
-Agent 接入码由数据库保存 SHA-256 哈希，明文仅在创建响应中出现一次，15 分钟到期且只能兑换一次。安装器在发出接入码前先用 UI 展示的证书 SHA-256 指纹校验控制器证书；Agent 在本机生成私钥和 CSR，Core 只签发 CN 与预分配 Agent UUID 一致的客户端证书。mTLS Gateway 校验证书链，并将证书指纹随心跳交给 Core 再次匹配登记记录。Agent 还上报 Helper 状态和 `agent.self_update` 能力；更新任务经 Core 持久化并由本机 root Helper 从固定控制器下载、原子替换 Agent。证书吊销/续期、通用 systemd 服务观测和其他特权能力仍未实现。Agent gRPC 协议见 [agent.proto](../agent/protocol/agent.proto)。
+Agent 接入码由数据库保存 SHA-256 哈希，明文仅在创建响应中出现一次，15 分钟到期且只能兑换一次。安装器在发出接入码前先用 UI 展示的证书 SHA-256 指纹校验控制器证书；Agent 在本机生成私钥和 CSR，Core 只签发 CN 与预分配 Agent UUID 一致的客户端证书。mTLS Gateway 校验证书链，并将证书指纹随心跳交给 Core 再次匹配登记记录。安装响应会携带可选的 2–8 个 Relay HTTPS 源站和由 Core Ed25519 签名的备用 Relay 清单，安装器将其写入 Agent 环境配置；Agent 启动时验签，清单篡改或签名无效时拒绝启动；Relay 不授权身份，Core 心跳校验后才开放控制路由。Agent 上报 Helper 状态、主机清单和 systemd 服务观测；更新任务经 Core 持久化并由本机 root Helper 从固定控制器下载、原子替换 Agent。root Helper 对 systemd restart/journal、软件包名称、受保护文件名、容器镜像/端口和临时防火墙接口/协议/端口使用独立 root 管理 allowlist；安装器创建的 allowlist 默认全部为空。容器操作限定为列表、100 行日志、启停以及 loopback 端口、只读根文件系统、丢弃全部 Linux capabilities 的预设部署。防火墙规则在 30–300 秒后自动回滚，只有在定时器成功启动后才会应用，并通过瞬时最小权限 worker 验证。journal 最多返回 12 行；操作结果经 Agent 本地持久化，Core 确认后删除。SSH 支持固定 true 可达性探测、host-bound allowlist 的固定 systemctl 状态/有界 journal 读取与 restart/is-active 救援，以及固定 `agent-install.sh` 初始化。初始化只接受未过期、未兑换且与 host/agent ID 匹配的一次性接入码；token 经 SSH stdin 传递，不进入进程参数、操作记录或审计。安装任务持久化、幂等并等待 mTLS 心跳；SSH 断线或 token 已兑换但未见心跳时标记 UNKNOWN。所有 SSH 动作使用固定 known_hosts，不保存 SSH 私钥或密码，alias allowlist 默认为空。其他 agentless 管理能力、证书吊销/续期和通用路由配置仍未实现。Agent gRPC 协议见 [agent.proto](../agent/protocol/agent.proto)。
 
 ## 认证、授权与读取
 
 Web 使用服务端不透明 Cookie 会话与 CSRF 校验，已替换脚手架 Basic 认证；详见 [Web 平台 API](web-platform.md)。管理员创建接入码需已完成首次改密；安装器兑换端点只接受无浏览器 Cookie 的 Bearer 接入码，不能访问 Web 管理资源。Agent 使用独立 mTLS 身份。
 
-Core 根据已认证主体执行 `subject/action/resource` 授权，Agent/root Helper 再验证本地操作范围。`allowedActions` 是 UI 提示，不能作为执行授权凭证。操作记录的 `requestedBy` 由 Core 填充，不接受客户端提供。
+Core 根据已认证主体执行 `subject/action/resource` 授权，Agent/root Helper 再验证本地操作范围。网络规则固定来自 root 管理的空白默认 `network.allowlist`，要求先创建 30–300 秒定时回滚，再由仅获 `CAP_NET_ADMIN` 的瞬时 worker 应用并核验；不接受客户端任意网络参数。SSH alias 通过 Core 主机 UUID allowlist 精确绑定，并使用固定 root-managed OpenSSH 配置和 host key 清单；SSH systemd 状态/日志/重启均要求 unit 出现在 host-bound `ssh-units.allowlist`，文件缺失或为空时默认拒绝。日志查询最多 100 行、24 KiB，审计记录原因但不保存日志正文。`allowedActions` 是 UI 提示，不能作为执行授权凭证。操作记录的 `requestedBy` 由 Core 填充，不接受客户端提供。
 
 主机状态描述管理通道，不能推断已有业务链路已中断或已恢复。服务 GET 返回 Core 的最近观测，不触发远程命令；离线或过期观测标记 `observationStale=true`。空列表只表示没有可返回的已发现资源。UUID 不存在或服务不属于路径指定主机返回 404。
 
@@ -49,8 +56,8 @@ Core 根据已认证主体执行 `subject/action/resource` 授权，Agent/root H
 1. 读取服务详情，取得完整表示对应的不透明强 `ETag`。`generation` 是管理配置/策略版本；ETag 还涵盖观测和调用者授权视图，不能由前端自行用 generation 拼接。
 2. 提交 JSON 请求体 `reason` 和可选 `timeoutSeconds`，必须携带 `Idempotency-Key` 与 `If-Match`（原样保留 ETag 的双引号）。本版不支持 `If-Match: *` 或多个 ETag。
 3. Core 先认证授权，再在原主体、方法及路径范围内检查幂等记录。相同键、语义一致的规范化请求体（含默认值）和完全相同的 If-Match 返回原任务，不重复执行。幂等冲突返回 409 `IDEMPOTENCY_KEY_REUSED`。
-4. 新请求校验版本、Agent 会话、已报告能力、已知 Helper 状态及服务在途操作锁。未提供 If-Match 返回 428，过期返回 412；Agent/Helper 已知不可用返回 503，能力不支持返回 422。这些前置拒绝不新建任务。连接中断时客户端不能据此推断请求未接受，应使用原键重试。
-5. Core 原子持久化任务、幂等记录及目标互斥状态后才允许下发；同一服务的在途或 UNKNOWN 任务阻止另一个重启，返回 409 `OPERATION_IN_PROGRESS`。Agent/Helper 使用持久化操作 ID 和幂等记录去重，不能仅依赖 HTTP 层去重。
+4. 新请求校验版本、systemd 观测新鲜度、Agent 会话、已报告能力、已知 Helper 状态及服务在途操作锁。未提供 If-Match 返回 428，过期返回 412；观测已过期或 Agent/Helper 已知不可用返回 503，能力不支持返回 422。这些前置拒绝不新建任务。连接中断时客户端不能据此推断请求未接受，应使用原键重试。
+5. Core 原子持久化任务和幂等记录后才允许下发；同一服务的在途或 UNKNOWN 任务阻止另一个重启，返回 409 `OPERATION_IN_PROGRESS`。Core 对相同 HTTP 请求及结果回调做持久化去重。Agent 在执行前持久化 claim、执行后持久化结果，只有 Core 确认回调后才删除结果；重连会重放未确认结果，未完成的旧 claim 返回 UNKNOWN 且不重复执行。此机制已有测试，仍待两台真实主机的故障验收。
 6. 新接受任务返回 202，`Location` 指向任务，`Retry-After` 建议轮询间隔。重放未结束或 UNKNOWN 任务也返回 202；重放 SUCCEEDED/FAILED/CANCELLED 任务返回 200。重放响应 `Idempotency-Replayed=true`，首次接受为 false。无论重放时主机是否离线或 ETag 是否变化，都先返回匹配原记录，前提是调用者仍有权限。
 
 任务与幂等记录保留至少 7 天，非终态不能提前清除。相同键超出记录保留窗口不能保证去重，客户端不得依赖无限期幂等。希望在失败后再次执行时，应先确认原任务结果、刷新服务详情，再使用新键；结果未知时不得盲目换键。
@@ -64,7 +71,7 @@ Core 根据已认证主体执行 `subject/action/resource` 授权，Agent/root H
 - `CANCELLED`：系统在下发前取消的预留终态，`result=null`、`error=null`、`finishedAt` 非空；本版无客户端取消接口，不能用于表示已发出的命令被撤销。
 - `UNKNOWN`：可能已执行但缺少可靠结果，`error.executionOutcome=UNCERTAIN`、`result=null`、`finishedAt=null`；保留目标互斥锁，等待 Agent/Helper 持久化执行记录与后续观测对账，可转为 SUCCEEDED 或 FAILED。仅看到服务 ACTIVE 不能证明指定重启任务确实执行过。
 
-PENDING/RUNNING 的 `result` 和 `error` 均为 null，`finishedAt=null`。SUCCEEDED/FAILED/CANCELLED 为终态，不再变化。初次接受为 PENDING，运行后更新 RUNNING；网络中断不得自动改成 FAILED。重启本身通常没有可撤销的补偿步骤，不能承诺恢复旧进程；`COMPENSATE` 仅为通用任务阶段预留。
+PENDING/RUNNING 的 `result` 和 `error` 均为 null，`finishedAt=null`。SUCCEEDED/FAILED/CANCELLED 为终态，不再变化。当前 systemd 重启在 Core 写入时直接进入 RUNNING；网络中断不得自动改成 FAILED。重启本身通常没有可撤销的补偿步骤，不能承诺恢复旧进程；`COMPENSATE` 仅为通用任务阶段预留。
 
 `timeoutSeconds` 默认 60 秒，可选 5–300 秒，包含排队、执行和验证；第一次接受时计算 `deadlineAt`，重试不延长。到期前确定未下发可记 FAILED/DEADLINE_EXCEEDED；已下发但执行结果无法确定则记 UNKNOWN，而非宣称失败或自动重新执行。Helper 也须执行截止时间约束。
 
@@ -82,7 +89,7 @@ python -m venv /tmp/nanpanel-api-check
 /tmp/nanpanel-api-check/bin/python -m openapi_spec_validator api/openapi.yaml
 ```
 
-主机列表、主机详情和 Agent 详情从持久化 inventory 表读取；Agent 注册接入和心跳写入已实现。Helper 观测、systemd 服务与操作任务仍待实现。
+主机列表、主机详情、Agent 详情、systemd 服务观测及操作任务从数据库读取；Agent 注册接入和心跳写入已实现。服务观测不代表业务健康。systemd 受限重启和 journal 查询已接通 Core、Gateway、Agent 和 Helper，但尚未完成两台独立主机的部署验收。
 
 ## 拓扑期望草稿
 

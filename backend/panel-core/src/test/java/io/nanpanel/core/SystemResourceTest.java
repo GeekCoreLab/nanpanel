@@ -4,15 +4,193 @@ import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 @QuarkusTest
 class SystemResourceTest {
+  @Inject AuthStore store;
+
+  @Test
+  void gatewayLeaseFencesCompetingAndExpiredOwners() {
+    String firstOwner = "b0fb3e0a-f38b-4abc-83ea-1c4eb8887a10";
+    String secondOwner = "931fb05f-c9d2-44e6-b24e-951c223f5c6c";
+    store.transaction(c -> {
+      AuthStore.update(c,
+          "UPDATE agent_gateway_fencing SET owner_id=NULL,epoch=0,lease_until=? WHERE id=1",
+          java.sql.Timestamp.from(Instant.now().minusSeconds(1)));
+      return null;
+    });
+    var initial = Map.of("ownerId", firstOwner, "clusterId", "test-cluster", "epoch", 0);
+    Number firstEpoch = given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json").body(initial)
+        .post("/internal/agent-relay/lease/acquire")
+        .then().statusCode(200).extract().path("epoch");
+    Number sameOwnerEpoch = given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json").body(initial)
+        .post("/internal/agent-relay/lease/acquire")
+        .then().statusCode(200).extract().path("epoch");
+    assertEquals(firstEpoch.longValue(), sameOwnerEpoch.longValue());
+
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json")
+        .body(Map.of("ownerId", secondOwner, "clusterId", "test-cluster", "epoch", 0))
+        .post("/internal/agent-relay/lease/acquire")
+        .then().statusCode(409).body("code", equalTo("RELAY_LEASE_HELD"));
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json")
+        .body(Map.of("ownerId", firstOwner, "clusterId", "test-cluster",
+            "epoch", firstEpoch.intValue()))
+        .post("/internal/agent-relay/lease/renew")
+        .then().statusCode(200).body("epoch", equalTo(firstEpoch.intValue()));
+
+    store.transaction(c -> {
+      AuthStore.update(c, "UPDATE agent_gateway_fencing SET lease_until=? WHERE id=1",
+          java.sql.Timestamp.from(Instant.now().minusSeconds(1)));
+      return null;
+    });
+    Number nextEpoch = given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json")
+        .body(Map.of("ownerId", secondOwner, "clusterId", "test-cluster", "epoch", 0))
+        .post("/internal/agent-relay/lease/acquire")
+        .then().statusCode(200).extract().path("epoch");
+    assertEquals(firstEpoch.longValue() + 1, nextEpoch.longValue());
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json")
+        .body(Map.of("ownerId", firstOwner, "clusterId", "test-cluster",
+            "epoch", firstEpoch.intValue()))
+        .post("/internal/agent-relay/lease/renew")
+        .then().statusCode(409).body("code", equalTo("RELAY_LEASE_LOST"));
+  }
+
+  @Test
+  void relayStatusRequiresAllowlistedEndpointAndRejectsStaleEpochs() {
+    String owner = "82791d95-b2d6-469e-a1d1-13550862d956";
+    store.transaction(c -> {
+      AuthStore.update(c,
+          "UPDATE agent_gateway_fencing SET owner_id=NULL,epoch=1,lease_until=? WHERE id=1",
+          java.sql.Timestamp.from(Instant.now().minusSeconds(1)));
+      AuthStore.update(c, "DELETE FROM agent_relay_status WHERE relay_id=?", "relay-a");
+      return null;
+    });
+    Number epoch = given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json")
+        .body(Map.of("ownerId", owner, "clusterId", "test-cluster", "epoch", 0))
+        .post("/internal/agent-relay/lease/acquire")
+        .then().statusCode(200).extract().path("epoch");
+    Map<String, Object> report = Map.of(
+        "relayId", "relay-a", "clusterId", "test-cluster", "epoch", epoch.intValue(),
+        "endpoint", "https://relay-a.example", "healthy", true);
+    given().contentType("application/json").body(report)
+        .post("/internal/agent-relay/status").then().statusCode(401);
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json")
+        .body(Map.of("relayId", "relay-a", "clusterId", "test-cluster", "epoch", epoch.intValue(),
+            "endpoint", "https://untrusted.example", "healthy", true))
+        .post("/internal/agent-relay/status").then().statusCode(400);
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json")
+        .body(Map.of("relayId", "relay-a", "clusterId", "other-cluster", "epoch", epoch.intValue(),
+            "endpoint", "https://relay-a.example", "healthy", true))
+        .post("/internal/agent-relay/status").then().statusCode(400);
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json").body(report)
+        .post("/internal/agent-relay/status").then().statusCode(204);
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json").body(report)
+        .post("/internal/agent-relay/status").then().statusCode(204);
+    var burstCount = store.transaction(c -> AuthStore.query(c,
+        "SELECT healthy_count FROM agent_relay_status WHERE relay_id=?", "relay-a").getFirst());
+    assertEquals(1, ((Number)burstCount.get("healthy_count")).intValue());
+    store.transaction(c -> {
+      AuthStore.update(c, "UPDATE agent_relay_status SET last_counted_at=? WHERE relay_id=?",
+          java.sql.Timestamp.from(Instant.now().minusSeconds(10)), "relay-a");
+      return null;
+    });
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json").body(report)
+        .post("/internal/agent-relay/status").then().statusCode(204);
+    store.transaction(c -> {
+      AuthStore.update(c, "UPDATE agent_relay_status SET last_counted_at=? WHERE relay_id=?",
+          java.sql.Timestamp.from(Instant.now().minusSeconds(10)), "relay-a");
+      return null;
+    });
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json").body(report)
+        .post("/internal/agent-relay/status").then().statusCode(204);
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json")
+        .body(Map.of("relayId", "relay-a", "clusterId", "test-cluster", "epoch", epoch.intValue() - 1,
+            "endpoint", "https://relay-b.example", "healthy", false))
+        .post("/internal/agent-relay/status").then().statusCode(409)
+        .body("code", equalTo("RELAY_LEASE_LOST"));
+    var stored = store.transaction(c -> AuthStore.query(c,
+        "SELECT cluster_id,target_name,epoch,healthy,healthy_count FROM agent_relay_status WHERE relay_id=?",
+        "relay-a").getFirst());
+    assertEquals("test-cluster", stored.get("cluster_id"));
+    assertEquals("relay-a.example", stored.get("target_name"));
+    assertEquals(epoch.longValue(), ((Number)stored.get("epoch")).longValue());
+    assertEquals(true, stored.get("healthy"));
+    assertEquals(3, ((Number)stored.get("healthy_count")).intValue());
+
+    Map<String, Object> failure = Map.of(
+        "relayId", "relay-a", "clusterId", "test-cluster", "epoch", epoch.intValue(),
+        "endpoint", "https://relay-a.example", "healthy", false);
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json").body(failure)
+        .post("/internal/agent-relay/status").then().statusCode(204);
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json").body(failure)
+        .post("/internal/agent-relay/status").then().statusCode(204);
+    var burstFailures = store.transaction(c -> AuthStore.query(c,
+        "SELECT unhealthy_count FROM agent_relay_status WHERE relay_id=?", "relay-a").getFirst());
+    assertEquals(1, ((Number)burstFailures.get("unhealthy_count")).intValue());
+    for (int expected = 2; expected <= 3; expected++) {
+      store.transaction(c -> {
+        AuthStore.update(c, "UPDATE agent_relay_status SET last_counted_at=? WHERE relay_id=?",
+            java.sql.Timestamp.from(Instant.now().minusSeconds(10)), "relay-a");
+        return null;
+      });
+      given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+          .contentType("application/json").body(failure)
+          .post("/internal/agent-relay/status").then().statusCode(204);
+      int failures = store.transaction(c -> ((Number)AuthStore.query(c,
+          "SELECT unhealthy_count FROM agent_relay_status WHERE relay_id=?", "relay-a")
+          .getFirst().get("unhealthy_count")).intValue());
+      assertEquals(expected, failures);
+    }
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json").body(report)
+        .post("/internal/agent-relay/status").then().statusCode(204);
+    var recovered = store.transaction(c -> AuthStore.query(c,
+        "SELECT healthy_count,unhealthy_count FROM agent_relay_status WHERE relay_id=?", "relay-a")
+        .getFirst());
+    assertEquals(1, ((Number)recovered.get("healthy_count")).intValue());
+    assertEquals(0, ((Number)recovered.get("unhealthy_count")).intValue());
+  }
+
+  @Test
+  void relayEndpointConfigurationIsAnExplicitHttpsOriginAllowlist() {
+    assertEquals(java.util.List.of(), AgentEnrollmentResource.parseRelayEndpoints("disabled"));
+    assertEquals(java.util.List.of("https://relay-a.example", "https://relay-b.example:9443"),
+        AgentEnrollmentResource.parseRelayEndpoints(
+            " HTTPS://Relay-A.Example:443/ , https://relay-b.example:9443 "));
+    assertThrows(IllegalArgumentException.class,
+        () -> AgentEnrollmentResource.parseRelayEndpoints("https://relay-a.example"));
+    assertThrows(IllegalArgumentException.class,
+        () -> AgentEnrollmentResource.parseRelayEndpoints(
+            "https://relay-a.example,https://RELAY-A.example:443/"));
+    assertThrows(IllegalArgumentException.class,
+        () -> AgentEnrollmentResource.parseRelayEndpoints(
+            "https://relay-a.example/path,https://relay-b.example"));
+  }
+
   @Test
   void sessionLifecycle() throws Exception {
     given().get("/api/v1/system").then().statusCode(401);
@@ -96,10 +274,14 @@ class SystemResourceTest {
         .get("/api/v1/system")
         .then()
         .statusCode(200);
+    given().get("/api/v1/hosts/00000000-0000-0000-0000-000000000001/services")
+        .then().statusCode(401);
     var installation = given().get("/api/v1/agent-installation")
         .then().statusCode(200).extract();
     String controllerFingerprint = installation.path("controllerFingerprint");
     assertTrue(controllerFingerprint.matches("[a-f0-9]{64}"));
+    assertEquals(java.util.List.of("https://relay-a.example", "https://relay-b.example"),
+        installation.path("relayEndpoints"));
     var enrollment = given()
         .cookie("nanpanel_session", restoredCookie)
         .header("X-CSRF-Token", restored.path("csrfToken"))
@@ -112,6 +294,8 @@ class SystemResourceTest {
     String enrollmentToken = enrollment.path("token");
     assertEquals(controllerFingerprint, enrollment.path("controllerFingerprint"));
     assertEquals(30444, (int)enrollment.path("gatewayPort"));
+    assertEquals(java.util.List.of("https://relay-a.example", "https://relay-b.example"),
+        enrollment.path("relayEndpoints"));
     given().cookie("nanpanel_session", restoredCookie)
         .header("X-CSRF-Token", "invalid")
         .contentType("application/json")
@@ -144,8 +328,13 @@ class SystemResourceTest {
         "certificateFingerprint", certificateFingerprint,
         "hostname", "panel-test-host-real", "os", "Ubuntu 24.04",
         "arch", "x86_64", "capabilities",
-        java.util.List.of("host.inventory", "agent.heartbeat", "agent.self_update"),
-        "helperStatus", "AVAILABLE");
+        java.util.List.of("host.inventory", "agent.heartbeat", "agent.self_update", "systemd.read", "systemd.restart", "systemd.journal.read", "package.install", "file.write.protected", "container.list", "container.logs", "container.start", "container.stop", "container.deploy", "network.firewall.expose"),
+        "helperStatus", "AVAILABLE",
+        "systemdObservedAtEpochMs", System.currentTimeMillis(),
+        "systemdServices", java.util.List.of(Map.of(
+            "unitName", "ssh.service", "displayName", "OpenSSH server",
+            "activeState", "ACTIVE", "subState", "running", "restartAllowed", true,
+            "journalReadAllowed", true)));
     var forgedHeartbeat = new java.util.HashMap<>(heartbeat);
     forgedHeartbeat.put("certificateFingerprint", "0".repeat(64));
     given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
@@ -163,7 +352,319 @@ class SystemResourceTest {
         .then().statusCode(200)
         .body("hostname", equalTo("panel-test-host-real"))
         .body("status", equalTo("ONLINE"))
-        .body("capabilities", hasItems("host.inventory", "agent.heartbeat", "agent.self_update"));
+        .body("generation", equalTo(1))
+        .body("capabilities", hasItems("host.inventory", "agent.heartbeat", "agent.self_update", "systemd.read"));
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .contentType("application/json")
+        .body(Map.of("alias", "bad alias", "reason", "Reject malformed SSH alias"))
+        .post("/api/v1/hosts/" + hostId + "/ssh/probe")
+        .then().statusCode(422).body("code", equalTo("VALIDATION_FAILED"));
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("Idempotency-Key", "ssh-restart-invalid-01")
+        .contentType("application/json")
+        .body(Map.of("unitName", "ssh.service;id", "reason", "Reject remote command text"))
+        .post("/api/v1/hosts/" + hostId + "/ssh/systemd/restart")
+        .then().statusCode(422).body("code", equalTo("VALIDATION_FAILED"));
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("Idempotency-Key", "ssh-restart-default-deny")
+        .contentType("application/json")
+        .body(Map.of("unitName", "ssh.service", "reason", "Confirm empty SSH unit allowlist denies by default"))
+        .post("/api/v1/hosts/" + hostId + "/ssh/systemd/restart")
+        .then().statusCode(422).body("code", equalTo("SSH_ALIAS_NOT_ALLOWED"));
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .contentType("application/json")
+        .body(Map.of("unitName", "ssh.service", "reason", "Check default-deny SSH status diagnostics"))
+        .post("/api/v1/hosts/" + hostId + "/ssh/systemd/status")
+        .then().statusCode(422).body("code", equalTo("SSH_ALIAS_NOT_ALLOWED"));
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .contentType("application/json")
+        .body(Map.of("unitName", "ssh.service", "lines", 100,
+            "reason", "Check default-deny SSH journal diagnostics"))
+        .post("/api/v1/hosts/" + hostId + "/ssh/systemd/journal")
+        .then().statusCode(422).body("code", equalTo("SSH_ALIAS_NOT_ALLOWED"));
+    var deniedSshDiagnostics = store.transaction(c -> AuthStore.query(c,
+        "SELECT action,outcome FROM audit_event WHERE resource_id=? AND " +
+            "action IN ('SSH_SYSTEMD_STATUS_READ','SSH_SYSTEMD_JOURNAL_READ') ORDER BY action",
+        hostId.toString()));
+    assertEquals(2, deniedSshDiagnostics.size());
+    assertTrue(deniedSshDiagnostics.stream().allMatch(row -> "DENIED".equals(row.get("outcome"))));
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("Idempotency-Key", "ssh-agent-install-default-deny")
+        .contentType("application/json")
+        .body(Map.of("enrollmentId", UUID.randomUUID().toString(), "agentId", agentId, "alias", "host-b",
+            "token", enrollmentToken, "reason", "Confirm SSH bootstrap alias is denied by default"))
+        .post("/api/v1/hosts/" + hostId + "/ssh/agent/install")
+        .then().statusCode(422).body("code", equalTo("SSH_ALIAS_NOT_ALLOWED"));
+    String packageOperationKey = "helper-package-key-01";
+    var packageRequest = Map.of(
+        "capability", "package.install", "target", "",
+        "payload", Map.of("packages", java.util.List.of("curl")),
+        "reason", "Install the allowlisted diagnostic utility", "timeoutSeconds", 60,
+        "expectedGeneration", 1);
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("Idempotency-Key", packageOperationKey)
+        .contentType("application/json").body(packageRequest)
+        .post("/api/v1/hosts/" + hostId + "/operations")
+        .then().statusCode(503).body("code", equalTo("EXECUTION_OUTCOME_UNKNOWN"));
+    var helperOperations = given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/operations?hostId=" + hostId)
+        .then().statusCode(200).extract();
+    String packageOperationId = helperOperations.path(
+        "items.find { it.idempotencyKey == '" + packageOperationKey + "' }.id");
+    var packageResultReport = Map.of("agentId", agentId, "operationId", packageOperationId,
+        "idempotencyKey", packageOperationKey, "status", "SUCCEEDED",
+        "detail", "{\"installed\":[\"curl\"]}");
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json").body(packageResultReport)
+        .post("/internal/agent-control-results").then().statusCode(204)
+        .header("X-NanPanel-Result-Ack", equalTo("true"));
+    given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/operations/" + packageOperationId)
+        .then().statusCode(200).body("kind", equalTo("HOST_HELPER_OPERATION"))
+        .body("capability", equalTo("package.install"))
+        .body("status", equalTo("SUCCEEDED"))
+        .body("result.output", equalTo("{\"installed\":[\"curl\"]}"));
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("Idempotency-Key", packageOperationKey)
+        .contentType("application/json").body(packageRequest)
+        .post("/api/v1/hosts/" + hostId + "/operations")
+        .then().statusCode(200).header("Idempotency-Replayed", equalTo("true"))
+        .body("id", equalTo(packageOperationId));
+    var invalidNetworkRequest = Map.of(
+        "capability", "network.firewall.expose", "target", "ssh-test",
+        "payload", Map.of("rollbackSeconds", 301),
+        "reason", "Test bounded rollback validation", "timeoutSeconds", 60,
+        "expectedGeneration", 1);
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("Idempotency-Key", "helper-network-invalid-01")
+        .contentType("application/json").body(invalidNetworkRequest)
+        .post("/api/v1/hosts/" + hostId + "/operations")
+        .then().statusCode(422).body("code", equalTo("VALIDATION_FAILED"));
+    var networkRequest = Map.of(
+        "capability", "network.firewall.expose", "target", "ssh-test",
+        "payload", Map.of("rollbackSeconds", 90),
+        "reason", "Test bounded network operation", "timeoutSeconds", 60,
+        "expectedGeneration", 1);
+    String networkOperationKey = "helper-network-valid-01";
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("Idempotency-Key", networkOperationKey)
+        .contentType("application/json").body(networkRequest)
+        .post("/api/v1/hosts/" + hostId + "/operations")
+        .then().statusCode(503).body("code", equalTo("EXECUTION_OUTCOME_UNKNOWN"));
+    var afterNetworkDispatch = given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/operations?hostId=" + hostId)
+        .then().statusCode(200).extract();
+    String networkOperationId = afterNetworkDispatch.path(
+        "items.find { it.idempotencyKey == '" + networkOperationKey + "' }.id");
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json")
+        .body(Map.of("agentId", agentId, "operationId", networkOperationId,
+            "idempotencyKey", networkOperationKey, "status", "SUCCEEDED",
+            "detail", "{\"verified\":true,\"automaticRollback\":true}"))
+        .post("/internal/agent-control-results").then().statusCode(204)
+        .header("X-NanPanel-Result-Ack", equalTo("true"));
+    given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/operations/" + networkOperationId)
+        .then().statusCode(200).body("capability", equalTo("network.firewall.expose"))
+        .body("status", equalTo("SUCCEEDED"))
+        .body("result.output", equalTo("{\"verified\":true,\"automaticRollback\":true}"));
+    var staleGenerationRequest = new java.util.HashMap<>(packageRequest);
+    staleGenerationRequest.put("expectedGeneration", 2);
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("Idempotency-Key", "helper-stale-generation-01")
+        .contentType("application/json").body(staleGenerationRequest)
+        .post("/api/v1/hosts/" + hostId + "/operations")
+        .then().statusCode(412).body("code", equalTo("PRECONDITION_FAILED"));
+    var services = given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/hosts/" + hostId + "/services")
+        .then().statusCode(200)
+        .body("items.size()", equalTo(1))
+        .body("items[0].unitName", equalTo("ssh.service"))
+        .body("items[0].activeState", equalTo("ACTIVE"))
+        .body("items[0].observationStale", equalTo(false))
+        .extract();
+    String serviceId = services.path("items[0].id");
+    var serviceDetail = given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/hosts/" + hostId + "/services/" + serviceId)
+        .then().statusCode(200)
+        .body("generation", equalTo(1))
+        .body("subState", equalTo("running"))
+        .body("allowedActions", hasItem("RESTART"))
+        .body("allowedActions", hasItem("READ_JOURNAL"))
+        .extract();
+    String serviceEtag = serviceDetail.header("ETag");
+    assertTrue(serviceEtag.matches("\"[a-f0-9]{64}\""));
+    String operationKey = "systemd-test-key-01";
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("If-Match", serviceEtag)
+        .header("Idempotency-Key", operationKey)
+        .contentType("application/json")
+        .body(Map.of("reason", "P1 systemd operation test", "timeoutSeconds", 60))
+        .post("/api/v1/hosts/" + hostId + "/services/" + serviceId + "/restart")
+        .then().statusCode(503)
+        .body("code", equalTo("EXECUTION_OUTCOME_UNKNOWN"));
+    var operations = given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/operations?hostId=" + hostId)
+        .then().statusCode(200)
+        .extract();
+    String operationId = operations.path(
+        "items.find { it.idempotencyKey == '" + operationKey + "' }.id");
+    assertEquals("UNKNOWN", operations.path(
+        "items.find { it.idempotencyKey == '" + operationKey + "' }.status"));
+    given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/admin/audit-events?outcome=UNKNOWN")
+        .then().statusCode(200)
+        .body("items.find { it.action == 'systemd.restart' }.outcome", equalTo("UNKNOWN"));
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("If-Match", serviceEtag)
+        .header("Idempotency-Key", operationKey)
+        .contentType("application/json")
+        .body(Map.of("reason", "P1 systemd operation test", "timeoutSeconds", 60))
+        .post("/api/v1/hosts/" + hostId + "/services/" + serviceId + "/restart")
+        .then().statusCode(202)
+        .header("Idempotency-Replayed", equalTo("true"))
+        .body("id", equalTo(operationId))
+        .body("status", equalTo("UNKNOWN"));
+    var uncertainResultReport = Map.of("agentId", agentId, "operationId", operationId,
+        "idempotencyKey", operationKey, "status", "FAILED",
+        "detail", "UNCERTAIN: result was not available during reconnect");
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json").body(uncertainResultReport)
+        .post("/internal/agent-control-results").then().statusCode(204)
+        .header("X-NanPanel-Result-Ack", equalTo("true"));
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json").body(uncertainResultReport)
+        .post("/internal/agent-control-results").then().statusCode(204);
+    var resultReport = Map.of("agentId", agentId, "operationId", operationId,
+        "idempotencyKey", operationKey, "status", "SUCCEEDED",
+        "detail", "{\"activeState\":\"ACTIVE\",\"evidence\":\"systemd is active\"}");
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json").body(resultReport)
+        .post("/internal/agent-control-results").then().statusCode(204);
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json").body(resultReport)
+        .post("/internal/agent-control-results").then().statusCode(204);
+    var conflictingResult = new java.util.HashMap<>(resultReport);
+    conflictingResult.put("status", "FAILED");
+    conflictingResult.put("detail", "DENIED: conflicting duplicate");
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json").body(conflictingResult)
+        .post("/internal/agent-control-results").then().statusCode(409);
+    given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/operations/" + operationId)
+        .then().statusCode(200).body("status", equalTo("SUCCEEDED"));
+    String journalKey = "systemd-journal-key-01";
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("If-Match", serviceEtag)
+        .header("Idempotency-Key", journalKey)
+        .contentType("application/json")
+        .body(Map.of("reason", "P1 bounded journal read test"))
+        .post("/api/v1/hosts/" + hostId + "/services/" + serviceId + "/journal")
+        .then().statusCode(503).body("code", equalTo("EXECUTION_OUTCOME_UNKNOWN"));
+    var journalOperations = given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/operations?hostId=" + hostId)
+        .then().statusCode(200).extract();
+    String journalOperationId = journalOperations.path(
+        "items.find { it.idempotencyKey == '" + journalKey + "' }.id");
+    var journalResultReport = Map.of("agentId", agentId, "operationId", journalOperationId,
+        "idempotencyKey", journalKey, "status", "SUCCEEDED",
+        "detail", "Oct 19 00:00:01 host service[123]: started\nOct 19 00:00:02 host service[123]: ready");
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json").body(journalResultReport)
+        .post("/internal/agent-control-results").then().statusCode(204)
+        .header("X-NanPanel-Result-Ack", equalTo("true"));
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json").body(journalResultReport)
+        .post("/internal/agent-control-results").then().statusCode(204)
+        .header("X-NanPanel-Result-Ack", equalTo("true"));
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("If-Match", serviceEtag)
+        .header("Idempotency-Key", journalKey)
+        .contentType("application/json")
+        .body(Map.of("reason", "P1 bounded journal read test"))
+        .post("/api/v1/hosts/" + hostId + "/services/" + serviceId + "/journal")
+        .then().statusCode(200).header("Idempotency-Replayed", equalTo("true"))
+        .body("id", equalTo(journalOperationId));
+    given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/operations/" + journalOperationId)
+        .then().statusCode(200).body("kind", equalTo("SYSTEMD_JOURNAL_READ"))
+        .body("status", equalTo("SUCCEEDED"))
+        .body("result.journal", containsString("service[123]: ready"));
+    var journalRevokedHeartbeat = new java.util.HashMap<>(heartbeat);
+    journalRevokedHeartbeat.put("capabilities", java.util.List.of(
+        "host.inventory", "agent.heartbeat", "agent.self_update", "systemd.read", "systemd.restart"));
+    journalRevokedHeartbeat.put("systemdServices", java.util.List.of(Map.of(
+        "unitName", "ssh.service", "displayName", "OpenSSH server",
+        "activeState", "ACTIVE", "subState", "running", "restartAllowed", true,
+        "journalReadAllowed", false)));
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json").body(journalRevokedHeartbeat)
+        .post("/internal/agent-heartbeats").then().statusCode(204);
+    var journalDeniedService = given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/hosts/" + hostId + "/services/" + serviceId)
+        .then().statusCode(200).body("allowedActions", not(hasItem("READ_JOURNAL")))
+        .extract();
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("If-Match", journalDeniedService.header("ETag"))
+        .header("Idempotency-Key", "journal-denied-key-01")
+        .contentType("application/json")
+        .body(Map.of("reason", "Reject journal read after allowlist removal"))
+        .post("/api/v1/hosts/" + hostId + "/services/" + serviceId + "/journal")
+        .then().statusCode(422).body("code", equalTo("OPERATION_UNSUPPORTED"));
+    var staleInventoryHeartbeat = new java.util.HashMap<>(heartbeat);
+    staleInventoryHeartbeat.put("systemdObservedAtEpochMs", System.currentTimeMillis() - 200_000);
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json").body(staleInventoryHeartbeat)
+        .post("/internal/agent-heartbeats").then().statusCode(204);
+    var staleService = given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/hosts/" + hostId + "/services/" + serviceId)
+        .then().statusCode(200)
+        .body("observationStale", equalTo(true))
+        .body("allowedActions", empty())
+        .extract();
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("If-Match", staleService.header("ETag"))
+        .header("Idempotency-Key", "stale-restart-key-01")
+        .contentType("application/json")
+        .body(Map.of("reason", "Reject stale observation", "timeoutSeconds", 60))
+        .post("/api/v1/hosts/" + hostId + "/services/" + serviceId + "/restart")
+        .then().statusCode(503).body("code", equalTo("SERVICE_OBSERVATION_STALE"));
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("If-Match", staleService.header("ETag"))
+        .header("Idempotency-Key", "stale-journal-key-01")
+        .contentType("application/json")
+        .body(Map.of("reason", "Reject stale journal observation"))
+        .post("/api/v1/hosts/" + hostId + "/services/" + serviceId + "/journal")
+        .then().statusCode(503).body("code", equalTo("SERVICE_OBSERVATION_STALE"));
+    var emptyInventoryHeartbeat = new java.util.HashMap<>(heartbeat);
+    emptyInventoryHeartbeat.put("systemdObservedAtEpochMs", System.currentTimeMillis());
+    emptyInventoryHeartbeat.put("systemdServices", java.util.List.of());
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json").body(emptyInventoryHeartbeat)
+        .post("/internal/agent-heartbeats").then().statusCode(204);
+    given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/hosts/" + hostId + "/services")
+        .then().statusCode(200).body("items.size()", equalTo(1))
+        .body("items[0].activeState", equalTo("UNKNOWN"))
+        .body("items[0].allowedActions", empty());
     given().cookie("nanpanel_session", restoredCookie)
         .get("/api/v1/agents/" + agentId)
         .then().statusCode(200)
@@ -178,10 +679,34 @@ class SystemResourceTest {
         .then().statusCode(503)
         .body("code", equalTo("GATEWAY_UNAVAILABLE"));
     given().cookie("nanpanel_session", restoredCookie)
-        .get("/api/v1/admin/audit-events?outcome=ACCEPTED")
+        .get("/api/v1/admin/audit-events?outcome=ACCEPTED&action=agent.update")
         .then().statusCode(200)
         .body("items[0].action", equalTo("agent.update"))
         .body("items[0].outcome", equalTo("ACCEPTED"));
+    UUID uncertainInstall = UUID.randomUUID();
+    Instant heartbeatEvidenceCreatedAt = Instant.now().minusSeconds(10);
+    String adminId = store.transaction(c -> String.valueOf(AuthStore.query(c,
+        "SELECT id FROM panel_user WHERE username='admin'").getFirst().get("id")));
+    store.transaction(c -> {
+      AuthStore.update(c,
+          "INSERT INTO operation (id,idempotency_key,phase,status,error,created_at,updated_at," +
+              "kind,host_id,agent_id,requested_by,reason,started_at,deadline_at,request_hash,target," +
+              "capability,result_json,error_json) VALUES (?,?,'APPLY','UNKNOWN',NULL,?,?,?,?,?,?,?,?,?,?,?," +
+              "'agent.install',NULL,?)",
+          uncertainInstall, "ssh-agent-reconcile-" + UUID.randomUUID(),
+          java.sql.Timestamp.from(heartbeatEvidenceCreatedAt), java.sql.Timestamp.from(Instant.now()),
+          "SSH_AGENT_INSTALL", UUID.fromString(hostId), UUID.fromString(agentId), adminId,
+          "Verify late mTLS heartbeat reconciliation", java.sql.Timestamp.from(heartbeatEvidenceCreatedAt),
+          java.sql.Timestamp.from(heartbeatEvidenceCreatedAt.plusSeconds(360)), "a".repeat(64), agentId,
+          "{\"code\":\"EXECUTION_OUTCOME_UNKNOWN\",\"message\":\"pending\",\"retryable\":false," +
+              "\"executionOutcome\":\"UNCERTAIN\"}");
+      return null;
+    });
+    given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/operations/" + uncertainInstall)
+        .then().statusCode(200).body("kind", equalTo("SSH_AGENT_INSTALL"))
+        .body("status", equalTo("SUCCEEDED"))
+        .body("result.agentId", equalTo(agentId));
     var sessions = given()
                        .cookie("nanpanel_session", restoredCookie)
                        .get("/api/v1/auth/sessions")

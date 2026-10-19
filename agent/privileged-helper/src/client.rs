@@ -10,8 +10,10 @@ use uuid::Uuid;
 #[tokio::main]
 async fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.len() != 3 {
-        anyhow::bail!("usage: nanpanel-helper-client <socket> <capability> <target>");
+    if !(3..=4).contains(&args.len()) {
+        anyhow::bail!(
+            "usage: nanpanel-helper-client <socket> <capability> <target> [payload-json]"
+        );
     }
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as i64;
     let request = Request {
@@ -20,6 +22,7 @@ async fn main() -> Result<()> {
         capability: args[1].clone(),
         target: args[2].clone(),
         deadline_epoch_ms: now + 30_000,
+        payload_json: args.get(3).cloned(),
     };
     let stream = UnixStream::connect(&args[0])
         .await

@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     ffi::CString,
     fs::File,
     io::{Read, Take},
@@ -18,9 +19,13 @@ use serde::{Deserialize, Serialize};
 use tokio::net::{UnixListener, UnixStream};
 use tokio_util::codec::{Framed, LinesCodec};
 
-const MAX_FRAME: usize = 16 * 1024;
+const MAX_FRAME: usize = 128 * 1024;
 const MAX_FILE_BYTES: usize = 64 * 1024;
+const MAX_WRITE_BYTES: usize = 32 * 1024;
+const MAX_COMMAND_OUTPUT_BYTES: usize = 32 * 1024;
+const MAX_PAYLOAD_BYTES: usize = 48 * 1024;
 const MAX_AGENT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_JOURNAL_CAPTURE_BYTES: usize = 64 * 1024;
 const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 const RESOLVE_BENEATH: u64 = 0x08;
@@ -36,6 +41,12 @@ pub struct Request {
     pub target: String,
     #[serde(rename = "deadlineEpochMs")]
     pub deadline_epoch_ms: i64,
+    #[serde(
+        rename = "payloadJson",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub payload_json: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -51,9 +62,87 @@ pub struct HelperConfig {
     pub allowed_agent_uid: u32,
     pub socket_gid: u32,
     pub allowed_read_root: File,
+    pub allowed_write_root: File,
     pub controller_url: reqwest::Url,
     pub controller_cert: reqwest::Certificate,
     pub agent_binary: std::path::PathBuf,
+    pub allowed_service_units: HashSet<String>,
+    pub allowed_journal_units: HashSet<String>,
+    pub allowed_packages: HashSet<String>,
+    pub allowed_files: HashSet<String>,
+    pub allowed_containers: HashMap<String, ContainerSpec>,
+    allowed_network_rules: HashMap<String, NetworkRuleSpec>,
+    pub container_runtime: Option<std::path::PathBuf>,
+    network_operations_available: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ContainerSpec {
+    image: String,
+    host_port: Option<u16>,
+    container_port: Option<u16>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct NetworkRuleSpec {
+    interface: String,
+    protocol: String,
+    port: u16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct NetworkFirewallPayload {
+    rollback_seconds: u16,
+}
+
+struct UnitAllowlist {
+    restart: HashSet<String>,
+    journal: HashSet<String>,
+}
+
+struct HelperRuntime {
+    allowed_uid: u32,
+    read_root: Arc<File>,
+    write_root: Arc<File>,
+    controller_url: reqwest::Url,
+    controller_cert: reqwest::Certificate,
+    agent_binary: std::path::PathBuf,
+    allowed_units: Arc<UnitAllowlist>,
+    allowed_packages: Arc<HashSet<String>>,
+    allowed_files: Arc<HashSet<String>>,
+    allowed_containers: Arc<HashMap<String, ContainerSpec>>,
+    allowed_network_rules: Arc<HashMap<String, NetworkRuleSpec>>,
+    container_runtime: Option<Arc<std::path::PathBuf>>,
+    network_operations_available: bool,
+    network_lock: tokio::sync::Mutex<()>,
+}
+
+#[derive(Clone, Copy)]
+struct CapabilityAllowlist<'a> {
+    restart_units: &'a HashSet<String>,
+    journal_units: &'a HashSet<String>,
+    packages: &'a HashSet<String>,
+    files: &'a HashSet<String>,
+    containers: &'a HashMap<String, ContainerSpec>,
+    network_rules: &'a HashMap<String, NetworkRuleSpec>,
+    has_container_runtime: bool,
+    network_operations_available: bool,
+}
+
+impl HelperRuntime {
+    fn capability_allowlist(&self) -> CapabilityAllowlist<'_> {
+        CapabilityAllowlist {
+            restart_units: &self.allowed_units.restart,
+            journal_units: &self.allowed_units.journal,
+            packages: &self.allowed_packages,
+            files: &self.allowed_files,
+            containers: &self.allowed_containers,
+            network_rules: &self.allowed_network_rules,
+            has_container_runtime: self.container_runtime.is_some(),
+            network_operations_available: self.network_operations_available,
+        }
+    }
 }
 
 impl HelperConfig {
@@ -88,6 +177,41 @@ impl HelperConfig {
         if !allowed_read_root.metadata()?.is_dir() {
             bail!("allowed read root is not a directory");
         }
+        let read_root_metadata = allowed_read_root.metadata()?;
+        if read_root_metadata.uid() != 0 || read_root_metadata.mode() & 0o022 != 0 {
+            bail!("allowed read root must be root-owned and not group/world writable");
+        }
+        let allowed_service_units = read_service_allowlist(&allowed_read_root)?;
+        let allowed_journal_units =
+            read_unit_allowlist(&allowed_read_root, "journal-units.allowlist")?;
+        let allowed_packages = read_simple_allowlist(
+            &allowed_read_root,
+            "packages.allowlist",
+            valid_package_name,
+            256,
+        )?;
+        let allowed_files =
+            read_simple_allowlist(&allowed_read_root, "files.allowlist", valid_file_name, 128)?;
+        let allowed_containers = read_container_allowlist(&allowed_read_root)?;
+        let allowed_network_rules = read_network_allowlist(&allowed_read_root)?;
+        let allowed_write_root = open_beneath(
+            &allowed_read_root,
+            "files",
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            0,
+        )
+        .context("open root-managed protected-file directory")?;
+        let write_root_metadata = allowed_write_root.metadata()?;
+        if !write_root_metadata.is_dir()
+            || write_root_metadata.uid() != 0
+            || write_root_metadata.mode() & 0o077 != 0
+        {
+            bail!("protected-file directory must be root-owned and inaccessible to group/others");
+        }
+        let container_runtime = read_container_runtime(&allowed_read_root)?;
+        let network_operations_available =
+            trusted_executable(&["/usr/bin/systemd-run", "/bin/systemd-run"]).is_ok()
+                && trusted_executable(&["/usr/sbin/nft", "/usr/bin/nft"]).is_ok();
         let controller_url =
             reqwest::Url::parse(controller_url).context("parse configured controller URL")?;
         if controller_url.scheme() != "https"
@@ -121,14 +245,24 @@ impl HelperConfig {
             allowed_agent_uid,
             socket_gid,
             allowed_read_root,
+            allowed_write_root,
             controller_url,
             controller_cert,
             agent_binary,
+            allowed_service_units,
+            allowed_journal_units,
+            allowed_packages,
+            allowed_files,
+            allowed_containers,
+            allowed_network_rules,
+            container_runtime,
+            network_operations_available,
         })
     }
 }
 
 pub async fn serve(config: HelperConfig) -> Result<()> {
+    let socket_path = config.socket_path.clone();
     let listener = UnixListener::bind(&config.socket_path)
         .with_context(|| format!("bind helper socket {}", config.socket_path.display()))?;
     std::fs::set_permissions(&config.socket_path, std::fs::Permissions::from_mode(0o660))?;
@@ -138,10 +272,25 @@ pub async fn serve(config: HelperConfig) -> Result<()> {
         let _ = std::fs::remove_file(&config.socket_path);
         return Err(error).context("set helper socket group");
     }
-    let read_root = Arc::new(config.allowed_read_root);
-    let controller_url = config.controller_url;
-    let controller_cert = config.controller_cert;
-    let agent_binary = config.agent_binary;
+    let runtime = Arc::new(HelperRuntime {
+        allowed_uid: config.allowed_agent_uid,
+        read_root: Arc::new(config.allowed_read_root),
+        write_root: Arc::new(config.allowed_write_root),
+        controller_url: config.controller_url,
+        controller_cert: config.controller_cert,
+        agent_binary: config.agent_binary,
+        allowed_units: Arc::new(UnitAllowlist {
+            restart: config.allowed_service_units,
+            journal: config.allowed_journal_units,
+        }),
+        allowed_packages: Arc::new(config.allowed_packages),
+        allowed_files: Arc::new(config.allowed_files),
+        allowed_containers: Arc::new(config.allowed_containers),
+        allowed_network_rules: Arc::new(config.allowed_network_rules),
+        container_runtime: config.container_runtime.map(Arc::new),
+        network_operations_available: config.network_operations_available,
+        network_lock: tokio::sync::Mutex::new(()),
+    });
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("install Helper SIGTERM handler")?;
     let interrupted = tokio::signal::ctrl_c();
@@ -150,22 +299,9 @@ pub async fn serve(config: HelperConfig) -> Result<()> {
         tokio::select! {
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
-                let read_root = Arc::clone(&read_root);
-                let controller_url = controller_url.clone();
-                let controller_cert = controller_cert.clone();
-                let agent_binary = agent_binary.clone();
-                let allowed_uid = config.allowed_agent_uid;
+                let runtime = Arc::clone(&runtime);
                 tokio::spawn(async move {
-                    if let Err(error) = handle(
-                        stream,
-                        allowed_uid,
-                        read_root,
-                        controller_url,
-                        controller_cert,
-                        agent_binary,
-                    )
-                    .await
-                    {
+                    if let Err(error) = handle(stream, runtime).await {
                         eprintln!(
                             "{{\"event\":\"helper_request_error\",\"error\":{}}}",
                             serde_json::to_string(&error.to_string())
@@ -179,7 +315,7 @@ pub async fn serve(config: HelperConfig) -> Result<()> {
         }
     }
     drop(listener);
-    match std::fs::remove_file(&config.socket_path) {
+    match std::fs::remove_file(&socket_path) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error).context("remove Helper socket during shutdown"),
@@ -211,14 +347,7 @@ fn remove_stale_socket(path: &Path) -> Result<()> {
     }
 }
 
-async fn handle(
-    stream: UnixStream,
-    allowed_uid: u32,
-    read_root: Arc<File>,
-    controller_url: reqwest::Url,
-    controller_cert: reqwest::Certificate,
-    agent_binary: std::path::PathBuf,
-) -> Result<()> {
+async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
     let peer = getsockopt(&stream, PeerCredentials).context("read Unix peer credentials")?;
     let mut framed = Framed::new(stream, LinesCodec::new_with_max_length(MAX_FRAME));
     while let Some(line) = framed.next().await {
@@ -238,26 +367,88 @@ async fn handle(
         let parsed = serde_json::from_str::<Request>(&line);
         let response = match parsed {
             Ok(request) => {
-                let result = if peer.uid() != allowed_uid {
+                let result = if peer.uid() != runtime.allowed_uid {
                     Err("caller identity is not authorized".to_owned())
                 } else {
                     match validate_envelope(&request) {
                         Err(error) => Err(error),
                         Ok(()) => {
-                            match validate_capability_target(&request.capability, &request.target) {
+                            match validate_payload_presence(&request).and_then(|()| {
+                                validate_capability_target(
+                                    &request.capability,
+                                    &request.target,
+                                    &runtime.capability_allowlist(),
+                                )
+                            }) {
                                 Err(error) => Err(error),
                                 Ok(()) => match request.capability.as_str() {
                                     "helper.status" => Ok("AVAILABLE".to_owned()),
+                                    "helper.capabilities" => {
+                                        Ok(serde_json::json!(available_capabilities(
+                                            &runtime.allowed_units,
+                                            &runtime.allowed_packages,
+                                            &runtime.allowed_files,
+                                            &runtime.allowed_containers,
+                                            &runtime.allowed_network_rules,
+                                            runtime.container_runtime.is_some(),
+                                            runtime.network_operations_available,
+                                        ))
+                                        .to_string())
+                                    }
                                     "agent.update" => {
                                         update_agent(
-                                            &controller_url,
-                                            &controller_cert,
-                                            &agent_binary,
+                                            &runtime.controller_url,
+                                            &runtime.controller_cert,
+                                            &runtime.agent_binary,
                                         )
                                         .await
                                     }
-                                    "systemd.restart" => restart_agent_service().await,
-                                    "file.read.allowed" => execute(&request, &read_root),
+                                    "systemd.restart" => {
+                                        restart_system_service(&request.target).await
+                                    }
+                                    "systemd.journal.read" => {
+                                        read_systemd_journal(&request.target).await
+                                    }
+                                    "file.read.allowed" => execute(&request, &runtime.read_root),
+                                    "package.install" => {
+                                        install_packages(&request, &runtime.allowed_packages).await
+                                    }
+                                    "file.write.protected" => write_protected_file(
+                                        &request,
+                                        &runtime.write_root,
+                                        &runtime.allowed_files,
+                                    ),
+                                    "container.list" => {
+                                        manage_container(
+                                            &request,
+                                            &runtime.allowed_containers,
+                                            runtime
+                                                .container_runtime
+                                                .as_deref()
+                                                .map(|path| path.as_path()),
+                                        )
+                                        .await
+                                    }
+                                    "container.logs" | "container.start" | "container.stop"
+                                    | "container.deploy" => {
+                                        manage_container(
+                                            &request,
+                                            &runtime.allowed_containers,
+                                            runtime
+                                                .container_runtime
+                                                .as_deref()
+                                                .map(|path| path.as_path()),
+                                        )
+                                        .await
+                                    }
+                                    "network.firewall.expose" => {
+                                        let _guard = runtime.network_lock.lock().await;
+                                        expose_network_port(
+                                            &request,
+                                            &runtime.allowed_network_rules,
+                                        )
+                                        .await
+                                    }
                                     _ => Err("capability is not allowlisted".to_owned()),
                                 },
                             }
@@ -266,11 +457,12 @@ async fn handle(
                 };
                 match result {
                     Ok(result) => {
+                        let audit_target = audit_target(&request);
                         audit(
                             peer.uid(),
                             &request.operation_id,
                             &request.capability,
-                            &request.target,
+                            &audit_target,
                             "succeeded",
                         );
                         Response {
@@ -281,12 +473,17 @@ async fn handle(
                         }
                     }
                     Err(error) => {
+                        let audit_target = audit_target(&request);
                         audit(
                             peer.uid(),
                             &request.operation_id,
                             &request.capability,
-                            &request.target,
-                            "rejected",
+                            &audit_target,
+                            if error.starts_with("UNCERTAIN:") {
+                                "uncertain"
+                            } else {
+                                "rejected"
+                            },
                         );
                         Response {
                             ok: false,
@@ -328,6 +525,13 @@ fn validate_envelope(request: &Request) -> std::result::Result<(), String> {
     {
         return Err("operation id and idempotency key must be 1–128 bytes".to_owned());
     }
+    if request
+        .payload_json
+        .as_ref()
+        .is_some_and(|payload| payload.len() > MAX_PAYLOAD_BYTES)
+    {
+        return Err("DENIED: operation payload exceeds the 48 KiB limit".to_owned());
+    }
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -338,16 +542,845 @@ fn validate_envelope(request: &Request) -> std::result::Result<(), String> {
     Ok(())
 }
 
-fn validate_capability_target(capability: &str, target: &str) -> std::result::Result<(), String> {
+fn validate_capability_target(
+    capability: &str,
+    target: &str,
+    allowed: &CapabilityAllowlist<'_>,
+) -> std::result::Result<(), String> {
     match capability {
-        "helper.status" | "agent.update" if target.is_empty() => Ok(()),
-        "systemd.restart" if target == "nanpanel-agent.service" => Ok(()),
-        "file.read.allowed" => Ok(()),
-        "helper.status" | "agent.update" | "systemd.restart" => {
-            Err("target is not allowlisted for this capability".to_owned())
+        "helper.status" | "helper.capabilities" | "agent.update" if target.is_empty() => Ok(()),
+        "systemd.restart"
+            if target == "nanpanel-agent.service" || allowed.restart_units.contains(target) =>
+        {
+            Ok(())
         }
-        _ => Err("capability is not allowlisted".to_owned()),
+        "systemd.journal.read" if allowed.journal_units.contains(target) => Ok(()),
+        "file.read.allowed" => Ok(()),
+        "package.install" if target.is_empty() && !allowed.packages.is_empty() => Ok(()),
+        "file.write.protected" if allowed.files.contains(target) => Ok(()),
+        "container.list"
+            if target.is_empty()
+                && allowed.has_container_runtime
+                && !allowed.containers.is_empty() =>
+        {
+            Ok(())
+        }
+        "container.logs" | "container.start" | "container.stop" | "container.deploy"
+            if allowed.containers.contains_key(target) && allowed.has_container_runtime =>
+        {
+            Ok(())
+        }
+        "network.firewall.expose"
+            if allowed.network_operations_available
+                && allowed.network_rules.contains_key(target) =>
+        {
+            Ok(())
+        }
+        "helper.status"
+        | "helper.capabilities"
+        | "agent.update"
+        | "systemd.restart"
+        | "systemd.journal.read"
+        | "package.install"
+        | "file.write.protected"
+        | "container.list"
+        | "container.logs"
+        | "container.start"
+        | "container.stop"
+        | "container.deploy"
+        | "network.firewall.expose" => {
+            Err("DENIED: target is not allowlisted for this capability".to_owned())
+        }
+        _ => Err("DENIED: capability is not allowlisted".to_owned()),
     }
+}
+
+fn validate_payload_presence(request: &Request) -> std::result::Result<(), String> {
+    let required = matches!(
+        request.capability.as_str(),
+        "package.install" | "file.write.protected" | "network.firewall.expose"
+    );
+    if required != request.payload_json.is_some() {
+        return Err("DENIED: payload presence does not match capability schema".to_owned());
+    }
+    Ok(())
+}
+
+fn audit_target(request: &Request) -> String {
+    if request.capability == "package.install"
+        && let Some(payload) = request.payload_json.as_deref()
+        && let Ok(payload) = serde_json::from_str::<PackageInstallPayload>(payload)
+    {
+        return payload.packages.join(",");
+    }
+    request.target.clone()
+}
+
+fn available_capabilities(
+    units: &UnitAllowlist,
+    packages: &HashSet<String>,
+    files: &HashSet<String>,
+    containers: &HashMap<String, ContainerSpec>,
+    network_rules: &HashMap<String, NetworkRuleSpec>,
+    has_container_runtime: bool,
+    network_operations_available: bool,
+) -> Vec<&'static str> {
+    let mut capabilities = vec!["systemd.restart", "helper.capabilities"];
+    if !units.journal.is_empty() {
+        capabilities.push("systemd.journal.read");
+    }
+    if !packages.is_empty() {
+        capabilities.push("package.install");
+    }
+    if !files.is_empty() {
+        capabilities.push("file.write.protected");
+    }
+    if has_container_runtime && !containers.is_empty() {
+        capabilities.extend([
+            "container.list",
+            "container.logs",
+            "container.start",
+            "container.stop",
+            "container.deploy",
+        ]);
+    }
+    if network_operations_available && !network_rules.is_empty() {
+        capabilities.push("network.firewall.expose");
+    }
+    capabilities
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PackageInstallPayload {
+    packages: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProtectedFilePayload {
+    content: String,
+}
+
+async fn install_packages(
+    request: &Request,
+    allowed_packages: &HashSet<String>,
+) -> std::result::Result<String, String> {
+    let payload = parse_payload::<PackageInstallPayload>(request)?;
+    if payload.packages.is_empty()
+        || payload.packages.len() > 16
+        || payload
+            .packages
+            .iter()
+            .any(|name| !valid_package_name(name) || !allowed_packages.contains(name))
+    {
+        return Err("DENIED: package list is empty, invalid, or not allowlisted".to_owned());
+    }
+    let mut unique = HashSet::new();
+    if payload.packages.iter().any(|name| !unique.insert(name)) {
+        return Err("DENIED: package list contains duplicates".to_owned());
+    }
+    let (program, mut args) = if Path::new("/usr/bin/apt-get").is_file() {
+        (
+            Path::new("/usr/bin/apt-get"),
+            vec![
+                "--assume-yes".to_owned(),
+                "--no-install-recommends".to_owned(),
+                "install".to_owned(),
+            ],
+        )
+    } else if Path::new("/usr/bin/dnf").is_file() {
+        (
+            Path::new("/usr/bin/dnf"),
+            vec!["--assumeyes".to_owned(), "install".to_owned()],
+        )
+    } else {
+        return Err("FAILED: no supported fixed package manager was found".to_owned());
+    };
+    args.extend(payload.packages);
+    run_fixed_command(program, &args, Duration::from_secs(300)).await
+}
+
+fn write_protected_file(
+    request: &Request,
+    write_root: &File,
+    allowed_files: &HashSet<String>,
+) -> std::result::Result<String, String> {
+    let payload = parse_payload::<ProtectedFilePayload>(request)?;
+    if !allowed_files.contains(&request.target) || !valid_file_name(&request.target) {
+        return Err("DENIED: protected file is not allowlisted".to_owned());
+    }
+    if payload.content.len() > MAX_WRITE_BYTES || payload.content.contains('\0') {
+        return Err("DENIED: protected file content exceeds 32 KiB or contains NUL".to_owned());
+    }
+    atomic_write_beneath(write_root, &request.target, payload.content.as_bytes())
+        .map_err(|error| format!("FAILED: write protected file: {error}"))?;
+    Ok(serde_json::json!({
+        "path": request.target,
+        "bytesWritten": payload.content.len(),
+        "mode": "0600"
+    })
+    .to_string())
+}
+
+async fn expose_network_port(
+    request: &Request,
+    allowlist: &HashMap<String, NetworkRuleSpec>,
+) -> std::result::Result<String, String> {
+    let payload = parse_payload::<NetworkFirewallPayload>(request)?;
+    if !(30..=300).contains(&payload.rollback_seconds) {
+        return Err("DENIED: rollbackSeconds must be between 30 and 300".to_owned());
+    }
+    let Some(rule) = allowlist.get(&request.target) else {
+        return Err("DENIED: network rule is not allowlisted".to_owned());
+    };
+    if !valid_network_rule_name(&request.target) {
+        return Err("DENIED: network rule name is invalid".to_owned());
+    }
+    let operation_id = uuid::Uuid::parse_str(&request.operation_id)
+        .map_err(|_| "DENIED: network operation ID must be a UUID".to_owned())?
+        .hyphenated()
+        .to_string();
+    let systemd_run = trusted_executable(&["/usr/bin/systemd-run", "/bin/systemd-run"])?;
+    let helper_binary = std::env::current_exe()
+        .map_err(|error| format!("FAILED: locate Helper binary: {error}"))?;
+    validate_trusted_executable(&helper_binary)
+        .map_err(|error| format!("FAILED: configured Helper binary is not trusted: {error}"))?;
+
+    schedule_network_rollback(
+        &systemd_run,
+        &helper_binary,
+        &operation_id,
+        payload.rollback_seconds,
+    )
+    .await?;
+    let verification = run_network_apply_worker(
+        &systemd_run,
+        &helper_binary,
+        &operation_id,
+        rule,
+        payload.rollback_seconds,
+    )
+    .await
+    .map_err(|error| format!("{error}; automatic firewall rollback remains scheduled"))?;
+    let verification: serde_json::Value = serde_json::from_str(&verification).map_err(|error| {
+        format!(
+            "UNCERTAIN: firewall worker returned unverified output; rollback remains scheduled: {error}"
+        )
+    })?;
+    Ok(serde_json::json!({
+        "rule": request.target,
+        "interface": rule.interface,
+        "protocol": rule.protocol,
+        "port": rule.port,
+        "verified": true,
+        "automaticRollback": true,
+        "rollbackAfterSeconds": payload.rollback_seconds,
+        "verification": verification,
+    })
+    .to_string())
+}
+
+pub async fn apply_network_firewall_rule(
+    operation_id: &str,
+    interface: &str,
+    protocol: &str,
+    port: u16,
+    rollback_seconds: u16,
+) -> Result<String> {
+    if !nix::unistd::geteuid().is_root() {
+        bail!("network apply worker must run as root");
+    }
+    if !(30..=300).contains(&rollback_seconds)
+        || !valid_network_interface(interface)
+        || !matches!(protocol, "tcp" | "udp")
+        || port == 0
+    {
+        bail!("network apply worker arguments are invalid");
+    }
+    let operation_id = uuid::Uuid::parse_str(operation_id)
+        .context("network apply operation ID must be a UUID")?
+        .hyphenated()
+        .to_string();
+    let rule = NetworkRuleSpec {
+        interface: interface.to_owned(),
+        protocol: protocol.to_owned(),
+        port,
+    };
+    let nft = trusted_executable(&["/usr/sbin/nft", "/usr/bin/nft"]).map_err(anyhow::Error::msg)?;
+    ensure_network_chain(&nft)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let rule_comment = format!("nanpanel:{operation_id}");
+    let script = format!(
+        "add rule inet nanpanel_agent input iifname \"{}\" {} dport {} ct state new,established accept comment \"{}\"\n",
+        rule.interface, rule.protocol, rule.port, rule_comment
+    );
+    run_nft_script(&nft, &script)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let rules = list_network_chain(&nft)
+        .await
+        .map_err(anyhow::Error::msg)?
+        .context("firewall rule chain disappeared before verification")?;
+    let handle = find_network_rule_handle(&rules, &rule_comment, Some(&rule))
+        .map_err(anyhow::Error::msg)?
+        .context("firewall rule was not found during verification")?;
+    Ok(serde_json::json!({
+        "verified": true,
+        "ruleHandle": handle,
+        "rollbackAfterSeconds": rollback_seconds,
+    })
+    .to_string())
+}
+
+pub async fn rollback_network_firewall_rule(operation_id: &str) -> Result<()> {
+    if !nix::unistd::geteuid().is_root() {
+        bail!("network rollback helper must run as root");
+    }
+    let operation_id = uuid::Uuid::parse_str(operation_id)
+        .context("network rollback operation ID must be a UUID")?
+        .hyphenated()
+        .to_string();
+    let rule_comment = format!("nanpanel:{operation_id}");
+    let nft = trusted_executable(&["/usr/sbin/nft", "/usr/bin/nft"]).map_err(anyhow::Error::msg)?;
+    let Some(chain) = list_network_chain(&nft).await.map_err(anyhow::Error::msg)? else {
+        audit(
+            0,
+            &operation_id,
+            "network.firewall.rollback",
+            &operation_id,
+            "already-absent",
+        );
+        return Ok(());
+    };
+    let Some(handle) =
+        find_network_rule_handle(&chain, &rule_comment, None).map_err(anyhow::Error::msg)?
+    else {
+        audit(
+            0,
+            &operation_id,
+            "network.firewall.rollback",
+            &operation_id,
+            "already-absent",
+        );
+        return Ok(());
+    };
+    let args = [
+        "delete".to_owned(),
+        "rule".to_owned(),
+        "inet".to_owned(),
+        "nanpanel_agent".to_owned(),
+        "input".to_owned(),
+        "handle".to_owned(),
+        handle.to_string(),
+    ];
+    let deletion = run_fixed_command(&nft, &args, Duration::from_secs(5)).await;
+    let remaining = list_network_chain(&nft).await.map_err(anyhow::Error::msg)?;
+    if remaining.as_ref().is_some_and(|value| {
+        find_network_rule_handle(value, &rule_comment, None)
+            .ok()
+            .flatten()
+            .is_some()
+    }) {
+        deletion.map_err(anyhow::Error::msg)?;
+        bail!("network firewall rule remains after rollback verification");
+    }
+    audit(
+        0,
+        &operation_id,
+        "network.firewall.rollback",
+        &operation_id,
+        "succeeded",
+    );
+    Ok(())
+}
+
+fn trusted_executable(candidates: &[&str]) -> std::result::Result<std::path::PathBuf, String> {
+    candidates
+        .iter()
+        .map(Path::new)
+        .find(|path| validate_trusted_executable(path).is_ok())
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "FAILED: required root-owned system executable is unavailable".to_owned())
+}
+
+fn validate_trusted_executable(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("inspect fixed executable {}", path.display()))?;
+    if !metadata.is_file()
+        || metadata.uid() != 0
+        || metadata.mode() & 0o022 != 0
+        || metadata.mode() & 0o111 == 0
+    {
+        bail!("fixed executable is not a root-owned non-writable executable");
+    }
+    Ok(())
+}
+
+async fn ensure_network_chain(nft: &Path) -> std::result::Result<(), String> {
+    let tables = nft_json(nft, &["--json", "list", "tables"]).await?;
+    let table_exists = tables
+        .get("nftables")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("table").is_some_and(|table| {
+                    table.get("family").and_then(serde_json::Value::as_str) == Some("inet")
+                        && table.get("name").and_then(serde_json::Value::as_str)
+                            == Some("nanpanel_agent")
+                })
+            })
+        });
+    if !table_exists {
+        let args = ["add", "table", "inet", "nanpanel_agent"].map(str::to_owned);
+        run_fixed_command(nft, &args, Duration::from_secs(5)).await?;
+    }
+    let table = nft_json(nft, &["--json", "list", "table", "inet", "nanpanel_agent"]).await?;
+    let chain = table
+        .get("nftables")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| {
+            items
+                .iter()
+                .find_map(|item| item.get("chain"))
+                .filter(|chain| {
+                    chain.get("name").and_then(serde_json::Value::as_str) == Some("input")
+                })
+        });
+    if chain.is_none() {
+        run_nft_script(
+            nft,
+            "add chain inet nanpanel_agent input { type filter hook input priority 0; policy accept; }\n",
+        )
+        .await?;
+    } else if !chain.is_some_and(is_owned_network_chain) {
+        return Err("DENIED: existing nanpanel_agent input chain has unexpected policy".to_owned());
+    }
+    let verified = nft_json(nft, &["--json", "list", "table", "inet", "nanpanel_agent"]).await?;
+    let valid = verified
+        .get("nftables")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| items.iter().find_map(|item| item.get("chain")))
+        .is_some_and(is_owned_network_chain);
+    if !valid {
+        return Err("FAILED: dedicated firewall chain could not be verified".to_owned());
+    }
+    Ok(())
+}
+
+fn is_owned_network_chain(chain: &serde_json::Value) -> bool {
+    chain.get("family").and_then(serde_json::Value::as_str) == Some("inet")
+        && chain.get("table").and_then(serde_json::Value::as_str) == Some("nanpanel_agent")
+        && chain.get("name").and_then(serde_json::Value::as_str) == Some("input")
+        && chain.get("type").and_then(serde_json::Value::as_str) == Some("filter")
+        && chain.get("hook").and_then(serde_json::Value::as_str) == Some("input")
+        && chain.get("policy").and_then(serde_json::Value::as_str) == Some("accept")
+        && chain.get("prio").and_then(serde_json::Value::as_i64) == Some(0)
+}
+
+async fn list_network_chain(nft: &Path) -> std::result::Result<Option<serde_json::Value>, String> {
+    let tables = nft_json(nft, &["--json", "list", "tables"]).await?;
+    let exists = tables
+        .get("nftables")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("table").is_some_and(|table| {
+                    table.get("family").and_then(serde_json::Value::as_str) == Some("inet")
+                        && table.get("name").and_then(serde_json::Value::as_str)
+                            == Some("nanpanel_agent")
+                })
+            })
+        });
+    if !exists {
+        return Ok(None);
+    }
+    let table = nft_json(nft, &["--json", "list", "table", "inet", "nanpanel_agent"]).await?;
+    let has_chain = table
+        .get("nftables")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("chain").is_some_and(|chain| {
+                    chain.get("name").and_then(serde_json::Value::as_str) == Some("input")
+                })
+            })
+        });
+    if has_chain { Ok(Some(table)) } else { Ok(None) }
+}
+
+async fn nft_json(
+    nft: &Path,
+    arguments: &[&str],
+) -> std::result::Result<serde_json::Value, String> {
+    let args = arguments
+        .iter()
+        .map(|argument| (*argument).to_owned())
+        .collect::<Vec<_>>();
+    let output = run_fixed_command(nft, &args, Duration::from_secs(5)).await?;
+    serde_json::from_str(&output)
+        .map_err(|error| format!("FAILED: nft returned invalid JSON: {error}"))
+}
+
+async fn run_nft_script(nft: &Path, script: &str) -> std::result::Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    let mut child = tokio::process::Command::new(nft)
+        .args(["-f", "-"])
+        .env("LC_ALL", "C")
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|error| format!("FAILED: start fixed nft command: {error}"))?;
+    let Some(mut stdin) = child.stdin.take() else {
+        return Err("FAILED: fixed nft command input is unavailable".to_owned());
+    };
+    if let Err(error) =
+        tokio::time::timeout(Duration::from_secs(5), stdin.write_all(script.as_bytes())).await
+    {
+        let _ = child.kill().await;
+        return Err(format!("UNCERTAIN: nft script input timed out: {error}"));
+    }
+    drop(stdin);
+    match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(Ok(status)) if status.success() => Ok(()),
+        Ok(Ok(_)) => Err("FAILED: nft rejected the bounded firewall change".to_owned()),
+        Ok(Err(error)) => Err(format!("UNCERTAIN: wait for nft command: {error}")),
+        Err(_) => {
+            let _ = child.kill().await;
+            Err("UNCERTAIN: nft command exceeded its time limit".to_owned())
+        }
+    }
+}
+
+async fn schedule_network_rollback(
+    systemd_run: &Path,
+    helper_binary: &Path,
+    operation_id: &str,
+    rollback_seconds: u16,
+) -> std::result::Result<(), String> {
+    let unit = format!(
+        "nanpanel-network-rollback-{}",
+        operation_id.replace('-', "")
+    );
+    let delay = format!("--on-active={}s", rollback_seconds);
+    let properties = [
+        "--property=NoNewPrivileges=yes",
+        "--property=CapabilityBoundingSet=CAP_NET_ADMIN",
+        "--property=AmbientCapabilities=CAP_NET_ADMIN",
+        "--property=PrivateTmp=yes",
+        "--property=ProtectSystem=strict",
+        "--property=ProtectHome=yes",
+        "--property=ProtectKernelTunables=yes",
+        "--property=ProtectKernelModules=yes",
+        "--property=ProtectControlGroups=yes",
+    ];
+    let mut args = vec![
+        "--quiet".to_owned(),
+        format!("--unit={unit}"),
+        delay,
+        "--collect".to_owned(),
+    ];
+    args.extend(properties.map(str::to_owned));
+    args.extend([
+        helper_binary.display().to_string(),
+        "rollback".to_owned(),
+        operation_id.to_owned(),
+    ]);
+    run_fixed_command(systemd_run, &args, Duration::from_secs(10))
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("FAILED: unable to arm automatic firewall rollback: {error}"))
+}
+
+async fn run_network_apply_worker(
+    systemd_run: &Path,
+    helper_binary: &Path,
+    operation_id: &str,
+    rule: &NetworkRuleSpec,
+    rollback_seconds: u16,
+) -> std::result::Result<String, String> {
+    let unit = format!("nanpanel-network-apply-{}", operation_id.replace('-', ""));
+    let properties = [
+        "--property=NoNewPrivileges=yes",
+        "--property=CapabilityBoundingSet=CAP_NET_ADMIN",
+        "--property=AmbientCapabilities=CAP_NET_ADMIN",
+        "--property=PrivateTmp=yes",
+        "--property=ProtectSystem=strict",
+        "--property=ProtectHome=yes",
+        "--property=ProtectKernelTunables=yes",
+        "--property=ProtectKernelModules=yes",
+        "--property=ProtectControlGroups=yes",
+    ];
+    let mut args = vec![
+        "--quiet".to_owned(),
+        "--pipe".to_owned(),
+        "--wait".to_owned(),
+        "--collect".to_owned(),
+        format!("--unit={unit}"),
+    ];
+    args.extend(properties.map(str::to_owned));
+    args.extend([
+        helper_binary.display().to_string(),
+        "apply-firewall".to_owned(),
+        operation_id.to_owned(),
+        rule.interface.clone(),
+        rule.protocol.clone(),
+        rule.port.to_string(),
+        rollback_seconds.to_string(),
+    ]);
+    run_fixed_command(systemd_run, &args, Duration::from_secs(20))
+        .await
+        .map_err(|error| format!("UNCERTAIN: bounded firewall worker failed: {error}"))
+}
+
+fn find_network_rule_handle(
+    table: &serde_json::Value,
+    comment: &str,
+    expected: Option<&NetworkRuleSpec>,
+) -> std::result::Result<Option<u64>, String> {
+    let entries = table
+        .get("nftables")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "FAILED: nft output omitted its rule list".to_owned())?;
+    let matches = entries
+        .iter()
+        .filter_map(|entry| entry.get("rule"))
+        .filter(|rule| {
+            rule.get("table").and_then(serde_json::Value::as_str) == Some("nanpanel_agent")
+                && rule.get("chain").and_then(serde_json::Value::as_str) == Some("input")
+                && rule.get("comment").and_then(serde_json::Value::as_str) == Some(comment)
+        })
+        .collect::<Vec<_>>();
+    if matches.len() > 1 {
+        return Err("DENIED: multiple firewall rules share the operation marker".to_owned());
+    }
+    let Some(rule) = matches.first() else {
+        return Ok(None);
+    };
+    if let Some(expected) = expected
+        && !nft_rule_matches(rule, expected)
+    {
+        return Err("FAILED: firewall rule differs from its allowlisted definition".to_owned());
+    }
+    let handle = rule
+        .get("handle")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "FAILED: nft rule has no numeric handle".to_owned())?;
+    Ok(Some(handle))
+}
+
+fn nft_rule_matches(rule: &serde_json::Value, expected: &NetworkRuleSpec) -> bool {
+    let Some(expressions) = rule.get("expr").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    let mut interface_matches = false;
+    let mut port_matches = false;
+    let mut accepted = false;
+    for expression in expressions {
+        if expression.get("accept").is_some() {
+            accepted = true;
+        }
+        if let Some(matched) = expression.get("match") {
+            let Some(left) = matched.get("left") else {
+                continue;
+            };
+            if let Some(meta) = left.get("meta")
+                && meta.get("key").and_then(serde_json::Value::as_str) == Some("iifname")
+                && matched.get("right").and_then(serde_json::Value::as_str)
+                    == Some(expected.interface.as_str())
+            {
+                interface_matches = true;
+            }
+            if let Some(payload) = left.get("payload")
+                && payload.get("protocol").and_then(serde_json::Value::as_str)
+                    == Some(expected.protocol.as_str())
+                && payload.get("field").and_then(serde_json::Value::as_str) == Some("dport")
+                && matched.get("right").and_then(serde_json::Value::as_u64)
+                    == Some(u64::from(expected.port))
+            {
+                port_matches = true;
+            }
+        }
+    }
+    interface_matches && port_matches && accepted
+}
+
+async fn manage_container(
+    request: &Request,
+    allowed_containers: &HashMap<String, ContainerSpec>,
+    runtime: Option<&Path>,
+) -> std::result::Result<String, String> {
+    let Some(runtime) = runtime else {
+        return Err(
+            "DENIED: no configured rootful Docker or Podman runtime is available".to_owned(),
+        );
+    };
+    let mut args = Vec::new();
+    match request.capability.as_str() {
+        "container.list" => {
+            if request.payload_json.is_some() {
+                return Err("DENIED: container.list does not accept a payload".to_owned());
+            }
+            if allowed_containers.is_empty() {
+                return Err("DENIED: no containers are allowlisted".to_owned());
+            }
+            args.extend([
+                "inspect".to_owned(),
+                "--format".to_owned(),
+                "{{.Name}} {{.State.Status}}".to_owned(),
+            ]);
+            args.extend(allowed_containers.keys().cloned());
+        }
+        "container.logs" => {
+            if request.payload_json.is_some() {
+                return Err("DENIED: container.logs does not accept a payload".to_owned());
+            }
+            if !allowed_containers.contains_key(&request.target) {
+                return Err("DENIED: container is not allowlisted".to_owned());
+            }
+            args.extend([
+                "logs".to_owned(),
+                "--tail".to_owned(),
+                "100".to_owned(),
+                "--timestamps".to_owned(),
+                request.target.clone(),
+            ]);
+        }
+        "container.start" => {
+            if request.payload_json.is_some() || !allowed_containers.contains_key(&request.target) {
+                return Err("DENIED: container start target or payload is invalid".to_owned());
+            }
+            args.extend(["start".to_owned(), request.target.clone()]);
+        }
+        "container.stop" => {
+            if request.payload_json.is_some() || !allowed_containers.contains_key(&request.target) {
+                return Err("DENIED: container stop target or payload is invalid".to_owned());
+            }
+            args.extend([
+                "stop".to_owned(),
+                "--time".to_owned(),
+                "10".to_owned(),
+                request.target.clone(),
+            ]);
+        }
+        "container.deploy" => {
+            if request.payload_json.is_some() {
+                return Err("DENIED: container.deploy does not accept a payload".to_owned());
+            }
+            let Some(spec) = allowed_containers.get(&request.target) else {
+                return Err("DENIED: container deployment is not allowlisted".to_owned());
+            };
+            args.extend([
+                "run".to_owned(),
+                "--detach".to_owned(),
+                "--name".to_owned(),
+                request.target.clone(),
+                "--restart=unless-stopped".to_owned(),
+                "--memory=256m".to_owned(),
+                "--cpus=1".to_owned(),
+                "--pids-limit=256".to_owned(),
+                "--cap-drop=ALL".to_owned(),
+                "--security-opt=no-new-privileges".to_owned(),
+                "--read-only".to_owned(),
+                "--network=bridge".to_owned(),
+            ]);
+            if let (Some(host_port), Some(container_port)) = (spec.host_port, spec.container_port) {
+                args.extend([
+                    "--publish".to_owned(),
+                    format!("127.0.0.1:{host_port}:{container_port}"),
+                ]);
+            }
+            args.push(spec.image.clone());
+        }
+        _ => return Err("DENIED: unsupported container capability".to_owned()),
+    }
+    let timeout = if request.capability == "container.logs" {
+        Duration::from_secs(15)
+    } else {
+        Duration::from_secs(60)
+    };
+    run_fixed_command(runtime, &args, timeout).await
+}
+
+fn parse_payload<T>(request: &Request) -> std::result::Result<T, String>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let Some(payload) = request.payload_json.as_deref() else {
+        return Err("DENIED: typed operation payload is required".to_owned());
+    };
+    if payload.len() > MAX_PAYLOAD_BYTES {
+        return Err("DENIED: operation payload exceeds the 48 KiB limit".to_owned());
+    }
+    serde_json::from_str(payload)
+        .map_err(|_| "DENIED: operation payload schema is invalid".to_owned())
+}
+
+async fn run_fixed_command(
+    program: &Path,
+    args: &[String],
+    timeout: Duration,
+) -> std::result::Result<String, String> {
+    use tokio::io::AsyncReadExt;
+    let mut child = tokio::process::Command::new(program)
+        .args(args)
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|error| format!("FAILED: start fixed command: {error}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "FAILED: fixed command output pipe is unavailable".to_owned())?;
+    let mut bytes = Vec::with_capacity(4 * 1024);
+    let read = tokio::time::timeout(
+        timeout,
+        stdout
+            .take((MAX_COMMAND_OUTPUT_BYTES + 1) as u64)
+            .read_to_end(&mut bytes),
+    )
+    .await;
+    match read {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
+            let _ = child.kill().await;
+            return Err(format!("FAILED: read fixed command output: {error}"));
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            return Err("UNCERTAIN: fixed command exceeded its time limit".to_owned());
+        }
+    }
+    if bytes.len() > MAX_COMMAND_OUTPUT_BYTES {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        return Err("UNCERTAIN: fixed command output exceeded 32 KiB".to_owned());
+    }
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) if status.success() => {}
+        Ok(Ok(status)) => return Err(format!("FAILED: fixed command exited with {status}")),
+        Ok(Err(error)) => return Err(format!("FAILED: wait for fixed command: {error}")),
+        Err(_) => {
+            let _ = child.kill().await;
+            return Err("UNCERTAIN: fixed command exceeded its time limit".to_owned());
+        }
+    }
+    let result = String::from_utf8_lossy(&bytes)
+        .chars()
+        .filter(|character| *character == '\n' || *character == '\t' || !character.is_control())
+        .collect::<String>()
+        .trim()
+        .to_owned();
+    Ok(if result.is_empty() {
+        "Operation completed.".to_owned()
+    } else {
+        result
+    })
 }
 
 async fn update_agent(
@@ -428,20 +1461,409 @@ async fn update_agent(
     Ok("Agent binary atomically replaced; restart is required".to_owned())
 }
 
-async fn restart_agent_service() -> std::result::Result<String, String> {
+async fn restart_system_service(unit_name: &str) -> std::result::Result<String, String> {
     let mut child = tokio::process::Command::new("/usr/bin/systemctl")
-        .args(["restart", "nanpanel-agent.service"])
+        .args(["restart", unit_name])
         .kill_on_drop(true)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .map_err(|error| format!("start fixed systemd restart: {error}"))?;
     match tokio::time::timeout(Duration::from_secs(20), child.wait()).await {
-        Ok(Ok(status)) if status.success() => Ok("nanpanel-agent.service restarted".to_owned()),
-        Ok(Ok(status)) => Err(format!("systemctl restart failed with {status}")),
-        Ok(Err(error)) => Err(format!("wait for systemctl restart: {error}")),
-        Err(_) => Err("systemctl restart timed out after 20 seconds".to_owned()),
+        Ok(Ok(status)) if status.success() => {}
+        Ok(Ok(status)) => return Err(format!("FAILED: systemctl restart failed with {status}")),
+        Ok(Err(error)) => return Err(format!("FAILED: wait for systemctl restart: {error}")),
+        Err(_) => return Err("FAILED: systemctl restart timed out after 20 seconds".to_owned()),
     }
+    let mut verify = tokio::process::Command::new("/usr/bin/systemctl")
+        .args(["is-active", "--quiet", unit_name])
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|error| format!("FAILED: start fixed systemd verification: {error}"))?;
+    match tokio::time::timeout(Duration::from_secs(5), verify.wait()).await {
+        Ok(Ok(status)) if status.success() => Ok(serde_json::json!({
+            "activeState": "ACTIVE",
+            "evidence": format!("{unit_name} restarted and systemd reports active")
+        })
+        .to_string()),
+        Ok(Ok(status)) => Err(format!(
+            "FAILED: systemd verification did not report active ({status})"
+        )),
+        Ok(Err(error)) => Err(format!("FAILED: wait for systemd verification: {error}")),
+        Err(_) => Err("FAILED: systemd verification timed out after 5 seconds".to_owned()),
+    }
+}
+
+async fn read_systemd_journal(unit_name: &str) -> std::result::Result<String, String> {
+    use tokio::io::AsyncReadExt;
+
+    let mut child = tokio::process::Command::new("/usr/bin/journalctl")
+        .args([
+            "--no-pager",
+            "--output=short-iso",
+            "--lines=12",
+            &format!("--unit={unit_name}"),
+        ])
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|error| format!("FAILED: start fixed journalctl query: {error}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "FAILED: journalctl stdout pipe is unavailable".to_owned())?;
+    let mut bytes = Vec::with_capacity(8 * 1024);
+    let read = tokio::time::timeout(
+        Duration::from_secs(5),
+        stdout
+            .take((MAX_JOURNAL_CAPTURE_BYTES + 1) as u64)
+            .read_to_end(&mut bytes),
+    )
+    .await;
+    match read {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
+            let _ = child.kill().await;
+            return Err(format!("FAILED: read journalctl output: {error}"));
+        }
+        Err(_) => {
+            let _ = child.kill().await;
+            return Err("FAILED: journalctl query timed out after 5 seconds".to_owned());
+        }
+    }
+    if bytes.len() > MAX_JOURNAL_CAPTURE_BYTES {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        bytes.truncate(MAX_JOURNAL_CAPTURE_BYTES);
+    } else {
+        match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+            Ok(Ok(status)) if status.success() => {}
+            Ok(Ok(_)) => return Err("FAILED: journalctl query failed".to_owned()),
+            Ok(Err(error)) => return Err(format!("FAILED: wait for journalctl query: {error}")),
+            Err(_) => {
+                let _ = child.kill().await;
+                return Err("FAILED: journalctl query timed out after 5 seconds".to_owned());
+            }
+        }
+    }
+    let text = String::from_utf8_lossy(&bytes)
+        .chars()
+        .filter(|character| *character == '\n' || *character == '\t' || !character.is_control())
+        .collect::<String>()
+        .trim()
+        .to_owned();
+    if text.is_empty() {
+        return Ok("No journal entries were returned.".to_owned());
+    }
+    Ok(truncate_journal_output(&text))
+}
+
+fn truncate_journal_output(text: &str) -> String {
+    let mut end = text.len().min(1_800);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    if end < text.len() {
+        format!("{}\n[output truncated]", &text[..end])
+    } else {
+        text.to_owned()
+    }
+}
+
+fn read_service_allowlist(root: &File) -> Result<HashSet<String>> {
+    read_unit_allowlist(root, "systemd-units.allowlist")
+}
+
+fn read_unit_allowlist(root: &File, filename: &str) -> Result<HashSet<String>> {
+    let contents = match read_beneath(root, filename) {
+        Ok(contents) => contents,
+        Err(error)
+            if error.chain().any(|source| {
+                source
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+            }) =>
+        {
+            String::new()
+        }
+        Err(error) => return Err(error).context("read root-managed systemd allowlist"),
+    };
+    let mut units = HashSet::new();
+    for unit in contents.lines().map(str::trim) {
+        if unit.is_empty() || unit.starts_with('#') {
+            continue;
+        }
+        if !valid_systemd_unit(unit)
+            || (filename == "systemd-units.allowlist" && unit == "nanpanel-agent.service")
+        {
+            bail!("invalid or reserved service unit in systemd allowlist");
+        }
+        units.insert(unit.to_owned());
+        if units.len() > 128 {
+            bail!("systemd allowlist exceeds 128 units");
+        }
+    }
+    Ok(units)
+}
+
+fn read_simple_allowlist(
+    root: &File,
+    filename: &str,
+    validator: fn(&str) -> bool,
+    maximum_entries: usize,
+) -> Result<HashSet<String>> {
+    let contents = match read_beneath(root, filename) {
+        Ok(contents) => contents,
+        Err(error)
+            if error.chain().any(|source| {
+                source
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+            }) =>
+        {
+            String::new()
+        }
+        Err(error) => return Err(error).context("read root-managed operation allowlist"),
+    };
+    let mut entries = HashSet::new();
+    for entry in contents.lines().map(str::trim) {
+        if entry.is_empty() || entry.starts_with('#') {
+            continue;
+        }
+        if !validator(entry) {
+            bail!("invalid entry in {filename}");
+        }
+        entries.insert(entry.to_owned());
+        if entries.len() > maximum_entries {
+            bail!("{filename} exceeds {maximum_entries} entries");
+        }
+    }
+    Ok(entries)
+}
+
+fn read_container_allowlist(root: &File) -> Result<HashMap<String, ContainerSpec>> {
+    let contents = match read_beneath(root, "containers.allowlist") {
+        Ok(contents) => contents,
+        Err(error)
+            if error.chain().any(|source| {
+                source
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+            }) =>
+        {
+            String::new()
+        }
+        Err(error) => return Err(error).context("read root-managed container allowlist"),
+    };
+    let mut containers = HashMap::new();
+    for line in contents.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() != 4
+            || !valid_container_name(fields[0])
+            || !valid_container_image(fields[1])
+        {
+            bail!("invalid entry in containers.allowlist");
+        }
+        let (host_port, container_port) = match (fields[2], fields[3]) {
+            ("-", "-") => (None, None),
+            (host, container) => {
+                let host_port = host
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|port| *port > 0)
+                    .context("invalid host port in container allowlist")?;
+                let container_port = container
+                    .parse::<u16>()
+                    .ok()
+                    .filter(|port| *port > 0)
+                    .context("invalid container port in container allowlist")?;
+                (Some(host_port), Some(container_port))
+            }
+        };
+        let name = fields[0].to_owned();
+        if containers
+            .insert(
+                name,
+                ContainerSpec {
+                    image: fields[1].to_owned(),
+                    host_port,
+                    container_port,
+                },
+            )
+            .is_some()
+        {
+            bail!("duplicate container name in allowlist");
+        }
+        if containers.len() > 128 {
+            bail!("containers.allowlist exceeds 128 entries");
+        }
+    }
+    Ok(containers)
+}
+
+fn read_network_allowlist(root: &File) -> Result<HashMap<String, NetworkRuleSpec>> {
+    use std::os::unix::fs::MetadataExt;
+
+    let contents = match read_beneath(root, "network.allowlist") {
+        Ok(contents) => contents,
+        Err(error)
+            if error.chain().any(|source| {
+                source
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+            }) =>
+        {
+            String::new()
+        }
+        Err(error) => return Err(error).context("read root-managed network allowlist"),
+    };
+    if let Ok(file) = open_beneath(
+        root,
+        "network.allowlist",
+        libc::O_RDONLY | libc::O_CLOEXEC,
+        0,
+    ) {
+        let metadata = file.metadata()?;
+        if !metadata.is_file() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+            bail!("network.allowlist must be a root-owned non-writable regular file");
+        }
+    }
+    parse_network_allowlist(&contents)
+}
+
+fn parse_network_allowlist(contents: &str) -> Result<HashMap<String, NetworkRuleSpec>> {
+    let mut rules = HashMap::new();
+    let mut unique_rules = HashSet::new();
+    for line in contents.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() != 4
+            || !valid_network_rule_name(fields[0])
+            || !valid_network_interface(fields[1])
+            || !matches!(fields[2], "tcp" | "udp")
+        {
+            bail!("invalid entry in network.allowlist");
+        }
+        let port = fields[3]
+            .parse::<u16>()
+            .ok()
+            .filter(|port| *port > 0)
+            .context("invalid port in network allowlist")?;
+        let rule = NetworkRuleSpec {
+            interface: fields[1].to_owned(),
+            protocol: fields[2].to_owned(),
+            port,
+        };
+        if !unique_rules.insert(rule.clone()) {
+            bail!("duplicate interface/protocol/port in network allowlist");
+        }
+        if rules.insert(fields[0].to_owned(), rule).is_some() {
+            bail!("duplicate network rule name in allowlist");
+        }
+        if rules.len() > 128 {
+            bail!("network.allowlist exceeds 128 entries");
+        }
+    }
+    Ok(rules)
+}
+
+fn read_container_runtime(root: &File) -> Result<Option<std::path::PathBuf>> {
+    use std::os::unix::fs::MetadataExt;
+    let contents = match read_beneath(root, "container-runtime") {
+        Ok(contents) => contents,
+        Err(error)
+            if error.chain().any(|source| {
+                source
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+            }) =>
+        {
+            String::new()
+        }
+        Err(error) => return Err(error).context("read root-managed container runtime selection"),
+    };
+    let runtime = contents.trim();
+    if runtime.is_empty() {
+        return Ok(None);
+    }
+    let path = match runtime {
+        "docker" => Path::new("/usr/bin/docker"),
+        "podman" => Path::new("/usr/bin/podman"),
+        _ => bail!("container-runtime must contain only docker or podman"),
+    };
+    let metadata = std::fs::metadata(path)
+        .with_context(|| format!("open configured container runtime {}", path.display()))?;
+    if !metadata.is_file() || metadata.mode() & 0o111 == 0 {
+        bail!("configured container runtime is not an executable regular file");
+    }
+    Ok(Some(path.to_path_buf()))
+}
+
+fn valid_package_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && !name.starts_with('-')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"+_.:-".contains(&byte))
+}
+
+fn valid_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name != "."
+        && name != ".."
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+}
+
+fn valid_container_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 63
+        && name.as_bytes()[0].is_ascii_alphanumeric()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+}
+
+fn valid_network_rule_name(name: &str) -> bool {
+    valid_container_name(name)
+}
+
+fn valid_network_interface(interface: &str) -> bool {
+    !interface.is_empty()
+        && interface.len() <= 15
+        && interface != "."
+        && interface != ".."
+        && interface
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+}
+
+fn valid_container_image(image: &str) -> bool {
+    !image.is_empty()
+        && image.len() <= 255
+        && !image.starts_with('-')
+        && image
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:/@-".contains(&byte))
+}
+
+fn valid_systemd_unit(unit_name: &str) -> bool {
+    unit_name.len() <= 255
+        && unit_name.ends_with(".service")
+        && unit_name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_.@:-".contains(&byte))
 }
 
 #[cfg(target_os = "linux")]
@@ -454,6 +1876,18 @@ struct OpenHow {
 
 #[cfg(target_os = "linux")]
 fn read_beneath(root: &File, target: &str) -> Result<String> {
+    let mut file = open_beneath(root, target, libc::O_RDONLY | libc::O_CLOEXEC, 0)?;
+    let mut bytes = Vec::with_capacity(MAX_FILE_BYTES.min(4096));
+    let mut limited: Take<&mut File> = (&mut file).take((MAX_FILE_BYTES + 1) as u64);
+    limited.read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_FILE_BYTES {
+        bail!("file exceeds the 64 KiB output limit");
+    }
+    String::from_utf8(bytes).context("file content is not UTF-8")
+}
+
+#[cfg(target_os = "linux")]
+fn open_beneath(root: &File, target: &str, flags: i32, mode: u32) -> Result<File> {
     let path = Path::new(target);
     if target.is_empty()
         || path
@@ -464,8 +1898,8 @@ fn read_beneath(root: &File, target: &str) -> Result<String> {
     }
     let name = CString::new(target).context("target contains NUL")?;
     let how = OpenHow {
-        flags: (libc::O_RDONLY | libc::O_CLOEXEC) as u64,
-        mode: 0,
+        flags: flags as u64,
+        mode: mode as u64,
         resolve: RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS,
     };
     // SAFETY: `root` and `name` remain live for the syscall; `how` has the
@@ -484,18 +1918,91 @@ fn read_beneath(root: &File, target: &str) -> Result<String> {
     }
     // SAFETY: `fd` is non-negative and uniquely owned by this function after
     // the successful openat2 call, so File may take ownership of it.
-    let mut file = unsafe { File::from_raw_fd(fd) };
-    let mut bytes = Vec::with_capacity(MAX_FILE_BYTES.min(4096));
-    let mut limited: Take<&mut File> = (&mut file).take((MAX_FILE_BYTES + 1) as u64);
-    limited.read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_FILE_BYTES {
-        bail!("file exceeds the 64 KiB output limit");
+    // SAFETY: `fd` is non-negative and uniquely owned by this function after
+    // the successful openat2 call, so File may take ownership of it.
+    Ok(unsafe { File::from_raw_fd(fd) })
+}
+
+#[cfg(target_os = "linux")]
+fn atomic_write_beneath(root: &File, target: &str, bytes: &[u8]) -> Result<()> {
+    if !valid_file_name(target) {
+        bail!("target must be a single allowlisted file name");
     }
-    String::from_utf8(bytes).context("file content is not UTF-8")
+    match open_beneath(root, target, libc::O_RDONLY | libc::O_CLOEXEC, 0) {
+        Ok(existing) => {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = existing.metadata()?;
+            if !metadata.is_file() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+                bail!("existing protected file must be a root-owned regular file");
+            }
+        }
+        Err(error)
+            if error.chain().any(|source| {
+                source
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+            }) => {}
+        Err(error) => return Err(error).context("inspect existing protected file"),
+    }
+    let temporary = format!(".nanpanel-{}.tmp", uuid::Uuid::new_v4());
+    let temporary_c = CString::new(temporary.as_str()).context("temporary path contains NUL")?;
+    // SAFETY: the directory FD is valid, the generated name is a single path
+    // component, and openat receives a complete mode because O_CREAT is set.
+    let fd = unsafe {
+        libc::openat(
+            root.as_raw_fd(),
+            temporary_c.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error()).context("create protected-file staging file");
+    }
+    // SAFETY: the successful openat call returned a unique FD owned here.
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    let write_result = (|| -> Result<()> {
+        use std::io::Write;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        let target_c = CString::new(target).context("target path contains NUL")?;
+        // SAFETY: both names are NUL-terminated, root is a valid directory FD,
+        // and renameat atomically replaces only the entry in this directory.
+        let renamed = unsafe {
+            libc::renameat(
+                root.as_raw_fd(),
+                temporary_c.as_ptr(),
+                root.as_raw_fd(),
+                target_c.as_ptr(),
+            )
+        };
+        if renamed != 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("atomically replace protected file");
+        }
+        root.sync_all()?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        // SAFETY: root is a valid directory FD and the generated name is a
+        // single path component; removing a missing file is harmless.
+        unsafe { libc::unlinkat(root.as_raw_fd(), temporary_c.as_ptr(), 0) };
+    }
+    write_result
 }
 
 #[cfg(not(target_os = "linux"))]
 fn read_beneath(_root: &File, _target: &str) -> Result<String> {
+    bail!("this privileged-helper PoC requires Linux openat2")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn open_beneath(_root: &File, _target: &str, _flags: i32, _mode: u32) -> Result<File> {
+    bail!("this privileged-helper PoC requires Linux openat2")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn atomic_write_beneath(_root: &File, _target: &str, _bytes: &[u8]) -> Result<()> {
     bail!("this privileged-helper PoC requires Linux openat2")
 }
 
@@ -522,6 +2029,7 @@ mod tests {
             capability: capability.into(),
             target: target.into(),
             deadline_epoch_ms: deadline,
+            payload_json: None,
         }
     }
 
@@ -583,12 +2091,230 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .context("system clock is before Unix epoch")?
             .as_millis() as i64;
+        let allowed = HashSet::from(["ssh.service".to_owned()]);
+        let journal_allowed = HashSet::from(["cron.service".to_owned()]);
+        let no_packages = HashSet::new();
+        let no_files = HashSet::new();
+        let no_containers = HashMap::new();
+        let no_network_rules = HashMap::new();
+        let allowlist = CapabilityAllowlist {
+            restart_units: &allowed,
+            journal_units: &journal_allowed,
+            packages: &no_packages,
+            files: &no_files,
+            containers: &no_containers,
+            network_rules: &no_network_rules,
+            has_container_runtime: false,
+            network_operations_available: false,
+        };
+        let target_allowed =
+            |capability, target| validate_capability_target(capability, target, &allowlist);
         assert!(validate_envelope(&request("agent.update", "", now + 30_000)).is_ok());
-        assert!(validate_capability_target("agent.update", "").is_ok());
-        assert!(validate_capability_target("systemd.restart", "nanpanel-agent.service").is_ok());
-        assert!(validate_capability_target("systemd.restart", "sshd.service").is_err());
-        assert!(validate_capability_target("agent.update", "https://evil.invalid").is_err());
-        assert!(validate_capability_target("package.install", "nano").is_err());
+        assert!(target_allowed("agent.update", "").is_ok());
+        assert!(target_allowed("systemd.restart", "nanpanel-agent.service").is_ok());
+        assert!(target_allowed("systemd.restart", "ssh.service").is_ok());
+        assert!(target_allowed("systemd.restart", "sshd.service").is_err());
+        assert!(target_allowed("systemd.journal.read", "cron.service").is_ok());
+        assert!(target_allowed("systemd.journal.read", "ssh.service").is_err());
+        assert!(target_allowed("agent.update", "https://evil.invalid").is_err());
+        assert!(target_allowed("package.install", "nano").is_err());
         Ok(())
+    }
+
+    #[test]
+    fn firewall_capability_requires_allowlist_and_trusted_system_tools() {
+        let rules = HashMap::from([(
+            "ssh-temp".to_owned(),
+            NetworkRuleSpec {
+                interface: "eth0".to_owned(),
+                protocol: "tcp".to_owned(),
+                port: 2222,
+            },
+        )]);
+        let no_units = UnitAllowlist {
+            restart: HashSet::new(),
+            journal: HashSet::new(),
+        };
+        let empty_packages = HashSet::new();
+        let empty_files = HashSet::new();
+        let empty_containers = HashMap::new();
+        let unavailable = CapabilityAllowlist {
+            restart_units: &no_units.restart,
+            journal_units: &no_units.journal,
+            packages: &empty_packages,
+            files: &empty_files,
+            containers: &empty_containers,
+            network_rules: &rules,
+            has_container_runtime: false,
+            network_operations_available: false,
+        };
+        assert!(
+            validate_capability_target("network.firewall.expose", "ssh-temp", &unavailable)
+                .is_err()
+        );
+        let unavailable_capabilities = available_capabilities(
+            &no_units,
+            &empty_packages,
+            &empty_files,
+            &empty_containers,
+            &rules,
+            false,
+            false,
+        );
+        assert!(!unavailable_capabilities.contains(&"network.firewall.expose"));
+        let available_capabilities = available_capabilities(
+            &no_units,
+            &empty_packages,
+            &empty_files,
+            &empty_containers,
+            &rules,
+            false,
+            true,
+        );
+        assert!(available_capabilities.contains(&"network.firewall.expose"));
+    }
+
+    #[test]
+    fn package_and_container_allowlists_reject_options_and_unbounded_configuration() -> Result<()> {
+        assert!(valid_package_name("libssl3"));
+        assert!(!valid_package_name("-y"));
+        assert!(!valid_package_name("curl;id"));
+        let root = tempfile::tempdir()?;
+        std::fs::write(
+            root.path().join("containers.allowlist"),
+            "web-test nginx:1.27 8080 80\nworker busybox:1.36 - -\n",
+        )?;
+        let root_fd = File::open(root.path())?;
+        let containers = read_container_allowlist(&root_fd)?;
+        assert_eq!(containers.len(), 2);
+        assert_eq!(containers["web-test"].host_port, Some(8080));
+        assert_eq!(containers["worker"].host_port, None);
+        std::fs::write(
+            root.path().join("containers.allowlist"),
+            "web-test nginx:1.27 8080 80\ninvalid nginx:latest 80\n",
+        )?;
+        assert!(read_container_allowlist(&root_fd).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn network_allowlist_is_named_and_rejects_duplicate_or_unbounded_rules() -> Result<()> {
+        let rules = parse_network_allowlist(
+            "# name interface protocol port\nssh-temp eth0 tcp 22\ndns-temp wlan0 udp 53\n",
+        )?;
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules["ssh-temp"].interface, "eth0");
+        assert_eq!(rules["ssh-temp"].protocol, "tcp");
+        assert_eq!(rules["ssh-temp"].port, 22);
+        assert!(parse_network_allowlist("all eth0 tcp 0\n").is_err());
+        assert!(parse_network_allowlist("open eth0 tcp 22\nother eth0 tcp 22\n").is_err());
+        assert!(parse_network_allowlist("open eth0 tcp 22\nopen wlan0 udp 53\n").is_err());
+        assert!(parse_network_allowlist("open eth0;id tcp 22\n").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn network_rule_verification_matches_interface_protocol_port_and_comment() -> Result<()> {
+        let spec = NetworkRuleSpec {
+            interface: "eth0".to_owned(),
+            protocol: "tcp".to_owned(),
+            port: 2222,
+        };
+        let table = serde_json::json!({
+            "nftables": [{"rule": {
+                "table": "nanpanel_agent",
+                "chain": "input",
+                "comment": "nanpanel:6d7163d2-5e8c-4c11-96f3-2d03cb47d26a",
+                "handle": 42,
+                "expr": [
+                    {"match": {"op": "==", "left": {"meta": {"key": "iifname"}}, "right": "eth0"}},
+                    {"match": {"op": "==", "left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 2222}},
+                    {"accept": null}
+                ]
+            }}]
+        });
+        assert_eq!(
+            find_network_rule_handle(
+                &table,
+                "nanpanel:6d7163d2-5e8c-4c11-96f3-2d03cb47d26a",
+                Some(&spec),
+            )
+            .map_err(anyhow::Error::msg)?,
+            Some(42)
+        );
+        let wrong_protocol = NetworkRuleSpec {
+            protocol: "udp".to_owned(),
+            ..spec.clone()
+        };
+        assert!(
+            find_network_rule_handle(
+                &table,
+                "nanpanel:6d7163d2-5e8c-4c11-96f3-2d03cb47d26a",
+                Some(&wrong_protocol),
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn protected_file_writes_use_single_allowlisted_names_and_atomic_contents() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let write_root_path = root.path().join("files");
+        std::fs::create_dir(&write_root_path)?;
+        let write_root = File::open(&write_root_path)?;
+        let allowed = HashSet::from(["app.conf".to_owned()]);
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("system clock is before Unix epoch")?
+            .as_millis() as i64;
+        let mut request = request("file.write.protected", "app.conf", now + 30_000);
+        request.payload_json = Some(r#"{"content":"port=8080\n"}"#.to_owned());
+        let result =
+            write_protected_file(&request, &write_root, &allowed).map_err(anyhow::Error::msg)?;
+        assert!(result.contains("\"bytesWritten\":10"));
+        assert_eq!(
+            std::fs::read_to_string(write_root_path.join("app.conf"))?,
+            "port=8080\n"
+        );
+        request.target = "../outside".to_owned();
+        assert!(write_protected_file(&request, &write_root, &allowed).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn root_managed_systemd_allowlist_rejects_invalid_units() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        std::fs::write(
+            root.path().join("systemd-units.allowlist"),
+            "# root-controlled\nssh.service\ninvalid;command.service\n",
+        )?;
+        let root_fd = File::open(root.path())?;
+        assert!(read_service_allowlist(&root_fd).is_err());
+        std::fs::write(
+            root.path().join("systemd-units.allowlist"),
+            "# root-controlled\nssh.service\n",
+        )?;
+        let allowed = read_service_allowlist(&root_fd)?;
+        assert!(allowed.contains("ssh.service"));
+        assert!(!allowed.contains("nanpanel-agent.service"));
+        std::fs::write(
+            root.path().join("journal-units.allowlist"),
+            "cron.service\n",
+        )?;
+        assert!(read_unit_allowlist(&root_fd, "journal-units.allowlist")?.contains("cron.service"));
+        Ok(())
+    }
+
+    #[test]
+    fn journal_result_is_sanitized_and_bounded_on_utf8_boundaries() {
+        let input = format!("{}{}", "日志行".repeat(1000), "\u{0007}tail");
+        let sanitized = input
+            .chars()
+            .filter(|character| *character == '\n' || *character == '\t' || !character.is_control())
+            .collect::<String>();
+        let result = truncate_journal_output(&sanitized);
+        assert!(result.len() <= 1_820);
+        assert!(result.ends_with("[output truncated]"));
     }
 }

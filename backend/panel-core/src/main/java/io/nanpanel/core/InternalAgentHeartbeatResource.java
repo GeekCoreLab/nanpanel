@@ -16,6 +16,7 @@ import jakarta.ws.rs.core.Response;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.time.Instant;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -28,6 +29,7 @@ public class InternalAgentHeartbeatResource {
   @Inject AuthStore store;
   @Inject ObjectMapper mapper;
 
+  @Inject
   @ConfigProperty(name = "nanpanel.agent.gateway-token")
   String gatewayToken;
 
@@ -47,13 +49,38 @@ public class InternalAgentHeartbeatResource {
         (report.capabilities() != null &&
             report.capabilities().contains("agent.self_update") !=
                 "AVAILABLE".equals(report.helperStatus())) ||
+        (report.capabilities() != null && report.capabilities().contains("systemd.read") &&
+            (report.systemdObservedAtEpochMs() == null || report.systemdObservedAtEpochMs() <= 0)) ||
+        (report.systemdObservedAtEpochMs() != null && report.systemdObservedAtEpochMs() > 0 &&
+            (report.systemdObservedAtEpochMs() > Instant.now().plusSeconds(60).toEpochMilli() ||
+             report.systemdObservedAtEpochMs() < Instant.now().minusSeconds(300).toEpochMilli())) ||
         report.version().isBlank() || report.version().length() > 64 ||
         report.hostname().isBlank() || report.hostname().length() > 255 ||
         report.hostname().chars().anyMatch(Character::isISOControl) ||
         report.os().length() > 255 || report.arch().length() > 64 ||
-        report.capabilities().size() > 16 || report.capabilities().stream().anyMatch(
-            capability -> !Set.of("host.inventory", "agent.heartbeat", "agent.self_update")
+        report.capabilities().size() > 24 || report.capabilities().stream().anyMatch(
+            capability -> !Set.of("host.inventory", "agent.heartbeat", "agent.self_update",
+                "systemd.read", "systemd.restart", "systemd.journal.read", "package.install",
+                "file.write.protected", "container.list", "container.logs", "container.start",
+                "container.stop", "container.deploy", "network.firewall.expose")
                 .contains(capability)) ||
+        (report.systemdServices() != null &&
+            (report.systemdServices().size() > 512 ||
+             report.systemdServices().stream().anyMatch(service ->
+                 service == null || service.unitName() == null || service.displayName() == null ||
+                 service.activeState() == null || service.subState() == null ||
+                 !service.unitName().matches("[A-Za-z0-9_.@:-]{1,247}\\.service") ||
+                 service.displayName().isBlank() || service.displayName().length() > 255 ||
+                 service.displayName().chars().anyMatch(Character::isISOControl) ||
+                 !Set.of("UNKNOWN", "ACTIVE", "INACTIVE", "ACTIVATING", "DEACTIVATING", "RELOADING", "FAILED")
+                     .contains(service.activeState()) || service.subState().length() > 64 ||
+                 service.subState().chars().anyMatch(Character::isISOControl) ||
+                 (service.restartAllowed() &&
+                    (!"AVAILABLE".equals(report.helperStatus()) ||
+                     !report.capabilities().contains("systemd.restart"))) ||
+                 (service.journalReadAllowed() &&
+                    (!"AVAILABLE".equals(report.helperStatus()) ||
+                     !report.capabilities().contains("systemd.journal.read")))))) ||
         !report.certificateFingerprint().matches("[a-f0-9]{64}"))
       throw fail(400, "INVALID_HEARTBEAT", "Agent 心跳字段无效");
 
@@ -85,6 +112,44 @@ public class InternalAgentHeartbeatResource {
           "UPDATE host SET hostname=?,os=?,arch=?,capabilities=" + jsonParameter +
               " WHERE id=?",
           report.hostname(), report.os(), report.arch(), capabilities, hostId);
+      if (report.systemdServices() != null && report.systemdObservedAtEpochMs() != null &&
+          report.systemdObservedAtEpochMs() > 0) {
+        Instant observedAt = Instant.ofEpochMilli(report.systemdObservedAtEpochMs());
+        var observedNames = new HashSet<String>();
+        for (var service : report.systemdServices()) {
+          observedNames.add(service.unitName());
+          var existing = query(c,
+              "SELECT id FROM system_service_observation WHERE host_id=? AND unit_name=?",
+              hostId, service.unitName());
+          if (existing.isEmpty()) {
+            update(c,
+                "INSERT INTO system_service_observation " +
+                    "(id,host_id,unit_name,display_name,active_state,sub_state,observed_at,restart_allowed,journal_read_allowed) " +
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                UUID.randomUUID(), hostId, service.unitName(), service.displayName(),
+                service.activeState(), service.subState(), java.sql.Timestamp.from(observedAt),
+                service.restartAllowed(), service.journalReadAllowed());
+          } else {
+            update(c,
+                "UPDATE system_service_observation SET display_name=?,active_state=?," +
+                    "sub_state=?,observed_at=?,restart_allowed=?,journal_read_allowed=? WHERE host_id=? AND unit_name=?",
+                service.displayName(), service.activeState(), service.subState(),
+                java.sql.Timestamp.from(observedAt), service.restartAllowed(),
+                service.journalReadAllowed(), hostId, service.unitName());
+          }
+        }
+        var priorServices = query(c,
+            "SELECT unit_name FROM system_service_observation WHERE host_id=?", hostId);
+        for (var prior : priorServices) {
+          String unitName = String.valueOf(prior.get("unit_name"));
+          if (!observedNames.contains(unitName)) {
+            update(c,
+                "UPDATE system_service_observation SET active_state='UNKNOWN',sub_state=''," +
+                    "observed_at=?,restart_allowed=FALSE,journal_read_allowed=FALSE WHERE host_id=? AND unit_name=?",
+                java.sql.Timestamp.from(observedAt), hostId, unitName);
+          }
+        }
+      }
       return Response.noContent().build();
     });
   }

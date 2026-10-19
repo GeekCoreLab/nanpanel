@@ -1,6 +1,6 @@
 # Web 平台登录与管理 API
 
-版本：`0.1.0-draft.2`。接口和 DTO 统一定义在 [openapi.yaml](openapi.yaml)，本文件补充交互与安全语义。`/auth/*` 已实现持久化账号、Cookie 会话、CSRF、本人改密与会话撤销；管理员账号、内置角色、平台设置、认证/管理审计查询、主机和 Agent 只读查询及仪表盘统计也已实现；Agent 接入、systemd 服务和操作任务仍待实现。密码采用随机盐 PBKDF2-HMAC-SHA256（600000 次）；常见密码当前使用本地基础拒绝列表，尚未接入完整泄露密码库。登录限流为单实例内存窗口，每来源地址及规范化账号每分钟 20 次。生产配置 `NANPANEL_ORIGIN` 为对外同源 HTTPS 地址；本地开发仅 dev profile 关闭 Secure。
+版本：`0.1.0-draft.2`。接口和 DTO 统一定义在 [openapi.yaml](openapi.yaml)，本文件补充交互与安全语义。`/auth/*` 已实现持久化账号、Cookie 会话、CSRF、本人改密与会话撤销；管理员账号、内置角色、平台设置、认证/管理审计查询、主机和 Agent 只读查询、systemd unit 观测及仪表盘统计也已实现；Agent mTLS 接入、systemd 重启任务及有界 journal 查询已实现；证书吊销/续期仍待实现。密码采用随机盐 PBKDF2-HMAC-SHA256（600000 次）；常见密码当前使用本地基础拒绝列表，尚未接入完整泄露密码库。登录限流为单实例内存窗口，每来源地址及规范化账号每分钟 20 次。生产配置 `NANPANEL_ORIGIN` 为对外同源 HTTPS 地址；本地开发仅 dev profile 关闭 Secure。
 
 ## 范围
 
@@ -63,10 +63,10 @@
 
 可编辑设置仅包含站点名称、默认展示时区、Host 离线阈值、已结束任务保留天数。设置不能读写数据库密码、CA、私钥、管理员密码、任意环境变量或主机配置文件。任务保留天数最小 7 天，与幂等窗口一致；非终态及 UNKNOWN 不清理，降低保留期也不能提前删除新接受任务对应的承诺去重记录。
 
-审计只读，记录主体、动作、资源、结果、时间、来源及 traceId。当前持久记录登录成功/拒绝、注销、本人改密、会话撤销、账号和设置变更，以及来源/CSRF、未认证、强制改密、停用账号和重新认证拒绝；设置变更和账号变更与审计写入同一事务。主机服务操作审计待运维 API 接入。不得记录密码、Cookie、CSRF token、注册码、私钥、密码哈希和原始请求体。审计保留与任务保留分开设计。
+审计只读，记录主体、动作、资源、结果、时间、来源及 traceId。当前持久记录登录成功/拒绝、注销、本人改密、会话撤销、账号和设置变更，以及来源/CSRF、未认证、强制改密、停用账号和重新认证拒绝；设置变更和账号变更与审计写入同一事务。systemd 重启/journal、SSH 探测/恢复/初始化和 Helper 操作均记录操作及结果状态；日志正文和秘密凭据不进入审计。不得记录密码、Cookie、CSRF token、注册码、私钥、密码哈希和原始请求体。审计保留与任务保留分开设计。
 
 ## 现有实现与参考
 
-当前 `/auth/*` 和 `/system` 使用数据库账号及 Cookie 会话，Basic 不再接受；管理员账号/角色、平台设置、认证/管理审计查询、主机/Agent 只读查询及仪表盘统计也已接入持久化数据库。主机服务/任务端点仍待实现，Helper 观测目前返回 UNKNOWN；主机服务操作审计会随运维 API 接入。密码泄露库与多实例共享限流尚未接入。
+当前 `/auth/*` 和 `/system` 使用数据库账号及 Cookie 会话，Basic 不再接受；管理员账号/角色、平台设置、认证/管理审计查询、主机/Agent 只读查询及仪表盘统计也已接入持久化数据库。systemd 服务观测和重启/journal 任务端点已接入数据库、Gateway、Agent 与 Helper；观测过期时明确返回 UNKNOWN。密码泄露库与多实例共享限流尚未接入，证书吊销/续期也仍待实现。
 
 Cookie 生命周期与轮换设计参考 [OWASP Session Management](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html)，CSRF 同步 token 与来源校验参考 [OWASP CSRF Prevention](https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html)。本文的具体超时、角色与端点是本项目设计选择。

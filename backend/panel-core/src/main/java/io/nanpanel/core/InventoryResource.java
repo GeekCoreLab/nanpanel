@@ -50,7 +50,7 @@ public class InventoryResource {
     boolean postgres = connection.getMetaData().getDatabaseProductName()
         .equalsIgnoreCase("PostgreSQL");
     String capabilities = postgres ? "h.capabilities::text" : "h.capabilities";
-    String host = "SELECT h.id,h.hostname,h.os,h.arch," + capabilities +
+    String host = "SELECT h.id,h.hostname,h.os,h.arch,h.generation," + capabilities +
         " AS capabilities,h.created_at,";
     if (postgres)
       return host + "a.id AS agent_id,a.version,a.last_seen FROM host h " +
@@ -116,6 +116,7 @@ public class InventoryResource {
     value.put("hostname", row.get("hostname"));
     value.put("os", row.get("os"));
     value.put("arch", row.get("arch"));
+    value.put("generation", ((Number)row.get("generation")).longValue());
     value.put("status", status(row.get("last_seen"), offlineAfter, now));
     value.put("capabilities", capabilities(row.get("capabilities")));
     value.put("agentId", row.get("agent_id") == null
