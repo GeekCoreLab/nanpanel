@@ -7,7 +7,9 @@
 **/node_modules
 web/dist
 web/artifacts
-agent
+agent/p0-lab
+agent/*.md
+agent/**/*.md
 plugins
 docs
 tests
