@@ -25,7 +25,7 @@ fi
 auth_file=$(mktemp)
 tls_dir=$(mktemp -d)
 chmod 700 "$tls_dir"
-trap 'rm -f "$auth_file"; rm -f "$tls_dir"/*; rmdir "$tls_dir"' EXIT
+trap 'rm -f "$auth_file"; if [[ -d "$tls_dir" ]]; then rm -f "$tls_dir"/tls.crt "$tls_dir"/tls.key; rmdir "$tls_dir" 2>/dev/null || true; fi' EXIT
 ghcr_auth=$(printf '%s:%s' "$ghcr_username" "$ghcr_token" | base64 | tr -d '\n')
 printf '{"auths":{"ghcr.io":{"auth":"%s"}}}\n' "$ghcr_auth" > "$auth_file"
 chmod 600 "$auth_file"
@@ -104,7 +104,7 @@ data:
 EOF
     unset cert_data key_data tls_san
 fi
-unset tls_host tls_san
+unset tls_san
 
 apply_file "$script_dir/postgres.yaml"
 ssh "$ssh_target" kubectl -n nanpanel rollout status statefulset/nanpanel-postgres --timeout=180s
