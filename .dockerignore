@@ -1,0 +1,15 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+**/target
+**/node_modules
+web/dist
+web/artifacts
+agent
+plugins
+docs
+tests
+deploy/k3s
+*.log

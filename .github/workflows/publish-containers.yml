@@ -1,0 +1,94 @@
+name: Publish NaNPanel containers
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.dockerignore'
+      - '.github/workflows/publish-containers.yml'
+      - 'backend/**'
+      - 'deploy/docker/**'
+      - 'pom.xml'
+      - 'mvnw'
+      - '.mvn/**'
+      - 'web/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Verify backend
+        run: ./mvnw -B -ntp verify
+      - name: Build web console
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+  publish:
+    needs: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/login-action@v5
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v7
+      - name: Core image metadata
+        id: core-meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/geekcorelab/nanpanel-core
+          tags: |
+            type=sha,format=long,prefix=sha-
+            type=raw,value=main,enable={{is_default_branch}}
+            type=raw,value=latest,enable={{is_default_branch}}
+      - name: Build and publish Core
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.core
+          push: true
+          tags: ${{ steps.core-meta.outputs.tags }}
+          labels: ${{ steps.core-meta.outputs.labels }}
+          cache-from: type=gha,scope=core
+          cache-to: type=gha,mode=max,scope=core
+      - name: Web image metadata
+        id: web-meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/geekcorelab/nanpanel-web
+          tags: |
+            type=sha,format=long,prefix=sha-
+            type=raw,value=main,enable={{is_default_branch}}
+            type=raw,value=latest,enable={{is_default_branch}}
+      - name: Build and publish Web
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/docker/Dockerfile.web
+          push: true
+          tags: ${{ steps.web-meta.outputs.tags }}
+          labels: ${{ steps.web-meta.outputs.labels }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web

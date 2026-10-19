@@ -1,0 +1,116 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: nanpanel-core
+  namespace: nanpanel
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: nanpanel-core
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nanpanel-core
+  namespace: nanpanel
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: nanpanel-core
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: nanpanel-core
+    spec:
+      imagePullSecrets:
+        - name: ghcr-pull
+      securityContext:
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:18
+          command:
+            - sh
+            - -c
+            - until pg_isready -h nanpanel-postgres -p 5432 -U nanpanel -d nanpanel; do sleep 2; done
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: nanpanel-db
+                  key: DB_PASSWORD
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+      containers:
+        - name: core
+          image: ghcr.io/geekcorelab/nanpanel-core:__NANPANEL_IMAGE_TAG__
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: nanpanel-config
+          env:
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: nanpanel-db
+                  key: DB_PASSWORD
+            - name: NANPANEL_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: nanpanel-admin-bootstrap
+                  key: NANPANEL_ADMIN_PASSWORD
+                  optional: true
+          startupProbe:
+            httpGet:
+              path: /q/health/ready
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /q/health/ready
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /q/health/live
+              port: http
+            periodSeconds: 20
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 384Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

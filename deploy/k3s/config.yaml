@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nanpanel-config
+  namespace: nanpanel
+data:
+  DB_USER: nanpanel
+  DB_URL: jdbc:postgresql://nanpanel-postgres:5432/nanpanel
+  QUARKUS_HTTP_HOST: 0.0.0.0
+  NANPANEL_ORIGIN: http://10.100.0.1:30081
+  # This test deployment is HTTP-only on the private k3s node address.
+  NANPANEL_AUTH_SECURE_COOKIE: "false"

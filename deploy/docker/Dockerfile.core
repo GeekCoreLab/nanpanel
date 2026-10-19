@@ -1,0 +1,17 @@
+FROM docker.io/library/maven:3.9-eclipse-temurin-21 AS build
+WORKDIR /workspace
+COPY . .
+RUN ./mvnw -B -ntp -pl backend/panel-core -am package -DskipTests
+
+FROM docker.io/library/eclipse-temurin:21-jre-jammy
+WORKDIR /work
+LABEL org.opencontainers.image.source="https://github.com/GeekCoreLab/nanpanel"
+COPY --from=build --chown=10001:0 /workspace/backend/panel-core/target/quarkus-app/lib/ ./lib/
+COPY --from=build --chown=10001:0 /workspace/backend/panel-core/target/quarkus-app/*.jar ./
+COPY --from=build --chown=10001:0 /workspace/backend/panel-core/target/quarkus-app/app/ ./app/
+COPY --from=build --chown=10001:0 /workspace/backend/panel-core/target/quarkus-app/quarkus/ ./quarkus/
+COPY --from=build --chown=10001:0 /workspace/backend/panel-core/target/quarkus-app/quarkus-app-dependencies.txt ./
+ENV QUARKUS_HTTP_HOST=0.0.0.0
+EXPOSE 8080
+USER 10001:0
+ENTRYPOINT ["java", "-jar", "quarkus-run.jar"]
