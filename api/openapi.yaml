@@ -1,0 +1,3206 @@
+openapi: 3.1.1
+info:
+  title: NaNPanel 管理 API
+  version: 0.1.0-draft.2
+  description: 契约优先的 Web 平台与系统运维 API：登录/会话、管理员账号、内置角色、仪表盘、平台设置、审计，以及主机 → systemd 服务 → 重启任务。Web 目标认证为 HttpOnly Cookie
+    会话 + 写请求 CSRF 校验，不能用 Basic 绕过。当前已实现 /auth/*、管理员账号 CRUD、内置角色、平台设置、审计查询、主机和 Agent 只读查询、仪表盘统计及 Cookie 保护的 /system；systemd 服务和操作任务仍待实现。本文件不描述 Core
+    ↔ Rust Agent 的 mTLS/gRPC 协议。
+  x-status: draft
+servers:
+- url: http://127.0.0.1:8080
+  description: 本地 Core（认证、平台管理、inventory 查询与仪表盘统计已实现）。
+security:
+- cookieAuth: []
+tags:
+- name: System
+  description: 主控基本信息
+- name: Hosts
+  description: 主机资产与管理通道状态
+- name: Agents
+  description: Rust Agent 会话与能力
+- name: SystemServices
+  description: 主机 systemd 服务管理
+- name: Operations
+  description: 持久化异步操作与结果
+- name: Auth
+  description: Web 登录、当前身份、密码与本人会话
+- name: AdminOverview
+  description: 管理仪表盘
+- name: AdminUsers
+  description: 平台管理员账号，首期仅内置 ADMIN 角色
+- name: AdminRoles
+  description: 只读内置角色与权限
+- name: AdminSettings
+  description: 非机密平台设置
+- name: AdminAudit
+  description: 只读脱敏审计
+- name: Topology
+  description: 拓扑期望草稿，不部署网络
+paths:
+  /api/v1/system:
+    get:
+      tags:
+      - System
+      operationId: getSystemInfo
+      summary: 查询系统信息
+      description: 使用有效 Cookie 会话，首次登录必须先修改初始密码。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 成功。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemInfo'
+              examples:
+                scaffold:
+                  value:
+                    name: NaNPanel
+                    version: 0.1.0-SNAPSHOT
+                    stage: scaffold
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security:
+      - cookieAuth: []
+  /api/v1/hosts:
+    get:
+      tags:
+      - Hosts
+      operationId: listHosts
+      summary: 列出主机
+      description: 返回已注册主机，不触发扫描或 Agent 接入。无数据返回空 items；在线状态按最近 Agent 心跳和平台离线阈值计算，没有心跳为 UNKNOWN。分页游标与 status 筛选绑定。登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回 401 或 403
+        PASSWORD_CHANGE_REQUIRED。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 成功。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HostPage'
+              examples:
+                online:
+                  value:
+                    items:
+                    - id: 8b395d24-5d5d-4f27-b70b-293cd30da621
+                      hostname: host-b
+                      os: linux
+                      arch: x86_64
+                      status: ONLINE
+                      capabilities:
+                      - systemd.read
+                      - systemd.restart
+                      agentId: dfc775e1-f656-4b7c-a1c7-5c5490bed367
+                      lastSeenAt: '2026-10-18T12:00:00Z'
+                      createdAt: '2026-10-18T12:00:00Z'
+                    nextCursor: null
+                empty:
+                  value:
+                    items: []
+                    nextCursor: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      parameters:
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/Cursor'
+      - name: status
+        in: query
+        schema:
+          type: string
+          enum:
+          - UNKNOWN
+          - ONLINE
+          - OFFLINE
+  /api/v1/hosts/{hostId}:
+    parameters:
+    - $ref: '#/components/parameters/HostId'
+    get:
+      tags:
+      - Hosts
+      operationId: getHost
+      summary: 查询主机详情
+      description: 返回最近一次 Agent 心跳、主机能力与 Agent 绑定；OFFLINE 不意味着已有业务流量中断。登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回 401 或 403 PASSWORD_CHANGE_REQUIRED。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 成功。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Host'
+              examples:
+                online:
+                  value:
+                    id: 8b395d24-5d5d-4f27-b70b-293cd30da621
+                    hostname: host-b
+                    os: linux
+                    arch: x86_64
+                    status: ONLINE
+                    capabilities:
+                    - systemd.read
+                    - systemd.restart
+                    agentId: dfc775e1-f656-4b7c-a1c7-5c5490bed367
+                    lastSeenAt: '2026-10-18T12:00:00Z'
+                    createdAt: '2026-10-18T12:00:00Z'
+                offline:
+                  value:
+                    id: 8b395d24-5d5d-4f27-b70b-293cd30da621
+                    hostname: host-b
+                    os: linux
+                    arch: x86_64
+                    status: OFFLINE
+                    capabilities:
+                    - systemd.read
+                    - systemd.restart
+                    agentId: dfc775e1-f656-4b7c-a1c7-5c5490bed367
+                    lastSeenAt: '2026-10-18T12:00:00Z'
+                    createdAt: '2026-10-18T12:00:00Z'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/agents/{agentId}:
+    parameters:
+    - $ref: '#/components/parameters/AgentId'
+    get:
+      tags:
+      - Agents
+      operationId: getAgent
+      summary: 查询 Agent 状态与能力
+      description: 不返回证书私钥、注册码或凭据。状态按最近心跳和平台离线阈值计算；当前持久化模型没有 Helper 观测字段，因此 helperStatus 返回 UNKNOWN。初版不包含注册、吊销、升级和直接下发命令。登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回 401 或 403 PASSWORD_CHANGE_REQUIRED。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 成功。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Agent'
+              examples:
+                online:
+                  value:
+                    id: dfc775e1-f656-4b7c-a1c7-5c5490bed367
+                    hostId: 8b395d24-5d5d-4f27-b70b-293cd30da621
+                    version: 0.1.0
+                    implementation: rust
+                    status: ONLINE
+                    lastSeenAt: '2026-10-18T12:00:00Z'
+                    capabilities:
+                    - systemd.read
+                    - systemd.restart
+                    helperStatus: AVAILABLE
+                helperUnavailable:
+                  value:
+                    id: dfc775e1-f656-4b7c-a1c7-5c5490bed367
+                    hostId: 8b395d24-5d5d-4f27-b70b-293cd30da621
+                    version: 0.1.0
+                    implementation: rust
+                    status: ONLINE
+                    lastSeenAt: '2026-10-18T12:00:00Z'
+                    capabilities:
+                    - systemd.read
+                    - systemd.restart
+                    helperStatus: UNAVAILABLE
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/hosts/{hostId}/services:
+    parameters:
+    - $ref: '#/components/parameters/HostId'
+    get:
+      tags:
+      - SystemServices
+      operationId: listSystemServices
+      summary: 列出主机 systemd 服务
+      description: 这里的 SystemService 是主机 systemd unit，不是领域模型中的逻辑 Service。读取 Core 已有观测，不在 GET 中触发远程执行；主机离线可返回 observationStale=true
+        的历史结果。尚无观测返回空列表，不能据此断言主机没有服务。 登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回 401 或 403 PASSWORD_CHANGE_REQUIRED。
+      x-implementation-status: planned
+      responses:
+        '200':
+          description: 成功。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemServicePage'
+              examples:
+                observed:
+                  value:
+                    items:
+                    - id: 6c0f837a-2fd9-4db8-9e87-c31d765c5bf1
+                      hostId: 8b395d24-5d5d-4f27-b70b-293cd30da621
+                      unitName: nginx.service
+                      displayName: Nginx
+                      activeState: ACTIVE
+                      subState: running
+                      generation: 7
+                      observedAt: '2026-10-18T12:00:00Z'
+                      allowedActions:
+                      - RESTART
+                      observationStale: false
+                    nextCursor: null
+                empty:
+                  value:
+                    items: []
+                    nextCursor: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      parameters:
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/Cursor'
+  /api/v1/hosts/{hostId}/services/{serviceId}:
+    parameters:
+    - $ref: '#/components/parameters/HostId'
+    - $ref: '#/components/parameters/ServiceId'
+    get:
+      tags:
+      - SystemServices
+      operationId: getSystemService
+      summary: 查询 systemd 服务详情
+      description: 返回最近观测和平台配置版本。后续重启需将响应 ETag 原样传入 If-Match。此查询不接受任意 unit 名称或文件路径。 登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回
+        401 或 403 PASSWORD_CHANGE_REQUIRED。
+      x-implementation-status: planned
+      responses:
+        '200':
+          description: 成功。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SystemService'
+              examples:
+                active:
+                  value:
+                    id: 6c0f837a-2fd9-4db8-9e87-c31d765c5bf1
+                    hostId: 8b395d24-5d5d-4f27-b70b-293cd30da621
+                    unitName: nginx.service
+                    displayName: Nginx
+                    activeState: ACTIVE
+                    subState: running
+                    generation: 7
+                    observedAt: '2026-10-18T12:00:00Z'
+                    allowedActions:
+                    - RESTART
+                    observationStale: false
+                stale:
+                  value:
+                    id: 6c0f837a-2fd9-4db8-9e87-c31d765c5bf1
+                    hostId: 8b395d24-5d5d-4f27-b70b-293cd30da621
+                    unitName: nginx.service
+                    displayName: Nginx
+                    activeState: UNKNOWN
+                    subState: null
+                    generation: 7
+                    observedAt: '2026-10-18T12:00:00Z'
+                    allowedActions: []
+                    observationStale: true
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/hosts/{hostId}/services/{serviceId}/restart:
+    parameters:
+    - $ref: '#/components/parameters/HostId'
+    - $ref: '#/components/parameters/ServiceId'
+    post:
+      tags:
+      - SystemServices
+      operationId: restartSystemService
+      summary: 提交服务重启任务
+      description: 仅管理员且经 Core 授权的主体可操作。Core 将 UUID 映射为受管 unit，Rust Agent 经 root Helper 的本地授权执行，客户端不能传入 Shell、unit
+        名称或 root 身份。先认证授权，再检查幂等记录；匹配重放不重复执行且不因原 ETag 变化或后来离线被拒绝。新任务检查版本、能力、Agent 会话及单服务在途操作互斥，通过后持久化操作与幂等记录再下发。202
+        仅表示接受，不表示已重启或验证成功。接受后的断线、执行权限变化或 Helper 拒绝记录在 Operation 中。详细语义见 API README。 登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回
+        401 或 403 PASSWORD_CHANGE_REQUIRED。
+      x-implementation-status: planned
+      responses:
+        '202':
+          description: 新操作已接受，或重放仍未结束/结果未知的原操作。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+              examples:
+                accepted:
+                  value:
+                    id: 559903dd-6474-4cb1-a70d-3e0ade987442
+                    kind: SYSTEM_SERVICE_RESTART
+                    hostId: 8b395d24-5d5d-4f27-b70b-293cd30da621
+                    agentId: dfc775e1-f656-4b7c-a1c7-5c5490bed367
+                    serviceId: 6c0f837a-2fd9-4db8-9e87-c31d765c5bf1
+                    idempotencyKey: restart-nginx-20261018-001
+                    requestedBy: admin
+                    reason: 应用已审核的服务配置
+                    expectedGeneration: 7
+                    phase: VALIDATE
+                    status: PENDING
+                    createdAt: '2026-10-18T12:00:00Z'
+                    startedAt: null
+                    updatedAt: '2026-10-18T12:00:00Z'
+                    deadlineAt: '2026-10-18T12:01:00Z'
+                    finishedAt: null
+                    result: null
+                    error: null
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            Retry-After:
+              $ref: '#/components/headers/RetryAfter'
+            Idempotency-Replayed:
+              $ref: '#/components/headers/IdempotencyReplayed'
+        '200':
+          description: 同一幂等请求重放已结束的原操作；不创建新任务。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+              examples:
+                replayedSucceeded:
+                  value:
+                    id: 559903dd-6474-4cb1-a70d-3e0ade987442
+                    kind: SYSTEM_SERVICE_RESTART
+                    hostId: 8b395d24-5d5d-4f27-b70b-293cd30da621
+                    agentId: dfc775e1-f656-4b7c-a1c7-5c5490bed367
+                    serviceId: 6c0f837a-2fd9-4db8-9e87-c31d765c5bf1
+                    idempotencyKey: restart-nginx-20261018-001
+                    requestedBy: admin
+                    reason: 应用已审核的服务配置
+                    expectedGeneration: 7
+                    phase: COMMIT
+                    status: SUCCEEDED
+                    createdAt: '2026-10-18T12:00:00Z'
+                    startedAt: '2026-10-18T12:00:00Z'
+                    updatedAt: '2026-10-18T12:00:03Z'
+                    deadlineAt: '2026-10-18T12:01:00Z'
+                    finishedAt: '2026-10-18T12:00:03Z'
+                    result:
+                      serviceId: 6c0f837a-2fd9-4db8-9e87-c31d765c5bf1
+                      unitName: nginx.service
+                      activeState: ACTIVE
+                      verifiedAt: '2026-10-18T12:00:03Z'
+                      evidence: Helper 报告重启成功，systemd 重新观测为 active/running。
+                    error: null
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            Idempotency-Replayed:
+              $ref: '#/components/headers/IdempotencyReplayed'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '428':
+          $ref: '#/components/responses/PreconditionRequired'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      parameters:
+      - $ref: '#/components/parameters/IdempotencyKey'
+      - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RestartServiceRequest'
+            examples:
+              restartNginx:
+                value:
+                  reason: 应用已审核的服务配置
+                  timeoutSeconds: 60
+      security:
+      - cookieAuth: []
+        csrfToken: []
+  /api/v1/operations:
+    get:
+      tags:
+      - Operations
+      operationId: listOperations
+      summary: 列出操作任务
+      description: 仅返回当前主体有权查看的操作。按 UUID 升序分页，不承诺数据库快照；界面需要最近操作时可按返回字段自行展示，不依赖列表默认时间倒序。 登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回
+        401 或 403 PASSWORD_CHANGE_REQUIRED。
+      x-implementation-status: planned
+      responses:
+        '200':
+          description: 成功。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OperationPage'
+              examples:
+                pending:
+                  value:
+                    items:
+                    - id: 559903dd-6474-4cb1-a70d-3e0ade987442
+                      kind: SYSTEM_SERVICE_RESTART
+                      hostId: 8b395d24-5d5d-4f27-b70b-293cd30da621
+                      agentId: dfc775e1-f656-4b7c-a1c7-5c5490bed367
+                      serviceId: 6c0f837a-2fd9-4db8-9e87-c31d765c5bf1
+                      idempotencyKey: restart-nginx-20261018-001
+                      requestedBy: admin
+                      reason: 应用已审核的服务配置
+                      expectedGeneration: 7
+                      phase: VALIDATE
+                      status: PENDING
+                      createdAt: '2026-10-18T12:00:00Z'
+                      startedAt: null
+                      updatedAt: '2026-10-18T12:00:00Z'
+                      deadlineAt: '2026-10-18T12:01:00Z'
+                      finishedAt: null
+                      result: null
+                      error: null
+                    nextCursor: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      parameters:
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/Cursor'
+      - name: hostId
+        in: query
+        schema:
+          type: string
+          format: uuid
+      - name: status
+        in: query
+        schema:
+          type: string
+          enum:
+          - PENDING
+          - RUNNING
+          - SUCCEEDED
+          - FAILED
+          - CANCELLED
+          - UNKNOWN
+  /api/v1/operations/{operationId}:
+    parameters:
+    - $ref: '#/components/parameters/OperationId'
+    get:
+      tags:
+      - Operations
+      operationId: getOperation
+      summary: 查询操作执行与验证结果
+      description: 轮询建议间隔 2 秒。FAILED / UNKNOWN 仍返回 200，HTTP 成功不等于操作成功。SUCCEEDED / FAILED / CANCELLED 为终态；UNKNOWN
+        等待 Agent 持久化执行记录对账，不得当成可安全重试的失败。 登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回 401 或 403 PASSWORD_CHANGE_REQUIRED。
+      x-implementation-status: planned
+      responses:
+        '200':
+          description: 成功。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Operation'
+              examples:
+                pending:
+                  value:
+                    id: 559903dd-6474-4cb1-a70d-3e0ade987442
+                    kind: SYSTEM_SERVICE_RESTART
+                    hostId: 8b395d24-5d5d-4f27-b70b-293cd30da621
+                    agentId: dfc775e1-f656-4b7c-a1c7-5c5490bed367
+                    serviceId: 6c0f837a-2fd9-4db8-9e87-c31d765c5bf1
+                    idempotencyKey: restart-nginx-20261018-001
+                    requestedBy: admin
+                    reason: 应用已审核的服务配置
+                    expectedGeneration: 7
+                    phase: VALIDATE
+                    status: PENDING
+                    createdAt: '2026-10-18T12:00:00Z'
+                    startedAt: null
+                    updatedAt: '2026-10-18T12:00:00Z'
+                    deadlineAt: '2026-10-18T12:01:00Z'
+                    finishedAt: null
+                    result: null
+                    error: null
+                succeeded:
+                  value:
+                    id: 559903dd-6474-4cb1-a70d-3e0ade987442
+                    kind: SYSTEM_SERVICE_RESTART
+                    hostId: 8b395d24-5d5d-4f27-b70b-293cd30da621
+                    agentId: dfc775e1-f656-4b7c-a1c7-5c5490bed367
+                    serviceId: 6c0f837a-2fd9-4db8-9e87-c31d765c5bf1
+                    idempotencyKey: restart-nginx-20261018-001
+                    requestedBy: admin
+                    reason: 应用已审核的服务配置
+                    expectedGeneration: 7
+                    phase: COMMIT
+                    status: SUCCEEDED
+                    createdAt: '2026-10-18T12:00:00Z'
+                    startedAt: '2026-10-18T12:00:00Z'
+                    updatedAt: '2026-10-18T12:00:03Z'
+                    deadlineAt: '2026-10-18T12:01:00Z'
+                    finishedAt: '2026-10-18T12:00:03Z'
+                    result:
+                      serviceId: 6c0f837a-2fd9-4db8-9e87-c31d765c5bf1
+                      unitName: nginx.service
+                      activeState: ACTIVE
+                      verifiedAt: '2026-10-18T12:00:03Z'
+                      evidence: Helper 报告重启成功，systemd 重新观测为 active/running。
+                    error: null
+                helperDenied:
+                  value:
+                    id: 559903dd-6474-4cb1-a70d-3e0ade987442
+                    kind: SYSTEM_SERVICE_RESTART
+                    hostId: 8b395d24-5d5d-4f27-b70b-293cd30da621
+                    agentId: dfc775e1-f656-4b7c-a1c7-5c5490bed367
+                    serviceId: 6c0f837a-2fd9-4db8-9e87-c31d765c5bf1
+                    idempotencyKey: restart-nginx-20261018-001
+                    requestedBy: admin
+                    reason: 应用已审核的服务配置
+                    expectedGeneration: 7
+                    phase: APPLY
+                    status: FAILED
+                    createdAt: '2026-10-18T12:00:00Z'
+                    startedAt: '2026-10-18T12:00:00Z'
+                    updatedAt: '2026-10-18T12:00:02Z'
+                    deadlineAt: '2026-10-18T12:01:00Z'
+                    finishedAt: '2026-10-18T12:00:02Z'
+                    result: null
+                    error:
+                      code: HELPER_PERMISSION_DENIED
+                      message: 本地 Helper 拒绝操作该服务。
+                      retryable: false
+                      executionOutcome: NOT_EXECUTED
+                outcomeUnknown:
+                  value:
+                    id: 559903dd-6474-4cb1-a70d-3e0ade987442
+                    kind: SYSTEM_SERVICE_RESTART
+                    hostId: 8b395d24-5d5d-4f27-b70b-293cd30da621
+                    agentId: dfc775e1-f656-4b7c-a1c7-5c5490bed367
+                    serviceId: 6c0f837a-2fd9-4db8-9e87-c31d765c5bf1
+                    idempotencyKey: restart-nginx-20261018-001
+                    requestedBy: admin
+                    reason: 应用已审核的服务配置
+                    expectedGeneration: 7
+                    phase: VERIFY
+                    status: UNKNOWN
+                    createdAt: '2026-10-18T12:00:00Z'
+                    startedAt: '2026-10-18T12:00:00Z'
+                    updatedAt: '2026-10-18T12:01:00Z'
+                    deadlineAt: '2026-10-18T12:01:00Z'
+                    finishedAt: null
+                    result: null
+                    error:
+                      code: EXECUTION_OUTCOME_UNKNOWN
+                      message: 命令下发后 Agent 断线，暂未取得执行结果。
+                      retryable: false
+                      executionOutcome: UNCERTAIN
+          headers:
+            Retry-After:
+              $ref: '#/components/headers/RetryAfter'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/auth/csrf:
+    get:
+      tags:
+      - Auth
+      operationId: getCsrfContext
+      summary: 获取登录/写请求 CSRF 上下文
+      description: 公开 bootstrap：无 Cookie 时建立 10 分钟预认证会话，不能授权管理操作；已有有效会话时返回绑定当前会话的 token，不降级或轮换现有会话。禁止跨站读取，仅允许受信
+        Web Origin，响应不缓存。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 成功。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CsrfContext'
+              examples:
+                preLogin:
+                  value:
+                    csrfToken: example-csrf-token-not-a-real-secret-0001
+                    expiresAt: '2026-10-18T12:10:00Z'
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+            Set-Cookie:
+              $ref: '#/components/headers/SessionCookie'
+        '403':
+          $ref: '#/components/responses/CsrfRejected'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      security: []
+  /api/v1/auth/login:
+    post:
+      tags:
+      - Auth
+      operationId: login
+      summary: 登录 Web 平台
+      description: 需先获取 CSRF token 和配对的预认证 Cookie。仅验证 JSON 用户名/密码，不接受 Basic 登录；失败使用统一 INVALID_CREDENTIALS，按来源和账号节流。成功销毁预认证/当前浏览器旧会话，轮换会话
+        Cookie 和 CSRF token；其他浏览器会话保持不变。已登录时也允许同一账号重新验证，不允许静默切换为不同账号（409）。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 成功。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionContext'
+              examples:
+                loggedIn:
+                  value:
+                    user:
+                      id: dc14f15b-7015-4690-98d7-f3cc4e8ff578
+                      username: admin
+                      displayName: 平台管理员
+                      roles:
+                      - ADMIN
+                      status: ACTIVE
+                      mustChangePassword: false
+                      createdAt: '2026-10-18T12:00:00Z'
+                      updatedAt: '2026-10-18T12:00:00Z'
+                      lastLoginAt: '2026-10-18T12:00:00Z'
+                    session:
+                      id: 9fc55f63-a643-440d-837b-9bf7e6b145bc
+                      userId: dc14f15b-7015-4690-98d7-f3cc4e8ff578
+                      current: true
+                      createdAt: '2026-10-18T12:00:00Z'
+                      authenticatedAt: '2026-10-18T12:00:00Z'
+                      lastSeenAt: '2026-10-18T12:00:00Z'
+                      idleExpiresAt: '2026-10-18T12:30:00Z'
+                      absoluteExpiresAt: '2026-10-19T00:00:00Z'
+                      clientIp: 127.0.0.1
+                      userAgent: NaNPanel Web / example
+                    permissions:
+                    - host.read
+                    - agent.read
+                    - system-service.read
+                    - system-service.restart
+                    - operation.read
+                    - admin.overview.read
+                    - admin.user.manage
+                    - admin.settings.manage
+                    - admin.audit.read
+                    csrfToken: example-csrf-token-not-a-real-secret-0001
+                passwordChangeRequired:
+                  value:
+                    user:
+                      id: dc14f15b-7015-4690-98d7-f3cc4e8ff578
+                      username: admin
+                      displayName: 平台管理员
+                      roles:
+                      - ADMIN
+                      status: ACTIVE
+                      mustChangePassword: true
+                      createdAt: '2026-10-18T12:00:00Z'
+                      updatedAt: '2026-10-18T12:00:00Z'
+                      lastLoginAt: '2026-10-18T12:00:00Z'
+                    session:
+                      id: 9fc55f63-a643-440d-837b-9bf7e6b145bc
+                      userId: dc14f15b-7015-4690-98d7-f3cc4e8ff578
+                      current: true
+                      createdAt: '2026-10-18T12:00:00Z'
+                      authenticatedAt: '2026-10-18T12:00:00Z'
+                      lastSeenAt: '2026-10-18T12:00:00Z'
+                      idleExpiresAt: '2026-10-18T12:30:00Z'
+                      absoluteExpiresAt: '2026-10-19T00:00:00Z'
+                      clientIp: 127.0.0.1
+                      userAgent: NaNPanel Web / example
+                    permissions: []
+                    csrfToken: example-csrf-token-not-a-real-secret-0001
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+            Set-Cookie:
+              $ref: '#/components/headers/SessionCookie'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/InvalidCredentials'
+        '403':
+          $ref: '#/components/responses/CsrfRejected'
+        '409':
+          $ref: '#/components/responses/AdminConflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+      security:
+      - preAuthCookie: []
+        csrfToken: []
+      - cookieAuth: []
+        csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              username: admin
+              password: Example-login-password-2026!
+  /api/v1/auth/logout:
+    post:
+      tags:
+      - Auth
+      operationId: logout
+      summary: 退出当前会话
+      description: 校验 CSRF 后在服务端撤销当前会话并清除 Cookie。失效/过期会话返回 401，前端仍清理本地身份状态。
+      x-implementation-status: implemented
+      responses:
+        '204':
+          description: 会话已撤销。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+            Set-Cookie:
+              $ref: '#/components/headers/SessionCookie'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/CsrfRejected'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+      security:
+      - cookieAuth: []
+        csrfToken: []
+  /api/v1/auth/me:
+    get:
+      tags:
+      - Auth
+      operationId: getCurrentIdentity
+      summary: 获取当前用户、权限及会话
+      description: 页面加载时恢复当前身份，并取得当前会话 CSRF token。mustChangePassword=true 时 permissions 为空，仅允许 /auth/*。返回的权限是 UI
+        提示，服务端逐请求检查。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 成功。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionContext'
+              examples:
+                authenticated:
+                  value:
+                    user:
+                      id: dc14f15b-7015-4690-98d7-f3cc4e8ff578
+                      username: admin
+                      displayName: 平台管理员
+                      roles:
+                      - ADMIN
+                      status: ACTIVE
+                      mustChangePassword: false
+                      createdAt: '2026-10-18T12:00:00Z'
+                      updatedAt: '2026-10-18T12:00:00Z'
+                      lastLoginAt: '2026-10-18T12:00:00Z'
+                    session:
+                      id: 9fc55f63-a643-440d-837b-9bf7e6b145bc
+                      userId: dc14f15b-7015-4690-98d7-f3cc4e8ff578
+                      current: true
+                      createdAt: '2026-10-18T12:00:00Z'
+                      authenticatedAt: '2026-10-18T12:00:00Z'
+                      lastSeenAt: '2026-10-18T12:00:00Z'
+                      idleExpiresAt: '2026-10-18T12:30:00Z'
+                      absoluteExpiresAt: '2026-10-19T00:00:00Z'
+                      clientIp: 127.0.0.1
+                      userAgent: NaNPanel Web / example
+                    permissions:
+                    - host.read
+                    - agent.read
+                    - system-service.read
+                    - system-service.restart
+                    - operation.read
+                    - admin.overview.read
+                    - admin.user.manage
+                    - admin.settings.manage
+                    - admin.audit.read
+                    csrfToken: example-csrf-token-not-a-real-secret-0001
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/auth/password:
+    put:
+      tags:
+      - Auth
+      operationId: changeOwnPassword
+      summary: 修改本人密码
+      description: 验证 currentPassword，原子更新密码并撤销本人全部会话（包括当前会话），清除 mustChangePassword。成功后需重新获取预认证 CSRF 并登录；重试遇到 401
+        不代表前一次修改失败。不得记录密码。
+      x-implementation-status: implemented
+      responses:
+        '204':
+          description: 密码已修改，所有本人会话已撤销，请重新登录。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+            Set-Cookie:
+              $ref: '#/components/headers/SessionCookie'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/InvalidCredentials'
+        '403':
+          $ref: '#/components/responses/CsrfRejected'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '422':
+          $ref: '#/components/responses/PasswordRejected'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangePasswordRequest'
+            example:
+              currentPassword: Example-old-password-2026!
+              newPassword: Example-new-password-2026!
+  /api/v1/auth/sessions:
+    get:
+      tags:
+      - Auth
+      operationId: listOwnSessions
+      summary: 列出本人有效会话
+      description: 最多允许 10 个有效会话；新登录达到上限时撤销最早创建的非当前会话。列表按创建时间降序；不返回会话 Cookie 或 CSRF token。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 成功。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebSessionList'
+              examples:
+                sessions:
+                  value:
+                    items:
+                    - id: 9fc55f63-a643-440d-837b-9bf7e6b145bc
+                      userId: dc14f15b-7015-4690-98d7-f3cc4e8ff578
+                      current: true
+                      createdAt: '2026-10-18T12:00:00Z'
+                      authenticatedAt: '2026-10-18T12:00:00Z'
+                      lastSeenAt: '2026-10-18T12:00:00Z'
+                      idleExpiresAt: '2026-10-18T12:30:00Z'
+                      absoluteExpiresAt: '2026-10-19T00:00:00Z'
+                      clientIp: 127.0.0.1
+                      userAgent: NaNPanel Web / example
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/auth/sessions/{sessionId}:
+    parameters:
+    - $ref: '#/components/parameters/SessionId'
+    delete:
+      tags:
+      - Auth
+      operationId: revokeOwnSession
+      summary: 撤销本人指定会话
+      description: 只能操作本人会话。本人已撤销记录重复撤销返回 204，未知或其他用户的 ID 返回 404；撤销当前会话同时清除 Cookie。
+      x-implementation-status: implemented
+      responses:
+        '204':
+          description: 会话已撤销；仅撤销当前会话时发送清除 Cookie 的 Set-Cookie。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+            Set-Cookie:
+              $ref: '#/components/headers/SessionCookie'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/CsrfRejected'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '404':
+          $ref: '#/components/responses/NotFound'
+      security:
+      - cookieAuth: []
+        csrfToken: []
+  /api/v1/admin/overview:
+    get:
+      tags:
+      - AdminOverview
+      operationId: getAdminOverview
+      summary: 查询管理仪表盘
+      description: 返回当前资产、未完成任务及近 24 小时失败计数。主机状态使用平台心跳阈值；无 Agent 或无心跳的主机计为 UNKNOWN。各计数以 observedAt 对应快照计算；不是基础设施连通性证明。登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回
+        401 或 403 PASSWORD_CHANGE_REQUIRED。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 成功。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminOverview'
+              examples:
+                overview:
+                  value:
+                    observedAt: '2026-10-18T12:00:00Z'
+                    hosts:
+                      total: 1
+                      online: 1
+                      offline: 0
+                      unknown: 0
+                    operations:
+                      pending: 1
+                      running: 0
+                      unknown: 0
+                      failedLast24Hours: 0
+                    activeAdminUsers: 1
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/admin/users:
+    get:
+      tags:
+      - AdminUsers
+      operationId: listAdminUsers
+      summary: 列出平台管理员
+      description: 只管理平台账号，不是 Linux 主机用户。首期所有账号均为内置 ADMIN；不引入自定义角色、租户或公开注册。 登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回 401
+        或 403 PASSWORD_CHANGE_REQUIRED。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 成功。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUserPage'
+              examples:
+                admins:
+                  value:
+                    items:
+                    - id: dc14f15b-7015-4690-98d7-f3cc4e8ff578
+                      username: admin
+                      displayName: 平台管理员
+                      roles:
+                      - ADMIN
+                      status: ACTIVE
+                      mustChangePassword: false
+                      createdAt: '2026-10-18T12:00:00Z'
+                      updatedAt: '2026-10-18T12:00:00Z'
+                      lastLoginAt: '2026-10-18T12:00:00Z'
+                    nextCursor: null
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      parameters:
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/Cursor'
+      - name: status
+        in: query
+        schema:
+          type: string
+          enum:
+          - ACTIVE
+          - DISABLED
+    post:
+      tags:
+      - AdminUsers
+      operationId: createAdminUser
+      summary: 创建管理员账号
+      description: 需要最近 5 分钟内的密码认证和 CSRF。账号 ACTIVE、角色固定 ADMIN、mustChangePassword=true。username 唯一冲突 409；密码只写入哈希，不在响应或审计中返回。首次管理员由部署侧
+        bootstrap 创建，不开放匿名安装接口。 登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回 401 或 403 PASSWORD_CHANGE_REQUIRED。
+      x-implementation-status: implemented
+      responses:
+        '201':
+          description: 成功。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUser'
+              examples:
+                created:
+                  value:
+                    id: 389da156-d4df-4acd-bdfe-1806e79e2f34
+                    username: operator
+                    displayName: 运维管理员
+                    roles:
+                    - ADMIN
+                    status: ACTIVE
+                    mustChangePassword: true
+                    createdAt: '2026-10-18T12:00:00Z'
+                    updatedAt: '2026-10-18T12:00:00Z'
+                    lastLoginAt: null
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+            ETag:
+              $ref: '#/components/headers/ETag'
+            Location:
+              description: 新用户资源路径。
+              schema:
+                type: string
+                format: uri-reference
+                examples:
+                - /api/v1/admin/users/389da156-d4df-4acd-bdfe-1806e79e2f34
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/CsrfRejected'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '409':
+          $ref: '#/components/responses/AdminConflict'
+        '422':
+          $ref: '#/components/responses/PasswordRejected'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAdminUserRequest'
+            example:
+              username: operator
+              displayName: 运维管理员
+              initialPassword: Example-initial-password-2026!
+  /api/v1/admin/users/{userId}:
+    parameters:
+    - $ref: '#/components/parameters/UserId'
+    get:
+      tags:
+      - AdminUsers
+      operationId: getAdminUser
+      summary: 查询管理员详情
+      description: 不返回密码哈希、凭据或会话密钥。ETag 对应完整用户表示。 登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回 401 或 403 PASSWORD_CHANGE_REQUIRED。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 成功。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUser'
+              examples:
+                admin:
+                  value:
+                    id: dc14f15b-7015-4690-98d7-f3cc4e8ff578
+                    username: admin
+                    displayName: 平台管理员
+                    roles:
+                    - ADMIN
+                    status: ACTIVE
+                    mustChangePassword: false
+                    createdAt: '2026-10-18T12:00:00Z'
+                    updatedAt: '2026-10-18T12:00:00Z'
+                    lastLoginAt: '2026-10-18T12:00:00Z'
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+            ETag:
+              $ref: '#/components/headers/ETag'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags:
+      - AdminUsers
+      operationId: updateAdminUser
+      summary: 更新管理员显示名或状态
+      description: 需要最近 5 分钟内的密码认证、CSRF 和 If-Match。仅更新提供字段，不允许 null，至少一个字段；禁止禁用自己或最后一个 ACTIVE 管理员（事务内检查，409）。禁用后原子撤销目标全部会话，重新启用不会恢复旧会话。不提供删除账号接口以保留审计关联。
+        登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回 401 或 403 PASSWORD_CHANGE_REQUIRED。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 成功。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUser'
+              examples:
+                updated:
+                  value:
+                    id: dc14f15b-7015-4690-98d7-f3cc4e8ff578
+                    username: admin
+                    displayName: 基础设施管理员
+                    roles:
+                    - ADMIN
+                    status: ACTIVE
+                    mustChangePassword: false
+                    createdAt: '2026-10-18T12:00:00Z'
+                    updatedAt: '2026-10-18T12:00:00Z'
+                    lastLoginAt: '2026-10-18T12:00:00Z'
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+            ETag:
+              $ref: '#/components/headers/ETag'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/CsrfRejected'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '428':
+          $ref: '#/components/responses/PreconditionRequired'
+        '409':
+          $ref: '#/components/responses/AdminConflict'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateAdminUserRequest'
+            example:
+              displayName: 基础设施管理员
+      parameters:
+      - $ref: '#/components/parameters/ResourceIfMatch'
+  /api/v1/admin/users/{userId}/password:
+    parameters:
+    - $ref: '#/components/parameters/UserId'
+    put:
+      tags:
+      - AdminUsers
+      operationId: resetAdminPassword
+      summary: 重置其他管理员密码
+      description: 需要最近 5 分钟内的密码认证、CSRF 和目标用户 If-Match。不得用于本人（409，请用 /auth/password）。原子更新密码、置 mustChangePassword=true
+        并撤销目标全部会话；不返回密码。响应丢失时不要自动换密码重试，应刷新用户版本后人工确认。 登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回 401 或 403 PASSWORD_CHANGE_REQUIRED。
+      x-implementation-status: implemented
+      responses:
+        '204':
+          description: 目标密码已重置，目标全部会话已撤销。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/CsrfRejected'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '428':
+          $ref: '#/components/responses/PreconditionRequired'
+        '409':
+          $ref: '#/components/responses/AdminConflict'
+        '422':
+          $ref: '#/components/responses/PasswordRejected'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ResetAdminPasswordRequest'
+            example:
+              newPassword: Example-reset-password-2026!
+      parameters:
+      - $ref: '#/components/parameters/ResourceIfMatch'
+  /api/v1/admin/roles:
+    get:
+      tags:
+      - AdminRoles
+      operationId: listBuiltinRoles
+      summary: 列出内置角色与权限
+      description: 首期仅 ADMIN，权限由代码维护。接口只读，不代表支持动态 RBAC；未来扩展角色时另行演进契约。 登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回 401 或 403
+        PASSWORD_CHANGE_REQUIRED。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 成功。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BuiltinRoleList'
+              examples:
+                roles:
+                  value:
+                    items:
+                    - id: ADMIN
+                      name: 平台管理员
+                      permissions:
+                      - host.read
+                      - agent.read
+                      - system-service.read
+                      - system-service.restart
+                      - operation.read
+                      - admin.overview.read
+                      - admin.user.manage
+                      - admin.settings.manage
+                      - admin.audit.read
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+  /api/v1/admin/settings:
+    get:
+      tags:
+      - AdminSettings
+      operationId: getPlatformSettings
+      summary: 读取平台非机密设置
+      description: 仅返回明确列出的可编辑字段，不返回数据库密码、证书、密钥或任意配置文件。首次读取时以默认值初始化唯一设置行。登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回 401 或 403 PASSWORD_CHANGE_REQUIRED。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 成功。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformSettings'
+              examples:
+                settings:
+                  value:
+                    siteName: NaNPanel
+                    defaultTimezone: Asia/Shanghai
+                    hostOfflineAfterSeconds: 90
+                    operationRetentionDays: 7
+                    updatedAt: '2026-10-18T12:00:00Z'
+                    updatedBy: dc14f15b-7015-4690-98d7-f3cc4e8ff578
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+            ETag:
+              $ref: '#/components/headers/ETag'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    patch:
+      tags:
+      - AdminSettings
+      operationId: updatePlatformSettings
+      summary: 更新平台非机密设置
+      description: 需要最近 5 分钟内的密码认证、CSRF 和 If-Match；合并提供字段，至少一个且不可为 null。非法 IANA 时区返回 400；成功原子持久化并审计。离线阈值仅改变管理状态判定，不执行网络操作；任务保留期不清理非终态记录。
+        登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回 401 或 403 PASSWORD_CHANGE_REQUIRED。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 成功。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformSettings'
+              examples:
+                updated:
+                  value:
+                    siteName: 家庭实验室
+                    defaultTimezone: Asia/Shanghai
+                    hostOfflineAfterSeconds: 90
+                    operationRetentionDays: 7
+                    updatedAt: '2026-10-18T12:00:00Z'
+                    updatedBy: dc14f15b-7015-4690-98d7-f3cc4e8ff578
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+            ETag:
+              $ref: '#/components/headers/ETag'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/CsrfRejected'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '428':
+          $ref: '#/components/responses/PreconditionRequired'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePlatformSettingsRequest'
+            example:
+              siteName: 家庭实验室
+      parameters:
+      - $ref: '#/components/parameters/ResourceIfMatch'
+  /api/v1/admin/audit-events:
+    get:
+      tags:
+      - AdminAudit
+      operationId: listAuditEvents
+      summary: 查询审计事件
+      description: 只读且按事件 UUID 升序游标分页，UI 不得假设默认时间倒序。当前记录认证、会话、密码和管理员账号/平台设置变更，以及登录、来源、CSRF、未认证和账号状态拒绝；主机服务操作审计待运维 API 实现后接入。不记录密码、Cookie、CSRF、私钥或原始请求体。时间范围为
+        [from,to)，from 必须早于 to。 登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回 401 或 403 PASSWORD_CHANGE_REQUIRED。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 成功。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditEventPage'
+              examples:
+                events:
+                  value:
+                    items:
+                    - id: dc2fd20f-e1c1-4f3a-a6ce-e62f2cfe41ca
+                      occurredAt: '2026-10-18T12:00:00Z'
+                      actorId: dc14f15b-7015-4690-98d7-f3cc4e8ff578
+                      action: auth.login
+                      resourceType: session
+                      resourceId: 9fc55f63-a643-440d-837b-9bf7e6b145bc
+                      outcome: SUCCEEDED
+                      traceId: example-login-trace-001
+                      clientIp: 127.0.0.1
+                      summary: 管理员登录成功。
+                    nextCursor: null
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+      parameters:
+      - $ref: '#/components/parameters/Limit'
+      - $ref: '#/components/parameters/Cursor'
+      - name: actorId
+        in: query
+        schema:
+          type: string
+          format: uuid
+      - name: action
+        in: query
+        schema:
+          type: string
+          minLength: 1
+      - name: outcome
+        in: query
+        schema:
+          type: string
+          enum:
+          - SUCCEEDED
+          - DENIED
+          - FAILED
+      - name: from
+        in: query
+        schema:
+          type: string
+          format: date-time
+      - name: to
+        in: query
+        schema:
+          type: string
+          format: date-time
+  /api/v1/admin/audit-events/{eventId}:
+    parameters:
+    - $ref: '#/components/parameters/AuditEventId'
+    get:
+      tags:
+      - AdminAudit
+      operationId: getAuditEvent
+      summary: 查询单条审计事件
+      description: 仅返回脱敏摘要和资源关联，不提供修改/删除 API。审计存储与保留策略独立于普通任务保留期。 登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回 401 或 403 PASSWORD_CHANGE_REQUIRED。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 成功。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditEvent'
+              examples:
+                event:
+                  value:
+                    id: dc2fd20f-e1c1-4f3a-a6ce-e62f2cfe41ca
+                    occurredAt: '2026-10-18T12:00:00Z'
+                    actorId: dc14f15b-7015-4690-98d7-f3cc4e8ff578
+                    action: auth.login
+                    resourceType: session
+                    resourceId: 9fc55f63-a643-440d-837b-9bf7e6b145bc
+                    outcome: SUCCEEDED
+                    traceId: example-login-trace-001
+                    clientIp: 127.0.0.1
+                    summary: 管理员登录成功。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/topology/draft:
+    get:
+      tags:
+      - Topology
+      operationId: getTopologyDraft
+      summary: 读取拓扑期望草稿
+      x-implementation-status: planned
+      description: 要求 ACTIVE 管理员会话且已完成强制改密。只读保存的期望状态，不探测网络或部署。详见 topology.md。
+      responses:
+        '200':
+          description: 期望草稿；所有连接始终未验证。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TopologyDraft'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags:
+      - Topology
+      operationId: replaceTopologyDraft
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      summary: 原子替换拓扑期望草稿
+      x-implementation-status: planned
+      description: 要求 ACTIVE 管理员会话、CSRF 与 If-Match。检查端口方向、节点形状、单端口占用、引用、重复与环路后原子替换，并记录审计。不执行真实转发；不要求最近五分钟重新认证。详见
+        topology.md。
+      parameters:
+      - $ref: '#/components/parameters/ResourceIfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TopologyDraftWrite'
+      responses:
+        '200':
+          description: 期望草稿；所有连接始终未验证。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TopologyDraft'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '428':
+          $ref: '#/components/responses/PreconditionRequired'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+components:
+  securitySchemes:
+    basicAuth:
+      type: http
+      scheme: basic
+      description: 仅供当前脚手架 GET /api/v1/system 兼容；不是 Web 登录方案。其余规划接口不接受 Basic 作为会话替代。
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: nanpanel_session
+      description: 服务端保存的随机不透明会话；Secure、HttpOnly、SameSite=Lax、Path=/，不设置 Domain。生产仅 HTTPS；具体预认证/登录/续期语义见 API README。
+    preAuthCookie:
+      type: apiKey
+      in: cookie
+      name: nanpanel_session
+      description: GET /auth/csrf 签发的短期预认证 Cookie，不能访问管理资源；登录时必须与 CSRF token 配对。
+    csrfToken:
+      type: apiKey
+      in: header
+      name: X-CSRF-Token
+      description: 与 Cookie 绑定的同步 CSRF token；所有 POST/PUT/PATCH/DELETE 都要求验证，登录也不例外。
+  parameters:
+    HostId:
+      name: hostId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: 平台分配的资源 UUID，不是主机名、unit 名称或系统 PID。
+    AgentId:
+      name: agentId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: 平台分配的资源 UUID，不是主机名、unit 名称或系统 PID。
+    ServiceId:
+      name: serviceId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: 平台分配的资源 UUID，不是主机名、unit 名称或系统 PID。
+    OperationId:
+      name: operationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: 平台分配的资源 UUID，不是主机名、unit 名称或系统 PID。
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+      description: 按资源 UUID 升序游标分页。
+    Cursor:
+      name: cursor
+      in: query
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 2048
+      description: 不透明游标，与调用者授权范围和筛选条件绑定。无效或筛选不匹配返回 400。
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+        pattern: ^[A-Za-z0-9._:-]+$
+      description: 调用者为一次逻辑操作生成的唯一键。按认证主体 + HTTP 方法 + 规范化路径 + 此键去重；规范化请求体和 If-Match 必须一致。任务及去重记录保留至少 7 天，非终态记录不得提前删除。
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      schema:
+        type: string
+        pattern: ^"[A-Za-z0-9._:-]{1,200}"$
+        examples:
+        - '"svc7-obs42-admin"'
+      description: 服务详情返回的不透明强 ETag（带双引号）；标识当前调用者可见的完整表示，观测或权限提示变化也会使其改变，不接受通配符或多个值。新任务版本过期返回 412，缺失返回 428；同一幂等请求重放优先匹配原记录。
+    ResourceIfMatch:
+      name: If-Match
+      in: header
+      required: true
+      schema:
+        type: string
+        pattern: ^"[A-Za-z0-9._:-]{1,200}"$
+        examples:
+        - '"user-v3-admin"'
+      description: 对应资源详情的强 ETag。与当前完整表示比较；缺失 428、过期 412，不允许 * 或多个 ETag。
+    UserId:
+      name: userId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    SessionId:
+      name: sessionId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    AuditEventId:
+      name: eventId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  headers:
+    ETag:
+      description: 当前调用者可见的完整资源表示对应的不透明强 ETag；服务、用户与设置均独立生成，不等同于 generation。
+      schema:
+        type: string
+        examples:
+        - '"svc7-obs42-admin"'
+    Location:
+      description: 操作资源的相对 URI。
+      schema:
+        type: string
+        format: uri-reference
+        examples:
+        - /api/v1/operations/559903dd-6474-4cb1-a70d-3e0ade987442
+    RetryAfter:
+      description: 建议下次轮询/重试等待的秒数。
+      schema:
+        type: integer
+        minimum: 1
+        examples:
+        - 2
+    IdempotencyReplayed:
+      description: true 表示返回原操作，没有再次执行。
+      schema:
+        type: boolean
+    SessionCookie:
+      description: 签发/轮换 HttpOnly Cookie；退出时以相同 Path/属性置空并设 Max-Age=0。仅示意，不是真实凭据。
+      schema:
+        type: string
+        examples:
+        - nanpanel_session=example-not-a-real-session; Path=/; Secure; HttpOnly; SameSite=Lax
+    NoStore:
+      description: 认证和管理响应不缓存。
+      schema:
+        type: string
+        const: no-store
+  schemas:
+    TopologyNodeKind:
+      type: string
+      enum:
+      - GATEWAY
+      - HOST
+      - SERVICE
+      - SWITCH
+      - MERGE
+      - SPLIT
+      - FORWARDER
+    TopologyPosition:
+      type: object
+      additionalProperties: false
+      required:
+      - x
+      - y
+      properties:
+        x:
+          type: number
+          minimum: -10000
+          maximum: 10000
+        y:
+          type: number
+          minimum: -10000
+          maximum: 10000
+    TopologyNode:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - kind
+      - name
+      - position
+      - inputCount
+      - outputCount
+      properties:
+        id: &id001
+          type: string
+          format: uuid
+        kind:
+          $ref: '#/components/schemas/TopologyNodeKind'
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        position:
+          $ref: '#/components/schemas/TopologyPosition'
+        inputCount:
+          type: integer
+          minimum: 0
+          maximum: 16
+        outputCount:
+          type: integer
+          minimum: 0
+          maximum: 16
+    TopologyLink:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - sourceNodeId
+      - sourcePort
+      - targetNodeId
+      - targetPort
+      - status
+      properties:
+        id: *id001
+        sourceNodeId: *id001
+        sourcePort:
+          type: string
+          pattern: ^out-([1-9]|1[0-6])$
+        targetNodeId: *id001
+        targetPort:
+          type: string
+          pattern: ^in-([1-9]|1[0-6])$
+        status:
+          type: string
+          const: UNVERIFIED
+    TopologyDraftWrite:
+      type: object
+      additionalProperties: false
+      required:
+      - nodes
+      - links
+      properties:
+        nodes:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/TopologyNode'
+        links:
+          type: array
+          maxItems: 800
+          items:
+            $ref: '#/components/schemas/TopologyLink'
+    TopologyDraft:
+      type: object
+      additionalProperties: false
+      required:
+      - nodes
+      - links
+      - updatedAt
+      - updatedBy
+      properties:
+        nodes:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/TopologyNode'
+        links:
+          type: array
+          maxItems: 800
+          items:
+            $ref: '#/components/schemas/TopologyLink'
+        updatedAt:
+          type: string
+          format: date-time
+        updatedBy:
+          type:
+          - string
+          - 'null'
+          format: uuid
+    SystemInfo:
+      type: object
+      additionalProperties: false
+      required:
+      - name
+      - version
+      - stage
+      properties:
+        name:
+          type: string
+          minLength: 1
+        version:
+          type: string
+          minLength: 1
+        stage:
+          type: string
+          minLength: 1
+    Host:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - hostname
+      - os
+      - arch
+      - status
+      - capabilities
+      - agentId
+      - lastSeenAt
+      - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        hostname:
+          type: string
+          minLength: 1
+        os:
+          type:
+          - string
+          - 'null'
+        arch:
+          type:
+          - string
+          - 'null'
+        status:
+          type: string
+          enum:
+          - UNKNOWN
+          - ONLINE
+          - OFFLINE
+          description: Agent 管理通道状态，不表示业务数据面健康。
+        capabilities:
+          type: array
+          items:
+            type: string
+            minLength: 1
+        agentId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        lastSeenAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+    Agent:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - hostId
+      - version
+      - implementation
+      - status
+      - lastSeenAt
+      - capabilities
+      - helperStatus
+      properties:
+        id:
+          type: string
+          format: uuid
+        hostId:
+          type: string
+          format: uuid
+        version:
+          type:
+          - string
+          - 'null'
+        implementation:
+          type: string
+          const: rust
+        status:
+          type: string
+          enum:
+          - UNKNOWN
+          - ONLINE
+          - OFFLINE
+        lastSeenAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        capabilities:
+          type: array
+          items:
+            type: string
+            minLength: 1
+        helperStatus:
+          type: string
+          enum:
+          - UNKNOWN
+          - AVAILABLE
+          - UNAVAILABLE
+          description: 仅反映最近观测的 Helper 可用性，不替代每次操作的授权检查。
+    SystemService:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - hostId
+      - unitName
+      - displayName
+      - activeState
+      - subState
+      - generation
+      - observedAt
+      - allowedActions
+      - observationStale
+      properties:
+        id:
+          type: string
+          format: uuid
+        hostId:
+          type: string
+          format: uuid
+        unitName:
+          type: string
+          pattern: ^[A-Za-z0-9_.@:\\-]+\.service$
+          maxLength: 255
+        displayName:
+          type: string
+          minLength: 1
+        activeState:
+          type: string
+          enum:
+          - UNKNOWN
+          - ACTIVE
+          - INACTIVE
+          - ACTIVATING
+          - DEACTIVATING
+          - RELOADING
+          - FAILED
+        subState:
+          type:
+          - string
+          - 'null'
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+          description: 平台管理配置/权限策略版本；观测状态更新不递增此值。服务重建或授权策略变更须使旧 ETag 失效。
+        observedAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        allowedActions:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            enum:
+            - RESTART
+          description: 结合调用者权限与最近能力信息的 UI 提示；执行时必须重新授权。
+        observationStale:
+          type: boolean
+          description: true 时仅为历史观测，不能表示当前实际状态。
+    RestartServiceRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - reason
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: 审计用途，去除首尾空白后不得为空，不得包含密码或令牌。
+        timeoutSeconds:
+          type: integer
+          minimum: 5
+          maximum: 300
+          default: 60
+          description: 包含排队、执行与验证的总期限。截止时间由服务端在首次接受请求时计算，重试不延长。
+    OperationError:
+      type: object
+      additionalProperties: false
+      required:
+      - code
+      - message
+      - retryable
+      - executionOutcome
+      properties:
+        code:
+          type: string
+          minLength: 1
+        message:
+          type: string
+          minLength: 1
+        retryable:
+          type: boolean
+        executionOutcome:
+          type: string
+          enum:
+          - NOT_EXECUTED
+          - VERIFIED_FAILED
+          - UNCERTAIN
+          description: 是否执行与是否允许新建重试须分别判断；UNCERTAIN 不得自动重新执行。
+    ServiceRestartResult:
+      type: object
+      additionalProperties: false
+      required:
+      - serviceId
+      - unitName
+      - activeState
+      - verifiedAt
+      - evidence
+      properties:
+        serviceId:
+          type: string
+          format: uuid
+        unitName:
+          type: string
+          minLength: 1
+        activeState:
+          type: string
+          const: ACTIVE
+        verifiedAt:
+          type: string
+          format: date-time
+        evidence:
+          type: string
+          minLength: 1
+          description: 脱敏后的执行与验证摘要。ACTIVE 仅证明 systemd 服务状态，不证明 HTTP 或其他业务端到端健康。
+    Operation:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - kind
+      - hostId
+      - agentId
+      - serviceId
+      - idempotencyKey
+      - requestedBy
+      - reason
+      - expectedGeneration
+      - phase
+      - status
+      - createdAt
+      - startedAt
+      - updatedAt
+      - deadlineAt
+      - finishedAt
+      - result
+      - error
+      properties:
+        id:
+          type: string
+          format: uuid
+        kind:
+          type: string
+          const: SYSTEM_SERVICE_RESTART
+        hostId:
+          type: string
+          format: uuid
+        agentId:
+          type: string
+          format: uuid
+        serviceId:
+          type: string
+          format: uuid
+        idempotencyKey:
+          type: string
+          minLength: 1
+        requestedBy:
+          type: string
+          description: 从已认证主体取得，不接受客户端指定。
+        reason:
+          type: string
+          minLength: 1
+        expectedGeneration:
+          type: integer
+          minimum: 1
+        phase:
+          type: string
+          enum:
+          - VALIDATE
+          - PREPARE
+          - APPLY
+          - VERIFY
+          - COMMIT
+          - COMPENSATE
+        status:
+          type: string
+          enum:
+          - PENDING
+          - RUNNING
+          - SUCCEEDED
+          - FAILED
+          - CANCELLED
+          - UNKNOWN
+        createdAt:
+          type: string
+          format: date-time
+        startedAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        deadlineAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+        result:
+          oneOf:
+          - $ref: '#/components/schemas/ServiceRestartResult'
+          - type: 'null'
+        error:
+          oneOf:
+          - $ref: '#/components/schemas/OperationError'
+          - type: 'null'
+      description: 异步操作快照。SUCCEEDED 必须执行成功且验证通过；UNKNOWN 表示可能已执行但缺少可靠结果，禁止盲目重放。具体状态约束见 API README。CANCELLED 预留给执行前的系统取消，本版不提供取消端点。
+      allOf:
+      - if:
+          properties:
+            status:
+              enum:
+              - PENDING
+              - RUNNING
+        then:
+          properties:
+            result:
+              type: 'null'
+            error:
+              type: 'null'
+            finishedAt:
+              type: 'null'
+      - if:
+          properties:
+            status:
+              enum:
+              - PENDING
+        then:
+          properties:
+            startedAt:
+              type: 'null'
+      - if:
+          properties:
+            status:
+              enum:
+              - SUCCEEDED
+        then:
+          properties:
+            result:
+              $ref: '#/components/schemas/ServiceRestartResult'
+            error:
+              type: 'null'
+            finishedAt:
+              type: string
+              format: date-time
+      - if:
+          properties:
+            status:
+              enum:
+              - FAILED
+        then:
+          properties:
+            result:
+              type: 'null'
+            error:
+              $ref: '#/components/schemas/OperationError'
+            finishedAt:
+              type: string
+              format: date-time
+      - if:
+          properties:
+            status:
+              enum:
+              - CANCELLED
+        then:
+          properties:
+            result:
+              type: 'null'
+            error:
+              type: 'null'
+            finishedAt:
+              type: string
+              format: date-time
+      - if:
+          properties:
+            status:
+              enum:
+              - UNKNOWN
+        then:
+          properties:
+            result:
+              type: 'null'
+            finishedAt:
+              type: 'null'
+            error:
+              allOf:
+              - $ref: '#/components/schemas/OperationError'
+              - properties:
+                  executionOutcome:
+                    const: UNCERTAIN
+                  retryable:
+                    const: false
+    Problem:
+      type: object
+      additionalProperties: false
+      required:
+      - type
+      - title
+      - status
+      - detail
+      - instance
+      - code
+      - traceId
+      properties:
+        type:
+          type: string
+          format: uri
+          description: 本版使用 about:blank。
+        title:
+          type: string
+          minLength: 1
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        detail:
+          type: string
+          minLength: 1
+        instance:
+          type: string
+          format: uri-reference
+        code:
+          type: string
+          minLength: 1
+        traceId:
+          type: string
+          minLength: 1
+        errors:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+            - field
+            - message
+            properties:
+              field:
+                type: string
+                minLength: 1
+              message:
+                type: string
+                minLength: 1
+      description: 统一 HTTP 错误。业务执行失败放入 Operation.error，GET 任务仍返回 200。不得返回堆栈、机密或原始命令输出。
+    HostPage:
+      type: object
+      additionalProperties: false
+      required:
+      - items
+      - nextCursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Host'
+        nextCursor:
+          type:
+          - string
+          - 'null'
+          description: null 表示无下一页；否则原样传入下一次请求，保持其他筛选参数不变。
+    SystemServicePage:
+      type: object
+      additionalProperties: false
+      required:
+      - items
+      - nextCursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/SystemService'
+        nextCursor:
+          type:
+          - string
+          - 'null'
+          description: null 表示无下一页；否则原样传入下一次请求，保持其他筛选参数不变。
+    OperationPage:
+      type: object
+      additionalProperties: false
+      required:
+      - items
+      - nextCursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Operation'
+        nextCursor:
+          type:
+          - string
+          - 'null'
+          description: null 表示无下一页；否则原样传入下一次请求，保持其他筛选参数不变。
+    AdminUser:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - username
+      - displayName
+      - roles
+      - status
+      - mustChangePassword
+      - createdAt
+      - updatedAt
+      - lastLoginAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+          pattern: ^[a-z][a-z0-9_.-]{2,63}$
+          description: 创建后不可更改，按小写规范化后唯一。
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        roles:
+          type: array
+          minItems: 1
+          maxItems: 1
+          items:
+            type: string
+            const: ADMIN
+        status:
+          type: string
+          enum:
+          - ACTIVE
+          - DISABLED
+        mustChangePassword:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        lastLoginAt:
+          type:
+          - string
+          - 'null'
+          format: date-time
+    WebSession:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - userId
+      - current
+      - createdAt
+      - authenticatedAt
+      - lastSeenAt
+      - idleExpiresAt
+      - absoluteExpiresAt
+      - clientIp
+      - userAgent
+      properties:
+        id:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        current:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        authenticatedAt:
+          type: string
+          format: date-time
+        lastSeenAt:
+          type: string
+          format: date-time
+        idleExpiresAt:
+          type: string
+          format: date-time
+        absoluteExpiresAt:
+          type: string
+          format: date-time
+        clientIp:
+          type:
+          - string
+          - 'null'
+        userAgent:
+          type:
+          - string
+          - 'null'
+          maxLength: 512
+      description: id 仅为可展示/撤销的会话资源标识，不是可用于认证的 Cookie 值。不得返回会话密钥或 Cookie。
+    CsrfContext:
+      type: object
+      additionalProperties: false
+      required:
+      - csrfToken
+      - expiresAt
+      properties:
+        csrfToken:
+          type: string
+          minLength: 32
+          description: 绑定当前预认证/已认证会话，仅存内存，不是会话凭证。
+        expiresAt:
+          type: string
+          format: date-time
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - username
+      - password
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 64
+        password:
+          type: string
+          minLength: 1
+          maxLength: 128
+          writeOnly: true
+    SessionContext:
+      type: object
+      additionalProperties: false
+      required:
+      - user
+      - session
+      - permissions
+      - csrfToken
+      properties:
+        user:
+          $ref: '#/components/schemas/AdminUser'
+        session:
+          $ref: '#/components/schemas/WebSession'
+        permissions:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+        csrfToken:
+          type: string
+          minLength: 32
+    ChangePasswordRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - currentPassword
+      - newPassword
+      properties:
+        currentPassword:
+          type: string
+          minLength: 1
+          maxLength: 128
+          writeOnly: true
+        newPassword:
+          type: string
+          minLength: 15
+          maxLength: 128
+          writeOnly: true
+          description: 新密码：15–128 个 Unicode 字符，不截断，不记录日志；须通过服务端常见/泄露密码检查。
+    CreateAdminUserRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - username
+      - displayName
+      - initialPassword
+      properties:
+        username:
+          type: string
+          pattern: ^[a-z][a-z0-9_.-]{2,63}$
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        initialPassword:
+          type: string
+          minLength: 15
+          maxLength: 128
+          writeOnly: true
+          description: 新密码：15–128 个 Unicode 字符，不截断，不记录日志；须通过服务端常见/泄露密码检查。
+    UpdateAdminUserRequest:
+      type: object
+      additionalProperties: false
+      required: []
+      properties:
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        status:
+          type: string
+          enum:
+          - ACTIVE
+          - DISABLED
+      minProperties: 1
+    ResetAdminPasswordRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - newPassword
+      properties:
+        newPassword:
+          type: string
+          minLength: 15
+          maxLength: 128
+          writeOnly: true
+          description: 新密码：15–128 个 Unicode 字符，不截断，不记录日志；须通过服务端常见/泄露密码检查。
+    BuiltinRole:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - name
+      - permissions
+      properties:
+        id:
+          type: string
+          const: ADMIN
+        name:
+          type: string
+          minLength: 1
+        permissions:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+    PlatformSettings:
+      type: object
+      additionalProperties: false
+      required:
+      - siteName
+      - defaultTimezone
+      - hostOfflineAfterSeconds
+      - operationRetentionDays
+      - updatedAt
+      - updatedBy
+      properties:
+        siteName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        defaultTimezone:
+          type: string
+          minLength: 1
+          maxLength: 100
+          description: 有效 IANA 时区名，默认仅用于 UI 展示；所有 API 时间戳为 RFC 3339。
+        hostOfflineAfterSeconds:
+          type: integer
+          minimum: 30
+          maximum: 600
+        operationRetentionDays:
+          type: integer
+          minimum: 7
+          maximum: 365
+          description: 仅适用于已结束操作，非终态和 UNKNOWN 不得因保留期清理。
+        updatedAt:
+          type: string
+          format: date-time
+        updatedBy:
+          type: string
+          format: uuid
+    UpdatePlatformSettingsRequest:
+      type: object
+      additionalProperties: false
+      required: []
+      properties:
+        siteName:
+          type: string
+          minLength: 1
+          maxLength: 100
+        defaultTimezone:
+          type: string
+          minLength: 1
+          maxLength: 100
+        hostOfflineAfterSeconds:
+          type: integer
+          minimum: 30
+          maximum: 600
+        operationRetentionDays:
+          type: integer
+          minimum: 7
+          maximum: 365
+      minProperties: 1
+    AuditEvent:
+      type: object
+      additionalProperties: false
+      required:
+      - id
+      - occurredAt
+      - actorId
+      - action
+      - resourceType
+      - resourceId
+      - outcome
+      - traceId
+      - clientIp
+      - summary
+      properties:
+        id:
+          type: string
+          format: uuid
+        occurredAt:
+          type: string
+          format: date-time
+        actorId:
+          type:
+          - string
+          - 'null'
+          format: uuid
+        action:
+          type: string
+          minLength: 1
+        resourceType:
+          type: string
+          minLength: 1
+        resourceId:
+          type:
+          - string
+          - 'null'
+        outcome:
+          type: string
+          enum:
+          - SUCCEEDED
+          - DENIED
+          - FAILED
+        traceId:
+          type: string
+          minLength: 1
+        clientIp:
+          type:
+          - string
+          - 'null'
+        summary:
+          type: string
+          minLength: 1
+    AdminOverview:
+      type: object
+      additionalProperties: false
+      required:
+      - observedAt
+      - hosts
+      - operations
+      - activeAdminUsers
+      properties:
+        observedAt:
+          type: string
+          format: date-time
+        hosts:
+          type: object
+          additionalProperties: false
+          required:
+          - total
+          - online
+          - offline
+          - unknown
+          properties:
+            total:
+              type: integer
+              minimum: 0
+            online:
+              type: integer
+              minimum: 0
+            offline:
+              type: integer
+              minimum: 0
+            unknown:
+              type: integer
+              minimum: 0
+        operations:
+          type: object
+          additionalProperties: false
+          required:
+          - pending
+          - running
+          - unknown
+          - failedLast24Hours
+          properties:
+            pending:
+              type: integer
+              minimum: 0
+            running:
+              type: integer
+              minimum: 0
+            unknown:
+              type: integer
+              minimum: 0
+            failedLast24Hours:
+              type: integer
+              minimum: 0
+        activeAdminUsers:
+          type: integer
+          minimum: 1
+    AdminUserPage:
+      type: object
+      additionalProperties: false
+      required:
+      - items
+      - nextCursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdminUser'
+        nextCursor:
+          type:
+          - string
+          - 'null'
+    AuditEventPage:
+      type: object
+      additionalProperties: false
+      required:
+      - items
+      - nextCursor
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditEvent'
+        nextCursor:
+          type:
+          - string
+          - 'null'
+    WebSessionList:
+      type: object
+      additionalProperties: false
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebSession'
+    BuiltinRoleList:
+      type: object
+      additionalProperties: false
+      required:
+      - items
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/BuiltinRole'
+  responses:
+    BadRequest:
+      description: 路径、查询参数、请求头或请求体无效。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: about:blank
+            title: 请求格式错误
+            status: 400
+            detail: 路径、查询参数、请求头或请求体无效。
+            instance: /api/v1/hosts/8b395d24-5d5d-4f27-b70b-293cd30da621/services/6c0f837a-2fd9-4db8-9e87-c31d765c5bf1/restart
+            code: INVALID_REQUEST
+            traceId: example-trace-001
+    Unauthorized:
+      description: 缺少有效登录会话、会话已过期/撤销，或登录凭据无效；不返回 Basic challenge。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: about:blank
+            title: 需要认证
+            status: 401
+            detail: 缺少有效登录会话或登录凭据无效。
+            instance: /api/v1/hosts/8b395d24-5d5d-4f27-b70b-293cd30da621/services/6c0f837a-2fd9-4db8-9e87-c31d765c5bf1/restart
+            code: UNAUTHENTICATED
+            traceId: example-trace-001
+    Forbidden:
+      description: 主体无操作权限，或服务不在允许管理的范围。 Web 管理接口也可能返回 PASSWORD_CHANGE_REQUIRED 或 REAUTHENTICATION_REQUIRED；写操作还可能返回
+        CSRF_INVALID。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: about:blank
+            title: 权限不足
+            status: 403
+            detail: 主体无操作权限，或服务不在允许管理的范围。
+            instance: /api/v1/hosts/8b395d24-5d5d-4f27-b70b-293cd30da621/services/6c0f837a-2fd9-4db8-9e87-c31d765c5bf1/restart
+            code: PERMISSION_DENIED
+            traceId: example-trace-001
+    NotFound:
+      description: 资源不存在或不属于指定主机。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: about:blank
+            title: 资源不存在
+            status: 404
+            detail: 资源不存在或不属于指定主机。
+            instance: /api/v1/hosts/8b395d24-5d5d-4f27-b70b-293cd30da621/services/6c0f837a-2fd9-4db8-9e87-c31d765c5bf1/restart
+            code: RESOURCE_NOT_FOUND
+            traceId: example-trace-001
+    Conflict:
+      description: 目标服务已有未结束或执行结果未知的操作；也可能为幂等键请求不一致（IDEMPOTENCY_KEY_REUSED）。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: about:blank
+            title: 操作冲突
+            status: 409
+            detail: 目标服务已有未结束或执行结果未知的操作；也可能为幂等键请求不一致（IDEMPOTENCY_KEY_REUSED）。
+            instance: /api/v1/hosts/8b395d24-5d5d-4f27-b70b-293cd30da621/services/6c0f837a-2fd9-4db8-9e87-c31d765c5bf1/restart
+            code: OPERATION_IN_PROGRESS
+            traceId: example-trace-001
+    PreconditionFailed:
+      description: If-Match 已过期，请刷新对应资源详情后重新确认变更。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: about:blank
+            title: 资源版本已变化
+            status: 412
+            detail: If-Match 已过期，请刷新对应资源详情后重新确认变更。
+            instance: /api/v1/hosts/8b395d24-5d5d-4f27-b70b-293cd30da621/services/6c0f837a-2fd9-4db8-9e87-c31d765c5bf1/restart
+            code: GENERATION_MISMATCH
+            traceId: example-trace-001
+    PreconditionRequired:
+      description: 更新操作必须提供对应详情的 If-Match。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: about:blank
+            title: 缺少版本前置条件
+            status: 428
+            detail: 更新操作必须提供对应详情的 If-Match。
+            instance: /api/v1/hosts/8b395d24-5d5d-4f27-b70b-293cd30da621/services/6c0f837a-2fd9-4db8-9e87-c31d765c5bf1/restart
+            code: PRECONDITION_REQUIRED
+            traceId: example-trace-001
+    UnsupportedMediaType:
+      description: 请求体必须为 application/json。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: about:blank
+            title: 不支持的媒体类型
+            status: 415
+            detail: 请求体必须为 application/json。
+            instance: /api/v1/hosts/8b395d24-5d5d-4f27-b70b-293cd30da621/services/6c0f837a-2fd9-4db8-9e87-c31d765c5bf1/restart
+            code: UNSUPPORTED_MEDIA_TYPE
+            traceId: example-trace-001
+    Unprocessable:
+      description: Agent 不支持 systemd.restart，或主机未提供 systemd 服务管理。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: about:blank
+            title: 能力不支持
+            status: 422
+            detail: Agent 不支持 systemd.restart，或主机未提供 systemd 服务管理。
+            instance: /api/v1/hosts/8b395d24-5d5d-4f27-b70b-293cd30da621/services/6c0f837a-2fd9-4db8-9e87-c31d765c5bf1/restart
+            code: CAPABILITY_UNSUPPORTED
+            traceId: example-trace-001
+    Unavailable:
+      description: Agent 离线、无可用会话，或已知 Helper 不可用；不创建新任务。 若请求结果因连接中断未知，应使用相同幂等键重试以找回可能已接受的任务。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: about:blank
+            title: 执行端不可用
+            status: 503
+            detail: Agent 离线、无可用会话，或已知 Helper 不可用；不创建新任务。
+            instance: /api/v1/hosts/8b395d24-5d5d-4f27-b70b-293cd30da621/services/6c0f837a-2fd9-4db8-9e87-c31d765c5bf1/restart
+            code: AGENT_UNAVAILABLE
+            traceId: example-trace-001
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+    InternalError:
+      description: 控制面发生内部错误；请依据 traceId 排查。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: about:blank
+            title: 服务端错误
+            status: 500
+            detail: 控制面发生内部错误；请依据 traceId 排查。
+            instance: /api/v1/hosts/8b395d24-5d5d-4f27-b70b-293cd30da621/services/6c0f837a-2fd9-4db8-9e87-c31d765c5bf1/restart
+            code: INTERNAL_ERROR
+            traceId: example-trace-001
+    LegacyBasicUnauthorized:
+      description: 缺少凭据或凭据无效。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: about:blank
+            title: 需要认证
+            status: 401
+            detail: 缺少凭据或凭据无效。
+            instance: /api/v1/hosts/8b395d24-5d5d-4f27-b70b-293cd30da621/services/6c0f837a-2fd9-4db8-9e87-c31d765c5bf1/restart
+            code: UNAUTHENTICATED
+            traceId: example-trace-001
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+            examples:
+            - Basic realm="NaNPanel"
+    CsrfRejected:
+      description: CSRF token 缺失/无效或 Origin 不在明确允许的 Web 来源内；不执行操作。 已认证请求还可能返回 PERMISSION_DENIED、PASSWORD_CHANGE_REQUIRED
+        或 REAUTHENTICATION_REQUIRED；具体以 Problem.code 区分。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: about:blank
+            title: 请求未通过安全校验
+            status: 403
+            detail: CSRF token 缺失/无效或 Origin 不在明确允许的 Web 来源内；不执行操作。
+            instance: /api/v1/auth/login
+            code: CSRF_INVALID
+            traceId: example-web-trace-001
+    RecentAuthRequired:
+      description: 敏感管理操作要求 5 分钟内的密码认证；重新登录后刷新 ETag 再提交。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: about:blank
+            title: 需要重新验证身份
+            status: 403
+            detail: 敏感管理操作要求 5 分钟内的密码认证；重新登录后刷新 ETag 再提交。
+            instance: /api/v1/auth/login
+            code: REAUTHENTICATION_REQUIRED
+            traceId: example-web-trace-001
+    PasswordChangeRequired:
+      description: 临时密码会话只能访问 /auth/*，修改密码后才能管理资源。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: about:blank
+            title: 需要修改密码
+            status: 403
+            detail: 临时密码会话只能访问 /auth/*，修改密码后才能管理资源。
+            instance: /api/v1/auth/login
+            code: PASSWORD_CHANGE_REQUIRED
+            traceId: example-web-trace-001
+    AdminConflict:
+      description: 用户名已存在、试图禁用自己或最后一个启用管理员，或请求与现有状态冲突。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: about:blank
+            title: 管理变更冲突
+            status: 409
+            detail: 用户名已存在、试图禁用自己或最后一个启用管理员，或请求与现有状态冲突。
+            instance: /api/v1/auth/login
+            code: ADMIN_STATE_CONFLICT
+            traceId: example-web-trace-001
+    PasswordRejected:
+      description: 密码不能与当前密码相同，且须通过长度及常见/泄露密码检查。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: about:blank
+            title: 密码不符合策略
+            status: 422
+            detail: 密码不能与当前密码相同，且须通过长度及常见/泄露密码检查。
+            instance: /api/v1/auth/login
+            code: PASSWORD_POLICY_VIOLATION
+            traceId: example-web-trace-001
+    RateLimited:
+      description: 超过登录或敏感操作限额，请稍后重试。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: about:blank
+            title: 请求过于频繁
+            status: 429
+            detail: 超过登录或敏感操作限额，请稍后重试。
+            instance: /api/v1/auth/login
+            code: RATE_LIMITED
+            traceId: example-web-trace-001
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+    InvalidCredentials:
+      description: 用户名或密码错误，或账号无法登录；不区分账号不存在、禁用和密码错误。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: about:blank
+            title: 无法登录
+            status: 401
+            detail: 用户名或密码错误，或账号无法登录；不区分账号不存在、禁用和密码错误。
+            instance: /api/v1/auth/login
+            code: INVALID_CREDENTIALS
+            traceId: example-web-trace-001

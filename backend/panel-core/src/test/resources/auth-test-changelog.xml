@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog https://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+    <changeSet id="auth-test" author="nanpanel">
+        <sqlFile path="db/changelog/002-auth.sql"/>
+    </changeSet>
+    <changeSet id="admin-user-state-test" author="nanpanel">
+        <sqlFile path="db/changelog/003-admin-user-state.sql"/>
+    </changeSet>
+    <changeSet id="audit-test" author="nanpanel">
+        <sqlFile path="db/changelog/004-audit-event.sql"/>
+    </changeSet>
+</databaseChangeLog>

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog https://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-latest.xsd">
+<changeSet id="001-inventory" author="nanpanel"><sqlFile path="001-inventory.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE operation; DROP TABLE agent; DROP TABLE host;</sql></rollback></changeSet>
+<changeSet id="002-auth" author="nanpanel"><sqlFile path="002-auth.sql" relativeToChangelogFile="true"/></changeSet>
+<changeSet id="003-admin-user-state" author="nanpanel"><sqlFile path="003-admin-user-state.sql" relativeToChangelogFile="true"/></changeSet>
+<changeSet id="004-audit-event" author="nanpanel"><sqlFile path="004-audit-event.sql" relativeToChangelogFile="true"/></changeSet>
+<changeSet id="005-platform-settings" author="nanpanel"><sqlFile path="005-platform-settings.sql" relativeToChangelogFile="true"/></changeSet>
+</databaseChangeLog>

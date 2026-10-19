@@ -1,0 +1,15 @@
+CREATE TABLE host (
+ id UUID PRIMARY KEY, hostname TEXT NOT NULL, os TEXT, arch TEXT,
+ capabilities JSONB NOT NULL DEFAULT '[]', generation BIGINT NOT NULL DEFAULT 1,
+ observed_generation BIGINT NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'UNKNOWN',
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE agent (
+ id UUID PRIMARY KEY, host_id UUID NOT NULL REFERENCES host(id),
+ cert_identity TEXT NOT NULL UNIQUE, version TEXT, last_seen TIMESTAMPTZ
+);
+CREATE TABLE operation (
+ id UUID PRIMARY KEY, idempotency_key TEXT NOT NULL UNIQUE, phase TEXT NOT NULL,
+ status TEXT NOT NULL DEFAULT 'PENDING', error TEXT,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
