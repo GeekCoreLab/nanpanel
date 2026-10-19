@@ -4,11 +4,11 @@ use std::{
     io::{Read, Take},
     os::{
         fd::{AsRawFd, FromRawFd},
-        unix::fs::PermissionsExt,
+        unix::fs::{FileTypeExt, PermissionsExt},
     },
     path::{Component, Path},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, bail};
@@ -20,6 +20,7 @@ use tokio_util::codec::{Framed, LinesCodec};
 
 const MAX_FRAME: usize = 16 * 1024;
 const MAX_FILE_BYTES: usize = 64 * 1024;
+const MAX_AGENT_BYTES: usize = 64 * 1024 * 1024;
 const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 const RESOLVE_BENEATH: u64 = 0x08;
@@ -50,6 +51,9 @@ pub struct HelperConfig {
     pub allowed_agent_uid: u32,
     pub socket_gid: u32,
     pub allowed_read_root: File,
+    pub controller_url: reqwest::Url,
+    pub controller_cert: reqwest::Certificate,
+    pub agent_binary: std::path::PathBuf,
 }
 
 impl HelperConfig {
@@ -58,6 +62,9 @@ impl HelperConfig {
         allowed_agent_uid: u32,
         socket_gid: u32,
         read_root: impl AsRef<Path>,
+        controller_url: &str,
+        controller_cert: impl AsRef<Path>,
+        agent_binary: impl Into<std::path::PathBuf>,
     ) -> Result<Self> {
         if !nix::unistd::geteuid().is_root() {
             bail!("privileged-helper must run as root");
@@ -65,12 +72,6 @@ impl HelperConfig {
         let path = socket_path.into();
         if !path.is_absolute() {
             bail!("helper socket path must be absolute");
-        }
-        if path.exists() {
-            bail!(
-                "refusing to replace an existing socket path: {}",
-                path.display()
-            );
         }
         let parent = path
             .parent()
@@ -81,16 +82,48 @@ impl HelperConfig {
         if parent_metadata.uid() != 0 || parent_metadata.mode() & 0o022 != 0 {
             bail!("helper socket parent must be root-owned and not group/world writable");
         }
+        remove_stale_socket(&path)?;
         let allowed_read_root = File::open(read_root.as_ref())
             .with_context(|| format!("open read root {}", read_root.as_ref().display()))?;
         if !allowed_read_root.metadata()?.is_dir() {
             bail!("allowed read root is not a directory");
+        }
+        let controller_url =
+            reqwest::Url::parse(controller_url).context("parse configured controller URL")?;
+        if controller_url.scheme() != "https"
+            || controller_url.host_str().is_none()
+            || controller_url.username() != ""
+            || controller_url.password().is_some()
+            || controller_url.path() != "/"
+            || controller_url.query().is_some()
+            || controller_url.fragment().is_some()
+        {
+            bail!("controller URL must be an HTTPS origin without credentials or path");
+        }
+        let certificate_pem = std::fs::read(controller_cert.as_ref())
+            .context("read pinned controller certificate")?;
+        let controller_cert = reqwest::Certificate::from_pem(&certificate_pem)
+            .context("parse pinned controller certificate")?;
+        let agent_binary = agent_binary.into();
+        if !agent_binary.is_absolute() {
+            bail!("Agent binary path must be absolute");
+        }
+        let parent = agent_binary
+            .parent()
+            .context("Agent binary has no parent")?;
+        let metadata = std::fs::metadata(parent)
+            .with_context(|| format!("inspect Agent binary directory {}", parent.display()))?;
+        if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+            bail!("Agent binary directory must be root-owned and not group/world writable");
         }
         Ok(Self {
             socket_path: path,
             allowed_agent_uid,
             socket_gid,
             allowed_read_root,
+            controller_url,
+            controller_cert,
+            agent_binary,
         })
     }
 }
@@ -106,23 +139,86 @@ pub async fn serve(config: HelperConfig) -> Result<()> {
         return Err(error).context("set helper socket group");
     }
     let read_root = Arc::new(config.allowed_read_root);
+    let controller_url = config.controller_url;
+    let controller_cert = config.controller_cert;
+    let agent_binary = config.agent_binary;
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("install Helper SIGTERM handler")?;
+    let interrupted = tokio::signal::ctrl_c();
+    tokio::pin!(interrupted);
     loop {
-        let (stream, _) = listener.accept().await?;
-        let read_root = Arc::clone(&read_root);
-        let allowed_uid = config.allowed_agent_uid;
-        tokio::spawn(async move {
-            if let Err(error) = handle(stream, allowed_uid, read_root).await {
-                eprintln!(
-                    "{{\"event\":\"helper_request_error\",\"error\":{}}}",
-                    serde_json::to_string(&error.to_string())
-                        .unwrap_or_else(|_| "\"unknown\"".to_owned())
-                );
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, _) = accepted?;
+                let read_root = Arc::clone(&read_root);
+                let controller_url = controller_url.clone();
+                let controller_cert = controller_cert.clone();
+                let agent_binary = agent_binary.clone();
+                let allowed_uid = config.allowed_agent_uid;
+                tokio::spawn(async move {
+                    if let Err(error) = handle(
+                        stream,
+                        allowed_uid,
+                        read_root,
+                        controller_url,
+                        controller_cert,
+                        agent_binary,
+                    )
+                    .await
+                    {
+                        eprintln!(
+                            "{{\"event\":\"helper_request_error\",\"error\":{}}}",
+                            serde_json::to_string(&error.to_string())
+                                .unwrap_or_else(|_| "\"unknown\"".to_owned())
+                        );
+                    }
+                });
             }
-        });
+            _ = &mut interrupted => break,
+            _ = terminate.recv() => break,
+        }
+    }
+    drop(listener);
+    match std::fs::remove_file(&config.socket_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("remove Helper socket during shutdown"),
+    }
+    Ok(())
+}
+
+fn remove_stale_socket(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).context("inspect existing Helper socket path"),
+    };
+    if !metadata.file_type().is_socket() || metadata.uid() != 0 {
+        bail!("refusing to replace a non-socket or non-root-owned Helper path");
+    }
+    match std::os::unix::net::UnixStream::connect(path) {
+        Ok(_) => bail!("refusing to replace an active Helper socket"),
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+            ) =>
+        {
+            std::fs::remove_file(path).context("remove stale Helper socket")
+        }
+        Err(error) => Err(error).context("check whether existing Helper socket is active"),
     }
 }
 
-async fn handle(stream: UnixStream, allowed_uid: u32, read_root: Arc<File>) -> Result<()> {
+async fn handle(
+    stream: UnixStream,
+    allowed_uid: u32,
+    read_root: Arc<File>,
+    controller_url: reqwest::Url,
+    controller_cert: reqwest::Certificate,
+    agent_binary: std::path::PathBuf,
+) -> Result<()> {
     let peer = getsockopt(&stream, PeerCredentials).context("read Unix peer credentials")?;
     let mut framed = Framed::new(stream, LinesCodec::new_with_max_length(MAX_FRAME));
     while let Some(line) = framed.next().await {
@@ -145,7 +241,28 @@ async fn handle(stream: UnixStream, allowed_uid: u32, read_root: Arc<File>) -> R
                 let result = if peer.uid() != allowed_uid {
                     Err("caller identity is not authorized".to_owned())
                 } else {
-                    execute(&request, &read_root)
+                    match validate_envelope(&request) {
+                        Err(error) => Err(error),
+                        Ok(()) => {
+                            match validate_capability_target(&request.capability, &request.target) {
+                                Err(error) => Err(error),
+                                Ok(()) => match request.capability.as_str() {
+                                    "helper.status" => Ok("AVAILABLE".to_owned()),
+                                    "agent.update" => {
+                                        update_agent(
+                                            &controller_url,
+                                            &controller_cert,
+                                            &agent_binary,
+                                        )
+                                        .await
+                                    }
+                                    "systemd.restart" => restart_agent_service().await,
+                                    "file.read.allowed" => execute(&request, &read_root),
+                                    _ => Err("capability is not allowlisted".to_owned()),
+                                },
+                            }
+                        }
+                    }
                 };
                 match result {
                     Ok(result) => {
@@ -196,6 +313,14 @@ async fn handle(stream: UnixStream, allowed_uid: u32, read_root: Arc<File>) -> R
 }
 
 fn execute(request: &Request, allowed_read_root: &File) -> std::result::Result<String, String> {
+    validate_envelope(request)?;
+    if request.capability != "file.read.allowed" {
+        return Err("capability is not allowlisted".to_owned());
+    }
+    read_beneath(allowed_read_root, &request.target).map_err(|e| format!("read denied: {e}"))
+}
+
+fn validate_envelope(request: &Request) -> std::result::Result<(), String> {
     if request.operation_id.is_empty()
         || request.operation_id.len() > 128
         || request.idempotency_key.is_empty()
@@ -210,10 +335,113 @@ fn execute(request: &Request, allowed_read_root: &File) -> std::result::Result<S
     if request.deadline_epoch_ms < now || request.deadline_epoch_ms > now + 10 * 60 * 1000 {
         return Err("deadline is expired or exceeds the 10 minute limit".to_owned());
     }
-    if request.capability != "file.read.allowed" {
-        return Err("capability is not allowlisted".to_owned());
+    Ok(())
+}
+
+fn validate_capability_target(capability: &str, target: &str) -> std::result::Result<(), String> {
+    match capability {
+        "helper.status" | "agent.update" if target.is_empty() => Ok(()),
+        "systemd.restart" if target == "nanpanel-agent.service" => Ok(()),
+        "file.read.allowed" => Ok(()),
+        "helper.status" | "agent.update" | "systemd.restart" => {
+            Err("target is not allowlisted for this capability".to_owned())
+        }
+        _ => Err("capability is not allowlisted".to_owned()),
     }
-    read_beneath(allowed_read_root, &request.target).map_err(|e| format!("read denied: {e}"))
+}
+
+async fn update_agent(
+    controller_url: &reqwest::Url,
+    controller_cert: &reqwest::Certificate,
+    agent_binary: &Path,
+) -> std::result::Result<String, String> {
+    let client = reqwest::Client::builder()
+        .add_root_certificate(controller_cert.clone())
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|error| format!("build pinned update client: {error}"))?;
+    let url = controller_url
+        .join("api/v1/agent-download/linux-amd64")
+        .map_err(|error| format!("build fixed Agent download URL: {error}"))?;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| format!("download Agent from configured controller: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("controller rejected Agent download: {error}"))?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_AGENT_BYTES as u64)
+    {
+        return Err("Agent download exceeds the 64 MiB limit".to_owned());
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|error| format!("read Agent download: {error}"))?;
+    if bytes.len() < 4 || bytes.len() > MAX_AGENT_BYTES || &bytes[..4] != b"\x7fELF" {
+        return Err("download is not a valid-sized Linux ELF Agent".to_owned());
+    }
+
+    let parent = agent_binary
+        .parent()
+        .ok_or_else(|| "configured Agent binary has no parent directory".to_owned())?;
+    let temporary = parent.join(format!(".nanpanel-agent-{}.tmp", uuid::Uuid::new_v4()));
+    let write_result = async {
+        use tokio::io::AsyncWriteExt;
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o755)
+            .open(&temporary)
+            .await
+            .map_err(|error| format!("create root-owned Agent staging file: {error}"))?;
+        file.write_all(&bytes)
+            .await
+            .map_err(|error| format!("write staged Agent: {error}"))?;
+        file.sync_all()
+            .await
+            .map_err(|error| format!("sync staged Agent: {error}"))?;
+        drop(file);
+        tokio::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755))
+            .await
+            .map_err(|error| format!("set staged Agent permissions: {error}"))?;
+        tokio::fs::rename(&temporary, agent_binary)
+            .await
+            .map_err(|error| format!("atomically install Agent: {error}"))?;
+        let directory = tokio::fs::File::open(parent)
+            .await
+            .map_err(|error| format!("open Agent binary directory: {error}"))?;
+        directory
+            .sync_all()
+            .await
+            .map_err(|error| format!("sync Agent binary directory: {error}"))?;
+        Ok::<(), String>(())
+    }
+    .await;
+    if write_result.is_err() {
+        let _ = tokio::fs::remove_file(&temporary).await;
+    }
+    write_result?;
+    Ok("Agent binary atomically replaced; restart is required".to_owned())
+}
+
+async fn restart_agent_service() -> std::result::Result<String, String> {
+    let mut child = tokio::process::Command::new("/usr/bin/systemctl")
+        .args(["restart", "nanpanel-agent.service"])
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|error| format!("start fixed systemd restart: {error}"))?;
+    match tokio::time::timeout(Duration::from_secs(20), child.wait()).await {
+        Ok(Ok(status)) if status.success() => Ok("nanpanel-agent.service restarted".to_owned()),
+        Ok(Ok(status)) => Err(format!("systemctl restart failed with {status}")),
+        Ok(Err(error)) => Err(format!("wait for systemctl restart: {error}")),
+        Err(_) => Err("systemctl restart timed out after 20 seconds".to_owned()),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -346,6 +574,21 @@ mod tests {
             )
             .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn helper_capabilities_are_typed_and_target_limited() -> Result<()> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("system clock is before Unix epoch")?
+            .as_millis() as i64;
+        assert!(validate_envelope(&request("agent.update", "", now + 30_000)).is_ok());
+        assert!(validate_capability_target("agent.update", "").is_ok());
+        assert!(validate_capability_target("systemd.restart", "nanpanel-agent.service").is_ok());
+        assert!(validate_capability_target("systemd.restart", "sshd.service").is_err());
+        assert!(validate_capability_target("agent.update", "https://evil.invalid").is_err());
+        assert!(validate_capability_target("package.install", "nano").is_err());
         Ok(())
     }
 }

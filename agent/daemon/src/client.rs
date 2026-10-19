@@ -1,14 +1,27 @@
-use std::{path::PathBuf, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use anyhow::{Context, Result, anyhow};
-use tokio::{sync::mpsc, time};
+use tokio::{
+    sync::{Mutex, mpsc},
+    time,
+};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 use tracing::{info, warn};
 
 use crate::v1::{
-    AgentMessage, Heartbeat, agent_gateway_client::AgentGatewayClient, agent_message::Payload,
+    AgentMessage, Heartbeat, OperationResult, agent_gateway_client::AgentGatewayClient,
+    agent_message::Payload,
 };
+
+use crate::helper;
 
 #[derive(Clone)]
 struct HostSnapshot {
@@ -25,6 +38,7 @@ pub struct AgentConfig {
     pub ca_pem: PathBuf,
     pub cert_pem: PathBuf,
     pub key_pem: PathBuf,
+    pub helper_socket: PathBuf,
     pub heartbeat_interval: Duration,
     pub reconnect_min: Duration,
     pub reconnect_max: Duration,
@@ -43,6 +57,9 @@ impl AgentConfig {
             ca_pem: required("NANPANEL_AGENT_CA")?.into(),
             cert_pem: required("NANPANEL_AGENT_CERT")?.into(),
             key_pem: required("NANPANEL_AGENT_KEY")?.into(),
+            helper_socket: std::env::var("NANPANEL_AGENT_HELPER_SOCKET")
+                .unwrap_or_else(|_| "/run/nanpanel/helper.sock".to_owned())
+                .into(),
             heartbeat_interval: duration_env("NANPANEL_AGENT_HEARTBEAT_SECS", 5),
             reconnect_min: duration_env("NANPANEL_AGENT_RECONNECT_MIN_MS", 500),
             reconnect_max: duration_env("NANPANEL_AGENT_RECONNECT_MAX_MS", 30_000),
@@ -120,20 +137,50 @@ async fn connect_once(config: &AgentConfig, tls: ClientTlsConfig) -> Result<()> 
         .into_inner();
     info!(agent_id = %config.agent_id, endpoint = %config.endpoint, "mTLS gateway stream established");
 
+    let helper_available = Arc::new(AtomicBool::new(
+        helper::status(&config.helper_socket).await?,
+    ));
+    info!(
+        agent_id = %config.agent_id,
+        helper_status = if helper_available.load(Ordering::Relaxed) { "AVAILABLE" } else { "UNAVAILABLE" },
+        "Agent Helper probe completed"
+    );
     let agent_id = config.agent_id.clone();
     let interval = config.heartbeat_interval;
     let host = host_snapshot();
+    let sequence = Arc::new(Mutex::new(0_u64));
+    let heartbeat_sequence = Arc::clone(&sequence);
+    let heartbeat_helper_available = Arc::clone(&helper_available);
+    let heartbeat_helper_socket = config.helper_socket.clone();
+    let heartbeat_sender = sender.clone();
     let heartbeat_task = tokio::spawn(async move {
-        let mut sequence = 0_u64;
         let mut ticker = time::interval(interval);
         ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         loop {
             ticker.tick().await;
-            sequence = sequence.saturating_add(1);
-            let sent_at_epoch_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as i64;
+            let helper_is_available = helper::status(&heartbeat_helper_socket)
+                .await
+                .unwrap_or(false);
+            heartbeat_helper_available.store(helper_is_available, Ordering::Relaxed);
+            let capabilities = if helper_is_available {
+                vec![
+                    "host.inventory".to_owned(),
+                    "agent.heartbeat".to_owned(),
+                    "agent.self_update".to_owned(),
+                ]
+            } else {
+                vec!["host.inventory".to_owned(), "agent.heartbeat".to_owned()]
+            };
+            let mut sequence_guard = heartbeat_sequence.lock().await;
+            *sequence_guard = sequence_guard.saturating_add(1);
+            let sequence = *sequence_guard;
+            let sent_at_epoch_ms = match epoch_ms() {
+                Ok(value) => value,
+                Err(error) => {
+                    warn!(%error, "unable to read system time for heartbeat");
+                    continue;
+                }
+            };
             let message = AgentMessage {
                 agent_id: agent_id.clone(),
                 sequence,
@@ -143,10 +190,15 @@ async fn connect_once(config: &AgentConfig, tls: ClientTlsConfig) -> Result<()> 
                     hostname: host.hostname.clone(),
                     os: host.os.clone(),
                     arch: host.arch.clone(),
-                    capabilities: vec!["host.inventory".to_owned(), "agent.heartbeat".to_owned()],
+                    capabilities,
+                    helper_status: if helper_is_available {
+                        "AVAILABLE".to_owned()
+                    } else {
+                        "UNAVAILABLE".to_owned()
+                    },
                 })),
             };
-            if sender.send(message).await.is_err() {
+            if heartbeat_sender.send(message).await.is_err() {
                 break;
             }
         }
@@ -156,15 +208,140 @@ async fn connect_once(config: &AgentConfig, tls: ClientTlsConfig) -> Result<()> 
         if control.operation_id.is_empty()
             || control.idempotency_key.is_empty()
             || control.capability.is_empty()
-            || control.target.is_empty()
             || control.deadline_epoch_ms <= 0
         {
             return Err(anyhow!("gateway sent an invalid control envelope"));
         }
-        warn!(operation_id = %control.operation_id, "control execution is not part of this transport PoC");
+        if control.capability != "agent.update" || !control.target.is_empty() {
+            send_operation_result(
+                &sender,
+                &config.agent_id,
+                &sequence,
+                control.operation_id,
+                control.idempotency_key,
+                "FAILED",
+                "Agent only accepts the typed agent.update operation with an empty target",
+            )
+            .await?;
+            continue;
+        }
+        if !helper_available.load(Ordering::Relaxed) {
+            send_operation_result(
+                &sender,
+                &config.agent_id,
+                &sequence,
+                control.operation_id,
+                control.idempotency_key,
+                "FAILED",
+                "root Helper is unavailable",
+            )
+            .await?;
+            continue;
+        }
+
+        let operation_id = control.operation_id;
+        let idempotency_key = control.idempotency_key;
+        let deadline = control.deadline_epoch_ms;
+        let agent_id = config.agent_id.clone();
+        let helper_socket = config.helper_socket.clone();
+        let operation_sender = sender.clone();
+        let operation_sequence = Arc::clone(&sequence);
+        tokio::spawn(async move {
+            let update_result = helper::update(
+                &helper_socket,
+                &operation_id,
+                &idempotency_key,
+                "agent.update",
+                "",
+                deadline,
+            )
+            .await;
+            match update_result {
+                Ok(detail) => {
+                    if let Err(error) = send_operation_result(
+                        &operation_sender,
+                        &agent_id,
+                        &operation_sequence,
+                        operation_id.clone(),
+                        idempotency_key.clone(),
+                        "SUCCEEDED",
+                        &detail,
+                    )
+                    .await
+                    {
+                        warn!(operation_id = %operation_id, %error, "unable to report Agent update result");
+                        return;
+                    }
+                    time::sleep(Duration::from_millis(750)).await;
+                    let restart_id = format!("{operation_id}:restart");
+                    let restart_key = format!("{idempotency_key}:restart");
+                    if let Err(error) = helper::update(
+                        &helper_socket,
+                        &restart_id,
+                        &restart_key,
+                        "systemd.restart",
+                        "nanpanel-agent.service",
+                        deadline,
+                    )
+                    .await
+                    {
+                        warn!(operation_id = %operation_id, %error, "Agent binary installed but service restart failed");
+                    }
+                }
+                Err(error) => {
+                    let detail = error.to_string();
+                    if let Err(report_error) = send_operation_result(
+                        &operation_sender,
+                        &agent_id,
+                        &operation_sequence,
+                        operation_id,
+                        idempotency_key,
+                        "FAILED",
+                        &detail,
+                    )
+                    .await
+                    {
+                        warn!(%report_error, "unable to report failed Agent update");
+                    }
+                }
+            }
+        });
     }
     heartbeat_task.abort();
     Ok(())
+}
+
+async fn send_operation_result(
+    sender: &mpsc::Sender<AgentMessage>,
+    agent_id: &str,
+    sequence: &Mutex<u64>,
+    operation_id: String,
+    idempotency_key: String,
+    status: &str,
+    detail: &str,
+) -> Result<()> {
+    let mut sequence_guard = sequence.lock().await;
+    *sequence_guard = sequence_guard.saturating_add(1);
+    let message = AgentMessage {
+        agent_id: agent_id.to_owned(),
+        sequence: *sequence_guard,
+        sent_at_epoch_ms: epoch_ms()?,
+        payload: Some(Payload::OperationResult(OperationResult {
+            operation_id,
+            idempotency_key,
+            status: status.to_owned(),
+            detail: detail.to_owned(),
+        })),
+    };
+    sender.send(message).await.context("send operation result")
+}
+
+fn epoch_ms() -> Result<i64> {
+    let value = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .context("system clock is before Unix epoch")?
+        .as_millis();
+    i64::try_from(value).context("system clock value exceeds i64")
 }
 
 fn host_snapshot() -> HostSnapshot {

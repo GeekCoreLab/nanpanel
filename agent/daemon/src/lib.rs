@@ -4,3 +4,4 @@ pub mod v1 {
 
 pub mod client;
 pub mod gateway;
+pub mod helper;

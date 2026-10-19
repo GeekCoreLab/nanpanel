@@ -24,6 +24,7 @@ message Heartbeat {
   string os = 3;
   string arch = 4;
   repeated string capabilities = 5;
+  string helper_status = 6;
 }
 
 message OperationResult {
