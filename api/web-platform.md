@@ -1,6 +1,6 @@
 # Web 平台登录与管理 API
 
-版本：`0.1.0-draft.2`。接口和 DTO 统一定义在 [openapi.yaml](openapi.yaml)，本文件补充交互与安全语义。`/auth/*` 已实现持久化账号、Cookie 会话、CSRF、本人改密与会话撤销；管理员账号、内置角色、平台设置、认证/管理审计查询、主机和 Agent 只读查询、systemd unit 观测及仪表盘统计也已实现；Agent mTLS 接入、systemd 重启任务及有界 journal 查询已实现；证书吊销/续期仍待实现。密码采用随机盐 PBKDF2-HMAC-SHA256（600000 次）；常见密码当前使用本地基础拒绝列表，尚未接入完整泄露密码库。登录限流为单实例内存窗口，每来源地址及规范化账号每分钟 20 次。生产配置 `NANPANEL_ORIGIN` 为对外同源 HTTPS 地址；本地开发仅 dev profile 关闭 Secure。
+版本：`0.1.0-draft.2`。接口和 DTO 统一定义在 [openapi.yaml](openapi.yaml)，本文件补充交互与安全语义。`/auth/*` 已实现持久化账号、Cookie 会话、CSRF、本人改密与会话撤销；管理员账号、内置角色、平台设置、认证/管理审计查询、主机和 Agent 只读查询、systemd unit 观测及仪表盘统计也已实现；Agent mTLS 接入、systemd 重启任务及有界 journal 查询已实现。主机资产可保存 AES-GCM 加密 SSH 凭据，并通过一次性 WebSocket 票据开启受审计的堡垒终端；证书吊销/续期仍待实现。密码采用随机盐 PBKDF2-HMAC-SHA256（600000 次）；常见密码当前使用本地基础拒绝列表，尚未接入完整泄露密码库。登录限流为单实例内存窗口，每来源地址及规范化账号每分钟 20 次。生产配置 `NANPANEL_ORIGIN` 为对外同源 HTTPS 地址；本地开发仅 dev profile 关闭 Secure。
 
 ## 范围
 
@@ -35,6 +35,20 @@
 未登录/过期登录统一 401；用户名不存在、禁用或密码错误的登录响应均为 `INVALID_CREDENTIALS`。会话端点不返回 Basic WWW-Authenticate challenge，以免触发浏览器内置密码框。登录按可信来源地址和规范化账号分别限流，重置密码、改密等敏感操作也限流，429 附 Retry-After；不能无条件信任客户端提交的转发 IP。
 
 已登录浏览器可通过 `/auth/login` 使用同账号密码重新验证，轮换当前会话并更新 `authenticatedAt`，其他浏览器不受影响；不允许静默改为另一账号。有效会话最多 10 个，新登录超出限制时撤销最早创建的非当前会话。
+
+## 主机 SSH 直连与堡垒终端
+
+SSH 配置属于主机资产，不依赖本机 SSH alias。`PUT /api/v1/hosts/{hostId}/ssh/config` 保存 IPv4/IPv6/DNS 地址、端口、用户名，以及密码或私钥（可带私钥口令）；密码/私钥按主机 UUID 绑定 AES-256-GCM 加密后保存，GET 只返回配置元数据，任何响应、任务、审计摘要和日志都不回显凭据。生产必须给所有 Core 实例配置相同的 `NANPANEL_SSH_CREDENTIAL_KEY`（32 个随机字节的 Base64）；Kubernetes 部署使用 `nanpanel-ssh-credentials-key` Secret。备份数据库时必须同时安全备份该 Secret，密钥丢失后既有凭据无法解密；密钥轮换需要单独迁移凭据，不能直接替换环境变量。
+
+首次连接分两步：`POST .../ssh/host-key/probe` 只进行 SSH 握手并读取 SHA-256 host key 指纹，不发送密码或私钥；管理员应通过目标主机控制台、配置管理记录等可信渠道核对后，调用 `POST .../ssh/host-key/trust` 明确确认。探测结果五分钟过期，地址/端口变化会清除信任。目标 host key 后续不匹配时，Core 在 SSH 认证之前拒绝连接。信任指纹的用户、原因和时间进入管理审计。
+
+资产登记时可填写直连地址和凭据。完成指纹确认后，Agent 初始化端点可以省略 `alias`，Core 经固定安装脚本连接该资产、通过 SSH 标准输入传递一次性接入码，并等待 Agent 首次 mTLS 心跳；Controller Origin 仍必须由服务端配置为固定 HTTPS 地址。alias 方式保留兼容。未确认 host key 时不会尝试密码登录或私钥认证。
+
+管理员在主机详情里填写开启原因后调用 `POST /api/v1/hosts/{hostId}/ssh/sessions` 创建 60 秒有效、一次消费且绑定当前 Web 登录会话的票据。前端随后连接返回的 `websocketPath`，第一条文本帧提交 `{type:"auth",ticket,columns,rows}`；后续支持 `input`、`resize`、`keepalive` 和 `close`。Core 校验 WebSocket Origin，按已固定 host key 认证到目标并只打开 PTY shell，不提供 SFTP、端口转发或 SCP。撤销/到期的 Web 登录会话不能继续保持堡垒终端操作。
+
+堡垒会话数据单独保存于 `bastion_session`、`bastion_command`、`bastion_recording_chunk`：包括操作者、主机和目标快照、操作原因、开始/结束/退出状态、终端输入输出字节、已提交命令行及带毫秒偏移的 Base64 原始终端录像。命令行和录像块均使用 AES-GCM 加密，附加数据绑定会话、序号和方向；回放/查询时验证后解密。每会话录像上限 8 MiB、最多 100,000 块；已结束会话默认从开始时间起保留 30 天（未结束会话不清理，可用 `nanpanel.bastion.retention-days` 调整，范围 1–3650 天）。前端可查询会话、查看命令历史并回放终端输出。输入和输出可能含密码、令牌或业务数据；界面会提醒用户不要在此终端输入秘密，命令/录像只对管理员会话开放，不进入常规审计摘要。读取命令历史/录像本身会生成审计事件。命令历史从终端提交的输入行提取，不是 shell 进程的完整系统调用审计；需要更强的命令归因时应配合目标主机的 auditd/会话记录策略。
+
+这些是拥有主机 SSH 登录身份的高权限操作。无论 alias 还是直连 SSH，平台权限不替代主机账户的最小权限配置；凭据和录像解密密钥必须跨 Core 实例一致。
 
 ## 平台管理
 

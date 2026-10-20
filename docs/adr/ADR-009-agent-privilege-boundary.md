@@ -10,7 +10,7 @@
 
 Agent 与自研边缘控制器默认使用专用普通用户；Rust `privileged-helper` 以 root 运行，通过受限 Unix Domain Socket 接收类型化能力请求。Helper 校验调用方身份、操作授权、目标及参数，执行白名单操作，记录脱敏审计并限制超时和并发。完整要求见 PROJECT_PLAN.md 第 6.3 节。
 
-不提供默认的任意 Shell 执行接口。远程终端如需实现，必须作为独立高权限功能授权与审计。Agent 非 root 与容器 rootless 相互独立：系统支持按需管理 rootful 和 rootless 工作负载。
+Agent/Helper 协议不提供任意 Shell 执行接口。需要交互式远程终端时，作为独立的管理员高权限功能授权和审计，不借道 Agent 或 root Helper。主机 SSH 堡垒功能按 [ADR-012](ADR-012-host-ssh-bastion.md) 实现资产级 SSH 凭据、host key 确认、会话票据和终端录像。Agent 非 root 与容器 rootless 相互独立：系统支持按需管理 rootful 和 rootless 工作负载。
 
 ## 实施与验收
 

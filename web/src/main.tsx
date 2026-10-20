@@ -1,12 +1,15 @@
-import { StrictMode, useEffect, useState, type FormEvent, type ReactNode } from 'react';
+import { StrictMode, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
+import { Terminal } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
 import Topology from './Topology';
 import '@xyflow/react/dist/style.css';
+import '@xterm/xterm/css/xterm.css';
 import { api, ApiError, isMock, mockBusiness } from './lib/api';
 import { DEMO_PASSWORD } from './lib/mock';
 import { createUuid } from './lib/uuid.ts';
 import { agentMaintenanceCommand, type AgentMaintenanceMode } from './lib/agent-maintenance.ts';
-import type { Host, HostPage, Agent, AgentInstallation, AgentUpdateOperation, SystemService, SystemServicePage, Operation, OperationPage, SessionContext, AdminOverview, AdminUser, AdminUserPage, PlatformSettings, AuditEventPage, WebSessionList, BuiltinRoleList, AgentEnrollmentCreated, HostHelperOperationRequest, SshProbeResult, SshSystemdStatusResult, SshSystemdJournalResult } from './lib/types';
+import type { Host, HostPage, Agent, AgentInstallation, AgentUpdateOperation, SystemService, SystemServicePage, Operation, OperationPage, SessionContext, AdminOverview, AdminUser, AdminUserPage, PlatformSettings, AuditEventPage, WebSessionList, BuiltinRoleList, AgentEnrollmentCreated, HostHelperOperationRequest, SshProbeResult, SshSystemdStatusResult, SshSystemdJournalResult, HostSshConfig, SshHostKeyProbe, BastionSession, BastionSessionTicket, BastionCommand, BastionRecordingChunk } from './lib/types';
 import './style.css';
 const nav = [['overview', '◫', '总览'], ['hosts', '▤', '主机资产'], ['topology', '⌘', '网络拓扑'], ['operations', '◷', '操作任务'], ['users', '♙', '管理员'], ['audit', '☷', '审计日志'], ['settings', '⚙', '平台设置'], ['account', '◎', '账号与会话']];
 const labels: Record<string, string> = { ONLINE: '在线', OFFLINE: '离线', UNKNOWN: '未知 / 结果未知', ACTIVE: '运行中', INACTIVE: '未运行', AVAILABLE: '可用', UNAVAILABLE: '不可用', SUCCEEDED: '成功', ACCEPTED: '已受理', FAILED: '失败', RUNNING: '执行中', PENDING: '等待中', CANCELLED: '已取消', DISABLED: '已禁用', DENIED: '已拒绝' };
@@ -75,6 +78,13 @@ function HostEnrollmentDialog({ close, onCreated }: { close: () => void; onCreat
  const [sshError, setSshError] = useState('');
  const [sshOperation, setSshOperation] = useState<Operation>();
  const [sshKey, setSshKey] = useState('');
+ const [directAddress, setDirectAddress] = useState(''); const [directPort, setDirectPort] = useState('22');
+ const [directUsername, setDirectUsername] = useState('root');
+ const [directAuthMethod, setDirectAuthMethod] = useState<'PASSWORD' | 'PRIVATE_KEY'>('PASSWORD');
+ const [directPassword, setDirectPassword] = useState(''); const [directPrivateKey, setDirectPrivateKey] = useState('');
+ const [directPassphrase, setDirectPassphrase] = useState(''); const [directConfigured, setDirectConfigured] = useState(false);
+ const [directProbe, setDirectProbe] = useState<SshHostKeyProbe>(); const [directProbeReason, setDirectProbeReason] = useState('');
+ const [directTrusted, setDirectTrusted] = useState(false); const [directBusy, setDirectBusy] = useState(false);
 
  useEffect(() => {
   if (!sshOperation || ['SUCCEEDED', 'FAILED', 'CANCELLED', 'UNKNOWN'].includes(sshOperation.status)) return;
@@ -93,12 +103,58 @@ function HostEnrollmentDialog({ close, onCreated }: { close: () => void; onCreat
 
  async function create(e: FormEvent) {
   e.preventDefault(); setBusy(true); setError('');
+  if (directAddress.trim() && ((directAuthMethod === 'PASSWORD' && !directPassword) ||
+      (directAuthMethod === 'PRIVATE_KEY' && !directPrivateKey.trim()))) {
+   setError('填写 SSH 地址时也需要提供对应的密码或私钥。'); setBusy(false); return;
+  }
   try {
    await api('/auth/csrf');
    const result = await api<AgentEnrollmentCreated>('/agent-enrollments', 'POST', { hostname: hostname.trim() }, {}, true);
    setEnrollment(result.data); onCreated();
+   if (directAddress.trim()) await saveDirectSsh(result.data.hostId);
   } catch (e) { setError((e as Error).message); }
   finally { setBusy(false); }
+ }
+
+ async function saveDirectSsh(hostId = enrollment?.hostId) {
+  if (!hostId) return;
+  setDirectBusy(true); setSshError('');
+  try {
+   await api('/auth/csrf');
+   await api(`/hosts/${hostId}/ssh/config`, 'PUT', {
+    address: directAddress.trim(), port: Number(directPort), username: directUsername.trim(),
+    authMethod: directAuthMethod,
+    password: directAuthMethod === 'PASSWORD' ? directPassword : null,
+    privateKey: directAuthMethod === 'PRIVATE_KEY' ? directPrivateKey : null,
+    privateKeyPassphrase: directAuthMethod === 'PRIVATE_KEY' && directPassphrase ? directPassphrase : null,
+   }, {}, true);
+   setDirectPassword(''); setDirectPrivateKey(''); setDirectPassphrase('');
+   setDirectConfigured(true); setDirectTrusted(false); setDirectProbe(undefined);
+  } catch (error) { setSshError((error as Error).message); }
+  finally { setDirectBusy(false); }
+ }
+
+ async function probeDirectSsh() {
+  if (!enrollment) return;
+  setDirectBusy(true); setSshError('');
+  try {
+   await api('/auth/csrf');
+   const result = await api<SshHostKeyProbe>(`/hosts/${enrollment.hostId}/ssh/host-key/probe`, 'POST', { reason: directProbeReason.trim() }, {}, true);
+   setDirectProbe(result.data); setDirectTrusted(result.data.matchesTrustedFingerprint);
+  } catch (error) { setSshError((error as Error).message); }
+  finally { setDirectBusy(false); }
+ }
+
+ async function trustDirectSsh() {
+  if (!enrollment || !directProbe) return;
+  setDirectBusy(true); setSshError('');
+  try {
+   await api(`/hosts/${enrollment.hostId}/ssh/host-key/trust`, 'POST', {
+    fingerprint: directProbe.fingerprint, reason: directProbeReason.trim(),
+   }, {}, true);
+   setDirectTrusted(true);
+  } catch (error) { setSshError((error as Error).message); }
+  finally { setDirectBusy(false); }
  }
 
  async function copyCommand() {
@@ -115,7 +171,7 @@ function HostEnrollmentDialog({ close, onCreated }: { close: () => void; onCreat
    await api('/auth/csrf');
    const result = await api<Operation>(`/hosts/${enrollment.hostId}/ssh/agent/install`, 'POST', {
     enrollmentId: enrollment.enrollmentId, agentId: enrollment.agentId,
-    alias: sshAlias.trim(), token: enrollment.token, reason: sshReason.trim(),
+    alias: directTrusted ? null : sshAlias.trim(), token: enrollment.token, reason: sshReason.trim(),
    }, { 'Idempotency-Key': key }, true);
    setSshOperation(result.data);
    if (result.data.status === 'FAILED') setSshKey('');
@@ -123,12 +179,23 @@ function HostEnrollmentDialog({ close, onCreated }: { close: () => void; onCreat
   finally { setSshBusy(false); }
  }
 
+ const directSshFields = <>
+  <p className="muted">可选：直接保存目标地址和认证凭据，完成 host key 人工核对后可在此安装 Agent，无需在 Core 配置 SSH alias。</p>
+  <Field label="SSH 地址（可选）"><input maxLength={253} value={directAddress} onChange={e => setDirectAddress(e.target.value)} placeholder="例如 192.0.2.10 或 host.example.net" /></Field>
+  {directAddress.trim() && <>
+   <div className="ssh-form-grid"><Field label="端口"><input type="number" min="1" max="65535" required value={directPort} onChange={e => setDirectPort(e.target.value)} /></Field><Field label="用户名"><input required maxLength={128} value={directUsername} onChange={e => setDirectUsername(e.target.value)} /></Field></div>
+   <Field label="SSH 认证方式"><select value={directAuthMethod} onChange={e => setDirectAuthMethod(e.target.value as 'PASSWORD' | 'PRIVATE_KEY')}><option value="PASSWORD">密码</option><option value="PRIVATE_KEY">SSH 私钥</option></select></Field>
+   {directAuthMethod === 'PASSWORD' ? <Field label="SSH 密码"><input type="password" autoComplete="new-password" required value={directPassword} onChange={e => setDirectPassword(e.target.value)} /></Field> : <><Field label="SSH 私钥"><textarea required rows={5} autoComplete="off" value={directPrivateKey} onChange={e => setDirectPrivateKey(e.target.value)} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" /></Field><Field label="私钥口令（可选）"><input type="password" autoComplete="new-password" value={directPassphrase} onChange={e => setDirectPassphrase(e.target.value)} /></Field></>}
+  </>}
+ </>;
+
  return <div className="modal-backdrop"><section className="modal host-enrollment-modal" role="dialog" aria-modal="true" aria-labelledby="host-enrollment-title">
   <div className="card-title"><div><span className="eyebrow">HOST ENROLLMENT</span><h2 id="host-enrollment-title">添加主机</h2></div><button className="icon-button" aria-label="关闭添加主机" onClick={close}>×</button></div>
   {isMock && <div className="alert">当前为 Mock 演示，生成的接入码不能用于实际安装。</div>}
   {!enrollment ? <form onSubmit={create}>
    <p className="muted">为目标主机创建一条资产记录和 15 分钟有效的一次性接入码。首次心跳会自动补齐主机名、系统和架构。</p>
    <Field label="资产名称"><input autoFocus required maxLength={255} value={hostname} onChange={e => setHostname(e.target.value)} placeholder="例如 node-01" /></Field>
+   <section className="restart-form"><h3>SSH 直连（可选）</h3>{directSshFields}</section>
    <div className="alert">Agent 使用独立 mTLS 证书接入并上报主机清单、systemd 服务观测；root Helper 只执行系统管理员配置白名单中的操作。</div>
    {error && <div className="alert error" role="alert">{error}</div>}
    <div className="form-actions"><button type="button" className="secondary" onClick={close}>取消</button><button className="primary" disabled={busy || !hostname.trim()}>{busy ? '正在创建接入码…' : '生成安装命令'}</button></div>
@@ -138,14 +205,16 @@ function HostEnrollmentDialog({ close, onCreated }: { close: () => void; onCreat
    {!isMock && <>
     <textarea className="install-command" aria-label="Agent 安装命令" readOnly value={enrollmentInstallCommand(enrollment)} onFocus={e => e.currentTarget.select()} />
     <div className="form-actions"><button className="secondary" onClick={copyCommand}>{copied ? '已复制' : '复制安装命令'}</button><button className="primary" onClick={close}>完成</button></div>
+    {directAddress.trim() && !directConfigured && <section className="restart-form"><h3>保存主机 SSH 直连配置</h3>{directSshFields}<div className="form-actions"><button type="button" className="primary" disabled={directBusy} onClick={() => void saveDirectSsh()}>{directBusy ? '正在加密保存…' : '加密保存 SSH 配置'}</button></div></section>}
+    {directConfigured && <section className="restart-form"><h3>验证目标 SSH host key</h3><div className="alert">已加密保存：{directUsername}@{directAddress}:{directPort} · {directAuthMethod}</div><p className="muted">指纹探测阶段不会发送 SSH 密码或私钥；请通过可信渠道核对后再确认。</p><Field label="指纹核对原因"><input required maxLength={500} value={directProbeReason} onChange={e => setDirectProbeReason(e.target.value)} placeholder="说明为什么要连接此主机" /></Field><div className="form-actions"><button type="button" className="secondary" disabled={directBusy || !directProbeReason.trim()} onClick={() => void probeDirectSsh()}>{directBusy ? '探测中…' : '探测 host key 指纹'}</button></div>{directProbe && <div className="alert">目标 host key SHA-256：<code className="mono">{directProbe.fingerprint}</code>{directTrusted ? ' · 已信任' : ' · 请先核对指纹'}</div>}{directProbe?.requiresConfirmation && <button type="button" className="secondary" disabled={directBusy} onClick={() => void trustDirectSsh()}>我已核对并信任此 host key</button>}</section>}
     <form className="ssh-install-form" onSubmit={installOverSsh}>
      <h3>通过受限 SSH 初始化</h3>
-     <p className="muted">只使用主控上的 root-managed host alias 和固定安装脚本。Core 必须配置 HTTPS 公网 Origin；未知结果需先到操作任务对账。</p>
-     <Field label="SSH 别名"><input required maxLength={100} value={sshAlias} onChange={e => setSshAlias(e.target.value)} placeholder="例如 host-b" /></Field>
+     <p className="muted">使用已核对 host key 的资产直连配置，或兼容 root-managed SSH alias；Core 必须配置 HTTPS 公网 Origin。未知结果需先到操作任务对账。</p>
+     {!directTrusted && <Field label="SSH 别名"><input required={!directAddress.trim()} maxLength={100} value={sshAlias} onChange={e => setSshAlias(e.target.value)} placeholder="例如 host-b" /></Field>}
      <Field label="SSH 初始化原因"><input required maxLength={500} value={sshReason} onChange={e => setSshReason(e.target.value)} placeholder="说明授权的初始化目的" /></Field>
      {sshError && <div className="alert error" role="alert">{sshError}</div>}
      {sshOperation && <div className="alert" role="status">SSH 初始化任务 {labels[sshOperation.status] ?? sshOperation.status} · {sshOperation.id}{sshOperation.status === 'UNKNOWN' ? '；请对账后再处理接入码。' : ''}</div>}
-     <div className="form-actions"><button className="primary" disabled={sshBusy || !sshAlias.trim() || !sshReason.trim() || Boolean(sshOperation && ['RUNNING', 'PENDING', 'UNKNOWN', 'SUCCEEDED'].includes(sshOperation.status))}>{sshBusy ? '正在提交 SSH 初始化…' : '通过 SSH 安装 Agent'}</button></div>
+     <div className="form-actions"><button className="primary" disabled={sshBusy || !(directTrusted || (!directAddress.trim() && sshAlias.trim())) || !sshReason.trim() || Boolean(sshOperation && ['RUNNING', 'PENDING', 'UNKNOWN', 'SUCCEEDED'].includes(sshOperation.status))}>{sshBusy ? '正在提交 SSH 初始化…' : '通过 SSH 安装 Agent'}</button></div>
     </form>
    </>}
    {isMock && <div className="form-actions"><button className="primary" onClick={close}>完成</button></div>}
@@ -275,7 +344,149 @@ function SshAccessPanel({ host, notify }: { host: Host; notify: (s: string) => v
   <div className="form-actions"><button type="button" className="secondary" disabled={diagnosticBusy || !unitName.trim() || !diagnosticReason.trim()} onClick={() => void readStatus()}>{diagnosticBusy ? '读取中…' : '读取服务状态'}</button><button type="button" className="secondary" disabled={diagnosticBusy || !unitName.trim() || !diagnosticReason.trim() || Number(journalLines) < 1 || Number(journalLines) > 100} onClick={() => void readJournal()}>{diagnosticBusy ? '读取中…' : '读取服务日志'}</button></div>
   {status && <div className="alert" role="status">{status.unitName} · {status.loadState} / {status.activeState} / {status.subState}</div>}
   {journal && <div className="ssh-journal"><p className="muted">最多 {journal.requestedLines} 行{journal.truncated ? ' · 输出已截断' : ''}</p><pre>{journal.output || '（没有日志内容）'}</pre></div>}
- </section></>;
+ </section><HostSshBastionPanel hostId={host.id} /></>;
+}
+function HostSshBastionPanel({ hostId }: { hostId: string }) {
+ const [config, setConfig] = useState<HostSshConfig>();
+ const [configError, setConfigError] = useState('');
+ const [address, setAddress] = useState(''); const [port, setPort] = useState('22'); const [username, setUsername] = useState('root');
+ const [authMethod, setAuthMethod] = useState<'PASSWORD' | 'PRIVATE_KEY'>('PASSWORD');
+ const [password, setPassword] = useState(''); const [privateKey, setPrivateKey] = useState(''); const [privateKeyPassphrase, setPrivateKeyPassphrase] = useState('');
+ const [saveBusy, setSaveBusy] = useState(false); const [probeBusy, setProbeBusy] = useState(false); const [trustBusy, setTrustBusy] = useState(false);
+ const [keyProbe, setKeyProbe] = useState<SshHostKeyProbe>(); const [probeReason, setProbeReason] = useState('');
+ const [sessionReason, setSessionReason] = useState(''); const [sessionBusy, setSessionBusy] = useState(false);
+ const [ticket, setTicket] = useState<BastionSessionTicket>(); const [sessions, setSessions] = useState<BastionSession[]>([]);
+ const [historyError, setHistoryError] = useState(''); const [selectedCommands, setSelectedCommands] = useState<{ session: BastionSession; items: BastionCommand[] }>();
+ const [replay, setReplay] = useState<{ session: BastionSession; items: BastionRecordingChunk[] }>();
+ async function loadConfig() {
+  if (isMock) return;
+  try { const result = await api<HostSshConfig>(`/hosts/${hostId}/ssh/config`, 'GET', undefined, {}, true); setConfig(result.data); setAddress(result.data.address); setPort(String(result.data.port)); setUsername(result.data.username); setAuthMethod(result.data.authMethod); setConfigError(''); }
+  catch (error) { if ((error as ApiError).status === 404) { setConfig(undefined); setConfigError(''); } else setConfigError((error as Error).message); }
+ }
+ async function loadSessions() {
+  if (isMock) return;
+  try { const result = await api<{ items: BastionSession[] }>(`/bastion-sessions?hostId=${encodeURIComponent(hostId)}&limit=30`, 'GET', undefined, {}, true); setSessions(result.data.items); setHistoryError(''); }
+  catch (error) { setHistoryError((error as Error).message); }
+ }
+ useEffect(() => { void loadConfig(); void loadSessions(); }, [hostId]);
+ async function saveConfig(event: FormEvent) {
+  event.preventDefault(); setSaveBusy(true); setConfigError('');
+  try {
+   await api('/auth/csrf');
+   await api(`/hosts/${hostId}/ssh/config`, 'PUT', {
+    address: address.trim(), port: Number(port), username: username.trim(), authMethod,
+    password: authMethod === 'PASSWORD' ? password : null,
+    privateKey: authMethod === 'PRIVATE_KEY' ? privateKey : null,
+    privateKeyPassphrase: authMethod === 'PRIVATE_KEY' && privateKeyPassphrase ? privateKeyPassphrase : null,
+   }, {}, true);
+   setPassword(''); setPrivateKey(''); setPrivateKeyPassphrase(''); setKeyProbe(undefined);
+   await loadConfig();
+  } catch (error) { setConfigError((error as Error).message); }
+  finally { setSaveBusy(false); }
+ }
+ async function probeHostKey() {
+  setProbeBusy(true); setConfigError('');
+  try {
+   await api('/auth/csrf');
+   const result = await api<SshHostKeyProbe>(`/hosts/${hostId}/ssh/host-key/probe`, 'POST', { reason: probeReason.trim() }, {}, true);
+   setKeyProbe(result.data);
+   if (result.data.matchesTrustedFingerprint) await loadConfig();
+  } catch (error) { setConfigError((error as Error).message); }
+  finally { setProbeBusy(false); }
+ }
+ async function trustHostKey() {
+  if (!keyProbe) return;
+  setTrustBusy(true); setConfigError('');
+  try {
+   await api(`/hosts/${hostId}/ssh/host-key/trust`, 'POST', { fingerprint: keyProbe.fingerprint, reason: probeReason.trim() }, {}, true);
+   setKeyProbe(undefined); await loadConfig();
+  } catch (error) { setConfigError((error as Error).message); }
+  finally { setTrustBusy(false); }
+ }
+ async function openShell(event: FormEvent) {
+  event.preventDefault(); setSessionBusy(true); setHistoryError('');
+  try {
+   await api('/auth/csrf');
+   const result = await api<BastionSessionTicket>(`/hosts/${hostId}/ssh/sessions`, 'POST', { reason: sessionReason.trim(), columns: 120, rows: 36 }, {}, true);
+   setTicket(result.data); setSessionReason('');
+  } catch (error) { setHistoryError((error as Error).message); }
+  finally { setSessionBusy(false); }
+ }
+ async function viewCommands(session: BastionSession) {
+  try { const result = await api<{ items: BastionCommand[] }>(`/bastion-sessions/${session.id}/commands`, 'GET', undefined, {}, true); setSelectedCommands({ session, items: result.data.items }); }
+  catch (error) { setHistoryError((error as Error).message); }
+ }
+ async function playRecording(session: BastionSession) {
+  try { const result = await api<{ items: BastionRecordingChunk[] }>(`/bastion-sessions/${session.id}/recording`, 'GET', undefined, {}, true); setReplay({ session, items: result.data.items }); }
+  catch (error) { setHistoryError((error as Error).message); }
+ }
+ if (isMock) return <section className="restart-form"><h3>SSH 直连与堡垒 Shell</h3><p className="muted">Mock 演示模式不连接真实主机。切换到 live API 后，可管理加密 SSH 凭据并开启可审计终端。</p></section>;
+ return <><section className="restart-form"><h3>资产 SSH 连接</h3>
+  <p className="muted">支持直接填写 IP/域名、端口、用户名和密码或私钥，凭据以 AES-GCM 加密保存，读取接口不返回凭据。首次连接先显示 host key SHA-256 指纹，确认后才会使用凭据连接。</p>
+  {config && <div className="alert">当前连接：{config.username}@{config.address}:{config.port} · {config.authMethod} · 凭据已保存 · {config.hostKeyFingerprint ? `host key ${config.hostKeyFingerprint}` : '尚未确认 host key'}</div>}
+  <form onSubmit={saveConfig}>
+   <Field label="SSH 地址"><input required maxLength={253} value={address} onChange={event => setAddress(event.target.value)} placeholder="例如 192.0.2.10 或 host.example.net" /></Field>
+   <div className="ssh-form-grid"><Field label="端口"><input type="number" min="1" max="65535" required value={port} onChange={event => setPort(event.target.value)} /></Field><Field label="用户名"><input required maxLength={128} value={username} onChange={event => setUsername(event.target.value)} placeholder="root" /></Field></div>
+   <Field label="认证方式"><select value={authMethod} onChange={event => setAuthMethod(event.target.value as 'PASSWORD' | 'PRIVATE_KEY')}><option value="PASSWORD">密码</option><option value="PRIVATE_KEY">SSH 私钥</option></select></Field>
+   {authMethod === 'PASSWORD' ? <Field label="SSH 密码"><input type="password" autoComplete="new-password" required value={password} onChange={event => setPassword(event.target.value)} placeholder={config ? '更新时重新输入密码' : '不会回显或再次读取'} /></Field> : <><Field label="私钥内容"><textarea required rows={5} autoComplete="off" value={privateKey} onChange={event => setPrivateKey(event.target.value)} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" /></Field><Field label="私钥口令（可选）"><input type="password" autoComplete="new-password" value={privateKeyPassphrase} onChange={event => setPrivateKeyPassphrase(event.target.value)} /></Field></>}
+   {configError && <div className="alert error" role="alert">{configError}</div>}
+   <div className="form-actions"><button className="primary" disabled={saveBusy || !address.trim() || !username.trim() || (authMethod === 'PASSWORD' ? !password : !privateKey.trim())}>{saveBusy ? '正在加密保存…' : config ? '更新 SSH 配置' : '保存 SSH 配置'}</button></div>
+  </form>
+  {config && <><Field label="指纹探测原因"><input required maxLength={500} value={probeReason} onChange={event => setProbeReason(event.target.value)} placeholder="说明为什么要验证目标主机" /></Field><div className="form-actions"><button type="button" className="secondary" disabled={probeBusy || !probeReason.trim()} onClick={() => void probeHostKey()}>{probeBusy ? '探测中…' : '探测 host key 指纹'}</button></div>
+   {keyProbe && <div className="alert" role="status">目标报告的 SHA-256 指纹：<code className="mono">{keyProbe.fingerprint}</code>{keyProbe.matchesTrustedFingerprint ? ' · 与已信任指纹一致' : ' · 尚未信任，请先通过其他可信渠道核对后确认'}</div>}
+   {keyProbe?.requiresConfirmation && <button className="secondary" disabled={trustBusy || !probeReason.trim()} onClick={() => void trustHostKey()}>{trustBusy ? '确认中…' : '我已核对并信任此 host key'}</button>}
+  </>}
+ </section>
+ <section className="restart-form"><h3>堡垒 Shell</h3><p className="muted">所有输入和输出都会保存为可回放终端录像，按回车提交的命令行会单独记录。请勿在终端输入密码、密钥或其他秘密值。</p>
+  <form onSubmit={openShell}><Field label="开启 Shell 的原因"><textarea required maxLength={500} value={sessionReason} onChange={event => setSessionReason(event.target.value)} placeholder="记录本次主机 Shell 的操作目的" /></Field><div className="form-actions"><button className="primary" disabled={sessionBusy || !config?.hostKeyFingerprint || !sessionReason.trim()}>{sessionBusy ? '正在创建审计会话…' : '开启主机 Shell'}</button></div></form>
+  {historyError && <div className="alert error" role="alert">{historyError}</div>}
+ </section>
+ <section className="restart-form"><h3>堡垒审计记录</h3>{sessions.length === 0 ? <p className="muted">还没有 SSH 堡垒 Shell 会话。</p> : sessions.map(session => <div className="bastion-session-row" key={session.id}><div><b>{time(session.startedAt)} · <Badge value={session.status} /></b><small>{session.targetUsername}@{session.targetAddress}:{session.targetPort} · {session.reason}</small><small>{session.bytesIn + session.bytesOut} 字节 · {session.durationMs == null ? '进行中' : `${Math.round(session.durationMs / 1000)} 秒`}</small></div><div className="form-actions"><button type="button" className="secondary" onClick={() => void viewCommands(session)}>命令记录</button><button type="button" className="secondary" onClick={() => void playRecording(session)}>回放录像</button></div></div>)}</section>
+ {ticket && <BastionTerminal ticket={ticket} close={() => { setTicket(undefined); void loadSessions(); }} />}
+ {replay && <BastionReplay session={replay.session} items={replay.items} commands={selectedCommands?.session.id === replay.session.id ? selectedCommands.items : undefined} close={() => setReplay(undefined)} />}
+ {selectedCommands && !replay && <div className="modal-backdrop"><section className="modal"><div className="card-title"><h2>命令历史 · {selectedCommands.session.targetAddress}</h2><button className="icon-button" onClick={() => setSelectedCommands(undefined)}>×</button></div>{selectedCommands.items.length ? <ol className="bastion-command-list">{selectedCommands.items.map(command => <li key={command.sequence}><time>{time(command.occurredAt)}</time><code>{command.command}</code></li>)}</ol> : <p className="muted">没有记录到提交的命令行。</p>}</section></div>}
+ </>;
+}
+function BastionTerminal({ ticket, close }: { ticket: BastionSessionTicket; close: () => void }) {
+ const terminalElement = useRef<HTMLDivElement>(null); const endedRef = useRef(close); const [status, setStatus] = useState('正在建立受审计的 SSH 连接…');
+ useEffect(() => { endedRef.current = close; }, [close]);
+ useEffect(() => {
+  if (!terminalElement.current) return;
+  const terminal = new Terminal({ cursorBlink: true, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 13, theme: { background: '#07111f', foreground: '#dbeafe', cursor: '#83b8ff' } });
+  const fit = new FitAddon(); terminal.loadAddon(fit); terminal.open(terminalElement.current); fit.fit(); terminal.focus();
+  const url = new URL(ticket.websocketPath, window.location.href); url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  const socket = new WebSocket(url);
+  let ready = false;
+  socket.onopen = () => socket.send(JSON.stringify({ type: 'auth', ticket: ticket.ticket, columns: terminal.cols, rows: terminal.rows }));
+  socket.onmessage = event => {
+   try { const message = JSON.parse(String(event.data)) as { type: string; data?: string; message?: string };
+    if (message.type === 'ready') { ready = true; setStatus('已连接 · 终端输入和输出正在录像'); return; }
+    if (message.type === 'output' && message.data) { const bytes = Uint8Array.from(atob(message.data), value => value.charCodeAt(0)); terminal.write(bytes); return; }
+    if (message.type === 'error') { terminal.write(`\r\n\x1b[31m${message.message ?? 'SSH 连接失败'}\x1b[0m\r\n`); setStatus(message.message ?? 'SSH 连接失败'); }
+   } catch { terminal.write(String(event.data)); }
+  };
+  socket.onerror = () => setStatus('WebSocket 连接失败');
+  socket.onclose = () => { ready = false; setStatus('连接已关闭'); endedRef.current(); };
+  const input = terminal.onData(data => { if (ready && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'input', data })); });
+  const resize = () => { fit.fit(); if (ready && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', columns: terminal.cols, rows: terminal.rows })); };
+  window.addEventListener('resize', resize);
+  const keepalive = window.setInterval(() => { if (ready && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'keepalive' })); }, 30000);
+  return () => { window.clearInterval(keepalive); window.removeEventListener('resize', resize); input.dispose(); socket.close(); terminal.dispose(); };
+ }, [ticket.sessionId, ticket.websocketPath, ticket.ticket]);
+ function end() { setStatus('正在结束会话并保存录像…'); close(); }
+ return <div className="modal-backdrop bastion-terminal-backdrop"><section className="modal bastion-terminal-modal"><div className="card-title"><div><span className="eyebrow">RECORDED SSH SESSION</span><h2>堡垒 Shell · {ticket.sessionId.slice(0, 8)}</h2></div><button className="icon-button" aria-label="结束 SSH 会话" onClick={end}>×</button></div><p className="muted">{status}</p><div className="bastion-terminal" ref={terminalElement} /><div className="form-actions"><button className="secondary" onClick={end}>结束会话并归档</button></div></section></div>;
+}
+function BastionReplay({ session, items, commands, close }: { session: BastionSession; items: BastionRecordingChunk[]; commands?: BastionCommand[]; close: () => void }) {
+ const terminalElement = useRef<HTMLDivElement>(null);
+ useEffect(() => {
+  if (!terminalElement.current) return;
+  const terminal = new Terminal({ convertEol: true, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 12, theme: { background: '#07111f', foreground: '#dbeafe' } });
+  terminal.open(terminalElement.current); terminal.write('\x1b[90m回放从 0.25× 加速；只显示远端终端输出。\x1b[0m\r\n');
+  let cancelled = false;
+  void (async () => { let previous = 0; for (const chunk of items.filter(item => item.direction === 'OUTPUT')) { const delay = Math.min(200, Math.max(0, (chunk.offsetMs - previous) / 4)); await new Promise(resolve => window.setTimeout(resolve, delay)); if (cancelled) return; const bytes = Uint8Array.from(atob(chunk.data), value => value.charCodeAt(0)); terminal.write(bytes); previous = chunk.offsetMs; } })();
+  return () => { cancelled = true; terminal.dispose(); };
+ }, [session.id, items]);
+ return <div className="modal-backdrop bastion-terminal-backdrop"><section className="modal bastion-terminal-modal"><div className="card-title"><div><span className="eyebrow">BASTION RECORDING</span><h2>{session.targetUsername}@{session.targetAddress}:{session.targetPort}</h2></div><button className="icon-button" onClick={close}>×</button></div><div className="bastion-terminal bastion-replay-terminal" ref={terminalElement} />{commands && <ol className="bastion-command-list">{commands.map(command => <li key={command.sequence}><time>{time(command.occurredAt)}</time><code>{command.command}</code></li>)}</ol>}<div className="form-actions"><button className="secondary" onClick={close}>关闭回放</button></div></section></div>;
 }
 function HelperOperationPanel({ host, agent, notify, refresh }: { host: Host; agent: Agent; notify: (s: string) => void; refresh: () => void }) {
  const actionLabels: Record<HostHelperOperationRequest['capability'], string> = {

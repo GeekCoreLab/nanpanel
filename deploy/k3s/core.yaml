@@ -81,6 +81,11 @@ spec:
                 secretKeyRef:
                   name: nanpanel-agent-gateway
                   key: NANPANEL_AGENT_GATEWAY_TOKEN
+            - name: NANPANEL_SSH_CREDENTIAL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: nanpanel-ssh-credentials-key
+                  key: NANPANEL_SSH_CREDENTIAL_KEY
             - name: NANPANEL_AGENT_CA_CERT
               value: /etc/nanpanel/agent-ca/ca.crt
             - name: NANPANEL_AGENT_CA_KEY

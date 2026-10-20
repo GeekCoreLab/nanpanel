@@ -64,6 +64,7 @@ public class HostSshAccessResource {
   @Inject ManagedExecutor managedExecutor;
   @Inject AgentCertificateAuthority certificateAuthority;
   @Inject RelayFallbackSigner relayFallbackSigner;
+  @Inject HostSshCredentialService sshCredentials;
   @Context jakarta.ws.rs.container.ContainerRequestContext request;
   @Context io.vertx.core.http.HttpServerRequest http;
 
@@ -393,15 +394,26 @@ public class HostSshAccessResource {
     String token = input == null || input.token() == null ? "" : input.token().trim();
     String reason = input == null || input.reason() == null ? "" : input.reason().trim();
     if (input == null || input.enrollmentId() == null || input.agentId() == null ||
-        !ALIAS.matcher(requestedAlias).matches() || !token.matches("[A-Za-z0-9_-]{40,128}") ||
+        (!requestedAlias.isEmpty() && !ALIAS.matcher(requestedAlias).matches()) ||
+        !token.matches("[A-Za-z0-9_-]{40,128}") ||
         reason.isEmpty() || reason.length() > 500 ||
         reason.chars().anyMatch(Character::isISOControl) || reason.contains(token))
       throw fail(422, "VALIDATION_FAILED", "SSH 别名、接入码、Agent ID 或操作原因无效");
 
     String alias = allowedAliases().get(hostId);
-    if (!Objects.equals(alias, requestedAlias)) {
+    HostSshCredentialService.HostConfig directConfig = store.transaction(c ->
+        sshCredentials.find(c, hostId));
+    boolean directSsh = requestedAlias.isEmpty();
+    if (directSsh) {
+      if (directConfig == null || directConfig.hostKeyFingerprint() == null) {
+        recordAudit(actor, hostId, SSH_AGENT_INSTALL_KIND, "DENIED",
+            "拒绝未配置且未固定 host key 的直连 SSH Agent 初始化");
+        throw fail(422, "SSH_HOST_KEY_UNTRUSTED",
+            "请先配置 SSH 凭据并确认目标 host key 指纹");
+      }
+    } else if (!Objects.equals(alias, requestedAlias)) {
       recordAudit(actor, hostId, SSH_AGENT_INSTALL_KIND, "DENIED", "拒绝未绑定 SSH alias 的 Agent 初始化");
-      throw fail(422, "SSH_ALIAS_NOT_ALLOWED", "该主机未绑定 root 管理的 SSH alias");
+      throw fail(422, "SSH_ALIAS_NOT_ALLOWED", "SSH 别名未绑定到该主机的 root 管理 allowlist");
     }
     Path ssh;
     byte[] installer;
@@ -409,9 +421,13 @@ public class HostSshAccessResource {
     String relayEndpoints;
     RelayFallbackSigner.Manifest relayFallback;
     try {
-      requireTrustedFile(Path.of(sshConfigPath), "SSH 配置");
-      requireTrustedFile(Path.of(knownHostsPath), "SSH host key 清单");
-      ssh = trustedSshBinary();
+      if (directSsh) {
+        ssh = null;
+      } else {
+        requireTrustedFile(Path.of(sshConfigPath), "SSH 配置");
+        requireTrustedFile(Path.of(knownHostsPath), "SSH host key 清单");
+        ssh = trustedSshBinary();
+      }
       installer = readTrustedInstaller(Path.of(installerPath));
       origin = trustedHttpsOrigin(publicOrigin);
       relayEndpoints = String.join(",",
@@ -430,7 +446,9 @@ public class HostSshAccessResource {
     String tokenDigest = AuthStore.digest(token);
     String requestHash = AuthStore.digest(String.join("\n", "POST",
         "/api/v1/hosts/" + hostId + "/ssh/agent/install",
-        input.enrollmentId().toString(), input.agentId().toString(), alias, tokenDigest, reason));
+        input.enrollmentId().toString(), input.agentId().toString(),
+        directSsh ? "direct:" + directConfig.address() + ":" + directConfig.port()
+            : alias, tokenDigest, reason));
     Instant now = Instant.now();
     String remoteAddress = http.remoteAddress() == null ? null : http.remoteAddress().host();
     UUID operationId = UUID.randomUUID();
@@ -493,7 +511,8 @@ public class HostSshAccessResource {
             return;
           }
           try {
-            runAgentInstall(operationId, actor, hostId, input.agentId(), reason, alias, token,
+            runAgentInstall(operationId, actor, hostId, input.agentId(), reason,
+                directSsh ? null : alias, directSsh ? directConfig : null, token,
                 normalizedOrigin, ssh, installerBytes, relayEndpoints, relayFallback, remoteAddress);
           } finally {
             SSH_BOOTSTRAP_SLOTS.release();
@@ -528,14 +547,27 @@ public class HostSshAccessResource {
   }
 
   private void runAgentInstall(UUID operationId, String actor, UUID hostId, UUID agentId,
-      String reason, String alias, String token, String origin, Path ssh, byte[] installer,
+      String reason, String alias, HostSshCredentialService.HostConfig directConfig,
+      String token, String origin, Path ssh, byte[] installer,
       String relayEndpoints, RelayFallbackSigner.Manifest relayFallback, String remoteAddress) {
     ProcessResult result;
     try {
-      if (!Objects.equals(allowedAliases().get(hostId), alias))
-        throw new IllegalStateException("SSH alias binding changed before execution");
-      result = invokeInstaller(ssh, alias, installer, origin, hostId, agentId, token,
-          certificateAuthority.controllerFingerprint(), gatewayPort, relayEndpoints, relayFallback);
+      if (alias != null) {
+        if (!Objects.equals(allowedAliases().get(hostId), alias))
+          throw new IllegalStateException("SSH alias binding changed before execution");
+        result = invokeInstaller(ssh, alias, installer, origin, hostId, agentId, token,
+            certificateAuthority.controllerFingerprint(), gatewayPort, relayEndpoints, relayFallback);
+      } else {
+        HostSshCredentialService.HostConfig current = store.transaction(c ->
+            sshCredentials.find(c, hostId));
+        if (current == null || !Objects.equals(current.address(), directConfig.address()) ||
+            current.port() != directConfig.port() ||
+            !Objects.equals(current.hostKeyFingerprint(), directConfig.hostKeyFingerprint()) ||
+            !MessageDigest.isEqual(current.encryptedCredential(), directConfig.encryptedCredential()))
+          throw new IllegalStateException("Stored SSH connection changed before execution");
+        result = invokeInstallerDirect(current, installer, origin, hostId, agentId, token,
+            certificateAuthority.controllerFingerprint(), gatewayPort, relayEndpoints, relayFallback);
+      }
     } catch (Exception e) {
       result = new ProcessResult(127, false);
     }
@@ -638,6 +670,46 @@ public class HostSshAccessResource {
       return new ProcessResult(124, true);
     }
     return new ProcessResult(process.exitValue(), false);
+  }
+
+  private ProcessResult invokeInstallerDirect(HostSshCredentialService.HostConfig config,
+      byte[] installer, String origin, UUID hostId, UUID agentId, String token,
+      String fingerprint, int port, String relayEndpoints,
+      RelayFallbackSigner.Manifest relayFallback) throws Exception {
+    byte[] payload = installerPayload(installer, origin, hostId, agentId, token, fingerprint,
+        port, relayEndpoints, relayFallback);
+    try (var connection = sshCredentials.connect(config);
+         var channel = connection.session().createExecChannel("sudo -n /usr/bin/bash -s")) {
+      channel.setIn(new java.io.ByteArrayInputStream(payload));
+      channel.setOut(OutputStream.nullOutputStream());
+      channel.setErr(OutputStream.nullOutputStream());
+      channel.open().verify(15_000);
+      var events = channel.waitFor(java.util.EnumSet.of(
+          org.apache.sshd.client.channel.ClientChannelEvent.CLOSED),
+          TimeUnit.SECONDS.toMillis(240));
+      if (!events.contains(org.apache.sshd.client.channel.ClientChannelEvent.CLOSED)) {
+        channel.close(true);
+        return new ProcessResult(124, true);
+      }
+      Integer exitStatus = channel.getExitStatus();
+      return new ProcessResult(exitStatus == null ? 255 : exitStatus, false);
+    } finally {
+      java.util.Arrays.fill(payload, (byte)0);
+    }
+  }
+
+  private byte[] installerPayload(byte[] installer, String origin, UUID hostId,
+      UUID agentId, String token, String fingerprint, int port, String relayEndpoints,
+      RelayFallbackSigner.Manifest relayFallback) throws Exception {
+    var payload = new ByteArrayOutputStream(installer.length + 1024);
+    String bootstrapArguments = "set -- " + shellQuote(origin) + " " + shellQuote(hostId.toString()) +
+        " " + shellQuote(agentId.toString()) + " " + shellQuote(token) + " " +
+        shellQuote(fingerprint) + " " + shellQuote(Integer.toString(port)) + " " +
+        shellQuote(relayEndpoints) + " " + shellQuote(String.join(",", relayFallback.endpoints())) +
+        " " + shellQuote(relayFallback.signature()) + " " + shellQuote(relayFallback.publicKey()) + "\n";
+    payload.write(bootstrapArguments.getBytes(StandardCharsets.UTF_8));
+    payload.write(installer);
+    return payload.toByteArray();
   }
 
   private String shellQuote(String value) {

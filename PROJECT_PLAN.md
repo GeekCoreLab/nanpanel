@@ -437,14 +437,18 @@ hybrid-infrastructure-platform/
 - [x] SSH 固定只读可达性探测：主机 UUID 绑定 root-managed alias，强制固定 known_hosts、BatchMode 和 true 命令，不保存私钥或密码。
 - [x] SSH 救援恢复：对 host-bound unit allowlist 提交固定 systemctl restart/active 校验，操作幂等、审计并将断线结果标为 UNKNOWN；默认无授权 unit。
 - [x] P1 固定范围的 agentless SSH 管理/恢复代码：host-bound alias 探测、allowlist systemd 状态/有界日志读取与重启，以及固定安装脚本初始化 Agent；alias 和 unit allowlist 默认均为空。
+- [x] 主机资产 SSH 直连配置：支持地址、端口、用户名、密码或私钥；凭据 AES-256-GCM 加密，host key 未核对并显式信任前不发送认证信息。
+- [x] SSH 直连可省略 alias 执行固定 Agent 安装脚本；一次性接入码仅经 SSH stdin 传递，需以首次 mTLS 心跳确认结果。
+- [x] 管理员显式开启 PTY 堡垒 Shell：一次性 WebSocket 票据绑定当前 Web 会话；会话、已提交命令行和终端输入/输出录像单独存储，命令及录像加密、有界并按保留期清理。
 - [ ] 在两台非 K3s Linux 主机上验收真实 SSH 通道、拒绝路径和恢复流程。
+- [ ] 在真实目标机验收堡垒终端交互、会话撤销、命令历史/录像回放、数据清理与主机账户权限边界。
 - [x] Agent 侧恢复基元：1–8 个 HTTPS 端点规范化轮询、有限退避，以及系统 DNS 失败后的 Cloudflare A/AAAA 直查（UDP 截断回退 TCP、受限重试、公网地址过滤）。
 - [x] ADR-011 代码切片：Core/Agent 双向拨号、双 Relay 预连接、安装时 Ed25519 签名备用名单、Cloudflare DNS 单写租约/写后读回、Relay 三次健康/失败滞回、120 秒切换冷却和周期性 API 对账。
 - [ ] 在 Cloudflare 测试 Zone 验证 TTL/公共解析恢复，并完成限制型 NAT、Relay 故障与 Core 掉线场景验收。
 - [x] Rust root Helper：allowlist 软件包安装、受保护文件原子写入、临时 nftables 规则及 30–300 秒可验证 systemd 定时回滚已接入异步 Operation；每条网络规则限定接口/协议/端口，`CAP_NET_ADMIN` 仅授予瞬时 worker，默认 allowlist 为空。
 - [x] Docker/Podman allowlist 容器列表、日志、启停和受限部署已接入类型化 Helper Operation；真实宿主机验收待完成。
 
-**阶段边界**：systemd 与通用 Helper 服务链有数据库集成测试，覆盖操作幂等键重放、结果回调去重、未知结果审计、受限 journal 查询、临时防火墙规则验证/定时回滚，以及 Agent 本地日志跨重启恢复。Helper 操作使用独立空白默认 allowlist；软件包只允许显式列出的名称，文件写入限制为固定目录的单层文件名，容器只允许预设镜像/loopback 端口，防火墙只允许预设接口/协议/端口。SSH 已实现主机绑定的固定只读探测、allowlist systemd 状态/有界 journal 读取、固定 systemd 重启，以及经固定安装脚本执行的异步 Agent 初始化；status/journal/restart 共用空白默认的 host-bound unit allowlist，token 经 SSH stdin 传递，等待首次 mTLS 心跳确认，断线或无心跳时结果未知。固定操作范围之外的 agentless 管理能力不属于当前 P1 MVP；两台非 K3s 主机的真实 SSH 验收仍未完成。ADR-011 已有 Agent 端点轮询、受限 DNS 直查、Rust 双向 Relay 流、Core 数据库单调 epoch、Relay 持久 fencing 和 Core Gateway 多 Relay 出站和数据库 leader 租约代码、Agent 双 Relay 同时预连接代码，签名备用名单由 Core Ed25519 签发并由 Agent 本地校验；Cloudflare DNS 三次健康/失败滞回、120 秒切换冷却和 API 周期读回对账已有代码；TTL/公共 DNS 传播验证、限制型 NAT/代理故障真实验收仍未完成。因此 P1 尚未通过整体验收。真实环境步骤和证据要求见 [P1 验收手册](tests/p1/README.md)。
+**阶段边界**：systemd 与通用 Helper 服务链有数据库集成测试，覆盖操作幂等键重放、结果回调去重、未知结果审计、受限 journal 查询、临时防火墙规则验证/定时回滚，以及 Agent 本地日志跨重启恢复。Helper 操作使用独立空白默认 allowlist；软件包只允许显式列出的名称，文件写入限制为固定目录的单层文件名，容器只允许预设镜像/loopback 端口，防火墙只允许预设接口/协议/端口。SSH alias 和 unit allowlist 默认空；固定路径包括 host-bound alias 探测、allowlist systemd 状态/有界 journal 读取和重启，以及固定脚本 Agent 初始化。资产直连凭据及堡垒命令/录像使用 AES-GCM 密文，先由管理员核对并信任 host key，再以 alias 可选方式安装 Agent 或显式开启受审计 PTY Shell；Shell 的实际命令能力由资产配置的 SSH 主机账户权限决定，不通过 Agent/Helper 授权。Agent 安装 token 经 SSH stdin 传递并等待首次 mTLS 心跳，断线或无心跳时结果未知。两台非 K3s 主机的 SSH 拒绝/恢复流程及真实终端/录像验收仍未完成。ADR-011 已有 Agent 端点轮询、受限 DNS 直查、Rust 双向 Relay 流、Core 数据库单调 epoch、Relay 持久 fencing 和 Core Gateway 多 Relay 出站和数据库 leader 租约代码、Agent 双 Relay 同时预连接代码，签名备用名单由 Core Ed25519 签发并由 Agent 本地校验；Cloudflare DNS 三次健康/失败滞回、120 秒切换冷却和 API 周期读回对账已有代码；TTL/公共 DNS 传播验证、限制型 NAT/代理故障真实验收仍未完成。因此 P1 尚未通过整体验收。真实环境步骤和证据要求见 [P1 验收手册](tests/p1/README.md)。
 
 **验收**：无 K3s 的两台 Linux 主机可独立被管理；非 root Agent 可通过 Helper 完成授权的系统级运维，越权请求被拒绝并记录审计；断网重连后的任务幂等和状态恢复正确。
 

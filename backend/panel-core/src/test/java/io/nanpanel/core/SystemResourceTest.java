@@ -17,6 +17,45 @@ import org.junit.jupiter.api.Test;
 class SystemResourceTest {
   @Inject AuthStore store;
 
+  private static final class EchoShellCommand implements org.apache.sshd.server.command.Command {
+    private java.io.InputStream input;
+    private java.io.OutputStream output;
+    private org.apache.sshd.server.ExitCallback exitCallback;
+    private Thread runner;
+
+    @Override public void setInputStream(java.io.InputStream value) { input = value; }
+    @Override public void setOutputStream(java.io.OutputStream value) { output = value; }
+    @Override public void setErrorStream(java.io.OutputStream value) { }
+    @Override public void setExitCallback(org.apache.sshd.server.ExitCallback value) {
+      exitCallback = value;
+    }
+
+    @Override
+    public void start(org.apache.sshd.server.channel.ChannelSession channel,
+        org.apache.sshd.server.Environment environment) {
+      runner = Thread.ofVirtual().start(() -> {
+        try (var reader = new java.io.BufferedReader(new java.io.InputStreamReader(
+            input, StandardCharsets.UTF_8))) {
+          String line;
+          while ((line = reader.readLine()) != null) {
+            if (line.startsWith("echo ")) {
+              output.write((line.substring(5) + "\r\n").getBytes(StandardCharsets.UTF_8));
+              output.flush();
+            }
+          }
+          exitCallback.onExit(0, "", false);
+        } catch (java.io.IOException failure) {
+          exitCallback.onExit(1, failure.getMessage(), false);
+        }
+      });
+    }
+
+    @Override
+    public void destroy(org.apache.sshd.server.channel.ChannelSession channel) {
+      if (runner != null) runner.interrupt();
+    }
+  }
+
   @Test
   void gatewayLeaseFencesCompetingAndExpiredOwners() {
     String firstOwner = "b0fb3e0a-f38b-4abc-83ea-1c4eb8887a10";
@@ -292,6 +331,7 @@ class SystemResourceTest {
     String hostId = enrollment.path("hostId");
     String agentId = enrollment.path("agentId");
     String enrollmentToken = enrollment.path("token");
+    verifyBastionTerminal(hostId, restoredCookie, restored.path("csrfToken"));
     assertEquals(controllerFingerprint, enrollment.path("controllerFingerprint"));
     assertEquals(30444, (int)enrollment.path("gatewayPort"));
     assertEquals(java.util.List.of("https://relay-a.example", "https://relay-b.example"),
@@ -731,6 +771,170 @@ class SystemResourceTest {
         .get("/api/v1/auth/me")
         .then()
         .statusCode(401);
+  }
+
+  private void verifyBastionTerminal(String hostId, String cookie, String csrf) throws Exception {
+    var generator = java.security.KeyPairGenerator.getInstance("RSA");
+    generator.initialize(2048);
+    var serverKey = generator.generateKeyPair();
+    org.apache.sshd.server.SshServer target = org.apache.sshd.server.SshServer
+        .setUpDefaultServer();
+    target.setHost("127.0.0.1");
+    target.setPort(0);
+    target.setKeyPairProvider(org.apache.sshd.common.keyprovider.KeyPairProvider.wrap(serverKey));
+    target.setPasswordAuthenticator((username, password, session) ->
+        "panel-test".equals(username) && "host-test-password-do-not-return".equals(password));
+    target.setShellFactory(channel -> new EchoShellCommand());
+    target.start();
+    try {
+      String password = "host-test-password-do-not-return";
+      given().cookie("nanpanel_session", cookie).header("X-CSRF-Token", csrf)
+          .contentType("application/json")
+          .body(Map.of("address", "127.0.0.1", "port", target.getPort(),
+              "username", "panel-test", "authMethod", "PASSWORD", "password", password))
+          .put("/api/v1/hosts/" + hostId + "/ssh/config").then().statusCode(204);
+      var saved = given().cookie("nanpanel_session", cookie)
+          .get("/api/v1/hosts/" + hostId + "/ssh/config").then().statusCode(200).extract();
+      assertEquals("127.0.0.1", saved.path("address"));
+      assertEquals("PASSWORD", saved.path("authMethod"));
+      assertTrue(Boolean.TRUE.equals(saved.path("credentialsConfigured")));
+      assertFalse(saved.asString().contains(password));
+      byte[] credentialCiphertext = (byte[])store.transaction(c -> AuthStore.query(c,
+          "SELECT encrypted_credential FROM host_ssh_config WHERE host_id=?",
+          UUID.fromString(hostId))).getFirst().get("encrypted_credential");
+      assertFalse(new String(credentialCiphertext, StandardCharsets.ISO_8859_1)
+          .contains(password));
+
+      String fingerprint = given().cookie("nanpanel_session", cookie)
+          .header("X-CSRF-Token", csrf).contentType("application/json")
+          .body(Map.of("reason", "Verify bastion target host key"))
+          .post("/api/v1/hosts/" + hostId + "/ssh/host-key/probe")
+          .then().statusCode(200).extract().path("fingerprint");
+      assertTrue(fingerprint.startsWith("SHA256:"));
+      given().cookie("nanpanel_session", cookie).header("X-CSRF-Token", csrf)
+          .contentType("application/json")
+          .body(Map.of("fingerprint", fingerprint, "reason", "Verified from local test SSHD"))
+          .post("/api/v1/hosts/" + hostId + "/ssh/host-key/trust")
+          .then().statusCode(204);
+
+      var created = given().cookie("nanpanel_session", cookie).header("X-CSRF-Token", csrf)
+          .contentType("application/json")
+          .body(Map.of("reason", "Verify audited interactive SSH shell", "columns", 100, "rows", 30))
+          .post("/api/v1/hosts/" + hostId + "/ssh/sessions")
+          .then().statusCode(201).extract();
+      String sessionId = created.path("sessionId");
+      String ticket = created.path("ticket");
+      String marker = "nanpanel-bastion-e2e-" + UUID.randomUUID().toString().substring(0, 8);
+      var frames = new java.util.concurrent.LinkedBlockingQueue<String>();
+      var listener = new java.net.http.WebSocket.Listener() {
+        @Override
+        public void onOpen(java.net.http.WebSocket webSocket) {
+          webSocket.request(1);
+        }
+
+        @Override
+        public java.util.concurrent.CompletionStage<?> onText(
+            java.net.http.WebSocket webSocket, CharSequence data, boolean last) {
+          frames.offer(data.toString());
+          webSocket.request(1);
+          return null;
+        }
+
+        @Override
+        public void onError(java.net.http.WebSocket webSocket, Throwable error) {
+          frames.offer("{\"type\":\"test-error\",\"message\":\"" +
+              String.valueOf(error.getMessage()).replace("\"", "'") + "\"}");
+        }
+      };
+      java.net.URI terminalUri = java.net.URI.create(
+          "ws://localhost:8081/api/v1/bastion-sessions/" + sessionId + "/terminal");
+      var socket = java.net.http.HttpClient.newHttpClient().newWebSocketBuilder()
+          .header("Origin", "http://localhost:8081")
+          .buildAsync(terminalUri, listener).get(10, TimeUnit.SECONDS);
+      socket.sendText("{\"type\":\"auth\",\"ticket\":\"" + ticket +
+          "\",\"columns\":100,\"rows\":30}", true).join();
+      boolean ready = false;
+      long readyDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+      while (!ready && System.nanoTime() < readyDeadline) {
+        String frame = frames.poll(1, TimeUnit.SECONDS);
+        if (frame == null) continue;
+        var event = new com.fasterxml.jackson.databind.ObjectMapper().readTree(frame);
+        if ("test-error".equals(event.path("type").asText()))
+          fail("WebSocket reported an error: " + frame);
+        ready = "ready".equals(event.path("type").asText());
+      }
+      assertTrue(ready, "Bastion WebSocket did not authenticate the ticket");
+      socket.sendText("{\"type\":\"input\",\"data\":\"echo " + marker + "\\r\"}", true).join();
+
+      boolean observedMarker = false;
+      StringBuilder remoteOutput = new StringBuilder();
+      long outputDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
+      while (!observedMarker && System.nanoTime() < outputDeadline) {
+        String frame = frames.poll(1, TimeUnit.SECONDS);
+        if (frame == null) continue;
+        var event = new com.fasterxml.jackson.databind.ObjectMapper().readTree(frame);
+        if ("test-error".equals(event.path("type").asText()))
+          fail("WebSocket reported an error: " + frame);
+        if ("output".equals(event.path("type").asText())) {
+          byte[] output = java.util.Base64.getDecoder().decode(event.path("data").asText());
+          remoteOutput.append(new String(output, StandardCharsets.UTF_8));
+          observedMarker = remoteOutput.indexOf(marker) >= 0;
+        }
+      }
+      assertTrue(observedMarker, "Remote shell did not return the submitted command output: " +
+          remoteOutput + "; frames=" + frames);
+      socket.sendClose(java.net.http.WebSocket.NORMAL_CLOSURE, "test complete")
+          .get(5, TimeUnit.SECONDS);
+
+      Map<String, Object> savedSession = Map.of();
+      long closeDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+      while (System.nanoTime() < closeDeadline) {
+        var listed = given().cookie("nanpanel_session", cookie)
+            .get("/api/v1/bastion-sessions?hostId=" + hostId)
+            .then().statusCode(200).extract();
+        java.util.List<Map<String, Object>> sessions = listed.jsonPath().getList("items");
+        if (!sessions.isEmpty() && "CLOSED".equals(sessions.getFirst().get("status"))) {
+          savedSession = sessions.getFirst();
+          break;
+        }
+        Thread.sleep(100);
+      }
+      assertEquals(sessionId, savedSession.get("id"));
+      assertTrue(((Number)savedSession.get("bytesIn")).longValue() > 0);
+      assertTrue(((Number)savedSession.get("bytesOut")).longValue() > 0);
+
+      var commands = given().cookie("nanpanel_session", cookie)
+          .get("/api/v1/bastion-sessions/" + sessionId + "/commands")
+          .then().statusCode(200).extract().jsonPath().getList("items");
+      assertTrue(commands.stream().anyMatch(item ->
+          String.valueOf(((Map<?, ?>)item).get("command")).contains("echo " + marker)));
+      var recording = given().cookie("nanpanel_session", cookie)
+          .get("/api/v1/bastion-sessions/" + sessionId + "/recording")
+          .then().statusCode(200).extract();
+      assertEquals("nanpanel-terminal-v1", recording.path("format"));
+      var chunks = recording.jsonPath().getList("items");
+      assertTrue(chunks.stream().anyMatch(item -> "INPUT".equals(((Map<?, ?>)item).get("direction"))));
+      assertTrue(chunks.stream().anyMatch(item -> "OUTPUT".equals(((Map<?, ?>)item).get("direction"))));
+      String recordedOutput = chunks.stream()
+          .filter(item -> "OUTPUT".equals(((Map<?, ?>)item).get("direction")))
+          .map(item -> java.util.Base64.getDecoder().decode(
+              String.valueOf(((Map<?, ?>)item).get("data"))))
+          .map(bytes -> new String(bytes, StandardCharsets.UTF_8))
+          .collect(java.util.stream.Collectors.joining());
+      assertTrue(recordedOutput.contains(marker));
+
+      var storedCommand = store.transaction(c -> AuthStore.query(c,
+          "SELECT encrypted_command FROM bastion_command WHERE session_id=?",
+          UUID.fromString(sessionId))).getFirst().get("encrypted_command");
+      assertFalse(new String((byte[])storedCommand, StandardCharsets.ISO_8859_1)
+          .contains("echo " + marker));
+      var views = store.transaction(c -> AuthStore.query(c,
+          "SELECT action FROM audit_event WHERE resource_id=? AND action IN " +
+              "('BASTION_COMMANDS_VIEWED','BASTION_RECORDING_VIEWED')", sessionId));
+      assertEquals(2, views.size());
+    } finally {
+      target.stop(true);
+    }
   }
 
   private String createCsr(UUID agentId) throws Exception {

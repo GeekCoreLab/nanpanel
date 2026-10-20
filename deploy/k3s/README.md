@@ -32,8 +32,9 @@ unset GHCR_TOKEN
 The script requires local `podman`, `openssl`, and the `k3s-1` SSH alias. It
 checks both private GHCR tags before changing the cluster. It creates the
 `nanpanel` namespace, a persistent 5 GiB PostgreSQL volume, generated
-database/bootstrap secrets, a self-signed Web TLS certificate, and the Core/Web
-Deployments and Services. It also creates a dedicated Agent client-signing CA
+database/bootstrap secrets, a persistent random SSH credential-encryption key,
+a self-signed Web TLS certificate, and the Core/Web Deployments and Services.
+It also creates a dedicated Agent client-signing CA
 and a private Gateway-to-Core callback token. The Core image contains the
 static Linux x86_64 Agent and runs its Rust mTLS Gateway sidecar on NodePort
 `30444`; the browser panel remains on HTTPS NodePort `30443`. The TLS
@@ -60,6 +61,12 @@ panel. HTTP on port `30081` redirects to HTTPS. To renew the certificate, delete
 the `nanpanel-web-tls` Secret and run the deploy script again. Keep this
 self-signed certificate on the test network; public access needs a trusted
 certificate and a matching origin.
+
+The `nanpanel-ssh-credentials-key` Secret encrypts per-host SSH passwords and
+private keys, plus bastion command/terminal recordings. The script creates it
+only once and preserves it during redeployments. Protect and back up this Secret
+with the PostgreSQL volume: losing it makes saved credentials and recordings
+unreadable. Never print its data or commit an exported copy.
 
 ## Add the controller host as an asset
 

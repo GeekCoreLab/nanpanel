@@ -2,7 +2,7 @@ openapi: 3.1.1
 info:
   title: NaNPanel 管理 API
   version: 0.1.0-draft.2
-  description: 契约优先的 Web 平台 API。管理操作使用 HttpOnly Cookie 会话和写请求 CSRF；Agent 使用独立的一次性接入码、客户端证书和 mTLS/gRPC。受 allowlist 限制的 systemd、journal、软件包、受保护文件、容器及带自动回滚的临时防火墙操作已接入；SSH 支持 host UUID 绑定的固定探测、显式 allowlist 的 systemd 状态/有界日志读取和恢复；其他 agentless 管理仍待实现。ADR-011 安装时签名备用名单已实现；真实 DNS/故障验收仍待完成。
+  description: 契约优先的 Web 平台 API。管理操作使用 HttpOnly Cookie 会话和写请求 CSRF；Agent 使用独立的一次性接入码、客户端证书和 mTLS/gRPC。除 host-bound alias 管理外，主机资产可保存 AES-GCM 加密的直连 SSH 密码或私钥，并支持指纹确认后自动安装 Agent。管理员可开启经一次性 WebSocket 票据授权的交互式 SSH 堡垒 Shell；会话、命令行和有界终端录像独立持久化。systemd、Helper、SSH alias 管理仍受 allowlist 限制。ADR-011 安装时签名备用名单已实现；真实 DNS/故障验收仍待完成。
   x-status: draft
 servers:
 - url: http://127.0.0.1:8080
@@ -20,6 +20,8 @@ tags:
   description: 主机 systemd 服务管理
 - name: SshAccess
   description: root allowlist 管理的 SSH 探测及固定 systemd 恢复操作
+- name: SshBastion
+  description: 主机资产 SSH 凭据、host key 信任和可审计堡垒终端
 - name: Operations
   description: 持久化异步操作与结果
 - name: Auth
@@ -771,7 +773,7 @@ paths:
       tags: [SshAccess]
       operationId: installAgentOverHostSsh
       summary: 使用一次性接入码通过受限 SSH 初始化 Agent
-      description: 仅允许 hostId 对应的 root-managed SSH alias。Core 通过固定 SSH 命令执行随镜像打包且 root 拥有的 agent-install.sh；脚本内容不可由请求控制，controller origin 只能来自服务端配置。一次性 token 通过 SSH stdin 传递，不进入 ssh argv、Operation、审计或日志。任务持久化并等待首次 mTLS 心跳；超时或已兑换但未能验证时标记 UNKNOWN，必须先对账。alias allowlist 默认空，Controller origin 未配置为 HTTPS 时功能关闭。
+      description: 可使用 hostId 对应的 root-managed alias，或使用该资产保存且已固定 host key 的直接 SSH 配置。Core 执行随镜像打包且 root 拥有的固定 agent-install.sh；controller origin 只能来自服务端 HTTPS 配置。一次性 token 通过 SSH stdin 传递，不进入 ssh argv、Operation、审计或日志。任务持久化并等待首次 mTLS 心跳；超时或已兑换但未能验证时标记 UNKNOWN，必须先对账。
       x-implementation-status: implemented
       parameters:
       - $ref: '#/components/parameters/IdempotencyKey'
@@ -816,6 +818,265 @@ paths:
           $ref: '#/components/responses/Unprocessable'
         '503':
           $ref: '#/components/responses/Unavailable'
+  /api/v1/hosts/{hostId}/ssh/config:
+    parameters:
+    - $ref: '#/components/parameters/HostId'
+    get:
+      tags: [SshBastion]
+      operationId: getHostSshConfig
+      summary: 查询主机 SSH 连接配置
+      description: 只返回地址、端口、用户、认证类型和 host key 状态，不回传或缓存凭据明文/密文。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: SSH 配置元数据。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HostSshConfig'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [SshBastion]
+      operationId: saveHostSshConfig
+      summary: 加密保存主机 SSH 凭据
+      description: 凭据按主机 UUID 作为 AES-GCM AAD 加密后写入数据库；服务端必须配置 NANPANEL_SSH_CREDENTIAL_KEY。更新配置不会返回凭据，并会在目标地址变化时清除已信任 host key；host key 变化后必须重新核对。写入会产生脱敏管理审计。
+      x-implementation-status: implemented
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SaveHostSshConfigRequest'
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      responses:
+        '204':
+          description: 凭据已加密保存；响应不包含任何凭据。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/hosts/{hostId}/ssh/host-key/probe:
+    parameters:
+    - $ref: '#/components/parameters/HostId'
+    post:
+      tags: [SshBastion]
+      operationId: probeHostSshHostKey
+      summary: 无凭据探测 SSH host key 指纹
+      description: 仅完成 SSH 握手和服务器公钥指纹读取，不发送密码或私钥。探测结果有效 5 分钟；管理员必须通过可信渠道核对目标并明确确认后，方可建立已认证连接。
+      x-implementation-status: implemented
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SshHostKeyProbeRequest'
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      responses:
+        '200':
+          description: 目标 host key 指纹及是否与当前信任值匹配。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SshHostKeyProbe'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '502':
+          description: 无法读取目标 SSH host key。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /api/v1/hosts/{hostId}/ssh/host-key/trust:
+    parameters:
+    - $ref: '#/components/parameters/HostId'
+    post:
+      tags: [SshBastion]
+      operationId: trustHostSshHostKey
+      summary: 明确信任已探测的 SSH host key
+      description: 仅接受 5 分钟内由服务端探测并保存的相同指纹；信任动作必须附带原因并写入审计。
+      x-implementation-status: implemented
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SshHostKeyTrustRequest'
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      responses:
+        '204':
+          description: 已信任该 host key。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v1/hosts/{hostId}/ssh/sessions:
+    parameters:
+    - $ref: '#/components/parameters/HostId'
+    post:
+      tags: [SshBastion]
+      operationId: createBastionSshSession
+      summary: 创建一次性堡垒 Shell 票据
+      description: 需要已加密保存的 SSH 凭据和已确认的 host key。票据只绑定当前管理员 Web 会话，60 秒内只能兑换一次；WebSocket 接通后直连目标 SSH PTY。服务端记录操作原因、输入输出字节、命令行和终端尺寸。
+      x-implementation-status: implemented
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBastionSessionRequest'
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      responses:
+        '201':
+          description: 一次性会话票据；不得记录或缓存 ticket。
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BastionSessionTicket'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v1/bastion-sessions:
+    get:
+      tags: [SshBastion]
+      operationId: listBastionSshSessions
+      summary: 查询堡垒 Shell 会话审计
+      x-implementation-status: implemented
+      parameters:
+      - name: hostId
+        in: query
+        required: false
+        schema: { type: string, format: uuid }
+      - name: limit
+        in: query
+        required: false
+        schema: { type: integer, minimum: 1, maximum: 100, default: 100 }
+      responses:
+        '200':
+          description: 按会话启动时间倒序返回审计记录。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BastionSessionList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/bastion-sessions/{sessionId}/commands:
+    parameters:
+    - name: sessionId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    get:
+      tags: [SshBastion]
+      operationId: getBastionSshCommands
+      summary: 查询堡垒 Shell 命令行历史
+      description: 记录通过终端输入的已提交命令行；命令可能包含敏感内容，受管理员会话保护并按配置保留期清理。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 按会话内序号升序的命令行历史。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BastionCommandList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/bastion-sessions/{sessionId}/recording:
+    parameters:
+    - name: sessionId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    get:
+      tags: [SshBastion]
+      operationId: getBastionSshRecording
+      summary: 查询堡垒 Shell 终端录像
+      description: 返回带毫秒偏移、方向和 Base64 原始终端字节的有序录像块；密文保存在数据库，总量上限 8 MiB/100000 块每会话，按配置保留并由前端终端模拟器回放。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 有序录像块及格式标识。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BastionRecordingList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/bastion-sessions/{sessionId}/terminal:
+    parameters:
+    - name: sessionId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    get:
+      tags: [SshBastion]
+      operationId: openBastionSshTerminal
+      summary: 升级为堡垒 SSH WebSocket 终端
+      description: >-
+        WebSocket 升级请求的 Origin 必须匹配 Core 配置。升级后第一条 JSON
+        文本帧为 {type: auth, ticket, columns, rows}；后续 type 支持 input（data
+        为终端文本）、resize、keepalive、close。客户端不得将 ticket 写入 URL、日志或持久存储。
+        输入和输出逐块记录；原因、命令与录制内容按堡垒审计权限保护。
+      x-websocket-upgrade: true
+      x-implementation-status: implemented
+      security: []
+      responses:
+        '101':
+          description: WebSocket 连接升级成功。
+        '401':
+          description: 会话票据无效、过期或绑定的 Web 登录已撤销。
+        '409':
+          description: SSH 配置或已信任 host key 在签发票据后发生变化。
   /api/v1/hosts/{hostId}/operations:
     parameters:
     - $ref: '#/components/parameters/HostId'
@@ -901,7 +1162,6 @@ paths:
           $ref: '#/components/responses/Unprocessable'
         '503':
           $ref: '#/components/responses/Unavailable'
-  /api/v1/operations:
   /api/v1/operations:
     get:
       tags:
@@ -2914,6 +3174,160 @@ components:
           type: string
           minLength: 1
           maxLength: 500
+    SaveHostSshConfigRequest:
+      type: object
+      additionalProperties: false
+      required: [address, port, username, authMethod]
+      description: PASSWORD 时只提供 password；PRIVATE_KEY 时只提供 privateKey 和可选 privateKeyPassphrase。明文只用于本次 TLS 写入，不会进入响应。
+      properties:
+        address:
+          type: string
+          minLength: 1
+          maxLength: 253
+          description: IPv4、IPv6 或 DNS 主机名，不包含 SSH alias、用户名或 URL scheme。
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+          default: 22
+        username:
+          type: string
+          pattern: '^[A-Za-z_][A-Za-z0-9_.-]{0,127}$'
+        authMethod:
+          type: string
+          enum: [PASSWORD, PRIVATE_KEY]
+        password:
+          type: [string, 'null']
+          maxLength: 4096
+        privateKey:
+          type: [string, 'null']
+          maxLength: 65536
+        privateKeyPassphrase:
+          type: [string, 'null']
+          maxLength: 4096
+    HostSshConfig:
+      type: object
+      additionalProperties: false
+      required: [hostId, address, port, username, authMethod, credentialsConfigured, hostKeyFingerprint, probedFingerprint, probedAt]
+      properties:
+        hostId: { type: string, format: uuid }
+        address: { type: string }
+        port: { type: integer, minimum: 1, maximum: 65535 }
+        username: { type: string }
+        authMethod: { type: string, enum: [PASSWORD, PRIVATE_KEY] }
+        credentialsConfigured: { type: boolean, const: true }
+        hostKeyFingerprint: { type: [string, 'null'], pattern: '^SHA256:[A-Za-z0-9+/]{43}$' }
+        probedFingerprint: { type: [string, 'null'], pattern: '^SHA256:[A-Za-z0-9+/]{43}$' }
+        probedAt: { type: [string, 'null'], format: date-time }
+    SshHostKeyProbeRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 500 }
+    SshHostKeyProbe:
+      type: object
+      additionalProperties: false
+      required: [hostId, fingerprint, matchesTrustedFingerprint, requiresConfirmation, probedAt]
+      properties:
+        hostId: { type: string, format: uuid }
+        fingerprint: { type: string, pattern: '^SHA256:[A-Za-z0-9+/]{43}$' }
+        matchesTrustedFingerprint: { type: boolean }
+        requiresConfirmation: { type: boolean }
+        probedAt: { type: string, format: date-time }
+    SshHostKeyTrustRequest:
+      type: object
+      additionalProperties: false
+      required: [fingerprint, reason]
+      properties:
+        fingerprint: { type: string, pattern: '^SHA256:[A-Za-z0-9+/]{43}$' }
+        reason: { type: string, minLength: 1, maxLength: 500 }
+    CreateBastionSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 500 }
+        columns: { type: integer, minimum: 20, maximum: 500, default: 120 }
+        rows: { type: integer, minimum: 5, maximum: 200, default: 36 }
+    BastionSessionTicket:
+      type: object
+      additionalProperties: false
+      required: [sessionId, ticket, expiresAt, websocketPath]
+      properties:
+        sessionId: { type: string, format: uuid }
+        ticket:
+          type: string
+          minLength: 40
+          maxLength: 128
+          writeOnly: true
+          description: 60 秒有效的一次性 WebSocket 票据；只允许短暂保存在浏览器内存。
+        expiresAt: { type: string, format: date-time }
+        websocketPath: { type: string, pattern: '^/api/v1/bastion-sessions/' }
+    BastionSessionList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/BastionSession' }
+    BastionSession:
+      type: object
+      additionalProperties: false
+      required: [id, hostId, hostname, actorId, reason, targetAddress, targetPort, targetUsername, targetFingerprint, status, durationMs, bytesIn, bytesOut, failureCode, startedAt, finishedAt]
+      properties:
+        id: { type: string, format: uuid }
+        hostId: { type: string, format: uuid }
+        hostname: { type: string }
+        actorId: { type: string, format: uuid }
+        reason: { type: string }
+        targetAddress: { type: string }
+        targetPort: { type: integer }
+        targetUsername: { type: string }
+        targetFingerprint: { type: string }
+        status: { type: string, enum: [PENDING, RUNNING, CLOSED, FAILED] }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: [string, 'null'], format: date-time }
+        durationMs: { type: [integer, 'null'], minimum: 0 }
+        bytesIn: { type: integer, minimum: 0 }
+        bytesOut: { type: integer, minimum: 0 }
+        failureCode: { type: [string, 'null'] }
+    BastionCommandList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/BastionCommand' }
+    BastionCommand:
+      type: object
+      additionalProperties: false
+      required: [sequence, occurredAt, command]
+      properties:
+        sequence: { type: integer, minimum: 1 }
+        occurredAt: { type: string, format: date-time }
+        command: { type: string, maxLength: 4096 }
+    BastionRecordingList:
+      type: object
+      additionalProperties: false
+      required: [items, encoding, format]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/BastionRecordingChunk' }
+        encoding: { type: string, const: base64 }
+        format: { type: string, const: nanpanel-terminal-v1 }
+    BastionRecordingChunk:
+      type: object
+      additionalProperties: false
+      required: [sequence, offsetMs, direction, data]
+      properties:
+        sequence: { type: integer, minimum: 1 }
+        offsetMs: { type: integer, minimum: 0 }
+        direction: { type: string, enum: [INPUT, OUTPUT] }
+        data: { type: string, contentEncoding: base64 }
     SshProbeResult:
       type: object
       additionalProperties: false
@@ -3027,7 +3441,7 @@ components:
     SshAgentInstallRequest:
       type: object
       additionalProperties: false
-      required: [enrollmentId, agentId, alias, token, reason]
+      required: [enrollmentId, agentId, token, reason]
       properties:
         enrollmentId:
           type: string
@@ -3036,9 +3450,9 @@ components:
           type: string
           format: uuid
         alias:
-          type: string
+          type: [string, 'null']
           pattern: '^[A-Za-z0-9][A-Za-z0-9_.@-]{0,99}$'
-          description: Must match the root-managed alias bound to hostId.
+          description: Optional legacy SSH alias. Omit or use null to connect through the host asset's saved direct SSH configuration and pinned host key.
         token:
           type: string
           minLength: 40
