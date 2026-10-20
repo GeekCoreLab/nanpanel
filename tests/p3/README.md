@@ -1,0 +1,23 @@
+# P3 topology and plugin protocol evidence
+
+Run the focused validation from the repository root:
+
+```sh
+./mvnw -pl backend/panel-core,plugins/provider-frp -am test
+(cd web && npm test && npm run build)
+python -c 'import yaml; yaml.safe_load(open("api/openapi.yaml", encoding="utf-8"))'
+git diff --check
+```
+
+| P3 item | Evidence | Boundary |
+| --- | --- | --- |
+| Typed NetworkGraph and Topology Revision | `SystemResourceTest` exercises authenticated draft reads, typed writes, generation/ETag conflict, immutable history, and protocol-layer rejection. | The regular topology page stores desired state; it does not apply Core-managed production routes. |
+| Generic Provider and Translator protocol | Core routes by Provider/Translator ID, reports descriptors and capabilities, validates plans, persists operations and audit records, and bounds asynchronous work. The FRP plugin runtime test loads a Provider and Translator from a separate PF4J JAR. | Plugin signing, external installation, permissions beyond the Core session boundary, and upgrade migration are not implemented. |
+| Plugin lifecycle and data retention | The PF4J test disables and re-enables the FRP plugin, confirms extensions disappear and return, and checks an unrelated FRP config file is unchanged. Core refuses to disable a plugin while its Provider has nonterminal operations. | Disable stops the plugin; it does not unload the JAR or erase plugin-owned data. |
+| FRP plan/apply/verify/compensate and drift | Provider tests cover config hash preconditions, collisions, restart restoration, actual atomic file replacement, FRPC command invocation through a test double, an HTTP response probe, safe compensation, and drift refusal. On 2026-10-20, `sh tests/p0/frp-route-transaction.sh` also passed with the pinned FRPC v0.71.0 client: the real route moved from port 18080 to 18081 and compensation restored port 18080. | The live FRPC route test uses the isolated P0 helper and does not invoke this PF4J Provider; the Provider's process control is tested with a command test double. The Provider currently manages only a local Core-visible TOML file. |
+| Link state UI | The console renders pending, verified, abnormal, and unsupported states with distinct colors and labels; typed L4 ports and TCP/UDP protocol compatibility are validated. | Provider verification does not automatically update topology links yet; the normal topology API returns `PENDING`. |
+
+The FRP Provider requires a configured TOML path, FRPC executable, enabled
+FRPC WebServer reload support, and an exact HTTP probe. See
+[`plugins/provider-frp/README.md`](../../plugins/provider-frp/README.md).
+The tested `k3s-1` cluster is not modified by these P3 tests.

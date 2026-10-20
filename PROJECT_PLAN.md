@@ -472,12 +472,12 @@ hybrid-infrastructure-platform/
 
 ### P3｜拓扑与插件协议
 
-- [ ] NetworkGraph、类型化端口与连线、Topology Revision。
-- [ ] Provider 生命周期、Capability、Config Translator。
-- [ ] FRP Provider 完整闭环及路由漂移检测。
-- [ ] UI 区分待部署/已验证/异常/不可支持的链路。
+- [x] NetworkGraph、类型化端口与连线、持久化 Topology Revision。
+- [x] Provider 启停生命周期、Capability、Config Translator 和通用 Core 操作协议。
+- [x] FRP TCP Provider 计划/校验/应用/验证/补偿及路由漂移检测。
+- [x] UI 区分待部署/已验证/异常/不可支持的链路。
 
-**验收**：新增一个 Provider 无需修改 Core 业务代码；插件停用后未托管的数据不会被误删。
+**验收**：新增 Provider JAR 可由 PF4J 在不修改 Core 业务代码的情况下装载；停用时 Core 阻断仍有未终结操作的插件，且 FRP 插件停用/启用不改写未托管配置。证据和边界见 [P3 验收记录](tests/p3/README.md)。FRP 插件当前要求 Core 可直接访问本机 TOML 文件、FRPC CLI 和固定 HTTP 探测端点；远程 Agent 配置传输、生产 Gateway 协调和 topology-to-provider 自动编排仍未实现。
 
 ### P4｜K3s / KubeEdge
 
