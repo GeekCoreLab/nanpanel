@@ -284,16 +284,31 @@ function HostDetail({ host, close, notify }: { host: Host; close: () => void; no
   <h3>systemd 服务</h3><ResourceState {...r} />
   {r.data?.items.map(s => <div className="service" key={s.id}><div><b>{s.unitName}</b><small>{s.displayName}</small>{s.observationStale && <small className="warning">历史观测 · 可能过期</small>}</div><Badge value={s.activeState} /><div className="form-actions"><button className="secondary" disabled={!s.allowedActions.includes('READ_JOURNAL') || agent.data?.helperStatus !== 'AVAILABLE'} onClick={() => void prepareJournal(s)}>查看日志</button><button className="secondary" disabled={!s.allowedActions.includes('RESTART') || agent.data?.helperStatus !== 'AVAILABLE'} onClick={() => void prepare(s)}>↻ 重启</button></div></div>)}
   {r.data?.items.length === 0 && <Empty>尚无服务观测</Empty>}
-  <SshAccessPanel host={currentHost} notify={notify} />
+  <HostSshBastionPanel key={`${host.id}-ssh-bastion`} hostId={host.id} hostName={currentHost.hostname} />
+  <SshAccessPanel key={`${host.id}-ssh-rescue`} host={currentHost} notify={notify} />
   {agent.data && <HelperOperationPanel host={currentHost} agent={agent.data} notify={notify} refresh={() => { details.refresh(); agent.refresh(); }} />}
   {service && <form className="restart-form" onSubmit={restart}><h3>确认重启 {service.unitName}</h3><p className="muted">重启会经 Core 授权并由 root Helper 执行；ACTIVE 仅证明 systemd 状态，不证明业务健康。</p><Field label="操作原因"><textarea required maxLength={500} value={reason} onChange={e => setReason(e.target.value)} placeholder="请填写本次重启的原因" /></Field><small className="muted">超时 60 秒 · 请求失败后保留原幂等键</small>{error && <div className="alert error">{error}</div>}<div className="form-actions"><button type="button" className="secondary" onClick={cancelAction}>取消</button><button className="primary" disabled={busy || !reason.trim() || !tag}>{busy ? '正在提交…' : '确认提交'}</button></div></form>}
   {journalService && <form className="restart-form" onSubmit={readJournal}><h3>查询 {journalService.unitName} 的服务日志</h3><p className="muted">读取最近 12 行，结果会写入受权限保护的操作记录。</p><Field label="查询原因"><textarea required maxLength={500} value={reason} onChange={e => setReason(e.target.value)} placeholder="请填写本次查询的原因" /></Field>{error && <div className="alert error">{error}</div>}<div className="form-actions"><button type="button" className="secondary" onClick={cancelAction}>取消</button><button className="primary" disabled={busy || !reason.trim() || !tag}>{busy ? '正在提交…' : '查询日志'}</button></div></form>}
  </section>{maintenance && <AgentMaintenanceDialog agentId={currentHost.agentId ?? ''} mode={maintenance} installation={installation.data} installationError={installation.error} selfUpdateSupported={agent.data?.status === 'ONLINE' && agent.data.helperStatus === 'AVAILABLE' && agent.data.capabilities.includes('agent.self_update')} close={() => setMaintenance(undefined)} />}</div>;
 }
+function SecondaryDrawer({ title, description, close, children }: {
+ title: string; description: string; close: () => void; children: ReactNode;
+}) {
+ return <div className="modal-backdrop host-secondary-backdrop"><aside className="drawer host-secondary-drawer" role="dialog" aria-modal="true" aria-label={title}>
+  <div className="card-title"><div><span className="eyebrow">HOST ACCESS</span><h2>{title}</h2><p className="muted">{description}</p></div><button className="icon-button" aria-label={`关闭${title}`} onClick={close}>×</button></div>
+  <div className="host-secondary-body">{children}</div>
+ </aside></div>;
+}
+function DrawerTabs({ label, value, onChange, tabs }: {
+ label: string; value: string; onChange: (value: string) => void; tabs: [string, string][];
+}) {
+ return <div className="drawer-tabs" role="tablist" aria-label={label}>{tabs.map(([id, title]) => <button key={id} type="button" role="tab" aria-selected={value === id} className={value === id ? 'active' : ''} onClick={() => onChange(id)}>{title}</button>)}</div>;
+}
 function SshAccessPanel({ host, notify }: { host: Host; notify: (s: string) => void }) {
  const [alias, setAlias] = useState(''); const [reason, setReason] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
  const [unitName, setUnitName] = useState(''); const [restartReason, setRestartReason] = useState(''); const [restartBusy, setRestartBusy] = useState(false); const [restartError, setRestartError] = useState(''); const [restartKey, setRestartKey] = useState(createUuid());
  const [diagnosticReason, setDiagnosticReason] = useState(''); const [journalLines, setJournalLines] = useState('50'); const [diagnosticBusy, setDiagnosticBusy] = useState(false); const [diagnosticError, setDiagnosticError] = useState(''); const [status, setStatus] = useState<SshSystemdStatusResult>(); const [journal, setJournal] = useState<SshSystemdJournalResult>();
+ const [drawerOpen, setDrawerOpen] = useState(false); const [rescueTab, setRescueTab] = useState('probe');
  async function probe(event: FormEvent) {
   event.preventDefault(); setBusy(true); setError('');
   try {
@@ -324,30 +339,42 @@ function SshAccessPanel({ host, notify }: { host: Host; notify: (s: string) => v
   catch (e) { setDiagnosticError((e as Error).message); }
   finally { setDiagnosticBusy(false); }
  }
- return <><h3>SSH 救援通道</h3><form className="restart-form" onSubmit={probe}>
-  <p className="muted">只探测主控 root allowlist 中的别名，强制校验固定 known_hosts，只运行无副作用的 true 命令。SSH 私钥留在主控的 OpenSSH 配置中，不保存到数据库；别名 allowlist 默认为空。</p>
-  <Field label="SSH 别名"><input required maxLength={100} value={alias} onChange={event => setAlias(event.target.value)} placeholder="例如 host-b" /></Field>
-  <Field label="SSH 探测原因"><textarea required maxLength={500} value={reason} onChange={event => setReason(event.target.value)} placeholder="记录本次 SSH 连通性检查的原因" /></Field>
-  {error && <div className="alert error" role="alert">{error}</div>}
-  <div className="form-actions"><button className="primary" disabled={busy || !alias.trim() || !reason.trim()}>{busy ? '正在验证…' : '验证 SSH 通道'}</button></div>
- </form><form className="restart-form" onSubmit={restart}>
-  <p className="muted">只执行固定的 systemctl restart 和 active 状态校验。unit 必须由 Core 主机上的 root 管理员写入 /etc/nanpanel/ssh-units.allowlist；默认无授权项，不开放 SSH shell。</p>
-  <Field label="allowlist systemd unit"><input required maxLength={256} value={unitName} onChange={event => setUnitName(event.target.value)} placeholder="例如 nanpanel-agent.service" /></Field>
-  <Field label="SSH 救援原因"><textarea required maxLength={500} value={restartReason} onChange={event => setRestartReason(event.target.value)} placeholder="记录本次 SSH 救援原因" /></Field>
-  {restartError && <div className="alert error" role="alert">{restartError}</div>}
-  <div className="form-actions"><button className="primary" disabled={restartBusy || !unitName.trim() || !restartReason.trim()}>{restartBusy ? '正在执行…' : '重启 allowlist 服务'}</button></div>
- </form><section className="restart-form"><h4>SSH 只读诊断</h4><p className="muted">读取固定 systemctl 状态或最多 100 行 journal。unit 必须显式列入主控 root 管理的 host-bound SSH allowlist；命令输出有字节和时间上限，内容不会写入审计摘要。</p>
-  <Field label="SSH 诊断 unit"><input required maxLength={256} value={unitName} onChange={event => setUnitName(event.target.value)} placeholder="例如 nanpanel-agent.service" /></Field>
-  <Field label="日志行数"><input type="number" min="1" max="100" value={journalLines} onChange={event => setJournalLines(event.target.value)} /></Field>
-  <Field label="SSH 诊断原因"><textarea required maxLength={500} value={diagnosticReason} onChange={event => setDiagnosticReason(event.target.value)} placeholder="说明读取服务状态或日志的目的" /></Field>
-  {diagnosticError && <div className="alert error" role="alert">{diagnosticError}</div>}
-  <div className="form-actions"><button type="button" className="secondary" disabled={diagnosticBusy || !unitName.trim() || !diagnosticReason.trim()} onClick={() => void readStatus()}>{diagnosticBusy ? '读取中…' : '读取服务状态'}</button><button type="button" className="secondary" disabled={diagnosticBusy || !unitName.trim() || !diagnosticReason.trim() || Number(journalLines) < 1 || Number(journalLines) > 100} onClick={() => void readJournal()}>{diagnosticBusy ? '读取中…' : '读取服务日志'}</button></div>
-  {status && <div className="alert" role="status">{status.unitName} · {status.loadState} / {status.activeState} / {status.subState}</div>}
-  {journal && <div className="ssh-journal"><p className="muted">最多 {journal.requestedLines} 行{journal.truncated ? ' · 输出已截断' : ''}</p><pre>{journal.output || '（没有日志内容）'}</pre></div>}
- </section><HostSshBastionPanel hostId={host.id} /></>;
+ return <>
+  <section className="ssh-entry-card">
+   <div><span className="eyebrow">ALLOWLISTED SSH</span><h3>受限 SSH 救援</h3><p>用于固定别名连通性检查、allowlist systemd 重启和只读诊断；不开放交互式 Shell。</p></div>
+   <button type="button" className="secondary" onClick={() => setDrawerOpen(true)}>打开救援工具</button>
+  </section>
+  {drawerOpen && <SecondaryDrawer title={`${host.hostname} · SSH 救援`} description="这些操作使用主控侧固定 alias 与 allowlist，不读取主机资产中的直连凭据。" close={() => setDrawerOpen(false)}>
+   <DrawerTabs label="SSH 救援操作" value={rescueTab} onChange={setRescueTab} tabs={[["probe", "连通性探测"], ["restart", "服务重启"], ["diagnostics", "只读诊断"]]} />
+   {rescueTab === 'probe' && <form className="restart-form" onSubmit={probe}>
+    <p className="muted">只探测主控 root allowlist 中的别名，强制校验固定 known_hosts，只运行无副作用的 true 命令。SSH 私钥留在主控的 OpenSSH 配置中，不保存到数据库；别名 allowlist 默认为空。</p>
+    <Field label="SSH 别名"><input required maxLength={100} value={alias} onChange={event => setAlias(event.target.value)} placeholder="例如 host-b" /></Field>
+    <Field label="SSH 探测原因"><textarea required maxLength={500} value={reason} onChange={event => setReason(event.target.value)} placeholder="记录本次 SSH 连通性检查的原因" /></Field>
+    {error && <div className="alert error" role="alert">{error}</div>}
+    <div className="form-actions"><button className="primary" disabled={busy || !alias.trim() || !reason.trim()}>{busy ? '正在验证…' : '验证 SSH 通道'}</button></div>
+   </form>}
+   {rescueTab === 'restart' && <form className="restart-form" onSubmit={restart}>
+    <p className="muted">只执行固定的 systemctl restart 和 active 状态校验。unit 必须由 Core 主机上的 root 管理员写入 /etc/nanpanel/ssh-units.allowlist；默认无授权项，不开放 SSH shell。</p>
+    <Field label="allowlist systemd unit"><input required maxLength={256} value={unitName} onChange={event => setUnitName(event.target.value)} placeholder="例如 nanpanel-agent.service" /></Field>
+    <Field label="SSH 救援原因"><textarea required maxLength={500} value={restartReason} onChange={event => setRestartReason(event.target.value)} placeholder="记录本次 SSH 救援原因" /></Field>
+    {restartError && <div className="alert error" role="alert">{restartError}</div>}
+    <div className="form-actions"><button className="primary" disabled={restartBusy || !unitName.trim() || !restartReason.trim()}>{restartBusy ? '正在执行…' : '重启 allowlist 服务'}</button></div>
+   </form>}
+   {rescueTab === 'diagnostics' && <section className="restart-form"><h4>SSH 只读诊断</h4><p className="muted">读取固定 systemctl 状态或最多 100 行 journal。unit 必须显式列入主控 root 管理的 host-bound SSH allowlist；命令输出有字节和时间上限，内容不会写入审计摘要。</p>
+    <Field label="SSH 诊断 unit"><input required maxLength={256} value={unitName} onChange={event => setUnitName(event.target.value)} placeholder="例如 nanpanel-agent.service" /></Field>
+    <Field label="日志行数"><input type="number" min="1" max="100" value={journalLines} onChange={event => setJournalLines(event.target.value)} /></Field>
+    <Field label="SSH 诊断原因"><textarea required maxLength={500} value={diagnosticReason} onChange={event => setDiagnosticReason(event.target.value)} placeholder="说明读取服务状态或日志的目的" /></Field>
+    {diagnosticError && <div className="alert error" role="alert">{diagnosticError}</div>}
+    <div className="form-actions"><button type="button" className="secondary" disabled={diagnosticBusy || !unitName.trim() || !diagnosticReason.trim()} onClick={() => void readStatus()}>{diagnosticBusy ? '读取中…' : '读取服务状态'}</button><button type="button" className="secondary" disabled={diagnosticBusy || !unitName.trim() || !diagnosticReason.trim() || Number(journalLines) < 1 || Number(journalLines) > 100} onClick={() => void readJournal()}>{diagnosticBusy ? '读取中…' : '读取服务日志'}</button></div>
+    {status && <div className="alert" role="status">{status.unitName} · {status.loadState} / {status.activeState} / {status.subState}</div>}
+    {journal && <div className="ssh-journal"><p className="muted">最多 {journal.requestedLines} 行{journal.truncated ? ' · 输出已截断' : ''}</p><pre>{journal.output || '（没有日志内容）'}</pre></div>}
+   </section>}
+  </SecondaryDrawer>}
+ </>;
 }
-function HostSshBastionPanel({ hostId }: { hostId: string }) {
+function HostSshBastionPanel({ hostId, hostName }: { hostId: string; hostName: string }) {
  const [config, setConfig] = useState<HostSshConfig>();
+ const [configLoaded, setConfigLoaded] = useState(isMock);
  const [configError, setConfigError] = useState('');
  const [address, setAddress] = useState(''); const [port, setPort] = useState('22'); const [username, setUsername] = useState('root');
  const [authMethod, setAuthMethod] = useState<'PASSWORD' | 'PRIVATE_KEY'>('PASSWORD');
@@ -359,10 +386,12 @@ function HostSshBastionPanel({ hostId }: { hostId: string }) {
  const [ticket, setTicket] = useState<BastionSessionTicket>(); const [sessions, setSessions] = useState<BastionSession[]>([]);
  const [historyError, setHistoryError] = useState(''); const [selectedCommands, setSelectedCommands] = useState<{ session: BastionSession; items: BastionCommand[] }>();
  const [replay, setReplay] = useState<{ session: BastionSession; items: BastionRecordingChunk[] }>();
+ const [drawer, setDrawer] = useState<'config' | 'bastion'>(); const [settingsTab, setSettingsTab] = useState('connection'); const [bastionTab, setBastionTab] = useState('shell');
  async function loadConfig() {
-  if (isMock) return;
+  if (isMock) { setConfigLoaded(true); return; }
   try { const result = await api<HostSshConfig>(`/hosts/${hostId}/ssh/config`, 'GET', undefined, {}, true); setConfig(result.data); setAddress(result.data.address); setPort(String(result.data.port)); setUsername(result.data.username); setAuthMethod(result.data.authMethod); setConfigError(''); }
   catch (error) { if ((error as ApiError).status === 404) { setConfig(undefined); setConfigError(''); } else setConfigError((error as Error).message); }
+  finally { setConfigLoaded(true); }
  }
  async function loadSessions() {
   if (isMock) return;
@@ -434,31 +463,63 @@ function HostSshBastionPanel({ hostId }: { hostId: string }) {
   try { const result = await api<{ items: BastionRecordingChunk[] }>(`/bastion-sessions/${session.id}/recording`, 'GET', undefined, {}, true); setReplay({ session, items: result.data.items }); }
   catch (error) { setHistoryError((error as Error).message); }
  }
- if (isMock) return <section className="restart-form"><h3>SSH 直连与堡垒 Shell</h3><p className="muted">Mock 演示模式不连接真实主机。切换到 live API 后，可管理加密 SSH 凭据并开启可审计终端。</p></section>;
- return <><section className="restart-form"><h3>资产 SSH 连接</h3>
-  <p className="muted">支持直接填写 IP/域名、端口、用户名和密码或私钥，凭据以 AES-GCM 加密保存，读取接口不返回凭据。首次连接先显示 host key SHA-256 指纹，确认后才会使用凭据连接。</p>
-  {config && <div className="alert">当前连接：{config.username}@{config.address}:{config.port} · {config.authMethod} · 凭据已保存 · {config.hostKeyFingerprint ? `host key ${config.hostKeyFingerprint}` : '尚未确认 host key'}</div>}
-  <form onSubmit={saveConfig}>
-   <Field label="SSH 地址"><input required maxLength={253} value={address} onChange={event => setAddress(event.target.value)} placeholder="例如 192.0.2.10 或 host.example.net" /></Field>
-   <div className="ssh-form-grid"><Field label="端口"><input type="number" min="1" max="65535" required value={port} onChange={event => setPort(event.target.value)} /></Field><Field label="用户名"><input required maxLength={128} value={username} onChange={event => setUsername(event.target.value)} placeholder="root" /></Field></div>
-   <Field label="认证方式"><select value={authMethod} onChange={event => setAuthMethod(event.target.value as 'PASSWORD' | 'PRIVATE_KEY')}><option value="PASSWORD">密码</option><option value="PRIVATE_KEY">SSH 私钥</option></select></Field>
-   {authMethod === 'PASSWORD' ? <Field label="SSH 密码"><input type="password" autoComplete="new-password" required value={password} onChange={event => setPassword(event.target.value)} placeholder={config ? '更新时重新输入密码' : '不会回显或再次读取'} /></Field> : <><Field label="私钥内容"><textarea required rows={5} autoComplete="off" value={privateKey} onChange={event => setPrivateKey(event.target.value)} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" /></Field><Field label="私钥口令（可选）"><input type="password" autoComplete="new-password" value={privateKeyPassphrase} onChange={event => setPrivateKeyPassphrase(event.target.value)} /></Field></>}
+ const openBastion = (tab: string) => { setBastionTab(tab); setDrawer('bastion'); void loadSessions(); };
+ return <>
+  <section className="ssh-entry-card">
+   <div><span className="eyebrow">DIRECT SSH · BASTION</span><h3>资产 SSH 访问</h3>
+    <p>{isMock ? 'Mock 演示只展示入口，不连接真实主机。Live API 会加载已保存连接信息。' : !configLoaded ? '正在读取连接配置…' : configError ? 'SSH 配置读取失败，请打开配置查看错误。' : config ? `${config.username}@${config.address}:${config.port} · ${config.authMethod} · 凭据已加密保存` : '尚未配置目标 SSH 地址和认证凭据。'}</p>
+    {config && <span className={`chip ${config.hostKeyFingerprint ? 'status-ok' : 'status-warn'}`}>{config.hostKeyFingerprint ? 'Host key 已确认' : 'Host key 待确认'}</span>}
+   </div>
+   <div className="ssh-entry-actions"><button type="button" className="secondary" disabled={!configLoaded} onClick={() => { setSettingsTab('connection'); setDrawer('config'); }}>{configLoaded ? 'SSH 配置' : '读取配置…'}</button><button type="button" className="primary" onClick={() => openBastion('shell')}>开启堡垒 Shell</button><button type="button" className="secondary" onClick={() => openBastion('audit')}>会话审计</button></div>
+  </section>
+  {drawer === 'config' && <SecondaryDrawer title={`${hostName} · SSH 配置`} description="连接参数与 host key 信任分开管理；凭据只写入，不会从服务器读取回显。" close={() => setDrawer(undefined)}>
+   <DrawerTabs label="SSH 配置" value={settingsTab} onChange={setSettingsTab} tabs={[["connection", "连接参数"], ["host-key", "Host key 信任"]]} />
+   {isMock ? <div className="alert">{settingsTab === 'connection' ? 'Mock 演示模式不保存 SSH 凭据。Live API 中可配置地址、端口、用户名、密码或私钥。' : 'Mock 演示模式不探测或信任真实 Host key。Live API 中此处会先显示 SHA-256 指纹，核对后再确认。'}</div> : <>
    {configError && <div className="alert error" role="alert">{configError}</div>}
-   <div className="form-actions"><button className="primary" disabled={saveBusy || !address.trim() || !username.trim() || (authMethod === 'PASSWORD' ? !password : !privateKey.trim())}>{saveBusy ? '正在加密保存…' : config ? '更新 SSH 配置' : '保存 SSH 配置'}</button></div>
-  </form>
-  {config && <><Field label="指纹探测原因"><input required maxLength={500} value={probeReason} onChange={event => setProbeReason(event.target.value)} placeholder="说明为什么要验证目标主机" /></Field><div className="form-actions"><button type="button" className="secondary" disabled={probeBusy || !probeReason.trim()} onClick={() => void probeHostKey()}>{probeBusy ? '探测中…' : '探测 host key 指纹'}</button></div>
-   {keyProbe && <div className="alert" role="status">目标报告的 SHA-256 指纹：<code className="mono">{keyProbe.fingerprint}</code>{keyProbe.matchesTrustedFingerprint ? ' · 与已信任指纹一致' : ' · 尚未信任，请先通过其他可信渠道核对后确认'}</div>}
-   {keyProbe?.requiresConfirmation && <button className="secondary" disabled={trustBusy || !probeReason.trim()} onClick={() => void trustHostKey()}>{trustBusy ? '确认中…' : '我已核对并信任此 host key'}</button>}
-  </>}
- </section>
- <section className="restart-form"><h3>堡垒 Shell</h3><p className="muted">所有输入和输出都会保存为可回放终端录像，按回车提交的命令行会单独记录。请勿在终端输入密码、密钥或其他秘密值。</p>
-  <form onSubmit={openShell}><Field label="开启 Shell 的原因"><textarea required maxLength={500} value={sessionReason} onChange={event => setSessionReason(event.target.value)} placeholder="记录本次主机 Shell 的操作目的" /></Field><div className="form-actions"><button className="primary" disabled={sessionBusy || !config?.hostKeyFingerprint || !sessionReason.trim()}>{sessionBusy ? '正在创建审计会话…' : '开启主机 Shell'}</button></div></form>
-  {historyError && <div className="alert error" role="alert">{historyError}</div>}
- </section>
- <section className="restart-form"><h3>堡垒审计记录</h3>{historyMessage && <div className="alert" role="status">{historyMessage}</div>}{sessions.length === 0 ? <p className="muted">还没有 SSH 堡垒 Shell 会话。</p> : sessions.map(session => <div className="bastion-session-row" key={session.id}><div><b>{time(session.startedAt)} · <Badge value={session.failureCode === 'FORCE_TERMINATED' ? 'FORCE_TERMINATED' : session.status} /></b><small>{session.targetUsername}@{session.targetAddress}:{session.targetPort} · {session.reason}</small><small>{session.bytesIn + session.bytesOut} 字节 · {session.durationMs == null ? '进行中' : `${Math.round(session.durationMs / 1000)} 秒`}{session.failureCode && session.failureCode !== 'FORCE_TERMINATED' ? ` · ${session.failureCode}` : ''}</small></div><div className="form-actions">{['PENDING', 'RUNNING'].includes(session.status) && <button type="button" className="secondary" disabled={terminatingSession === session.id} onClick={() => void forceTerminate(session)}>{terminatingSession === session.id ? '正在阻断…' : '强制阻断'}</button>}<button type="button" className="secondary" onClick={() => void viewCommands(session)}>命令记录</button><button type="button" className="secondary" onClick={() => void playRecording(session)}>回放录像</button></div></div>)}</section>
- {ticket && <BastionTerminal ticket={ticket} refresh={() => void loadSessions()} close={() => { setTicket(undefined); void loadSessions(); }} />}
- {replay && <BastionReplay session={replay.session} items={replay.items} commands={selectedCommands?.session.id === replay.session.id ? selectedCommands.items : undefined} close={() => setReplay(undefined)} />}
- {selectedCommands && !replay && <div className="modal-backdrop"><section className="modal"><div className="card-title"><h2>命令历史 · {selectedCommands.session.targetAddress}</h2><button className="icon-button" onClick={() => setSelectedCommands(undefined)}>×</button></div>{selectedCommands.items.length ? <ol className="bastion-command-list">{selectedCommands.items.map(command => <li key={command.sequence}><time>{time(command.occurredAt)}</time><code>{command.command}</code></li>)}</ol> : <p className="muted">没有记录到提交的命令行。</p>}</section></div>}
+   {settingsTab === 'connection' && <section className="drawer-section">
+    <div className="alert">支持 IP/域名直连。密码或私钥以 AES-GCM 加密保存，读取接口不返回凭据。</div>
+    {config && <div className="ssh-config-summary"><b>当前连接</b><span>{config.username}@{config.address}:{config.port}</span><small>{config.authMethod} · 凭据已保存 · {config.hostKeyFingerprint ? 'Host key 已确认' : 'Host key 尚未确认'}</small></div>}
+    <form onSubmit={saveConfig}>
+     <Field label="SSH 地址"><input required maxLength={253} value={address} onChange={event => setAddress(event.target.value)} placeholder="例如 192.0.2.10 或 host.example.net" /></Field>
+     <div className="ssh-form-grid"><Field label="端口"><input type="number" min="1" max="65535" required value={port} onChange={event => setPort(event.target.value)} /></Field><Field label="用户名"><input required maxLength={128} value={username} onChange={event => setUsername(event.target.value)} placeholder="root" /></Field></div>
+     <Field label="认证方式"><select value={authMethod} onChange={event => setAuthMethod(event.target.value as 'PASSWORD' | 'PRIVATE_KEY')}><option value="PASSWORD">密码</option><option value="PRIVATE_KEY">SSH 私钥</option></select></Field>
+     {authMethod === 'PASSWORD' ? <Field label="SSH 密码"><input type="password" autoComplete="new-password" required value={password} onChange={event => setPassword(event.target.value)} placeholder={config ? '更新时重新输入密码' : '不会回显或再次读取'} /></Field> : <><Field label="私钥内容"><textarea required rows={5} autoComplete="off" value={privateKey} onChange={event => setPrivateKey(event.target.value)} placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" /></Field><Field label="私钥口令（可选）"><input type="password" autoComplete="new-password" value={privateKeyPassphrase} onChange={event => setPrivateKeyPassphrase(event.target.value)} /></Field></>}
+     <div className="form-actions"><button className="primary" disabled={saveBusy || !address.trim() || !username.trim() || (authMethod === 'PASSWORD' ? !password : !privateKey.trim())}>{saveBusy ? '正在加密保存…' : config ? '更新连接配置' : '保存连接配置'}</button></div>
+    </form>
+   </section>}
+   {settingsTab === 'host-key' && <section className="drawer-section">
+    <div className="alert">指纹探测只验证 SSH 握手和 host key，不会验证密码或私钥。只有完成指纹确认后，堡垒 Shell 才能尝试登录。</div>
+    {config ? <>
+     <div className="ssh-config-summary"><b>已信任的 Host key</b><span className="mono">{config.hostKeyFingerprint ?? '尚未确认'}</span></div>
+     <Field label="探测或确认原因"><input required maxLength={500} value={probeReason} onChange={event => setProbeReason(event.target.value)} placeholder="说明为什么要验证目标主机" /></Field>
+     <div className="form-actions"><button type="button" className="secondary" disabled={probeBusy || !probeReason.trim()} onClick={() => void probeHostKey()}>{probeBusy ? '探测中…' : '探测 Host key 指纹'}</button></div>
+     {keyProbe && <div className="alert" role="status">目标报告的 SHA-256 指纹：<code className="mono">{keyProbe.fingerprint}</code>{keyProbe.matchesTrustedFingerprint ? ' · 与已信任指纹一致' : ' · 尚未信任，请先通过其他可信渠道核对后确认'}</div>}
+     {keyProbe?.requiresConfirmation && <button className="secondary" disabled={trustBusy || !probeReason.trim()} onClick={() => void trustHostKey()}>{trustBusy ? '确认中…' : '我已核对并信任此 Host key'}</button>}
+    </> : <p className="muted">请先在“连接参数”标签保存地址和凭据，再探测并确认 Host key。</p>}
+   </section>}
+   </>}
+  </SecondaryDrawer>}
+  {drawer === 'bastion' && <SecondaryDrawer title={`${hostName} · 堡垒 Shell`} description="通过 Core 代理目标 SSH；命令历史和有界终端录像会进入独立审计记录。" close={() => setDrawer(undefined)}>
+   <DrawerTabs label="堡垒 Shell" value={bastionTab} onChange={setBastionTab} tabs={[["shell", "开启 Shell"], ["audit", "会话审计"]]} />
+   {isMock ? bastionTab === 'shell' ? <div className="alert">Mock 演示模式不连接真实主机。Live API 中只有保存凭据并确认 Host key 后，才可以填写操作原因并建立审计 Shell。</div> : <Empty>Mock 演示模式没有真实堡垒会话或审计记录</Empty> : <>
+   {bastionTab === 'shell' && <section className="drawer-section">
+    {!config && <div className="alert error">尚未配置 SSH 地址和凭据。<button type="button" className="link" onClick={() => { setSettingsTab('connection'); setDrawer('config'); }}>前往 SSH 配置</button></div>}
+    {config && !config.hostKeyFingerprint && <div className="alert error">尚未确认目标 Host key。<button type="button" className="link" onClick={() => { setSettingsTab('host-key'); setDrawer('config'); }}>前往指纹确认</button></div>}
+    {config && <div className="ssh-config-summary"><b>目标主机</b><span>{config.username}@{config.address}:{config.port}</span><small>{config.authMethod} · Host key {config.hostKeyFingerprint ? '已确认' : '待确认'}</small></div>}
+    <div className="alert">所有输入和输出都会保存为可回放终端录像，按回车提交的命令行会单独记录。请勿在终端输入密码、密钥或其他秘密值。</div>
+    <form onSubmit={openShell}><Field label="开启 Shell 的原因"><textarea required maxLength={500} value={sessionReason} onChange={event => setSessionReason(event.target.value)} placeholder="记录本次主机 Shell 的操作目的" /></Field><div className="form-actions"><button className="primary" disabled={sessionBusy || !config?.hostKeyFingerprint || !sessionReason.trim()}>{sessionBusy ? '正在创建审计会话…' : '连接并开启 Shell'}</button></div></form>
+    {historyError && <div className="alert error" role="alert">{historyError}</div>}
+   </section>}
+   {bastionTab === 'audit' && <section className="drawer-section">
+    <div className="section-heading"><div><h3>堡垒会话历史</h3><p className="muted">最近 30 条；查看命令记录、回放终端或强制阻断活动会话。</p></div><button type="button" className="secondary" onClick={() => void loadSessions()}>↻ 刷新</button></div>
+    {historyMessage && <div className="alert" role="status">{historyMessage}</div>}{historyError && <div className="alert error" role="alert">{historyError}</div>}
+    {sessions.length === 0 ? <Empty>还没有 SSH 堡垒 Shell 会话。</Empty> : sessions.map(session => <div className="bastion-session-row" key={session.id}><div><b>{time(session.startedAt)} · <Badge value={session.failureCode === 'FORCE_TERMINATED' ? 'FORCE_TERMINATED' : session.status} /></b><small>{session.targetUsername}@{session.targetAddress}:{session.targetPort} · {session.reason}</small><small>{session.bytesIn + session.bytesOut} 字节 · {session.durationMs == null ? '进行中' : `${Math.round(session.durationMs / 1000)} 秒`}{session.failureCode && session.failureCode !== 'FORCE_TERMINATED' ? ` · ${session.failureCode}` : ''}</small></div><div className="form-actions">{['PENDING', 'RUNNING'].includes(session.status) && <button type="button" className="secondary" disabled={terminatingSession === session.id} onClick={() => void forceTerminate(session)}>{terminatingSession === session.id ? '正在阻断…' : '强制阻断'}</button>}<button type="button" className="secondary" onClick={() => void viewCommands(session)}>命令记录</button><button type="button" className="secondary" onClick={() => void playRecording(session)}>回放录像</button></div></div>)}
+   </section>}
+   </>}
+  </SecondaryDrawer>}
+  {ticket && <BastionTerminal ticket={ticket} refresh={() => void loadSessions()} close={() => { setTicket(undefined); void loadSessions(); }} />}
+  {replay && <BastionReplay session={replay.session} items={replay.items} commands={selectedCommands?.session.id === replay.session.id ? selectedCommands.items : undefined} close={() => setReplay(undefined)} />}
+  {selectedCommands && !replay && <div className="modal-backdrop bastion-audit-detail-backdrop"><section className="modal" role="dialog" aria-modal="true" aria-label="命令历史"><div className="card-title"><h2>命令历史 · {selectedCommands.session.targetAddress}</h2><button className="icon-button" aria-label="关闭命令历史" onClick={() => setSelectedCommands(undefined)}>×</button></div>{selectedCommands.items.length ? <ol className="bastion-command-list">{selectedCommands.items.map(command => <li key={command.sequence}><time>{time(command.occurredAt)}</time><code>{command.command}</code></li>)}</ol> : <p className="muted">没有记录到提交的命令行。</p>}</section></div>}
  </>;
 }
 function BastionTerminal({ ticket, close, refresh }: { ticket: BastionSessionTicket; close: () => void; refresh: () => void }) {
