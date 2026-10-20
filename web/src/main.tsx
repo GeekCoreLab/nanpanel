@@ -224,74 +224,85 @@ function HostEnrollmentDialog({ close, onCreated }: { close: () => void; onCreat
 function HostDetail({ host, close, notify }: { host: Host; close: () => void; notify: (s: string) => void }) {
  const details = useResource<Host>(`/hosts/${host.id}`, 0, true);
  const currentHost = details.data ?? host;
- const r = useResource<SystemServicePage>(`/hosts/${host.id}/services`, 0, true);
  const agent = useResource<Agent>(currentHost.agentId ? `/agents/${currentHost.agentId}` : '', 0, true);
  const installation = useResource<AgentInstallation>(!isMock && currentHost.agentId ? '/agent-installation' : '', 0, true);
- const [service, setService] = useState<SystemService>();
- const [journalService, setJournalService] = useState<SystemService>();
- const [tag, setTag] = useState('');
- const [key, setKey] = useState('');
- const [busy, setBusy] = useState(false);
- const [error, setError] = useState('');
- const [reason, setReason] = useState('');
  const [maintenance, setMaintenance] = useState<AgentMaintenanceMode>();
+ const [servicesOpen, setServicesOpen] = useState(false);
  const selfUpdateReported = agent.data?.capabilities.includes('agent.self_update') ?? false;
  const selfUpdateSupported = selfUpdateReported && agent.data?.status === 'ONLINE' && agent.data.helperStatus === 'AVAILABLE';
- async function freshService(s: SystemService) {
-  const result = await api<SystemService>(`/hosts/${host.id}/services/${s.id}`, 'GET', undefined, {}, true);
-  setTag(result.etag ?? '');
-  setKey(createUuid());
-  setError('');
-  setReason('');
-  return result.data;
- }
- async function prepare(s: SystemService) {
-  try { setService(await freshService(s)); setJournalService(undefined); }
-  catch (e) { notify((e as Error).message); }
- }
- async function prepareJournal(s: SystemService) {
-  try { setJournalService(await freshService(s)); setService(undefined); }
-  catch (e) { notify((e as Error).message); }
- }
- async function restart(e: FormEvent) {
-  e.preventDefault();
-  if (!service) return;
-  setBusy(true);
-  try {
-   await api<Operation>(`/hosts/${host.id}/services/${service.id}/restart`, 'POST',
-    { reason, timeoutSeconds: 60 }, { 'If-Match': tag, 'Idempotency-Key': key }, true);
-   notify(`${isMock ? '模拟' : ''}重启任务已接受，可在操作任务中查看执行结果`);
-   setService(undefined); setReason(''); r.refresh();
-  } catch (e) { setError((e as Error).message); }
-  finally { setBusy(false); }
- }
- async function readJournal(e: FormEvent) {
-  e.preventDefault();
-  if (!journalService) return;
-  setBusy(true);
-  try {
-   await api<Operation>(`/hosts/${host.id}/services/${journalService.id}/journal`, 'POST',
-    { reason }, { 'If-Match': tag, 'Idempotency-Key': key }, true);
-   notify(`${isMock ? '模拟' : ''}日志查询已接受，可在操作任务中查看结果`);
-   setJournalService(undefined); setReason(''); r.refresh();
-  } catch (e) { setError((e as Error).message); }
-  finally { setBusy(false); }
- }
- function cancelAction() { setService(undefined); setJournalService(undefined); setReason(''); setError(''); }
  return <div className="modal-backdrop"><section className="drawer">
   <div className="card-title"><div><span className="eyebrow">HOST DETAILS</span><h2>{currentHost.hostname}</h2></div><button className="icon-button" aria-label="关闭主机详情" onClick={close}>×</button></div>
   <ResourceState {...details} /><Badge value={currentHost.status} /><p className="muted mono">{currentHost.id}</p>
   <div className="alert">离线状态来自最近心跳；Helper 状态和 Agent 能力来自最近一次在线观测。</div>
   <h3>Agent 与权限边界</h3>{currentHost.agentId ? <><ResourceState {...agent} />{agent.data && <><dl className="info-list"><div><dt>版本 / 实现</dt><dd>{agent.data.version ?? '未知'} / Rust</dd></div><div><dt>Helper 状态</dt><dd><Badge value={agent.data.helperStatus} /></dd></div><div><dt>已报告能力</dt><dd>{agent.data.capabilities.join(', ') || '—'}</dd></div></dl><div className="agent-maintenance-actions"><button className="secondary" onClick={() => setMaintenance('reinstall')}>重新安装 Agent</button><button className="secondary" onClick={() => setMaintenance('update')}>更新 Agent</button></div></>}</> : <p className="muted">尚未绑定 Agent</p>}
-  <h3>systemd 服务</h3><ResourceState {...r} />
-  {r.data?.items.map(s => <div className="service" key={s.id}><div><b>{s.unitName}</b><small>{s.displayName}</small>{s.observationStale && <small className="warning">历史观测 · 可能过期</small>}</div><Badge value={s.activeState} /><div className="form-actions"><button className="secondary" disabled={!s.allowedActions.includes('READ_JOURNAL') || agent.data?.helperStatus !== 'AVAILABLE'} onClick={() => void prepareJournal(s)}>查看日志</button><button className="secondary" disabled={!s.allowedActions.includes('RESTART') || agent.data?.helperStatus !== 'AVAILABLE'} onClick={() => void prepare(s)}>↻ 重启</button></div></div>)}
-  {r.data?.items.length === 0 && <Empty>尚无服务观测</Empty>}
+  <section className="systemd-summary"><div><h3>systemd 服务</h3><p className="muted">服务列表、重启和日志查看已收纳到详细视图。</p></div><button type="button" className="secondary" onClick={() => setServicesOpen(true)}>详细</button></section>
   <HostSshBastionPanel key={`${host.id}-ssh-bastion`} hostId={host.id} hostName={currentHost.hostname} />
   <SshAccessPanel key={`${host.id}-ssh-rescue`} host={currentHost} notify={notify} />
   {agent.data && <HelperOperationPanel host={currentHost} agent={agent.data} notify={notify} refresh={() => { details.refresh(); agent.refresh(); }} />}
-  {service && <form className="restart-form" onSubmit={restart}><h3>确认重启 {service.unitName}</h3><p className="muted">重启会经 Core 授权并由 root Helper 执行；ACTIVE 仅证明 systemd 状态，不证明业务健康。</p><Field label="操作原因"><textarea required maxLength={500} value={reason} onChange={e => setReason(e.target.value)} placeholder="请填写本次重启的原因" /></Field><small className="muted">超时 60 秒 · 请求失败后保留原幂等键</small>{error && <div className="alert error">{error}</div>}<div className="form-actions"><button type="button" className="secondary" onClick={cancelAction}>取消</button><button className="primary" disabled={busy || !reason.trim() || !tag}>{busy ? '正在提交…' : '确认提交'}</button></div></form>}
-  {journalService && <form className="restart-form" onSubmit={readJournal}><h3>查询 {journalService.unitName} 的服务日志</h3><p className="muted">读取最近 12 行，结果会写入受权限保护的操作记录。</p><Field label="查询原因"><textarea required maxLength={500} value={reason} onChange={e => setReason(e.target.value)} placeholder="请填写本次查询的原因" /></Field>{error && <div className="alert error">{error}</div>}<div className="form-actions"><button type="button" className="secondary" onClick={cancelAction}>取消</button><button className="primary" disabled={busy || !reason.trim() || !tag}>{busy ? '正在提交…' : '查询日志'}</button></div></form>}
- </section>{maintenance && <AgentMaintenanceDialog agentId={currentHost.agentId ?? ''} mode={maintenance} installation={installation.data} installationError={installation.error} selfUpdateSupported={selfUpdateSupported} selfUpdateReported={selfUpdateReported} agentStatus={agent.data?.status} helperStatus={agent.data?.helperStatus} close={() => setMaintenance(undefined)} />}</div>;
+ </section>{servicesOpen && <SystemdServicesDialog host={currentHost} helperStatus={agent.data?.helperStatus} close={() => setServicesOpen(false)} notify={notify} />}{maintenance && <AgentMaintenanceDialog agentId={currentHost.agentId ?? ''} mode={maintenance} installation={installation.data} installationError={installation.error} selfUpdateSupported={selfUpdateSupported} selfUpdateReported={selfUpdateReported} agentStatus={agent.data?.status} helperStatus={agent.data?.helperStatus} close={() => setMaintenance(undefined)} />}</div>;
+}
+function SystemdServicesDialog({ host, helperStatus, close, notify }: {
+ host: Host; helperStatus?: string; close: () => void; notify: (message: string) => void;
+}) {
+ const pageSize = 25;
+ const [cursors, setCursors] = useState<(string | null)[]>([null]);
+ const [action, setAction] = useState<{ service: SystemService; kind: 'RESTART' | 'READ_JOURNAL'; etag: string; key: string }>();
+ const [reason, setReason] = useState('');
+ const [busy, setBusy] = useState(false);
+ const [error, setError] = useState('');
+ const [operationId, setOperationId] = useState('');
+ const cursor = cursors[cursors.length - 1];
+ const params = new URLSearchParams({ limit: String(pageSize) });
+ if (cursor) params.set('cursor', cursor);
+ const services = useResource<SystemServicePage>(`/hosts/${host.id}/services?${params}`, 0, true);
+ const operation = useResource<Operation>(operationId ? `/operations/${operationId}` : '', operationId ? 1500 : 0, true);
+ const running = operation.data && ['PENDING', 'RUNNING', 'UNKNOWN'].includes(operation.data.status);
+ const journal = operation.data?.result && 'journal' in operation.data.result ? operation.data.result.journal : undefined;
+ useEffect(() => {
+  if (operation.data?.kind === 'SYSTEM_SERVICE_RESTART' && ['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(operation.data.status)) services.refresh();
+ }, [operation.data?.id, operation.data?.status, operation.data?.updatedAt]);
+ async function prepare(service: SystemService, kind: 'RESTART' | 'READ_JOURNAL') {
+  try {
+   const result = await api<SystemService>(`/hosts/${host.id}/services/${service.id}`, 'GET', undefined, {}, true);
+   setAction({ service: result.data, kind, etag: result.etag ?? '', key: createUuid() });
+   setReason(''); setError('');
+  } catch (cause) { setError((cause as Error).message); }
+ }
+ async function submit(event: FormEvent) {
+  event.preventDefault();
+  if (!action) return;
+  setBusy(true); setError('');
+  const journalAction = action.kind === 'READ_JOURNAL';
+  try {
+   const result = await api<Operation>(
+    `/hosts/${host.id}/services/${action.service.id}/${journalAction ? 'journal' : 'restart'}`,
+    'POST',
+    journalAction ? { reason } : { reason, timeoutSeconds: 60 },
+    { 'If-Match': action.etag, 'Idempotency-Key': action.key }, true,
+   );
+   setOperationId(result.data.id); setAction(undefined); setReason('');
+   notify(`${isMock ? '模拟' : ''}${journalAction ? '日志查询' : '重启'}任务已接受，结果会显示在此弹窗`);
+  } catch (cause) { setError((cause as Error).message); }
+  finally { setBusy(false); }
+ }
+ const unavailableMessage = helperStatus !== 'AVAILABLE'
+  ? 'Agent 或 root Helper 当前不可用，暂时不能执行服务操作。'
+  : '操作需要目标主机 root 管理员逐项授权：重启写入 /etc/nanpanel/managed/systemd-units.allowlist，日志读取写入 /etc/nanpanel/managed/journal-units.allowlist；每行一个 .service unit。修改后重启 nanpanel-helper.service 和 nanpanel-agent.service 以刷新授权。';
+ return <div className="modal-backdrop systemd-services-backdrop"><section className="modal systemd-services-modal" role="dialog" aria-modal="true" aria-label={`${host.hostname} systemd 服务`}>
+  <div className="card-title"><div><span className="eyebrow">SYSTEMD SERVICES</span><h2>{host.hostname} · systemd 服务</h2><p className="muted">每页最多 25 个服务；操作结果与日志会直接显示在此弹窗。</p></div><button className="icon-button" aria-label="关闭 systemd 服务详情" onClick={close}>×</button></div>
+  <div className="systemd-services-content">
+   <ResourceState {...services} />
+   {helperStatus !== 'AVAILABLE' || services.data?.items.some(service => service.allowedActions.length < 2) ? <div className="alert systemd-allowlist-hint">{unavailableMessage}</div> : null}
+   <div className="table-wrap"><table className="systemd-services-table"><thead><tr><th>Unit</th><th>服务名称</th><th>状态</th><th>最近观测</th><th>操作</th></tr></thead><tbody>{services.data?.items.map(service => {
+    const canRestart = service.allowedActions.includes('RESTART') && helperStatus === 'AVAILABLE' && !service.observationStale && !running;
+    const canReadJournal = service.allowedActions.includes('READ_JOURNAL') && helperStatus === 'AVAILABLE' && !service.observationStale && !running;
+    return <tr key={service.id}><td className="mono">{service.unitName}</td><td>{service.displayName}</td><td><Badge value={service.activeState} />{service.observationStale && <small className="warning">观测已过期</small>}</td><td className="muted">{time(service.observedAt)}</td><td><div className="systemd-service-actions"><button type="button" className="secondary" title={canReadJournal ? '读取此服务日志' : unavailableMessage} disabled={!canReadJournal} onClick={() => void prepare(service, 'READ_JOURNAL')}>查看日志</button><button type="button" className="secondary" title={canRestart ? '重启此服务' : unavailableMessage} disabled={!canRestart} onClick={() => void prepare(service, 'RESTART')}>↻ 重启</button></div></td></tr>;
+   })}</tbody></table>{services.data?.items.length === 0 && !services.loading && <Empty>尚无服务观测</Empty>}</div>
+   <div className="form-actions systemd-pagination"><button className="secondary" disabled={cursors.length < 2 || services.loading} onClick={() => setCursors(value => value.slice(0, -1))}>上一页</button><span className="muted">第 {cursors.length} 页 · 每页 25 个</span><button className="secondary" disabled={!services.data?.nextCursor || services.loading} onClick={() => { if (services.data?.nextCursor) setCursors(value => [...value, services.data!.nextCursor]); }}>下一页</button><button type="button" className="secondary" onClick={services.refresh} disabled={services.loading}>↻ 刷新</button></div>
+   {action && <form className="restart-form systemd-action-form" onSubmit={submit}><h3>{action.kind === 'RESTART' ? `确认重启 ${action.service.unitName}` : `查看 ${action.service.unitName} 的日志`}</h3><p className="muted">{action.kind === 'RESTART' ? '重启由主机 root Helper 执行；成功只证明 systemd 服务状态，不代表业务健康。' : '读取最近 12 行，日志会受管理员权限保护，并保存在操作任务中。'}</p><Field label={action.kind === 'RESTART' ? '操作原因' : '查询原因'}><textarea required maxLength={500} value={reason} onChange={event => setReason(event.target.value)} placeholder={action.kind === 'RESTART' ? '请填写本次重启的原因' : '请填写本次查询的原因'} /></Field>{error && <div className="alert error" role="alert">{error}</div>}<div className="form-actions"><button type="button" className="secondary" onClick={() => { setAction(undefined); setError(''); }}>取消</button><button className="primary" disabled={busy || !reason.trim() || !action.etag}>{busy ? '正在提交…' : action.kind === 'RESTART' ? '确认重启' : '查询日志'}</button></div></form>}
+   {operationId && <section className="systemd-operation-result"><div className="section-heading"><h3>最近一次 systemd 操作</h3>{operation.data && <Badge value={operation.data.status} />}</div><ResourceState {...operation} />{operation.data?.error && <div className="alert error">{operation.data.error.message}</div>}{operation.data?.status === 'UNKNOWN' && <div className="alert">执行结果尚未确认，请等待 Agent 对账，不要重复提交。</div>}{operation.data?.result && 'evidence' in operation.data.result && <div className="alert">{operation.data.result.evidence}</div>}{journal !== undefined && <><p className="muted">{operation.data?.result && 'unitName' in operation.data.result ? operation.data.result.unitName : ''} · 查询时间 {time(operation.data?.result && 'retrievedAt' in operation.data.result ? operation.data.result.retrievedAt : null)}</p><pre className="journal-output">{journal || '（没有日志内容）'}</pre></>}</section>}
+  </div>
+ </section></div>;
 }
 function SecondaryDrawer({ title, description, close, children }: {
  title: string; description: string; close: () => void; children: ReactNode;
