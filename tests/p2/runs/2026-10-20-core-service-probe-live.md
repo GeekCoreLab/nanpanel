@@ -67,3 +67,18 @@ acceptance remains open until a current administrator creates a
 as `NANPANEL_P2_API_KEY` in ignored `.env`. Then run
 `tests/p2/core-service-probe-live.sh` with the trusted test certificate as
 documented in `tests/p2/README.md`; never send the key in chat.
+
+## Fresh cluster recheck at 13:16 UTC
+
+- Core and Web remain on the `8aa531ef17edf58d0836625d04597ccee46908ba`
+  immutable GHCR tags, each with one ready replica; current pod restart counts
+  are zero. PostgreSQL was not changed.
+- `deploy/istio/verify-test-mesh.sh` passed again: the allowed strict-mTLS
+  request returned the fixture body, the denied identity received HTTP 403,
+  three of four fixture workloads have sidecars, and the private raw-TCP probe
+  target remains Ready without a sidecar.
+- With the cluster TLS certificate, Core readiness and the Web root returned
+  HTTP 200. An unauthenticated service-inventory request returned HTTP 401.
+- The ignored local `.env` still has no non-empty `NANPANEL_P2_API_KEY`, so the
+  authenticated API acceptance script cannot yet run. No endpoint address or
+  API key was printed or stored in this record.
