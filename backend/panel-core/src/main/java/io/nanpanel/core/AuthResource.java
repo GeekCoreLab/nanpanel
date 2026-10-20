@@ -6,6 +6,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.*;
 import java.sql.Connection;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.*;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
@@ -24,6 +25,10 @@ public class AuthResource {
   Optional<String> bootstrap;
   @Context jakarta.ws.rs.container.ContainerRequestContext request;
   static final String COOKIE = "nanpanel_session";
+  private static final long SESSION_ABSOLUTE_LIFETIME_MS =
+      Duration.ofHours(24).toMillis();
+  private static final int SESSION_COOKIE_MAX_AGE_SECONDS =
+      (int)Duration.ofHours(24).toSeconds();
   static WebApplicationException fail(int status, String code, String detail) {
     return new WebApplicationException(
         Response.status(status)
@@ -182,7 +187,8 @@ public class AuthResource {
         update(c, "UPDATE panel_user SET last_login=? WHERE id=?", now,
                u.get("id"));
         String token = token();
-        var fresh = create(c, u.get("id"), token, 43200000);
+        var fresh = create(c, u.get("id"), token,
+                           SESSION_ABSOLUTE_LIFETIME_MS);
         audit(c, String.valueOf(u.get("id")), "auth.login", "session",
               String.valueOf(fresh.get("id")), "SUCCEEDED",
               http.remoteAddress().host(), "管理员登录成功");
@@ -194,7 +200,8 @@ public class AuthResource {
           update(c, "DELETE FROM web_session WHERE id=?",
                  active.get(i).get("id"));
         return Response.ok(context(c, fresh))
-            .header("Set-Cookie", cookie(token, 43200))
+            .header("Set-Cookie",
+                    cookie(token, SESSION_COOKIE_MAX_AGE_SECONDS))
             .build();
       });
     } catch (WebApplicationException e) {
@@ -303,6 +310,7 @@ public class AuthResource {
         .build();
   }
   String cookieFromRequest() {
-    return cookie(request.getCookies().get(COOKIE).getValue(), 43200);
+    return cookie(request.getCookies().get(COOKIE).getValue(),
+                  SESSION_COOKIE_MAX_AGE_SECONDS);
   }
 }

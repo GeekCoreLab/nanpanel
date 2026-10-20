@@ -28,7 +28,7 @@
 4. 前端将返回的 CSRF token 和身份保存在内存。后续请求由浏览器发送 Cookie；POST/PUT/PATCH/DELETE 均携带 CSRF 头，已有服务重启接口也适用。
 5. 页面刷新后调用 `/auth/me` 恢复身份；401 返回登录界面，403 根据 Problem.code 展示权限不足、强制改密或重新验证流程。前端权限仅控制展示，后端始终独立授权。
 
-目标使用服务端随机不透明会话，不向 Web 发放 JWT/refresh token，不在 localStorage 保存密码或认证凭证。Cookie 名 `nanpanel_session`，生产属性为 `Secure; HttpOnly; SameSite=Lax; Path=/`，无 Domain。响应使用 `Cache-Control: no-store`。服务端设置 30 分钟空闲超时及 12 小时绝对超时，客户端请求只能续空闲时间，不能延长绝对期限；读取会话返回当前有效的到期时间。预认证会话不能访问 `/auth/me` 或管理端点。
+目标使用服务端随机不透明会话，不向 Web 发放 JWT/refresh token，不在 localStorage 保存密码或认证凭证。Cookie 名 `nanpanel_session`，生产属性为 `Secure; HttpOnly; SameSite=Lax; Path=/`，无 Domain。响应使用 `Cache-Control: no-store`。登录会话 Cookie 保持 24 小时，服务端设置 30 分钟空闲超时及 24 小时绝对超时；客户端请求只能续空闲时间，不能延长绝对期限。读取会话返回当前有效的到期时间。预认证会话不能访问 `/auth/me` 或管理端点。
 
 正式部署采用 HTTPS，同源 Web/API 为默认方式。OpenAPI 中的 HTTP 回环地址供当前脚手架查看；未来本地 Cookie 测试优先使用本地 HTTPS，仅显式本地开发配置可关闭 Secure。前后端跨端口开发需要同源代理或明确配置的可信 Origin、凭据化请求和 CORS，不能使用通配来源。写请求验证 Origin，CSRF bootstrap 验证可信 Origin 或同源 Fetch Metadata/Referer；不允许仅凭 Cookie 放行跨站请求。CSRF token 校验不能被 SameSite 取代。
 

@@ -257,6 +257,13 @@ class SystemResourceTest {
             .extract();
     String active = login.cookie("nanpanel_session"),
            token = login.path("csrfToken");
+    assertTrue(login.header("Set-Cookie").contains("Max-Age=86400"));
+    var persistedSession = store.transaction(c -> AuthStore.query(
+        c, "SELECT created_at,absolute_expires FROM web_session WHERE token_hash=?",
+        AuthStore.digest(active)).getFirst());
+    assertEquals(24L * 60 * 60 * 1000,
+        ((Number)persistedSession.get("absolute_expires")).longValue() -
+            ((Number)persistedSession.get("created_at")).longValue());
     given()
         .cookie("nanpanel_session", cookie)
         .get("/api/v1/auth/me")
