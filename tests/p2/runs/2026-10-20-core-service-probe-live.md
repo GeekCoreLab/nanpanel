@@ -117,3 +117,8 @@ record. `deploy/istio/verify-test-mesh.sh` also passed after the Core rollout:
 the allowed strict-mTLS request returned the fixture body, the denied identity
 received HTTP 403, three of four workloads had sidecars, and the private raw-
 TCP probe target remained Ready without a sidecar.
+
+At 13:48 UTC, a final read-only K3s authorization check confirmed that the Core
+Deployment still uses the `nanpanel-core` ServiceAccount. Its permissions in
+`nanpanel-mesh` remain limited to the intended resources: Service list `yes`,
+EndpointSlice list `yes`, Pod list `no`, and Secret get `no`.

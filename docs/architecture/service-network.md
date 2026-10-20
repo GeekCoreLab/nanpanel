@@ -45,9 +45,10 @@ can check at most 32 Ready EndpointSlice private IP/TCP ports per refresh; it
 stores the latest result per service/endpoint/port and prunes records after seven
 days. It skips FQDN, public, loopback, link-local, UDP, and non-Ready endpoints.
 A live Core run on the test cluster persisted a successful probe matching
-the current Service and EndpointSlice inventory. Authenticated API-level
-acceptance still requires a valid administrator login; Istio policy
-reconciliation remains pending.
+the current Service and EndpointSlice inventory. Authenticated inventory and
+probe API-level acceptance passed with a scoped read-only API key; see the
+[live acceptance record](../../tests/p2/runs/2026-10-20-core-service-probe-live.md).
+Istio policy reconciliation remains future Provider work.
 
 Path display must be based on provider evidence. A NetBird management API peer
 record can establish discovery and control-plane connectivity, but does not by
