@@ -90,7 +90,8 @@ public class BastionSessionService {
       UUID actorId = UUID.fromString(String.valueOf(row.get("actor_id")));
       UUID webSessionId = (UUID)row.get("web_session_id");
       var webSessions = query(c, "SELECT id,user_id,idle_expires,absolute_expires " +
-          "FROM web_session WHERE id=? AND user_id=? FOR UPDATE", webSessionId, actorId);
+          "FROM web_session WHERE id=? AND user_id=? FOR UPDATE",
+          webSessionId.toString(), actorId.toString());
       if (webSessions.isEmpty())
         throw AuthResource.fail(401, "BASTION_LOGIN_EXPIRED", "登录会话已撤销");
       var webSession = webSessions.getFirst();
@@ -100,7 +101,7 @@ public class BastionSessionService {
         throw AuthResource.fail(401, "BASTION_LOGIN_EXPIRED", "登录会话已过期");
       long nextExpiry = Math.min(nowMs + 1_800_000, absoluteExpires);
       update(c, "UPDATE web_session SET last_seen=?,idle_expires=? WHERE id=?",
-          nowMs, nextExpiry, webSessionId);
+          nowMs, nextExpiry, webSessionId.toString());
 
       UUID hostId = (UUID)row.get("host_id");
       HostSshCredentialService.HostConfig config = credentials.find(c, hostId);
@@ -126,16 +127,16 @@ public class BastionSessionService {
     Instant now = Instant.now();
     store.transaction(c -> {
       var rows = query(c, "SELECT idle_expires,absolute_expires FROM web_session " +
-          "WHERE id=? AND user_id=? FOR UPDATE", webSessionId, actorId);
+          "WHERE id=? AND user_id=? FOR UPDATE", webSessionId.toString(), actorId.toString());
       if (rows.isEmpty()) throw AuthResource.fail(401, "BASTION_LOGIN_EXPIRED", "登录会话已撤销");
       long idleExpires = ((Number)rows.getFirst().get("idle_expires")).longValue();
       long absoluteExpires = ((Number)rows.getFirst().get("absolute_expires")).longValue();
       if (idleExpires <= nowMs || absoluteExpires <= nowMs)
         throw AuthResource.fail(401, "BASTION_LOGIN_EXPIRED", "登录会话已过期");
       update(c, "UPDATE web_session SET last_seen=?,idle_expires=? WHERE id=?",
-          nowMs, Math.min(nowMs + 1_800_000, absoluteExpires), webSessionId);
+          nowMs, Math.min(nowMs + 1_800_000, absoluteExpires), webSessionId.toString());
       update(c, "UPDATE bastion_session SET last_activity_at=? WHERE id=? AND actor_id=? AND status='RUNNING'",
-          Timestamp.from(now), sessionId, actorId);
+          Timestamp.from(now), sessionId, actorId.toString());
       return null;
     });
   }
