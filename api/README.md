@@ -2,7 +2,7 @@
 
 [openapi.yaml](openapi.yaml) 是 Web → Core HTTP API 的设计基线，格式为 [OpenAPI 3.1.1](https://spec.openapis.org/oas/v3.1.1.html)。可导入支持该版本的 API 编辑器、文档或 Mock 工具。
 
-版本：`0.1.0-draft.2`。当前已实现 `/auth/*`、管理员与审计 API、主机和 Agent 查询、受控 Agent 接入、Helper 状态心跳、systemd 服务观测、allowlist 重启与有界 journal 查询、通用受限 Helper 操作、限时防火墙放行、host-bound SSH 固定探测/allowlist systemd 状态和有界日志读取/系统服务救援/固定脚本 Agent 初始化及操作任务查询；Relay 双向流、安装时签名备用名单和 DNS 故障滞回/冷却/恢复对账已有代码实现，Cloudflare 公共 DNS 传播与真实故障验收、其他 agentless 管理和拓扑部署仍待完成。操作级 `x-implementation-status` 区分已有端点与规划端点。Agent 接入不授予任意远程命令或 root shell。
+版本：`0.1.0-draft.2`。当前已实现 `/auth/*`、管理员与审计 API、主机和 Agent 查询、受控 Agent 接入、Helper 状态心跳、systemd 服务观测和重启/有界 journal 查询、类型化 Helper 操作、限时防火墙放行、资产 SSH 固定探测与 systemd 状态/日志/重启、固定脚本 Agent 初始化及操作任务查询；Relay 双向流、安装时签名故障切换端点清单和 DNS 故障滞回/冷却/恢复对账已有代码实现，Cloudflare 公共 DNS 传播与真实故障验收、其他 agentless 管理和拓扑部署仍待完成。操作级 `x-implementation-status` 区分已有端点与规划端点。Agent 接入不授予任意远程命令或 root shell。
 
 ## 接口范围
 
@@ -13,8 +13,9 @@
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
 | GET | `/api/v1/system` | 查询主控信息 |
-| GET | `/api/v1/hosts` | 主机列表，支持状态筛选及游标分页 |
+| GET | `/api/v1/hosts` | 主机列表，支持状态筛选及游标分页；能力明细放在主机详情 |
 | GET | `/api/v1/hosts/{hostId}` | 主机详情及 Agent 绑定 |
+| GET | `/api/v1/hosts/{hostId}/network-inventory` | 最近一次网卡、IP 地址和路由表快照 |
 | GET | `/api/v1/agents/{agentId}` | Agent 在线状态、能力及 Helper 可用性 |
 | POST | `/api/v1/agent-enrollments` | 创建主机资产和一次性 Agent 接入码（需 Cookie + CSRF） |
 | POST | `/api/v1/agent-enrollments/redeem` | 用一次性 Bearer 接入码兑换 Agent 客户端证书 |
@@ -27,25 +28,25 @@
 | GET | `/api/v1/hosts/{hostId}/services` | 主机 systemd 服务列表 |
 | GET | `/api/v1/hosts/{hostId}/services/{serviceId}` | 服务观测、可用动作及 ETag |
 | POST | `/api/v1/hosts/{hostId}/services/{serviceId}/restart` | 接受服务重启任务 |
-| POST | `/api/v1/hosts/{hostId}/services/{serviceId}/journal` | 查询 allowlist 中服务最近 12 行 journal |
-| POST | `/api/v1/hosts/{hostId}/operations` | 提交 allowlist 软件包、受保护文件、受限容器或带自动回滚的临时防火墙操作 |
-| POST | `/api/v1/hosts/{hostId}/ssh/probe` | 使用与 host UUID 绑定的 root-managed alias、固定 `known_hosts` 执行只读 SSH 可达性探测 |
-| POST | `/api/v1/hosts/{hostId}/ssh/systemd/status` | 对 host-bound allowlist unit 执行固定 `systemctl show`，返回固定状态字段 |
-| POST | `/api/v1/hosts/{hostId}/ssh/systemd/journal` | 对 host-bound allowlist unit 执行固定、有行数和字节上限的 journal 查询 |
-| POST | `/api/v1/hosts/{hostId}/ssh/systemd/restart` | 仅对 `/etc/nanpanel/ssh-units.allowlist` 中 host-bound unit 执行固定 SSH systemd 重启及 active 校验 |
-| POST | `/api/v1/hosts/{hostId}/ssh/agent/install` | 使用同一 host-bound alias、一次性 enrollment token 和镜像内固定安装脚本初始化 Agent |
+| POST | `/api/v1/hosts/{hostId}/services/{serviceId}/journal` | 查询服务最近 12 行 journal |
+| POST | `/api/v1/hosts/{hostId}/operations` | 提交类型化 Helper 操作，包括文件管理、受限容器或带自动回滚的临时防火墙操作 |
+| POST | `/api/v1/hosts/{hostId}/ssh/probe` | 使用主机资产 SSH 凭据和已确认 host key 执行只读可达性探测 |
+| POST | `/api/v1/hosts/{hostId}/ssh/systemd/status` | 使用主机资产 SSH 配置执行固定 `systemctl show`，返回固定状态字段 |
+| POST | `/api/v1/hosts/{hostId}/ssh/systemd/journal` | 使用主机资产 SSH 配置执行固定、有行数和字节上限的 journal 查询 |
+| POST | `/api/v1/hosts/{hostId}/ssh/systemd/restart` | 使用主机资产 SSH 配置执行固定 systemd 重启及 active 校验 |
+| POST | `/api/v1/hosts/{hostId}/ssh/agent/install` | 使用资产 SSH 配置、一次性 enrollment token 和镜像内固定安装脚本初始化 Agent |
 | GET | `/api/v1/operations` | 操作列表，支持主机、状态筛选 |
 | GET | `/api/v1/operations/{operationId}` | 查询执行与验证结果 |
 
 这里的 `SystemService` 是主机 systemd unit，与平台逻辑服务 `Service` 分开。URL 使用平台 UUID，服务端解析受管 unit，不接受任意命令或客户端指定的主机身份。
 
-Agent 接入码由数据库保存 SHA-256 哈希，明文仅在创建响应中出现一次，15 分钟到期且只能兑换一次。安装器在发出接入码前先用 UI 展示的证书 SHA-256 指纹校验控制器证书；Agent 在本机生成私钥和 CSR，Core 只签发 CN 与预分配 Agent UUID 一致的客户端证书。mTLS Gateway 校验证书链，并将证书指纹随心跳交给 Core 再次匹配登记记录。安装响应会携带可选的 2–8 个 Relay HTTPS 源站和由 Core Ed25519 签名的备用 Relay 清单，安装器将其写入 Agent 环境配置；Agent 启动时验签，清单篡改或签名无效时拒绝启动；Relay 不授权身份，Core 心跳校验后才开放控制路由。Agent 上报 Helper 状态、主机清单和 systemd 服务观测；更新任务经 Core 持久化并由本机 root Helper 从固定控制器下载、原子替换 Agent。root Helper 对 systemd restart/journal、软件包名称、受保护文件名、容器镜像/端口和临时防火墙接口/协议/端口使用独立 root 管理 allowlist；安装器创建的 allowlist 默认全部为空。容器操作限定为列表、100 行日志、启停以及 loopback 端口、只读根文件系统、丢弃全部 Linux capabilities 的预设部署。防火墙规则在 30–300 秒后自动回滚，只有在定时器成功启动后才会应用，并通过瞬时最小权限 worker 验证。journal 最多返回 12 行；操作结果经 Agent 本地持久化，Core 确认后删除。SSH 支持固定 true 可达性探测、host-bound allowlist 的固定 systemctl 状态/有界 journal 读取与 restart/is-active 救援，以及固定 `agent-install.sh` 初始化。初始化只接受未过期、未兑换且与 host/agent ID 匹配的一次性接入码；token 经 SSH stdin 传递，不进入进程参数、操作记录或审计。安装任务持久化、幂等并等待 mTLS 心跳；SSH 断线或 token 已兑换但未见心跳时标记 UNKNOWN。所有 SSH 动作使用固定 known_hosts，不保存 SSH 私钥或密码，alias allowlist 默认为空。其他 agentless 管理能力、证书吊销/续期和通用路由配置仍未实现。Agent gRPC 协议见 [agent.proto](../agent/protocol/agent.proto)。
+Agent 接入码由数据库保存 SHA-256 哈希，明文仅在创建响应中出现一次，15 分钟到期且只能兑换一次。安装器在发出接入码前先用 UI 展示的证书 SHA-256 指纹校验控制器证书；Agent 在本机生成私钥和 CSR，Core 只签发 CN 与预分配 Agent UUID 一致的客户端证书。mTLS Gateway 校验证书链，并将证书指纹随心跳交给 Core 再次匹配登记记录。安装响应会携带可选的 2–8 个 Relay HTTPS 源站和由 Core Ed25519 签名的故障切换端点清单，安装器将其写入 Agent 环境配置；Agent 启动时验签，清单篡改或签名无效时拒绝启动；Relay 不授权身份，Core 心跳校验后才开放控制路由。Agent 上报 Helper 状态、主机清单和 systemd 服务观测，并每 30 秒通过 `ip -j` 采集网卡、IP 地址与 IPv4/IPv6 路由快照。网络快照按主机保存最近一次结果，读取接口不会触发远程执行。更新任务经 Core 持久化并由本机 root Helper 从固定控制器下载，原子替换 Agent。Helper 只暴露固定类型操作：systemd unit 使用格式校验，软件包使用安全名称校验，受保护文件只写入固定目录，容器部署使用校验过的镜像和 loopback 端口，临时防火墙参数通过接口/协议/端口校验并要求 30–300 秒自动回滚；主机文件管理可浏览绝对路径并读写或删除普通文件，拒绝 `.`、`..` 和符号链接，读取最多 64 KiB、写入最多 32 KiB、目录最多返回 200 项。读取内容会留在操作任务结果中。Helper 不依赖逐项权限配置，也不提供任意 Shell。容器操作限于列表、100 行日志、启停和固定安全参数部署。journal 最多返回 12 行；操作结果经 Agent 本地持久化，Core 确认后删除。SSH 的固定探测、systemd 状态/有界日志/重启及 Agent 初始化使用主机资产内加密保存且已确认 host key 的 SSH 配置；一次性接入码经 SSH stdin 传递，不进入操作记录或审计。安装任务持久化、幂等并等待 mTLS 心跳；SSH 断线或 token 已兑换但未见心跳时标记 UNKNOWN。其他 agentless 管理能力、证书吊销/续期和通用路由配置仍未实现。Agent gRPC 协议见 [agent.proto](../agent/protocol/agent.proto)。
 
 ## 认证、授权与读取
 
 Web 使用服务端不透明 Cookie 会话与 CSRF 校验，已替换脚手架 Basic 认证；详见 [Web 平台 API](web-platform.md)。管理员创建接入码需已完成首次改密；安装器兑换端点只接受无浏览器 Cookie 的 Bearer 接入码，不能访问 Web 管理资源。Agent 使用独立 mTLS 身份。
 
-Core 根据已认证主体执行 `subject/action/resource` 授权，Agent/root Helper 再验证本地操作范围。网络规则固定来自 root 管理的空白默认 `network.allowlist`，要求先创建 30–300 秒定时回滚，再由仅获 `CAP_NET_ADMIN` 的瞬时 worker 应用并核验；不接受客户端任意网络参数。SSH alias 通过 Core 主机 UUID allowlist 精确绑定，并使用固定 root-managed OpenSSH 配置和 host key 清单；SSH systemd 状态/日志/重启均要求 unit 出现在 host-bound `ssh-units.allowlist`，文件缺失或为空时默认拒绝。日志查询最多 100 行、24 KiB，审计记录原因但不保存日志正文。`allowedActions` 是 UI 提示，不能作为执行授权凭证。操作记录的 `requestedBy` 由 Core 填充，不接受客户端提供。
+Core 根据已认证主体执行管理员访问控制，Agent/root Helper 再验证 mTLS 身份、IPC 调用方和固定操作参数。网络操作要求先创建 30–300 秒定时回滚，再由仅获 `CAP_NET_ADMIN` 的瞬时 worker 应用并核验；不接受命令文本。SSH 固定操作必须使用主机资产的加密凭据及已确认 host key，unit 名称通过格式校验；日志查询最多 100 行、24 KiB，审计记录原因但不保存日志正文。`supportedActions` 根据 Agent 主机级能力与观测新鲜度生成，只用于界面提示；操作执行时再次校验 Agent、Helper 和所需主机级能力。操作记录的 `requestedBy` 由 Core 填充，不接受客户端提供。
 
 主机状态描述管理通道，不能推断已有业务链路已中断或已恢复。服务 GET 返回 Core 的最近观测，不触发远程命令；离线或过期观测标记 `observationStale=true`。空列表只表示没有可返回的已发现资源。UUID 不存在或服务不属于路径指定主机返回 404。
 

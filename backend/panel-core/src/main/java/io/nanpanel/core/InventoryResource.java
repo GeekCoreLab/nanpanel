@@ -210,6 +210,50 @@ public class InventoryResource {
   }
 
   @GET
+  @Path("hosts/{hostId}/network-inventory")
+  public Object getNetworkInventory(@PathParam("hostId") String hostId) {
+    authenticated();
+    UUID id = uuid(hostId, "hostId");
+    return store.transaction(c -> {
+      if (query(c, "SELECT id FROM host WHERE id=?", id).isEmpty())
+        throw fail(404, "NOT_FOUND", "主机不存在");
+      boolean postgres = c.getMetaData().getDatabaseProductName().equalsIgnoreCase("PostgreSQL");
+      String interfaces = postgres ? "interfaces::text" : "interfaces";
+      String routes = postgres ? "routes::text" : "routes";
+      var rows = query(c,
+          "SELECT " + interfaces + " AS interfaces," + routes + " AS routes,observed_at " +
+              "FROM host_network_inventory WHERE host_id=?", id);
+      var result = new LinkedHashMap<String, Object>();
+      if (rows.isEmpty()) {
+        result.put("interfaces", mapper.createArrayNode());
+        result.put("routes", mapper.createArrayNode());
+        result.put("observedAt", null);
+        return result;
+      }
+      var row = rows.getFirst();
+      try {
+        result.put("interfaces", mapper.readTree(jsonText(row.get("interfaces"))));
+        result.put("routes", mapper.readTree(jsonText(row.get("routes"))));
+      } catch (java.io.IOException e) {
+        throw new IllegalStateException("Stored host network inventory is invalid", e);
+      }
+      result.put("observedAt", timestamp(row.get("observed_at")));
+      return result;
+    });
+  }
+
+  private String jsonText(Object value) {
+    if (value instanceof java.sql.Clob clob) {
+      try {
+        return clob.getSubString(1, Math.toIntExact(clob.length()));
+      } catch (java.sql.SQLException | ArithmeticException e) {
+        throw new IllegalStateException("Unable to read stored network inventory JSON", e);
+      }
+    }
+    return String.valueOf(value);
+  }
+
+  @GET
   @Path("agents/{agentId}")
   public Object getAgent(@PathParam("agentId") String agentId) {
     authenticated();

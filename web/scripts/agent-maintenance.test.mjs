@@ -33,8 +33,8 @@ test('Agent update command pins the controller and updates Agent plus Helper', (
   assert.match(command, /nanpanel-helper\.new/);
   assert.match(command, /nanpanel-helper\.service/);
   assert.match(command, /systemctl restart nanpanel-agent\.service/);
-  assert.match(command, /allowlist-mode/);
-  assert.match(command, /restricted/);
+  assert.match(command, /rm -f -- .*allowlist-mode/);
+  assert.doesNotMatch(command, /restricted/);
   assert.doesNotMatch(command, /agent-enrollments|Authorization: Bearer/);
   assert.match(command, /systemctl enable nanpanel-helper\.service nanpanel-agent\.service/);
   assertValidBash(command);
@@ -46,7 +46,7 @@ test('Agent reinstall repairs its systemd unit without replacing enrollment iden
   assert.match(command, /StateDirectory=nanpanel-agent/);
   assert.match(command, /StateDirectoryMode=0750/);
   assert.match(command, /install -d -o root -g root -m 0700 \/etc\/nanpanel\/managed\/files/);
-  assert.match(command, /allowlist-mode/);
+  assert.match(command, /rm -f -- .*network\.allowlist/);
   assert.match(command, /Requires=nanpanel-helper\.service/);
   assert.match(bashBody(command), /cat > \/etc\/systemd\/system\/nanpanel-helper\.service <<UNIT/);
   assert.match(bashBody(command), /cat > \/etc\/systemd\/system\/nanpanel-agent\.service <<'UNIT'/);
@@ -68,7 +68,8 @@ test('Agent installer and maintenance units use the host environment without sys
     ?.split('\nUNIT\n')[0];
   assert.ok(agentUnit, 'installer should write the Agent systemd unit');
   assert.ok(helperUnit, 'installer should write the Helper systemd unit');
-  assert.match(installer, /allowlist-mode/);
+  assert.match(installer, /rm -f -- .*allowlist-mode/);
+  assert.doesNotMatch(installer, /restricted/);
   assert.match(agentUnit, /^StateDirectory=nanpanel-agent$/m);
   assert.match(agentUnit, /^StateDirectoryMode=0750$/m);
   assert.match(agentUnit, /^User=nanpanel-agent$/m);

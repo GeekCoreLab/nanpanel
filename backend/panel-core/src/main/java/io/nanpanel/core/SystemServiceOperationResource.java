@@ -128,7 +128,7 @@ public class SystemServiceOperationResource {
           hostId, serviceId);
       var observed = query(c,
           "SELECT s.id,s.host_id,s.unit_name,s.display_name,s.active_state,s.sub_state," +
-              "s.observed_at,s.restart_allowed,s.journal_read_allowed,h.generation,h.capabilities" +
+              "s.observed_at,h.generation,h.capabilities" +
               (c.getMetaData().getDatabaseProductName().equalsIgnoreCase("PostgreSQL")
                   ? "::text" : "") + " AS capabilities,a.id AS agent_id,a.helper_status," +
               "a.last_seen,p.host_offline_after_seconds FROM system_service_observation s " +
@@ -144,13 +144,11 @@ public class SystemServiceOperationResource {
       if (!MessageDigest.isEqual(
           ("\"" + etag + "\"").getBytes(StandardCharsets.US_ASCII),
           ifMatch.getBytes(StandardCharsets.US_ASCII)))
-        throw fail(412, "PRECONDITION_FAILED", "服务观测或授权已变化，请刷新后重试");
+        throw fail(412, "PRECONDITION_FAILED", "服务观测或支持的操作已变化，请刷新后重试");
       Instant observedAt = instant(service.get("observed_at"));
       if (observedAt == null || observedAt.isBefore(now.minusSeconds(
           ((Number)service.get("host_offline_after_seconds")).intValue())))
         throw fail(503, "SERVICE_OBSERVATION_STALE", "systemd 服务观测已过期，请等待 Agent 更新后重试");
-      if (!Boolean.TRUE.equals(service.get("restart_allowed")))
-        throw fail(422, "OPERATION_UNSUPPORTED", "该 systemd unit 未获 root Helper 白名单授权");
       if (service.get("agent_id") == null)
         throw fail(503, "AGENT_OFFLINE", "该主机尚未接入 Agent");
       Instant lastSeen = instant(service.get("last_seen"));
@@ -284,7 +282,7 @@ public class SystemServiceOperationResource {
           hostId, serviceId);
       var observed = query(c,
           "SELECT s.id,s.host_id,s.unit_name,s.display_name,s.active_state,s.sub_state," +
-              "s.observed_at,s.restart_allowed,s.journal_read_allowed,h.generation,h.capabilities" +
+              "s.observed_at,h.generation,h.capabilities" +
               (c.getMetaData().getDatabaseProductName().equalsIgnoreCase("PostgreSQL")
                   ? "::text" : "") + " AS capabilities,a.id AS agent_id,a.helper_status,a.last_seen," +
               "p.host_offline_after_seconds FROM system_service_observation s " +
@@ -299,12 +297,10 @@ public class SystemServiceOperationResource {
       String etag = services.etag(services.service(service, offlineAfter, now));
       if (!MessageDigest.isEqual(("\"" + etag + "\"").getBytes(StandardCharsets.US_ASCII),
           ifMatch.getBytes(StandardCharsets.US_ASCII)))
-        throw fail(412, "PRECONDITION_FAILED", "服务观测或授权已变化，请刷新后重试");
+        throw fail(412, "PRECONDITION_FAILED", "服务观测或支持的操作已变化，请刷新后重试");
       Instant observedAt = instant(service.get("observed_at"));
       if (observedAt == null || observedAt.isBefore(now.minusSeconds(offlineAfter)))
         throw fail(503, "SERVICE_OBSERVATION_STALE", "systemd 服务观测已过期，请等待 Agent 更新后重试");
-      if (!Boolean.TRUE.equals(service.get("journal_read_allowed")))
-        throw fail(422, "OPERATION_UNSUPPORTED", "该 systemd unit 未获 root Helper 日志白名单授权");
       if (service.get("agent_id") == null)
         throw fail(503, "AGENT_OFFLINE", "该主机尚未接入 Agent");
       Instant lastSeen = instant(service.get("last_seen"));

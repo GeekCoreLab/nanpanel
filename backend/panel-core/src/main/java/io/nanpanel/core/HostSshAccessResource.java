@@ -42,16 +42,13 @@ import org.eclipse.microprofile.context.ManagedExecutor;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
-/** Read-only SSH reachability check using a root-managed OpenSSH alias and pinned host key. */
+/** Fixed SSH operations using encrypted host-asset credentials and a pinned host key. */
 @jakarta.ws.rs.Path("/api/v1")
 @Consumes(MediaType.APPLICATION_JSON)
 @Produces(MediaType.APPLICATION_JSON)
 public class HostSshAccessResource {
-  private static final java.util.regex.Pattern ALIAS =
-      java.util.regex.Pattern.compile("[A-Za-z0-9][A-Za-z0-9_.@-]{0,99}");
   private static final java.util.regex.Pattern UNIT =
       java.util.regex.Pattern.compile("[A-Za-z0-9][A-Za-z0-9_.@:-]{0,247}\\.service");
-  private static final int MAX_ALLOWLIST_BYTES = 8 * 1024;
   private static final String SSH_RESTART_KIND = "SSH_SYSTEMD_RESTART";
   private static final String SSH_AGENT_INSTALL_KIND = "SSH_AGENT_INSTALL";
   private static final int MAX_INSTALLER_BYTES = 64 * 1024;
@@ -69,22 +66,6 @@ public class HostSshAccessResource {
   @Context io.vertx.core.http.HttpServerRequest http;
 
   @Inject
-  @ConfigProperty(name = "nanpanel.ssh.aliases-path", defaultValue = "/etc/nanpanel/ssh-aliases.allowlist")
-  String aliasesPath;
-
-  @Inject
-  @ConfigProperty(name = "nanpanel.ssh.config-path", defaultValue = "/etc/nanpanel/ssh_config")
-  String sshConfigPath;
-
-  @Inject
-  @ConfigProperty(name = "nanpanel.ssh.known-hosts-path", defaultValue = "/etc/nanpanel/ssh_known_hosts")
-  String knownHostsPath;
-
-  @Inject
-  @ConfigProperty(name = "nanpanel.ssh.units-path", defaultValue = "/etc/nanpanel/ssh-units.allowlist")
-  String unitsPath;
-
-  @Inject
   @ConfigProperty(name = "nanpanel.agent.installer", defaultValue = "/work/agent-install.sh")
   String installerPath;
 
@@ -100,11 +81,11 @@ public class HostSshAccessResource {
   @ConfigProperty(name = "nanpanel.agent.relay-endpoints", defaultValue = "disabled")
   String relayEndpointConfiguration;
 
-  public record ProbeRequest(String alias, String reason) {}
+  public record ProbeRequest(String reason) {}
   public record RestartRequest(String unitName, String reason) {}
   public record UnitDiagnosticRequest(String unitName, String reason) {}
   public record JournalReadRequest(String unitName, int lines, String reason) {}
-  public record AgentInstallRequest(UUID enrollmentId, UUID agentId, String alias, String token, String reason) {}
+  public record AgentInstallRequest(UUID enrollmentId, UUID agentId, String token, String reason) {}
   private record ProcessResult(int exitCode, boolean timedOut, String output,
                                boolean truncated, boolean outputFailed) {
     private ProcessResult(int exitCode, boolean timedOut) {
@@ -119,39 +100,27 @@ public class HostSshAccessResource {
   public Response probe(@PathParam("hostId") String hostValue, ProbeRequest input) {
     UUID hostId = uuid(hostValue);
     String actor = actorId();
-    String alias = input == null || input.alias() == null ? "" : input.alias().trim();
     String reason = input == null || input.reason() == null ? "" : input.reason().trim();
-    if (!ALIAS.matcher(alias).matches() || reason.isEmpty() || reason.length() > 500 ||
+    if (reason.isEmpty() || reason.length() > 500 ||
         reason.chars().anyMatch(Character::isISOControl))
-      throw fail(422, "VALIDATION_FAILED", "SSH 别名或操作原因无效");
-
-    if (!alias.equals(allowedAliases().get(hostId))) {
-      recordAudit(actor, hostId, "SSH_ACCESS_PROBED", "DENIED", "拒绝与该主机资产不匹配的 SSH 别名探测请求");
-      throw fail(422, "SSH_ALIAS_NOT_ALLOWED", "SSH 别名未绑定到该主机的 root 管理 allowlist");
-    }
-    Path ssh;
-    try {
-      requireTrustedFile(Path.of(sshConfigPath), "SSH 配置");
-      requireTrustedFile(Path.of(knownHostsPath), "SSH host key 清单");
-      ssh = trustedSshBinary();
-    } catch (jakarta.ws.rs.WebApplicationException e) {
-      recordAudit(actor, hostId, "SSH_ACCESS_PROBED", "FAILED", "SSH root 配置或 OpenSSH 客户端不可用");
-      throw e;
-    }
-
-    ProcessResult probeResult = invokeRemote(ssh, alias, List.of("true"), 10);
-    boolean succeeded = !probeResult.timedOut() && probeResult.exitCode() == 0;
+      throw fail(422, "VALIDATION_FAILED", "SSH 操作原因无效");
+    HostSshCredentialService.HostConfig config = requireAssetSsh(hostId, actor, "SSH_ACCESS_PROBED");
+    ProcessResult probeResult = runDirectSsh(config, List.of("true"), 10, 1024);
+    boolean succeeded = !probeResult.timedOut() && probeResult.exitCode() == 0 &&
+        !probeResult.outputFailed();
     recordAudit(actor, hostId, "SSH_ACCESS_PROBED", succeeded ? "SUCCEEDED" : "FAILED",
-        "固定 SSH host-key 探测 " + alias + "：" + (succeeded ? "成功" : "失败") + "；原因：" + reason);
+        "固定 SSH host-key 探测 " + config.address() + ":" + config.port() + "：" +
+            (succeeded ? "成功" : "失败") + "；原因：" + reason);
     if (!succeeded)
-      throw fail(502, "SSH_PROBE_FAILED", "SSH 连接或固定只读探测失败；检查网络、密钥和 host key 配置");
+      throw fail(502, "SSH_PROBE_FAILED", "SSH 连接或 host key 校验失败；检查凭据、网络和已确认的 host key");
 
     Map<String, Object> response = new LinkedHashMap<>();
     response.put("hostId", hostId.toString());
-    response.put("alias", alias);
+    response.put("address", config.address());
+    response.put("port", config.port());
     response.put("status", "SUCCEEDED");
     response.put("verifiedAt", Instant.now().toString());
-    response.put("evidence", "StrictHostKeyChecking 成功，固定 true 命令返回 0");
+    response.put("evidence", "已确认的 host key 匹配，固定 true 命令返回 0");
     return Response.ok(response).build();
   }
 
@@ -170,26 +139,8 @@ public class HostSshAccessResource {
         reason.chars().anyMatch(Character::isISOControl))
       throw fail(422, "VALIDATION_FAILED", "SSH systemd unit 或操作原因无效");
 
-    String alias = allowedAliases().get(hostId);
-    if (alias == null) {
-      recordAudit(actor, hostId, SSH_RESTART_KIND, "DENIED", "拒绝未绑定 SSH alias 的恢复操作");
-      throw fail(422, "SSH_ALIAS_NOT_ALLOWED", "该主机未绑定 root 管理的 SSH alias");
-    }
-    if (!allowedUnits().getOrDefault(hostId, Set.of()).contains(unit)) {
-      recordAudit(actor, hostId, SSH_RESTART_KIND, "DENIED", "拒绝未获 allowlist 授权的 SSH systemd unit");
-      throw fail(422, "SSH_UNIT_NOT_ALLOWED", "该 systemd unit 未获 root allowlist 授权");
-    }
-
-    Path ssh;
-    try {
-      requireTrustedFile(Path.of(sshConfigPath), "SSH 配置");
-      requireTrustedFile(Path.of(knownHostsPath), "SSH host key 清单");
-      requireTrustedFile(Path.of(unitsPath), "SSH systemd allowlist");
-      ssh = trustedSshBinary();
-    } catch (jakarta.ws.rs.WebApplicationException e) {
-      recordAudit(actor, hostId, SSH_RESTART_KIND, "FAILED", "SSH root 配置或 OpenSSH 客户端不可用");
-      throw e;
-    }
+    HostSshCredentialService.HostConfig sshConfig =
+        requireAssetSsh(hostId, actor, SSH_RESTART_KIND);
 
     String requestHash = AuthStore.digest(String.join("\n", "POST",
         "/api/v1/hosts/" + hostId + "/ssh/systemd/restart", unit, reason));
@@ -241,12 +192,12 @@ public class HostSshAccessResource {
     });
 
     if (!decision.replayed()) {
-      ProcessResult restart = invokeRemote(ssh, alias,
-          List.of("sudo", "-n", "/usr/bin/systemctl", "restart", "--", unit), 20);
+      ProcessResult restart = runDirectSsh(sshConfig,
+          List.of("sudo", "-n", "/usr/bin/systemctl", "restart", "--", unit), 20, 1024);
       ProcessResult verification = restart.timedOut() || restart.exitCode() != 0
           ? restart
-          : invokeRemote(ssh, alias,
-              List.of("sudo", "-n", "/usr/bin/systemctl", "is-active", "--quiet", "--", unit), 10);
+          : runDirectSsh(sshConfig,
+              List.of("sudo", "-n", "/usr/bin/systemctl", "is-active", "--quiet", "--", unit), 10, 1024);
       boolean succeeded = !restart.timedOut() && restart.exitCode() == 0 &&
           !verification.timedOut() && verification.exitCode() == 0;
       boolean unknown = restart.timedOut() || restart.exitCode() == 255 ||
@@ -290,9 +241,9 @@ public class HostSshAccessResource {
     String unit = validateDiagnostic(input == null ? null : input.unitName(),
         input == null ? null : input.reason());
     String reason = input.reason().trim();
-    String alias = requireSshUnitAuthorization(hostId, unit, actor, "SSH_SYSTEMD_STATUS_READ");
-    Path ssh = trustedDiagnosticSsh(hostId, actor, "SSH_SYSTEMD_STATUS_READ");
-    ProcessResult status = runBoundedSsh(ssh, alias,
+    HostSshCredentialService.HostConfig sshConfig =
+        requireAssetSsh(hostId, actor, "SSH_SYSTEMD_STATUS_READ");
+    ProcessResult status = runBoundedSsh(sshConfig,
         List.of("sudo", "-n", "/usr/bin/systemctl", "show", "--no-pager",
             "--property=LoadState,ActiveState,SubState", "--value", "--", unit), 10, 4096);
     String[] values = status.output().strip().split("\\R", -1);
@@ -300,7 +251,7 @@ public class HostSshAccessResource {
     boolean succeeded = !status.timedOut() && status.exitCode() == 0 &&
         !status.outputFailed() && validResponse;
     recordAudit(actor, hostId, "SSH_SYSTEMD_STATUS_READ", succeeded ? "SUCCEEDED" : "FAILED",
-        "通过受限 SSH 读取 allowlist systemd 状态 " + unit + "；原因：" + reason);
+        "通过资产 SSH 读取 systemd 状态 " + unit + "；原因：" + reason);
     if (!succeeded) throw fail(502, validResponse ? "SSH_SYSTEMD_STATUS_FAILED"
         : "SSH_SYSTEMD_STATUS_INVALID", validResponse ? "SSH systemd 状态读取失败"
             : "远程 systemd 状态响应格式无效");
@@ -320,15 +271,15 @@ public class HostSshAccessResource {
     if (input.lines() < 1 || input.lines() > 100)
       throw fail(422, "VALIDATION_FAILED", "SSH journal 行数须为 1–100");
     String reason = input.reason().trim();
-    String alias = requireSshUnitAuthorization(hostId, unit, actor, "SSH_SYSTEMD_JOURNAL_READ");
-    Path ssh = trustedDiagnosticSsh(hostId, actor, "SSH_SYSTEMD_JOURNAL_READ");
-    ProcessResult journal = runBoundedSsh(ssh, alias,
+    HostSshCredentialService.HostConfig sshConfig =
+        requireAssetSsh(hostId, actor, "SSH_SYSTEMD_JOURNAL_READ");
+    ProcessResult journal = runBoundedSsh(sshConfig,
         List.of("sudo", "-n", "/usr/bin/journalctl", "--no-pager",
             "--output=short-iso", "--lines=" + input.lines(), "--unit=" + unit), 12,
         MAX_SSH_CAPTURE_BYTES);
     boolean succeeded = !journal.timedOut() && journal.exitCode() == 0 && !journal.outputFailed();
     recordAudit(actor, hostId, "SSH_SYSTEMD_JOURNAL_READ", succeeded ? "SUCCEEDED" : "FAILED",
-        "通过受限 SSH 读取 allowlist systemd 日志 " + unit + "，最多 " + input.lines() +
+        "通过资产 SSH 读取 systemd 日志 " + unit + "，最多 " + input.lines() +
             " 行；原因：" + reason);
     if (!succeeded) throw fail(502, "SSH_SYSTEMD_JOURNAL_FAILED", "SSH systemd 日志读取失败");
     return Response.ok(Map.of("hostId", hostId.toString(), "unitName", unit,
@@ -345,39 +296,42 @@ public class HostSshAccessResource {
     return unit;
   }
 
-  private String requireSshUnitAuthorization(UUID hostId, String unit, String actor, String action) {
-    String alias = allowedAliases().get(hostId);
-    if (alias == null) {
-      recordAudit(actor, hostId, action, "DENIED", "拒绝未绑定 SSH alias 的诊断请求");
-      throw fail(422, "SSH_ALIAS_NOT_ALLOWED", "该主机未绑定 root 管理的 SSH alias");
+  private HostSshCredentialService.HostConfig requireAssetSsh(
+      UUID hostId, String actor, String action) {
+    HostSshCredentialService.HostConfig config = store.transaction(c -> sshCredentials.find(c, hostId));
+    if (config == null || config.hostKeyFingerprint() == null || config.encryptedCredential() == null) {
+      recordAudit(actor, hostId, action, "DENIED",
+          "SSH 资产配置缺失或 host key 尚未确认");
+      throw fail(422, "SSH_HOST_KEY_UNTRUSTED", "请先配置 SSH 凭据并确认目标 host key 指纹");
     }
-    if (!allowedUnits().getOrDefault(hostId, Set.of()).contains(unit)) {
-      recordAudit(actor, hostId, action, "DENIED", "拒绝未获 allowlist 授权的 SSH systemd unit");
-      throw fail(422, "SSH_UNIT_NOT_ALLOWED", "该 systemd unit 未获 root allowlist 授权");
-    }
-    return alias;
+    return config;
   }
 
-  private Path trustedDiagnosticSsh(UUID hostId, String actor, String action) {
-    try {
-      requireTrustedFile(Path.of(sshConfigPath), "SSH 配置");
-      requireTrustedFile(Path.of(knownHostsPath), "SSH host key 清单");
-      requireTrustedFile(Path.of(unitsPath), "SSH systemd allowlist");
-      return trustedSshBinary();
-    } catch (jakarta.ws.rs.WebApplicationException failure) {
-      recordAudit(actor, hostId, action, "FAILED", "SSH root 配置或 OpenSSH 客户端不可用");
-      throw failure;
-    }
-  }
-
-  private ProcessResult runBoundedSsh(Path ssh, String alias, List<String> command,
-                                      int timeoutSeconds, int outputLimit) {
+  private ProcessResult runBoundedSsh(HostSshCredentialService.HostConfig config,
+      List<String> command, int timeoutSeconds, int outputLimit) {
     if (!SSH_COMMAND_SLOTS.tryAcquire())
       throw fail(503, "SSH_CAPACITY_EXCEEDED", "SSH 诊断并发容量已满");
     try {
-      return invokeRemoteCapture(ssh, alias, command, timeoutSeconds, outputLimit);
+      return runDirectSsh(config, command, timeoutSeconds, outputLimit);
     } finally {
       SSH_COMMAND_SLOTS.release();
+    }
+  }
+
+  private ProcessResult runDirectSsh(HostSshCredentialService.HostConfig config,
+      List<String> command, int timeoutSeconds, int outputLimit) {
+    try {
+      HostSshCredentialService.CommandResult result = sshCredentials.execute(
+          config, command.stream().map(HostSshAccessResource::shellQuote)
+              .collect(java.util.stream.Collectors.joining(" ")),
+          timeoutSeconds, outputLimit);
+      return new ProcessResult(result.exitCode(), result.timedOut(), result.output(),
+          result.truncated(), false);
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+      return new ProcessResult(124, true, "", false, true);
+    } catch (Exception failure) {
+      return new ProcessResult(255, false, "", false, true);
     }
   }
 
@@ -390,44 +344,21 @@ public class HostSshAccessResource {
     UUID hostId = uuid(hostValue);
     String actor = actorId();
     String key = validateIdempotencyKey(idempotencyKey);
-    String requestedAlias = input == null || input.alias() == null ? "" : input.alias().trim();
     String token = input == null || input.token() == null ? "" : input.token().trim();
     String reason = input == null || input.reason() == null ? "" : input.reason().trim();
     if (input == null || input.enrollmentId() == null || input.agentId() == null ||
-        (!requestedAlias.isEmpty() && !ALIAS.matcher(requestedAlias).matches()) ||
         !token.matches("[A-Za-z0-9_-]{40,128}") ||
         reason.isEmpty() || reason.length() > 500 ||
         reason.chars().anyMatch(Character::isISOControl) || reason.contains(token))
-      throw fail(422, "VALIDATION_FAILED", "SSH 别名、接入码、Agent ID 或操作原因无效");
+      throw fail(422, "VALIDATION_FAILED", "接入码、Agent ID 或操作原因无效");
 
-    String alias = allowedAliases().get(hostId);
-    HostSshCredentialService.HostConfig directConfig = store.transaction(c ->
-        sshCredentials.find(c, hostId));
-    boolean directSsh = requestedAlias.isEmpty();
-    if (directSsh) {
-      if (directConfig == null || directConfig.hostKeyFingerprint() == null) {
-        recordAudit(actor, hostId, SSH_AGENT_INSTALL_KIND, "DENIED",
-            "拒绝未配置且未固定 host key 的直连 SSH Agent 初始化");
-        throw fail(422, "SSH_HOST_KEY_UNTRUSTED",
-            "请先配置 SSH 凭据并确认目标 host key 指纹");
-      }
-    } else if (!Objects.equals(alias, requestedAlias)) {
-      recordAudit(actor, hostId, SSH_AGENT_INSTALL_KIND, "DENIED", "拒绝未绑定 SSH alias 的 Agent 初始化");
-      throw fail(422, "SSH_ALIAS_NOT_ALLOWED", "SSH 别名未绑定到该主机的 root 管理 allowlist");
-    }
-    Path ssh;
+    HostSshCredentialService.HostConfig directConfig =
+        requireAssetSsh(hostId, actor, SSH_AGENT_INSTALL_KIND);
     byte[] installer;
     URI origin;
     String relayEndpoints;
     RelayFallbackSigner.Manifest relayFallback;
     try {
-      if (directSsh) {
-        ssh = null;
-      } else {
-        requireTrustedFile(Path.of(sshConfigPath), "SSH 配置");
-        requireTrustedFile(Path.of(knownHostsPath), "SSH host key 清单");
-        ssh = trustedSshBinary();
-      }
       installer = readTrustedInstaller(Path.of(installerPath));
       origin = trustedHttpsOrigin(publicOrigin);
       relayEndpoints = String.join(",",
@@ -447,8 +378,7 @@ public class HostSshAccessResource {
     String requestHash = AuthStore.digest(String.join("\n", "POST",
         "/api/v1/hosts/" + hostId + "/ssh/agent/install",
         input.enrollmentId().toString(), input.agentId().toString(),
-        directSsh ? "direct:" + directConfig.address() + ":" + directConfig.port()
-            : alias, tokenDigest, reason));
+        directConfig.address() + ":" + directConfig.port(), tokenDigest, reason));
     Instant now = Instant.now();
     String remoteAddress = http.remoteAddress() == null ? null : http.remoteAddress().host();
     UUID operationId = UUID.randomUUID();
@@ -512,8 +442,8 @@ public class HostSshAccessResource {
           }
           try {
             runAgentInstall(operationId, actor, hostId, input.agentId(), reason,
-                directSsh ? null : alias, directSsh ? directConfig : null, token,
-                normalizedOrigin, ssh, installerBytes, relayEndpoints, relayFallback, remoteAddress);
+                directConfig, token, normalizedOrigin, installerBytes, relayEndpoints,
+                relayFallback, remoteAddress);
           } finally {
             SSH_BOOTSTRAP_SLOTS.release();
           }
@@ -547,27 +477,20 @@ public class HostSshAccessResource {
   }
 
   private void runAgentInstall(UUID operationId, String actor, UUID hostId, UUID agentId,
-      String reason, String alias, HostSshCredentialService.HostConfig directConfig,
-      String token, String origin, Path ssh, byte[] installer,
-      String relayEndpoints, RelayFallbackSigner.Manifest relayFallback, String remoteAddress) {
+      String reason, HostSshCredentialService.HostConfig directConfig, String token, String origin,
+      byte[] installer, String relayEndpoints, RelayFallbackSigner.Manifest relayFallback,
+      String remoteAddress) {
     ProcessResult result;
     try {
-      if (alias != null) {
-        if (!Objects.equals(allowedAliases().get(hostId), alias))
-          throw new IllegalStateException("SSH alias binding changed before execution");
-        result = invokeInstaller(ssh, alias, installer, origin, hostId, agentId, token,
-            certificateAuthority.controllerFingerprint(), gatewayPort, relayEndpoints, relayFallback);
-      } else {
-        HostSshCredentialService.HostConfig current = store.transaction(c ->
-            sshCredentials.find(c, hostId));
-        if (current == null || !Objects.equals(current.address(), directConfig.address()) ||
-            current.port() != directConfig.port() ||
-            !Objects.equals(current.hostKeyFingerprint(), directConfig.hostKeyFingerprint()) ||
-            !MessageDigest.isEqual(current.encryptedCredential(), directConfig.encryptedCredential()))
-          throw new IllegalStateException("Stored SSH connection changed before execution");
-        result = invokeInstallerDirect(current, installer, origin, hostId, agentId, token,
-            certificateAuthority.controllerFingerprint(), gatewayPort, relayEndpoints, relayFallback);
-      }
+      HostSshCredentialService.HostConfig current = store.transaction(c ->
+          sshCredentials.find(c, hostId));
+      if (current == null || !Objects.equals(current.address(), directConfig.address()) ||
+          current.port() != directConfig.port() ||
+          !Objects.equals(current.hostKeyFingerprint(), directConfig.hostKeyFingerprint()) ||
+          !MessageDigest.isEqual(current.encryptedCredential(), directConfig.encryptedCredential()))
+        throw new IllegalStateException("Stored SSH connection changed before execution");
+      result = invokeInstallerDirect(current, installer, origin, hostId, agentId, token,
+          certificateAuthority.controllerFingerprint(), gatewayPort, relayEndpoints, relayFallback);
     } catch (Exception e) {
       result = new ProcessResult(127, false);
     }
@@ -629,49 +552,6 @@ public class HostSshAccessResource {
     }
   }
 
-  private ProcessResult invokeInstaller(Path ssh, String alias, byte[] installer, String origin,
-      UUID hostId, UUID agentId, String token, String fingerprint, int port,
-      String relayEndpoints, RelayFallbackSigner.Manifest relayFallback) throws Exception {
-    List<String> arguments = new ArrayList<>(List.of(
-        ssh.toString(), "-F", sshConfigPath,
-        "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
-        "-o", "UserKnownHostsFile=" + knownHostsPath,
-        "-o", "GlobalKnownHostsFile=/dev/null", "-o", "ConnectTimeout=5",
-        "-o", "ConnectionAttempts=1", "-o", "ClearAllForwardings=yes",
-        "-o", "ForwardAgent=no", "-o", "PermitLocalCommand=no",
-        "-o", "ControlMaster=no", "-o", "RequestTTY=no",
-        "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "-T", alias,
-        "sudo -n /usr/bin/bash -s"));
-    Process process = new ProcessBuilder(arguments)
-        .redirectOutput(ProcessBuilder.Redirect.DISCARD)
-        .redirectError(ProcessBuilder.Redirect.DISCARD)
-        .start();
-    try (var script = new java.io.ByteArrayInputStream(installer);
-         OutputStream remoteInput = process.getOutputStream()) {
-      String bootstrapArguments = "set -- " + shellQuote(origin) + " " + shellQuote(hostId.toString()) +
-          " " + shellQuote(agentId.toString()) + " " + shellQuote(token) + " " +
-          shellQuote(fingerprint) + " " + shellQuote(Integer.toString(port)) + " " +
-          shellQuote(relayEndpoints) + " " + shellQuote(String.join(",", relayFallback.endpoints())) +
-          " " + shellQuote(relayFallback.signature()) + " " + shellQuote(relayFallback.publicKey()) + "\n";
-      remoteInput.write(bootstrapArguments.getBytes(StandardCharsets.UTF_8));
-      script.transferTo(remoteInput);
-    } catch (Exception e) {
-      process.destroyForcibly();
-      return new ProcessResult(255, false);
-    }
-    try {
-      if (!process.waitFor(240, TimeUnit.SECONDS)) {
-        process.destroyForcibly();
-        return new ProcessResult(124, true);
-      }
-    } catch (InterruptedException e) {
-      process.destroyForcibly();
-      Thread.currentThread().interrupt();
-      return new ProcessResult(124, true);
-    }
-    return new ProcessResult(process.exitValue(), false);
-  }
-
   private ProcessResult invokeInstallerDirect(HostSshCredentialService.HostConfig config,
       byte[] installer, String origin, UUID hostId, UUID agentId, String token,
       String fingerprint, int port, String relayEndpoints,
@@ -712,7 +592,7 @@ public class HostSshAccessResource {
     return payload.toByteArray();
   }
 
-  private String shellQuote(String value) {
+  static String shellQuote(String value) {
     return "'" + value.replace("'", "'\\''") + "'";
   }
 
@@ -774,175 +654,6 @@ public class HostSshAccessResource {
           "SSH Agent 初始化 " + agentId + "：" + finalStatus + "；原因：" + reason);
       return null;
     });
-  }
-
-  private ProcessResult invokeRemote(Path ssh, String alias, List<String> command,
-      int timeoutSeconds) {
-    var arguments = new ArrayList<String>(List.of(
-        ssh.toString(), "-F", sshConfigPath,
-        "-o", "BatchMode=yes",
-        "-o", "StrictHostKeyChecking=yes",
-        "-o", "UserKnownHostsFile=" + knownHostsPath,
-        "-o", "GlobalKnownHostsFile=/dev/null",
-        "-o", "ConnectTimeout=5",
-        "-o", "ConnectionAttempts=1",
-        "-o", "ClearAllForwardings=yes",
-        "-o", "ForwardAgent=no",
-        "-o", "PermitLocalCommand=no",
-        "-o", "ControlMaster=no",
-        "-o", "RequestTTY=no",
-        "-o", "ServerAliveInterval=5",
-        "-o", "ServerAliveCountMax=1",
-        "-T", alias));
-    arguments.addAll(command);
-    var builder = new ProcessBuilder(arguments);
-    builder.redirectOutput(ProcessBuilder.Redirect.DISCARD);
-    builder.redirectError(ProcessBuilder.Redirect.DISCARD);
-    try {
-      Process process = builder.start();
-      if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
-        process.destroyForcibly();
-        return new ProcessResult(124, true);
-      }
-      return new ProcessResult(process.exitValue(), false);
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-      return new ProcessResult(124, true);
-    } catch (Exception e) {
-      return new ProcessResult(127, false);
-    }
-  }
-
-  private ProcessResult invokeRemoteCapture(Path ssh, String alias, List<String> command,
-      int timeoutSeconds, int outputLimit) {
-    var arguments = new ArrayList<String>(List.of(
-        ssh.toString(), "-F", sshConfigPath,
-        "-o", "BatchMode=yes",
-        "-o", "StrictHostKeyChecking=yes",
-        "-o", "UserKnownHostsFile=" + knownHostsPath,
-        "-o", "GlobalKnownHostsFile=/dev/null",
-        "-o", "ConnectTimeout=5",
-        "-o", "ConnectionAttempts=1",
-        "-o", "ClearAllForwardings=yes",
-        "-o", "ForwardAgent=no",
-        "-o", "PermitLocalCommand=no",
-        "-o", "ControlMaster=no",
-        "-o", "RequestTTY=no",
-        "-o", "ServerAliveInterval=5",
-        "-o", "ServerAliveCountMax=1",
-        "-T", alias));
-    arguments.addAll(command);
-    var builder = new ProcessBuilder(arguments).redirectErrorStream(true);
-    try {
-      Process process = builder.start();
-      var captured = new ByteArrayOutputStream(Math.min(outputLimit, 4096));
-      var truncated = new java.util.concurrent.atomic.AtomicBoolean();
-      var outputFailed = new java.util.concurrent.atomic.AtomicBoolean();
-      Thread reader = Thread.ofVirtual().name("nanpanel-ssh-output").start(() -> {
-        byte[] buffer = new byte[4096];
-        try (var input = process.getInputStream()) {
-          int read;
-          while ((read = input.read(buffer)) >= 0) {
-            int remaining = outputLimit - captured.size();
-            if (remaining > 0) captured.write(buffer, 0, Math.min(read, remaining));
-            if (read > remaining) truncated.set(true);
-          }
-        } catch (java.io.IOException e) {
-          outputFailed.set(true);
-        }
-      });
-      boolean timedOut = false;
-      try {
-        if (!process.waitFor(timeoutSeconds, TimeUnit.SECONDS)) {
-          timedOut = true;
-          process.destroyForcibly();
-          process.waitFor(3, TimeUnit.SECONDS);
-        }
-        reader.join(3_000);
-      } catch (InterruptedException e) {
-        process.destroyForcibly();
-        Thread.currentThread().interrupt();
-        return new ProcessResult(124, true, "", false, true);
-      }
-      if (reader.isAlive()) outputFailed.set(true);
-      int exitCode = timedOut ? 124 : process.exitValue();
-      String output = captured.toString(StandardCharsets.UTF_8).replace("\r\n", "\n");
-      return new ProcessResult(exitCode, timedOut, output, truncated.get(), outputFailed.get());
-    } catch (Exception e) {
-      return new ProcessResult(127, false, "", false, true);
-    }
-  }
-
-  private Map<UUID, String> allowedAliases() {
-    Path path = Path.of(aliasesPath);
-    try {
-      if (Files.isSymbolicLink(path) || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS))
-        return Map.of();
-      requireTrustedFile(path, "SSH 别名 allowlist");
-      if (Files.size(path) > MAX_ALLOWLIST_BYTES) return Map.of();
-      String contents = Files.readString(path, StandardCharsets.UTF_8);
-      return parseAliases(contents);
-    } catch (java.io.IOException | UnsupportedOperationException e) {
-      return Map.of();
-    }
-  }
-
-  static Map<UUID, String> parseAliases(String contents) {
-    var aliases = new java.util.LinkedHashMap<UUID, String>();
-    var uniqueAliases = new java.util.HashSet<String>();
-    for (String raw : contents.lines().toList()) {
-      String alias = raw.trim();
-      if (alias.isEmpty() || alias.startsWith("#")) continue;
-      String[] fields = alias.split("\\s+");
-      if (fields.length != 2 || !ALIAS.matcher(fields[1]).matches()) return Map.of();
-      UUID hostId;
-      try {
-        hostId = UUID.fromString(fields[0]);
-        if (!hostId.toString().equalsIgnoreCase(fields[0])) return Map.of();
-      } catch (IllegalArgumentException e) {
-        return Map.of();
-      }
-      if (aliases.putIfAbsent(hostId, fields[1]) != null ||
-          !uniqueAliases.add(fields[1]) || aliases.size() > 128) return Map.of();
-    }
-    return Map.copyOf(aliases);
-  }
-
-  private Map<UUID, Set<String>> allowedUnits() {
-    Path path = Path.of(unitsPath);
-    try {
-      if (Files.isSymbolicLink(path) || !Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS))
-        return Map.of();
-      requireTrustedFile(path, "SSH systemd allowlist");
-      if (Files.size(path) > MAX_ALLOWLIST_BYTES) return Map.of();
-      return parseSshUnits(Files.readString(path, StandardCharsets.UTF_8));
-    } catch (java.io.IOException | UnsupportedOperationException e) {
-      return Map.of();
-    }
-  }
-
-  static Map<UUID, Set<String>> parseSshUnits(String contents) {
-    var units = new LinkedHashMap<UUID, Set<String>>();
-    var uniqueBindings = new java.util.HashSet<String>();
-    for (String raw : contents.lines().toList()) {
-      String line = raw.trim();
-      if (line.isEmpty() || line.startsWith("#")) continue;
-      String[] fields = line.split("\\s+");
-      if (fields.length != 2 || !UNIT.matcher(fields[1]).matches()) return Map.of();
-      UUID hostId;
-      try {
-        hostId = UUID.fromString(fields[0]);
-        if (!hostId.toString().equalsIgnoreCase(fields[0])) return Map.of();
-      } catch (IllegalArgumentException e) {
-        return Map.of();
-      }
-      String binding = hostId + " " + fields[1];
-      if (!uniqueBindings.add(binding) || uniqueBindings.size() > 512) return Map.of();
-      units.computeIfAbsent(hostId, ignored -> new java.util.HashSet<>()).add(fields[1]);
-    }
-    var result = new LinkedHashMap<UUID, Set<String>>();
-    units.forEach((hostId, allowed) -> result.put(hostId, Set.copyOf(allowed)));
-    return Map.copyOf(result);
   }
 
   private String operationSelect() {
@@ -1040,23 +751,6 @@ public class HostSshAccessResource {
     } catch (java.io.IOException | UnsupportedOperationException e) {
       throw fail(503, "SSH_CONFIGURATION_UNAVAILABLE", label + "不可用");
     }
-  }
-
-  private Path trustedSshBinary() {
-    for (String candidate : new String[] {"/usr/bin/ssh", "/bin/ssh"}) {
-      Path path = Path.of(candidate);
-      if (!Files.isRegularFile(path, LinkOption.NOFOLLOW_LINKS) || !Files.isExecutable(path)) continue;
-      try {
-        var attributes = Files.readAttributes(path,
-            java.nio.file.attribute.PosixFileAttributes.class, LinkOption.NOFOLLOW_LINKS);
-        if (attributes.owner().getName().equals("root") &&
-            !attributes.permissions().contains(PosixFilePermission.GROUP_WRITE) &&
-            !attributes.permissions().contains(PosixFilePermission.OTHERS_WRITE)) return path;
-      } catch (java.io.IOException | UnsupportedOperationException ignored) {
-        // Try the next fixed system location.
-      }
-    }
-    throw fail(503, "SSH_CLIENT_UNAVAILABLE", "主控未安装 OpenSSH 客户端");
   }
 
   private void recordAudit(String actor, UUID hostId, String action, String outcome, String summary) {

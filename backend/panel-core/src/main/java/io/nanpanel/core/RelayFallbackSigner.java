@@ -51,7 +51,7 @@ public class RelayFallbackSigner {
         privateKeyPath.equalsIgnoreCase("disabled") || publicKeyHex == null ||
         !publicKeyHex.matches("[a-fA-F0-9]{64}"))
       throw AuthResource.fail(503, "RELAY_FALLBACK_SIGNING_UNAVAILABLE",
-          "Relay 备用名单签名密钥未配置");
+          "Relay 故障切换端点清单签名密钥未配置");
 
     try {
       byte[] publicKey = HexFormat.of().parseHex(publicKeyHex);
@@ -59,7 +59,7 @@ public class RelayFallbackSigner {
       return signManifest(endpoints, privateKey, publicKey);
     } catch (Exception failure) {
       throw AuthResource.fail(503, "RELAY_FALLBACK_SIGNING_UNAVAILABLE",
-          "Relay 备用名单无法签名或公钥与私钥不匹配");
+          "Relay 故障切换端点清单无法签名或公钥与私钥不匹配");
     }
   }
 

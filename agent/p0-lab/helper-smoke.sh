@@ -16,21 +16,21 @@ until [ -S /run/nanpanel/helper.sock ]; do
   sleep 0.1
 done
 
-runuser -u agent -- /usr/local/bin/nanpanel-helper-client /run/nanpanel/helper.sock file.read.allowed secret.txt >/tmp/authorized.json
+runuser -u agent -- /usr/local/bin/nanpanel-helper-client /run/nanpanel/helper.sock file.read.managed secret.txt >/tmp/authorized.json
 grep -q 'root-only fixture' /tmp/authorized.json
 if runuser -u agent -- /usr/local/bin/nanpanel-helper-client /run/nanpanel/helper.sock systemd.restart sshd >/tmp/denied-capability.json 2>&1; then
-  echo 'FAIL: an unallowlisted capability was accepted'
+  echo 'FAIL: an unsupported capability was accepted'
   exit 1
 fi
-if runuser -u agent -- /usr/local/bin/nanpanel-helper-client /run/nanpanel/helper.sock file.read.allowed ../etc/passwd >/tmp/denied-path.json 2>&1; then
+if runuser -u agent -- /usr/local/bin/nanpanel-helper-client /run/nanpanel/helper.sock file.read.managed ../etc/passwd >/tmp/denied-path.json 2>&1; then
   echo 'FAIL: a parent traversal was accepted'
   exit 1
 fi
-if runuser -u agent -- /usr/local/bin/nanpanel-helper-client /run/nanpanel/helper.sock file.read.allowed outside.txt >/tmp/denied-symlink.json 2>&1; then
+if runuser -u agent -- /usr/local/bin/nanpanel-helper-client /run/nanpanel/helper.sock file.read.managed outside.txt >/tmp/denied-symlink.json 2>&1; then
   echo 'FAIL: a symlink escape was accepted'
   exit 1
 fi
-if runuser -u untrusted -- /usr/local/bin/nanpanel-helper-client /run/nanpanel/helper.sock file.read.allowed secret.txt >/tmp/denied-caller.json 2>&1; then
+if runuser -u untrusted -- /usr/local/bin/nanpanel-helper-client /run/nanpanel/helper.sock file.read.managed secret.txt >/tmp/denied-caller.json 2>&1; then
   echo 'FAIL: an untrusted UID was accepted'
   exit 1
 fi
@@ -39,4 +39,4 @@ grep -q '"caller_uid":10001' /tmp/helper.log
 grep -q '"caller_uid":10002' /tmp/helper.log
 grep -q '"outcome":"succeeded"' /tmp/helper.log
 grep -q '"outcome":"rejected"' /tmp/helper.log
-echo 'PASS: root-only read through helper; rejected unallowlisted capability, traversal, symlink escape, and caller UID 10002; audit records caller and outcome'
+echo 'PASS: root-only read through helper; rejected unsupported capability, traversal, symlink escape, and caller UID 10002; audit records caller and outcome'

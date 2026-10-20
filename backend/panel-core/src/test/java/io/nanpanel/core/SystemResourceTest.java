@@ -109,7 +109,7 @@ class SystemResourceTest {
   }
 
   @Test
-  void relayStatusRequiresAllowlistedEndpointAndRejectsStaleEpochs() {
+  void relayStatusRequiresTrustedEndpointAndRejectsStaleEpochs() {
     String owner = "82791d95-b2d6-469e-a1d1-13550862d956";
     store.transaction(c -> {
       AuthStore.update(c,
@@ -215,7 +215,7 @@ class SystemResourceTest {
   }
 
   @Test
-  void relayEndpointConfigurationIsAnExplicitHttpsOriginAllowlist() {
+  void relayEndpointConfigurationAcceptsOnlyExplicitHttpsOrigins() {
     assertEquals(java.util.List.of(), AgentEnrollmentResource.parseRelayEndpoints("disabled"));
     assertEquals(java.util.List.of("https://relay-a.example", "https://relay-b.example:9443"),
         AgentEnrollmentResource.parseRelayEndpoints(
@@ -364,17 +364,34 @@ class SystemResourceTest {
         .post("/api/v1/agent-enrollments/redeem")
         .then().statusCode(401);
 
-    var heartbeat = Map.of("agentId", agentId, "version", "0.1.0-test",
-        "certificateFingerprint", certificateFingerprint,
-        "hostname", "panel-test-host-real", "os", "Ubuntu 24.04",
-        "arch", "x86_64", "capabilities",
-        java.util.List.of("host.inventory", "agent.heartbeat", "agent.self_update", "systemd.read", "systemd.restart", "systemd.journal.read", "package.install", "file.write.protected", "container.list", "container.logs", "container.start", "container.stop", "container.deploy", "network.firewall.expose"),
-        "helperStatus", "AVAILABLE",
-        "systemdObservedAtEpochMs", System.currentTimeMillis(),
-        "systemdServices", java.util.List.of(Map.of(
-            "unitName", "ssh.service", "displayName", "OpenSSH server",
-            "activeState", "ACTIVE", "subState", "running", "restartAllowed", true,
-            "journalReadAllowed", true)));
+    var heartbeat = new java.util.HashMap<String, Object>();
+    heartbeat.put("agentId", agentId);
+    heartbeat.put("version", "0.1.0-test");
+    heartbeat.put("certificateFingerprint", certificateFingerprint);
+    heartbeat.put("hostname", "panel-test-host-real");
+    heartbeat.put("os", "Ubuntu 24.04");
+    heartbeat.put("arch", "x86_64");
+    heartbeat.put("capabilities", java.util.List.of(
+        "host.inventory", "agent.heartbeat", "agent.self_update", "systemd.read",
+        "systemd.restart", "systemd.journal.read", "package.install", "file.write.protected",
+        "container.list", "container.logs", "container.start", "container.stop",
+        "container.deploy", "network.firewall.expose", "network.inventory"));
+    heartbeat.put("helperStatus", "AVAILABLE");
+    heartbeat.put("systemdObservedAtEpochMs", System.currentTimeMillis());
+    heartbeat.put("networkObservedAtEpochMs", System.currentTimeMillis());
+    heartbeat.put("networkInterfaces", java.util.List.of(Map.of(
+        "name", "ens18", "macAddress", "02:00:00:00:00:18", "mtu", 1500,
+        "state", "UP", "addresses", java.util.List.of(Map.of(
+            "family", "inet", "address", "192.0.2.10", "prefixLength", 24,
+            "scope", "global")))));
+    heartbeat.put("networkRoutes", java.util.List.of(Map.of(
+        "destination", "default", "gateway", "192.0.2.1", "interfaceName", "ens18",
+        "protocol", "static", "scope", "", "routeType", "unicast", "table", "main",
+        "metric", 100)));
+    heartbeat.put("systemdServices", java.util.List.of(Map.of(
+        "unitName", "ssh.service", "displayName", "OpenSSH server",
+        "activeState", "ACTIVE", "subState", "running",
+        "restartAllowed", false, "journalReadAllowed", false)));
     var forgedHeartbeat = new java.util.HashMap<>(heartbeat);
     forgedHeartbeat.put("certificateFingerprint", "0".repeat(64));
     given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
@@ -395,9 +412,16 @@ class SystemResourceTest {
         .body("generation", equalTo(1))
         .body("capabilities", hasItems("host.inventory", "agent.heartbeat", "agent.self_update", "systemd.read"));
     given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/hosts/" + hostId + "/network-inventory")
+        .then().statusCode(200)
+        .body("interfaces[0].name", equalTo("ens18"))
+        .body("interfaces[0].addresses[0].address", equalTo("192.0.2.10"))
+        .body("routes[0].destination", equalTo("default"))
+        .body("routes[0].gateway", equalTo("192.0.2.1"));
+    given().cookie("nanpanel_session", restoredCookie)
         .header("X-CSRF-Token", restored.path("csrfToken"))
         .contentType("application/json")
-        .body(Map.of("alias", "bad alias", "reason", "Reject malformed SSH alias"))
+        .body(Map.of("reason", ""))
         .post("/api/v1/hosts/" + hostId + "/ssh/probe")
         .then().statusCode(422).body("code", equalTo("VALIDATION_FAILED"));
     given().cookie("nanpanel_session", restoredCookie)
@@ -409,43 +433,42 @@ class SystemResourceTest {
         .then().statusCode(422).body("code", equalTo("VALIDATION_FAILED"));
     given().cookie("nanpanel_session", restoredCookie)
         .header("X-CSRF-Token", restored.path("csrfToken"))
-        .header("Idempotency-Key", "ssh-restart-default-deny")
+        .header("Idempotency-Key", "ssh-restart-invalid-unit-02")
         .contentType("application/json")
-        .body(Map.of("unitName", "ssh.service", "reason", "Confirm empty SSH unit allowlist denies by default"))
+        .body(Map.of("unitName", "ssh.service;id", "reason", "Reject invalid systemd unit syntax"))
         .post("/api/v1/hosts/" + hostId + "/ssh/systemd/restart")
-        .then().statusCode(422).body("code", equalTo("SSH_ALIAS_NOT_ALLOWED"));
+        .then().statusCode(422).body("code", equalTo("VALIDATION_FAILED"));
     given().cookie("nanpanel_session", restoredCookie)
         .header("X-CSRF-Token", restored.path("csrfToken"))
         .contentType("application/json")
-        .body(Map.of("unitName", "ssh.service", "reason", "Check default-deny SSH status diagnostics"))
+        .body(Map.of("unitName", "ssh.service;id", "reason", "Reject invalid systemd unit syntax"))
         .post("/api/v1/hosts/" + hostId + "/ssh/systemd/status")
-        .then().statusCode(422).body("code", equalTo("SSH_ALIAS_NOT_ALLOWED"));
+        .then().statusCode(422).body("code", equalTo("VALIDATION_FAILED"));
     given().cookie("nanpanel_session", restoredCookie)
         .header("X-CSRF-Token", restored.path("csrfToken"))
         .contentType("application/json")
-        .body(Map.of("unitName", "ssh.service", "lines", 100,
-            "reason", "Check default-deny SSH journal diagnostics"))
+        .body(Map.of("unitName", "ssh.service;id", "lines", 100,
+            "reason", "Reject invalid systemd unit syntax"))
         .post("/api/v1/hosts/" + hostId + "/ssh/systemd/journal")
-        .then().statusCode(422).body("code", equalTo("SSH_ALIAS_NOT_ALLOWED"));
+        .then().statusCode(422).body("code", equalTo("VALIDATION_FAILED"));
     var deniedSshDiagnostics = store.transaction(c -> AuthStore.query(c,
         "SELECT action,outcome FROM audit_event WHERE resource_id=? AND " +
             "action IN ('SSH_SYSTEMD_STATUS_READ','SSH_SYSTEMD_JOURNAL_READ') ORDER BY action",
         hostId.toString()));
-    assertEquals(2, deniedSshDiagnostics.size());
-    assertTrue(deniedSshDiagnostics.stream().allMatch(row -> "DENIED".equals(row.get("outcome"))));
+    assertEquals(0, deniedSshDiagnostics.size());
     given().cookie("nanpanel_session", restoredCookie)
         .header("X-CSRF-Token", restored.path("csrfToken"))
-        .header("Idempotency-Key", "ssh-agent-install-default-deny")
+        .header("Idempotency-Key", "ssh-agent-install-needs-asset-config")
         .contentType("application/json")
-        .body(Map.of("enrollmentId", UUID.randomUUID().toString(), "agentId", agentId, "alias", "host-b",
-            "token", enrollmentToken, "reason", "Confirm SSH bootstrap alias is denied by default"))
+        .body(Map.of("enrollmentId", UUID.randomUUID().toString(), "agentId", agentId,
+            "token", "invalid", "reason", "Reject malformed enrollment token"))
         .post("/api/v1/hosts/" + hostId + "/ssh/agent/install")
-        .then().statusCode(422).body("code", equalTo("SSH_ALIAS_NOT_ALLOWED"));
+        .then().statusCode(422).body("code", equalTo("VALIDATION_FAILED"));
     String packageOperationKey = "helper-package-key-01";
     var packageRequest = Map.of(
         "capability", "package.install", "target", "",
         "payload", Map.of("packages", java.util.List.of("curl")),
-        "reason", "Install the allowlisted diagnostic utility", "timeoutSeconds", 60,
+        "reason", "Install the diagnostic utility using validated package parameters", "timeoutSeconds", 60,
         "expectedGeneration", 1);
     given().cookie("nanpanel_session", restoredCookie)
         .header("X-CSRF-Token", restored.path("csrfToken"))
@@ -565,8 +588,8 @@ class SystemResourceTest {
         .then().statusCode(200)
         .body("generation", equalTo(1))
         .body("subState", equalTo("running"))
-        .body("allowedActions", hasItem("RESTART"))
-        .body("allowedActions", hasItem("READ_JOURNAL"))
+        .body("supportedActions", hasItem("RESTART"))
+        .body("supportedActions", hasItem("READ_JOURNAL"))
         .extract();
     String serviceEtag = serviceDetail.header("ETag");
     assertTrue(serviceEtag.matches("\"[a-f0-9]{64}\""));
@@ -670,26 +693,26 @@ class SystemResourceTest {
         .then().statusCode(200).body("kind", equalTo("SYSTEMD_JOURNAL_READ"))
         .body("status", equalTo("SUCCEEDED"))
         .body("result.journal", containsString("service[123]: ready"));
-    var journalRevokedHeartbeat = new java.util.HashMap<>(heartbeat);
-    journalRevokedHeartbeat.put("capabilities", java.util.List.of(
-        "host.inventory", "agent.heartbeat", "agent.self_update", "systemd.read", "systemd.restart"));
-    journalRevokedHeartbeat.put("systemdServices", java.util.List.of(Map.of(
+    var journalUnsupportedHeartbeat = new java.util.HashMap<>(heartbeat);
+    journalUnsupportedHeartbeat.put("capabilities", java.util.List.of(
+        "host.inventory", "agent.heartbeat", "agent.self_update", "systemd.read",
+        "systemd.restart", "network.inventory"));
+    journalUnsupportedHeartbeat.put("systemdServices", java.util.List.of(Map.of(
         "unitName", "ssh.service", "displayName", "OpenSSH server",
-        "activeState", "ACTIVE", "subState", "running", "restartAllowed", true,
-        "journalReadAllowed", false)));
+        "activeState", "ACTIVE", "subState", "running")));
     given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
-        .contentType("application/json").body(journalRevokedHeartbeat)
+        .contentType("application/json").body(journalUnsupportedHeartbeat)
         .post("/internal/agent-heartbeats").then().statusCode(204);
-    var journalDeniedService = given().cookie("nanpanel_session", restoredCookie)
+    var journalUnsupportedService = given().cookie("nanpanel_session", restoredCookie)
         .get("/api/v1/hosts/" + hostId + "/services/" + serviceId)
-        .then().statusCode(200).body("allowedActions", not(hasItem("READ_JOURNAL")))
+        .then().statusCode(200).body("supportedActions", not(hasItem("READ_JOURNAL")))
         .extract();
     given().cookie("nanpanel_session", restoredCookie)
         .header("X-CSRF-Token", restored.path("csrfToken"))
-        .header("If-Match", journalDeniedService.header("ETag"))
-        .header("Idempotency-Key", "journal-denied-key-01")
+        .header("If-Match", journalUnsupportedService.header("ETag"))
+        .header("Idempotency-Key", "journal-unsupported-key-01")
         .contentType("application/json")
-        .body(Map.of("reason", "Reject journal read after allowlist removal"))
+        .body(Map.of("reason", "Reject journal read when Agent lacks the host capability"))
         .post("/api/v1/hosts/" + hostId + "/services/" + serviceId + "/journal")
         .then().statusCode(422).body("code", equalTo("OPERATION_UNSUPPORTED"));
     var staleInventoryHeartbeat = new java.util.HashMap<>(heartbeat);
@@ -701,7 +724,7 @@ class SystemResourceTest {
         .get("/api/v1/hosts/" + hostId + "/services/" + serviceId)
         .then().statusCode(200)
         .body("observationStale", equalTo(true))
-        .body("allowedActions", empty())
+        .body("supportedActions", empty())
         .extract();
     given().cookie("nanpanel_session", restoredCookie)
         .header("X-CSRF-Token", restored.path("csrfToken"))
@@ -729,7 +752,7 @@ class SystemResourceTest {
         .get("/api/v1/hosts/" + hostId + "/services")
         .then().statusCode(200).body("items.size()", equalTo(1))
         .body("items[0].activeState", equalTo("UNKNOWN"))
-        .body("items[0].allowedActions", empty());
+        .body("items[0].supportedActions", empty());
     given().cookie("nanpanel_session", restoredCookie)
         .get("/api/v1/agents/" + agentId)
         .then().statusCode(200)

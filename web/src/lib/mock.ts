@@ -6,13 +6,11 @@ const now = () => new Date().toISOString();
 const id = () => createUuid();
 const uuid = (n: number) => `8b395d24-5d5d-4f27-b70b-${String(n).padStart(12, '0')}`;
 export const DEMO_PASSWORD = 'nanpanel-demo-2026';
-const hosts: Host[] = ['gateway-sg-01', 'homelab-node-01', 'k3s-worker-01', 'edge-shanghai-02', 'backup-node-01', 'lab-arm-01'].map((hostname, i) => ({ id: uuid(i + 1), hostname, os: 'linux', arch: i === 5 ? 'aarch64' : 'x86_64', generation: 1, status: i === 4 ? 'OFFLINE' : i === 5 ? 'UNKNOWN' : 'ONLINE', capabilities: ['systemd.read', 'systemd.restart', 'systemd.journal.read', ...(i < 2 ? ['package.install', 'file.write.protected', 'container.list', 'container.logs', 'container.start', 'container.stop', 'container.deploy', 'network.firewall.expose'] : [])], agentId: uuid(i + 21), lastSeenAt: i >= 4 ? new Date(Date.now() - 3600000).toISOString() : now(), createdAt: now() }));
-const sshAliases = new Map([[uuid(1), 'host-b'], [uuid(2), 'homelab_2']]);
-const sshSystemdUnits = new Map([[uuid(1), new Set(['nanpanel-agent.service'])], [uuid(2), new Set(['ssh.service'])]]);
+const hosts: Host[] = ['gateway-sg-01', 'homelab-node-01', 'k3s-worker-01', 'edge-shanghai-02', 'backup-node-01', 'lab-arm-01'].map((hostname, i) => ({ id: uuid(i + 1), hostname, os: 'linux', arch: i === 5 ? 'aarch64' : 'x86_64', generation: 1, status: i === 4 ? 'OFFLINE' : i === 5 ? 'UNKNOWN' : 'ONLINE', capabilities: ['systemd.read', 'systemd.restart', 'systemd.journal.read', 'network.inventory', ...(i < 2 ? ['package.install', 'file.write.protected', 'file.list', 'file.read', 'file.write', 'file.delete', 'container.list', 'container.logs', 'container.start', 'container.stop', 'container.deploy', 'network.firewall.expose'] : [])], agentId: uuid(i + 21), lastSeenAt: i >= 4 ? new Date(Date.now() - 3600000).toISOString() : now(), createdAt: now() }));
 const services: SystemService[] = hosts.flatMap((h, i) => Array.from({ length: i === 0 ? 30 : 3 }, (_, j) => {
  const unit = ['nginx', 'nanpanel-agent', 'frpc'][j] ?? `demo-systemd-${j - 2}`;
  const displayName = ['Nginx Web Server', 'NaNPanel Rust Agent', 'FRP Tunnel Client'][j] ?? `Mock systemd service ${j + 1}`;
- return { id: uuid(100 + i * 30 + j), hostId: h.id, unitName: `${unit}.service`, displayName, activeState: 'ACTIVE', subState: 'running', generation: 1, observedAt: h.lastSeenAt, allowedActions: h.status === 'ONLINE' && i !== 3 && j < 3 ? ['RESTART', 'READ_JOURNAL'] : [], observationStale: h.status !== 'ONLINE' };
+ return { id: uuid(100 + i * 30 + j), hostId: h.id, unitName: `${unit}.service`, displayName, activeState: 'ACTIVE', subState: 'running', generation: 1, observedAt: h.lastSeenAt, supportedActions: h.status === 'ONLINE' && i !== 3 ? ['RESTART', 'READ_JOURNAL'] : [], observationStale: h.status !== 'ONLINE' };
 }));
 const users: AdminUser[] = [{ id: uuid(50), username: 'admin', displayName: '实验室管理员', roles: ['ADMIN'], status: 'ACTIVE', mustChangePassword: false, createdAt: now(), updatedAt: now(), lastLoginAt: now() }, { id: uuid(51), username: 'operator', displayName: '运维管理员', roles: ['ADMIN'], status: 'ACTIVE', mustChangePassword: false, createdAt: now(), updatedAt: now(), lastLoginAt: null }];
 const passwords = new Map(users.map(u => [u.id, DEMO_PASSWORD]));
@@ -23,6 +21,48 @@ const bump = (key: string) => versions.set(key, (versions.get(key) ?? 1) + 1);
 let topology: TopologyDraft = { ...initialTopology(), updatedAt: now(), updatedBy: null };
 const operations: Operation[] = [];
 const audit: AuditEvent[] = [];
+const mockFileContents = new Map<string, Map<string, string>>();
+const mockDirectories = new Set(['/etc', '/etc/nanpanel']);
+for (const host of hosts.slice(0, 2)) {
+ mockFileContents.set(host.id, new Map([
+  ['/etc/hosts', '127.0.0.1 localhost\n'],
+  ['/etc/nanpanel/agent.conf', 'controller=https://panel.example\n'],
+ ]));
+}
+function mockFileOperation(hostId: string, capability: string, target: string, payload: Record<string, unknown>) {
+ const files = mockFileContents.get(hostId) ?? new Map<string, string>();
+ mockFileContents.set(hostId, files);
+ if (capability === 'file.list') {
+  const prefix = target === '/' ? '/' : `${target}/`;
+  const entries = new Map<string, { name: string; kind: 'directory' | 'file'; sizeBytes: number | null }>();
+  for (const directory of mockDirectories) {
+   if (!directory.startsWith(prefix) || directory === target) continue;
+   const child = directory.slice(prefix.length).split('/')[0];
+   if (child) entries.set(child, { name: child, kind: 'directory', sizeBytes: null });
+  }
+  for (const [path, content] of files) {
+   if (!path.startsWith(prefix) || path === target) continue;
+   const child = path.slice(prefix.length).split('/')[0];
+   if (child && !path.slice(prefix.length).includes('/')) entries.set(child, { name: child, kind: 'file', sizeBytes: new TextEncoder().encode(content).length });
+  }
+  return JSON.stringify({ path: target, entries: [...entries.values()].sort((a, b) => a.name.localeCompare(b.name)), truncated: false });
+ }
+ if (capability === 'file.read') {
+  const content = files.get(target);
+  if (content === undefined) throw new Error('模拟文件不存在');
+  return content;
+ }
+ if (capability === 'file.write') {
+  const content = String(payload.content ?? '');
+  files.set(target, content);
+  return JSON.stringify({ path: target, bytesWritten: new TextEncoder().encode(content).length });
+ }
+ if (capability === 'file.delete') {
+  files.delete(target);
+  return JSON.stringify({ path: target, deleted: true });
+ }
+ return `Mock ${capability} completed`;
+}
 let sessions: WebSession[] = [];
 let currentUserId: string | null = null;
 let csrf = id();
@@ -71,16 +111,19 @@ export async function mockRequest(path: string, options: RequestInit, authentica
  }
  const host = hosts.find(h => h.id === p.split('/')[2]);
  if (p.startsWith('/hosts/') && !host) return fail(404, 'NOT_FOUND', '主机不存在');
+ if (/^\/hosts\/[^/]+\/network-inventory$/.test(p)) return ok({
+  interfaces: [{ name: 'eth0', macAddress: '02:00:00:00:00:01', mtu: 1500, state: 'UP', addresses: [{ family: 'inet', address: '192.0.2.20', prefixLength: 24, scope: 'global' }, { family: 'inet6', address: '2001:db8::20', prefixLength: 64, scope: 'global' }] }],
+  routes: [{ destination: 'default', gateway: '192.0.2.1', interfaceName: 'eth0', protocol: 'static', scope: 'global', routeType: 'unicast', table: 'main', metric: 100 }],
+  observedAt: host!.lastSeenAt,
+ });
  if (/^\/hosts\/[^/]+$/.test(p)) return ok(host);
- if (/^\/hosts\/[^/]+\/ssh\/probe$/.test(p) && method === 'POST') { if (!/^[A-Za-z0-9][A-Za-z0-9_.@-]{0,99}$/.test(String(b.alias ?? '')) || !b.reason?.trim() || b.reason.length > 500) return fail(422, 'VALIDATION_FAILED', 'SSH 别名或操作原因无效'); if (sshAliases.get(host!.id) !== b.alias) return fail(422, 'SSH_ALIAS_NOT_ALLOWED', 'SSH 别名未绑定到该主机资产'); log('SSH_ACCESS_PROBED', 'host', host!.id, `Mock SSH alias ${String(b.alias)} probe: ${b.reason}`); return ok({ hostId: host!.id, alias: b.alias, status: 'SUCCEEDED', verifiedAt: now(), evidence: 'Mock: StrictHostKeyChecking and fixed true command succeeded' }); }
+ if (/^\/hosts\/[^/]+\/ssh\/probe$/.test(p) && method === 'POST') { if (!b.reason?.trim() || b.reason.length > 500) return fail(422, 'VALIDATION_FAILED', 'SSH 操作原因无效'); log('SSH_ACCESS_PROBED', 'host', host!.id, `Mock SSH direct connection probe: ${b.reason}`); return ok({ hostId: host!.id, address: host!.hostname, port: 22, status: 'SUCCEEDED', verifiedAt: now(), evidence: 'Mock: confirmed host key and fixed true command succeeded' }); }
  if (/^\/hosts\/[^/]+\/ssh\/systemd\/restart$/.test(p) && method === 'POST') {
   const key = headers.get('Idempotency-Key'); if (!key) return fail(400, 'IDEMPOTENCY_KEY_REQUIRED', '缺少幂等键');
   const fingerprint = JSON.stringify([current.id, p, b]); const previous = replay.get(key);
   if (previous) return previous.fingerprint === fingerprint ? ok(previous.operation, 200, { 'Idempotency-Replayed': 'true' }) : fail(409, 'IDEMPOTENCY_KEY_REUSED', '幂等键已被其他请求使用');
   const unitName = String(b.unitName ?? '').trim();
   if (!/^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,247}\.service$/.test(unitName) || !b.reason?.trim() || b.reason.length > 500) return fail(422, 'VALIDATION_FAILED', 'SSH systemd unit 或操作原因无效');
-  if (!sshAliases.has(host!.id)) return fail(422, 'SSH_ALIAS_NOT_ALLOWED', '该主机未绑定 SSH alias');
-  if (!sshSystemdUnits.get(host!.id)?.has(unitName)) return fail(422, 'SSH_UNIT_NOT_ALLOWED', '该 unit 未获 root allowlist 授权');
   const stamp = now(); const op: Operation = { id: id(), kind: 'SSH_SYSTEMD_RESTART', hostId: host!.id, agentId: null, serviceId: null, capability: 'systemd.restart', target: unitName, idempotencyKey: key, requestedBy: current.id, reason: b.reason, expectedGeneration: null, phase: 'VERIFY', status: 'SUCCEEDED', createdAt: stamp, startedAt: stamp, updatedAt: stamp, deadlineAt: stamp, finishedAt: stamp, result: { unitName, active: true, verifiedAt: stamp }, error: null };
   operations.unshift(op); replay.set(key, { fingerprint, operation: op }); log('SSH_SYSTEMD_RESTART', 'host', host!.id, `Mock SSH restarted ${unitName}: ${b.reason}`);
   return ok(op, 200, { Location: `/api/v1/operations/${op.id}`, 'Idempotency-Replayed': 'false' });
@@ -88,8 +131,6 @@ export async function mockRequest(path: string, options: RequestInit, authentica
  if (/^\/hosts\/[^/]+\/ssh\/systemd\/(status|journal)$/.test(p) && method === 'POST') {
   const unitName = String(b.unitName ?? '').trim();
   if (!/^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,247}\.service$/.test(unitName) || !b.reason?.trim() || b.reason.length > 500) return fail(422, 'VALIDATION_FAILED', 'SSH systemd unit 或操作原因无效');
-  if (!sshAliases.has(host!.id)) return fail(422, 'SSH_ALIAS_NOT_ALLOWED', '该主机未绑定 SSH alias');
-  if (!sshSystemdUnits.get(host!.id)?.has(unitName)) return fail(422, 'SSH_UNIT_NOT_ALLOWED', '该 unit 未获 root allowlist 授权');
   if (p.endsWith('/status')) { log('SSH_SYSTEMD_STATUS_READ', 'host', host!.id, `Mock SSH status read for ${unitName}: ${b.reason}`); return ok({ hostId: host!.id, unitName, loadState: 'loaded', activeState: 'active', subState: 'running', observedAt: now() }); }
   const lines = Number(b.lines); if (!Number.isInteger(lines) || lines < 1 || lines > 100) return fail(422, 'VALIDATION_FAILED', 'SSH journal 行数须为 1–100');
   log('SSH_SYSTEMD_JOURNAL_READ', 'host', host!.id, `Mock SSH journal read for ${unitName}, at most ${lines} lines: ${b.reason}`);
@@ -106,7 +147,21 @@ export async function mockRequest(path: string, options: RequestInit, authentica
   if (operations.some(o => o.hostId === host!.id && o.kind === 'HOST_HELPER_OPERATION' && ['PENDING', 'RUNNING', 'UNKNOWN'].includes(o.status))) return fail(409, 'OPERATION_IN_PROGRESS', '该主机有等待对账的 Helper 操作');
   const stamp = now(); const op: Operation = { id: id(), kind: 'HOST_HELPER_OPERATION', hostId: host!.id, agentId: host!.agentId!, serviceId: null, capability: String(b.capability), target: String(b.target ?? ''), idempotencyKey: key, requestedBy: current.id, reason: b.reason, expectedGeneration: host!.generation, phase: 'APPLY', status: 'RUNNING', createdAt: stamp, startedAt: stamp, updatedAt: stamp, deadlineAt: new Date(Date.now() + (b.timeoutSeconds ?? 60) * 1000).toISOString(), finishedAt: null, result: null, error: null };
   operations.unshift(op); replay.set(key, { fingerprint, operation: op }); log(String(b.capability), 'host', host!.id, b.reason);
-  setTimeout(() => { op.status = 'SUCCEEDED'; op.phase = 'COMMIT'; op.finishedAt = now(); op.updatedAt = now(); op.result = { capability: String(b.capability), target: String(b.target ?? ''), output: b.capability === 'container.list' ? '[{"name":"web-gateway","state":"running"}]' : b.capability === 'network.firewall.expose' ? JSON.stringify({ rule: String(b.target), interface: 'eth0', protocol: 'tcp', port: 2222, verified: true, automaticRollback: true, rollbackAfterSeconds: b.payload.rollbackSeconds }) : `Mock ${String(b.capability)} completed`, completedAt: now() }; }, 1500);
+  setTimeout(() => {
+   const capability = String(b.capability); const target = String(b.target ?? '');
+   try {
+    const output = capability.startsWith('file.')
+     ? mockFileOperation(host!.id, capability, target, (b.payload ?? {}) as Record<string, unknown>)
+     : capability === 'container.list' ? '[{"name":"web-gateway","state":"running"}]'
+     : capability === 'network.firewall.expose' ? JSON.stringify({ rule: target, interface: 'eth0', protocol: 'tcp', port: 2222, verified: true, automaticRollback: true, rollbackAfterSeconds: b.payload.rollbackSeconds })
+     : `Mock ${capability} completed`;
+    op.status = 'SUCCEEDED'; op.phase = 'COMMIT'; op.finishedAt = now(); op.updatedAt = now();
+    op.result = { capability, target, output, completedAt: now() };
+   } catch (cause) {
+    op.status = 'FAILED'; op.phase = 'APPLY'; op.finishedAt = now(); op.updatedAt = now();
+    op.error = { code: 'MOCK_OPERATION_FAILED', message: (cause as Error).message, retryable: false, executionOutcome: 'VERIFIED_FAILED' };
+   }
+  }, 1500);
   return ok(op, 202, { Location: `/api/v1/operations/${op.id}`, 'Retry-After': '1', 'Idempotency-Replayed': 'false' });
  }
  if (/\/services$/.test(p)) return ok(page(services.filter(s => s.hostId === host!.id)));
@@ -120,7 +175,7 @@ export async function mockRequest(path: string, options: RequestInit, authentica
    if (!headers.has('If-Match')) return fail(428, 'PRECONDITION_REQUIRED', '请先读取服务版本');
    if (!match(service.id)) return fail(412, 'PRECONDITION_FAILED', '服务版本变化，请刷新后确认');
    if (!b.reason?.trim() || b.reason.length > 500 || (b.timeoutSeconds && (b.timeoutSeconds < 5 || b.timeoutSeconds > 300))) return fail(422, 'VALIDATION_FAILED', '请提供操作原因和有效超时');
-   if (!service.allowedActions.includes('RESTART') || host!.status !== 'ONLINE') return fail(503, 'AGENT_UNAVAILABLE', 'Agent 或 Helper 不可用');
+   if (!service.supportedActions.includes('RESTART') || host!.status !== 'ONLINE') return fail(503, 'AGENT_UNAVAILABLE', 'Agent 或 Helper 不可用');
    if (operations.some(o => o.serviceId === service.id && ['PENDING', 'RUNNING', 'UNKNOWN'].includes(o.status))) return fail(409, 'OPERATION_IN_PROGRESS', '该服务有在途或结果未知的任务');
    const stamp = now(); const op: Operation = { id: id(), kind: 'SYSTEM_SERVICE_RESTART', hostId: host!.id, agentId: host!.agentId!, serviceId: service.id, capability: null, target: null, idempotencyKey: key, requestedBy: current.id, reason: b.reason, expectedGeneration: service.generation, phase: 'VALIDATE', status: 'PENDING', createdAt: stamp, startedAt: null, updatedAt: stamp, deadlineAt: new Date(Date.now() + (b.timeoutSeconds ?? 60) * 1000).toISOString(), finishedAt: null, result: null, error: null };
    operations.unshift(op); replay.set(key, { fingerprint, operation: op }); log('SYSTEM_SERVICE_RESTART', 'service', service.id, b.reason);
@@ -135,7 +190,7 @@ export async function mockRequest(path: string, options: RequestInit, authentica
    if (!headers.has('If-Match')) return fail(428, 'PRECONDITION_REQUIRED', '请先读取服务版本');
    if (!match(service.id)) return fail(412, 'PRECONDITION_FAILED', '服务版本变化，请刷新后确认');
    if (!b.reason?.trim() || b.reason.length > 500) return fail(422, 'VALIDATION_FAILED', '请提供查询原因');
-   if (!service.allowedActions.includes('READ_JOURNAL') || host!.status !== 'ONLINE') return fail(503, 'AGENT_UNAVAILABLE', 'Agent 或 Helper 不可用');
+   if (!service.supportedActions.includes('READ_JOURNAL') || host!.status !== 'ONLINE') return fail(503, 'AGENT_UNAVAILABLE', 'Agent 或 Helper 不可用');
    if (operations.some(o => o.serviceId === service.id && ['PENDING', 'RUNNING', 'UNKNOWN'].includes(o.status))) return fail(409, 'OPERATION_IN_PROGRESS', '该服务有在途或结果未知的任务');
    const stamp = now(); const op: Operation = { id: id(), kind: 'SYSTEMD_JOURNAL_READ', hostId: host!.id, agentId: host!.agentId!, serviceId: service.id, capability: 'systemd.journal.read', target: service.unitName, idempotencyKey: key, requestedBy: current.id, reason: b.reason, expectedGeneration: service.generation, phase: 'APPLY', status: 'RUNNING', createdAt: stamp, startedAt: stamp, updatedAt: stamp, deadlineAt: new Date(Date.now() + 30000).toISOString(), finishedAt: null, result: null, error: null };
    operations.unshift(op); replay.set(key, { fingerprint, operation: op }); log('SYSTEMD_JOURNAL_READ', 'service', service.id, b.reason);

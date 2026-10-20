@@ -20,12 +20,17 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 @Path("/internal/agent-heartbeats")
 @Consumes(MediaType.APPLICATION_JSON)
 @Produces(MediaType.APPLICATION_JSON)
 public class InternalAgentHeartbeatResource {
+  private static final Pattern NETWORK_INTERFACE = Pattern.compile("[A-Za-z0-9_.:-]{1,15}");
+  private static final Pattern NETWORK_TOKEN = Pattern.compile("[A-Za-z0-9_.-]{0,64}");
+  private static final Pattern NETWORK_ADDRESS = Pattern.compile("[0-9A-Fa-f:.]{2,45}");
+  private static final Pattern NETWORK_DESTINATION = Pattern.compile("[A-Za-z0-9:./-]{1,128}");
   @Inject AuthStore store;
   @Inject ObjectMapper mapper;
 
@@ -54,6 +59,7 @@ public class InternalAgentHeartbeatResource {
         (report.systemdObservedAtEpochMs() != null && report.systemdObservedAtEpochMs() > 0 &&
             (report.systemdObservedAtEpochMs() > Instant.now().plusSeconds(60).toEpochMilli() ||
              report.systemdObservedAtEpochMs() < Instant.now().minusSeconds(300).toEpochMilli())) ||
+        !validNetworkInventory(report) ||
         report.version().isBlank() || report.version().length() > 64 ||
         report.hostname().isBlank() || report.hostname().length() > 255 ||
         report.hostname().chars().anyMatch(Character::isISOControl) ||
@@ -62,7 +68,8 @@ public class InternalAgentHeartbeatResource {
             capability -> !Set.of("host.inventory", "agent.heartbeat", "agent.self_update",
                 "systemd.read", "systemd.restart", "systemd.journal.read", "package.install",
                 "file.write.protected", "container.list", "container.logs", "container.start",
-                "container.stop", "container.deploy", "network.firewall.expose")
+                "container.stop", "container.deploy", "network.firewall.expose",
+                "network.inventory", "file.list", "file.read", "file.write", "file.delete")
                 .contains(capability)) ||
         (report.systemdServices() != null &&
             (report.systemdServices().size() > 512 ||
@@ -74,13 +81,7 @@ public class InternalAgentHeartbeatResource {
                  service.displayName().chars().anyMatch(Character::isISOControl) ||
                  !Set.of("UNKNOWN", "ACTIVE", "INACTIVE", "ACTIVATING", "DEACTIVATING", "RELOADING", "FAILED")
                      .contains(service.activeState()) || service.subState().length() > 64 ||
-                 service.subState().chars().anyMatch(Character::isISOControl) ||
-                 (service.restartAllowed() &&
-                    (!"AVAILABLE".equals(report.helperStatus()) ||
-                     !report.capabilities().contains("systemd.restart"))) ||
-                 (service.journalReadAllowed() &&
-                    (!"AVAILABLE".equals(report.helperStatus()) ||
-                     !report.capabilities().contains("systemd.journal.read")))))) ||
+                 service.subState().chars().anyMatch(Character::isISOControl)))) ||
         !report.certificateFingerprint().matches("[a-f0-9]{64}"))
       throw fail(400, "INVALID_HEARTBEAT", "Agent 心跳字段无效");
 
@@ -124,18 +125,16 @@ public class InternalAgentHeartbeatResource {
           if (existing.isEmpty()) {
             update(c,
                 "INSERT INTO system_service_observation " +
-                    "(id,host_id,unit_name,display_name,active_state,sub_state,observed_at,restart_allowed,journal_read_allowed) " +
-                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    "(id,host_id,unit_name,display_name,active_state,sub_state,observed_at) " +
+                    "VALUES (?,?,?,?,?,?,?)",
                 UUID.randomUUID(), hostId, service.unitName(), service.displayName(),
-                service.activeState(), service.subState(), java.sql.Timestamp.from(observedAt),
-                service.restartAllowed(), service.journalReadAllowed());
+                service.activeState(), service.subState(), java.sql.Timestamp.from(observedAt));
           } else {
             update(c,
                 "UPDATE system_service_observation SET display_name=?,active_state=?," +
-                    "sub_state=?,observed_at=?,restart_allowed=?,journal_read_allowed=? WHERE host_id=? AND unit_name=?",
+                    "sub_state=?,observed_at=? WHERE host_id=? AND unit_name=?",
                 service.displayName(), service.activeState(), service.subState(),
-                java.sql.Timestamp.from(observedAt), service.restartAllowed(),
-                service.journalReadAllowed(), hostId, service.unitName());
+                java.sql.Timestamp.from(observedAt), hostId, service.unitName());
           }
         }
         var priorServices = query(c,
@@ -145,12 +144,86 @@ public class InternalAgentHeartbeatResource {
           if (!observedNames.contains(unitName)) {
             update(c,
                 "UPDATE system_service_observation SET active_state='UNKNOWN',sub_state=''," +
-                    "observed_at=?,restart_allowed=FALSE,journal_read_allowed=FALSE WHERE host_id=? AND unit_name=?",
+                    "observed_at=? WHERE host_id=? AND unit_name=?",
                 java.sql.Timestamp.from(observedAt), hostId, unitName);
           }
         }
       }
+      if (report.networkObservedAtEpochMs() != null && report.networkObservedAtEpochMs() > 0) {
+        String interfaces = mapper.writeValueAsString(report.networkInterfaces());
+        String routes = mapper.writeValueAsString(report.networkRoutes());
+        var existing = query(c, "SELECT host_id FROM host_network_inventory WHERE host_id=?", hostId);
+        if (existing.isEmpty()) {
+          update(c,
+              "INSERT INTO host_network_inventory (host_id,interfaces,routes,observed_at) " +
+                  "VALUES (?," + jsonParameter + "," + jsonParameter + ",?)",
+              hostId, interfaces, routes,
+              java.sql.Timestamp.from(Instant.ofEpochMilli(report.networkObservedAtEpochMs())));
+        } else {
+          update(c,
+              "UPDATE host_network_inventory SET interfaces=" + jsonParameter + ",routes=" +
+                  jsonParameter + ",observed_at=? WHERE host_id=?",
+              interfaces, routes,
+              java.sql.Timestamp.from(Instant.ofEpochMilli(report.networkObservedAtEpochMs())),
+              hostId);
+        }
+      }
       return Response.noContent().build();
     });
+  }
+
+  private boolean validNetworkInventory(AgentEnrollmentResource.HeartbeatReport report) {
+    Long observedAt = report.networkObservedAtEpochMs();
+    if (observedAt == null || observedAt <= 0) {
+      return !report.capabilities().contains("network.inventory") &&
+          (report.networkInterfaces() == null || report.networkInterfaces().isEmpty()) &&
+          (report.networkRoutes() == null || report.networkRoutes().isEmpty());
+    }
+    if (!report.capabilities().contains("network.inventory") ||
+        observedAt > Instant.now().plusSeconds(60).toEpochMilli() ||
+        observedAt < Instant.now().minusSeconds(300).toEpochMilli() ||
+        report.networkInterfaces() == null || report.networkInterfaces().size() > 128 ||
+        report.networkRoutes() == null || report.networkRoutes().size() > 2048)
+      return false;
+    for (var networkInterface : report.networkInterfaces()) {
+      if (networkInterface == null || networkInterface.name() == null ||
+          !NETWORK_INTERFACE.matcher(networkInterface.name()).matches() ||
+          networkInterface.macAddress() == null || networkInterface.macAddress().length() > 32 ||
+          networkInterface.macAddress().chars().anyMatch(Character::isISOControl) ||
+          (!networkInterface.macAddress().isEmpty() &&
+              !networkInterface.macAddress().matches("(?i)([0-9a-f]{2}:){5}[0-9a-f]{2}")) ||
+          networkInterface.mtu() < 0 || networkInterface.mtu() > 100_000 ||
+          !safeNetworkToken(networkInterface.state(), 32) ||
+          networkInterface.addresses() == null || networkInterface.addresses().size() > 32)
+        return false;
+      for (var address : networkInterface.addresses()) {
+        if (address == null || address.family() == null ||
+            !Set.of("inet", "inet6").contains(address.family()) ||
+            address.address() == null || address.address().length() > 45 ||
+            !NETWORK_ADDRESS.matcher(address.address()).matches() ||
+            address.prefixLength() > ("inet".equals(address.family()) ? 32 : 128) ||
+            !safeNetworkToken(address.scope(), 32))
+          return false;
+      }
+    }
+    for (var route : report.networkRoutes()) {
+      if (route == null || route.destination() == null ||
+          !NETWORK_DESTINATION.matcher(route.destination()).matches() ||
+          route.gateway() == null || route.gateway().length() > 45 ||
+          (!route.gateway().isEmpty() && !NETWORK_ADDRESS.matcher(route.gateway()).matches()) ||
+          route.interfaceName() == null ||
+          (!route.interfaceName().isEmpty() &&
+              !NETWORK_INTERFACE.matcher(route.interfaceName()).matches()) ||
+          !safeNetworkToken(route.protocol(), 32) || !safeNetworkToken(route.scope(), 32) ||
+          !safeNetworkToken(route.routeType(), 32) || !safeNetworkToken(route.table(), 64) ||
+          route.metric() < 0 || route.metric() > 4_294_967_295L)
+        return false;
+    }
+    return true;
+  }
+
+  private boolean safeNetworkToken(String value, int maxLength) {
+    return value != null && value.length() <= maxLength &&
+        !value.chars().anyMatch(Character::isISOControl) && NETWORK_TOKEN.matcher(value).matches();
   }
 }

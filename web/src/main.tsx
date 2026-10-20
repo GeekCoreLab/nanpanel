@@ -9,7 +9,7 @@ import { api, ApiError, isMock, mockBusiness } from './lib/api';
 import { DEMO_PASSWORD } from './lib/mock';
 import { createUuid } from './lib/uuid.ts';
 import { agentMaintenanceCommand, type AgentMaintenanceMode } from './lib/agent-maintenance.ts';
-import type { Host, HostPage, Agent, AgentInstallation, AgentUpdateOperation, SystemService, SystemServicePage, Operation, OperationPage, SessionContext, AdminOverview, AdminUser, AdminUserPage, PlatformSettings, AuditEventPage, WebSessionList, BuiltinRoleList, AgentEnrollmentCreated, HostHelperOperationRequest, SshProbeResult, SshSystemdStatusResult, SshSystemdJournalResult, HostSshConfig, SshHostKeyProbe, BastionSession, BastionSessionTicket, BastionCommand, BastionRecordingChunk } from './lib/types';
+import type { Host, HostPage, Agent, AgentInstallation, AgentUpdateOperation, SystemService, SystemServicePage, Operation, OperationPage, SessionContext, AdminOverview, AdminUser, AdminUserPage, PlatformSettings, AuditEventPage, WebSessionList, BuiltinRoleList, AgentEnrollmentCreated, HostHelperOperationRequest, HostNetworkInventory, HostNetworkInterface, HostNetworkRoute, HostFileListing, SshProbeResult, SshSystemdStatusResult, SshSystemdJournalResult, HostSshConfig, SshHostKeyProbe, BastionSession, BastionSessionTicket, BastionCommand, BastionRecordingChunk } from './lib/types';
 import './style.css';
 const nav = [['overview', '◫', '总览'], ['hosts', '▤', '主机资产'], ['topology', '⌘', '网络拓扑'], ['operations', '◷', '操作任务'], ['users', '♙', '管理员'], ['audit', '☷', '审计日志'], ['settings', '⚙', '平台设置'], ['account', '◎', '账号与会话']];
 const labels: Record<string, string> = { ONLINE: '在线', OFFLINE: '离线', UNKNOWN: '未知 / 结果未知', ACTIVE: '运行中', INACTIVE: '未运行', AVAILABLE: '可用', UNAVAILABLE: '不可用', SUCCEEDED: '成功', ACCEPTED: '已受理', FAILED: '失败', FORCE_TERMINATED: '已强制阻断', RUNNING: '执行中', PENDING: '等待中', CANCELLED: '已取消', DISABLED: '已禁用', DENIED: '已拒绝' };
@@ -46,7 +46,7 @@ function Overview() {
  const total = r.data?.hosts.total ?? 0; const online = r.data?.hosts.online ?? 0; const offline = r.data?.hosts.offline ?? 0; const unknown = r.data?.hosts.unknown ?? 0; const onlinePercent = total ? online / total * 100 : 0; const offlinePercent = total ? (online + offline) / total * 100 : 0;
  return <><PageHeading title="基础设施总览" description="你好，管理员。你的云端与边缘，一览无余。" action={<button className="secondary" onClick={() => { r.refresh(); h.refresh(); a.refresh(); }}>↻ 刷新数据</button>} /><ResourceState {...r} /><div className="stats">{[['主机总数', r.data?.hosts.total ?? '—', `${r.data?.hosts.online ?? '—'} 台在线`, '▤', 'blue'], ['在线主机', r.data?.hosts.online ?? '—', '管理通道已连接', '◎', 'green'], ['离线 / 未知', r.data ? r.data.hosts.offline + r.data.hosts.unknown : '—', '需要关注的节点', '△', 'amber'], ['进行中的任务', r.data ? r.data.operations.pending + r.data.operations.running : '—', `${r.data?.operations.unknown ?? 0} 个结果未知`, '◷', 'purple']].map(x => <div className="stat" key={String(x[0])}><div><span>{x[0]}</span><b className={`stat-icon ${x[4]}`}>{x[3]}</b></div><strong>{x[1]}</strong><small>{x[2]}</small></div>)}</div><div className="overview-grid"><section className="card"><div className="card-title"><div><h2>主机分布</h2><p>管理通道状态 · 最近观测</p></div><a href="#hosts">查看全部 ↗</a></div><ResourceState {...h} />{r.data && h.data && <div className="host-distribution"><div className="donut" style={{ background: `conic-gradient(#5387f4 0 ${onlinePercent}%, #e7b65b 0 ${offlinePercent}%, #e9edf4 0)` }}><div><strong>{total}</strong><span>主机节点</span></div></div><div className="legend">{[['ONLINE', '管理通道在线', online], ['OFFLINE', '管理通道离线', offline], ['UNKNOWN', '尚未确认状态', unknown]].map(([s, text, amount]) => <div key={String(s)}><Badge value={String(s)} /><span>{text}</span><b>{amount}</b></div>)}</div></div>}<div className="card-note">ⓘ 管理通道状态不代表业务流量健康状态</div></section><section className="card"><div className="card-title"><div><h2>控制面信息</h2><p>轻量控制，按需扩展</p></div><span className="square-icon">⌘</span></div><dl className="info-list"><div><dt>运行环境</dt><dd>{isMock ? '浏览器内 Mock' : '同源 API'}</dd></div><div><dt>主控架构</dt><dd>Java / Quarkus JVM</dd></div><div><dt>边缘组件</dt><dd>Rust Agent + root Helper</dd></div><div><dt>管理员账号</dt><dd>{r.data?.activeAdminUsers ?? '—'} 个 ACTIVE</dd></div><div><dt>最近观测</dt><dd>{time(r.data?.observedAt)}</dd></div></dl></section></div><section className="card"><div className="card-title"><div><h2>主机资产</h2><p>异构节点，统一管理</p></div><a href="#hosts">管理主机 →</a></div><HostTable hosts={h.data?.items ?? []} /></section><div className="overview-grid lower"><section className="card"><div className="card-title"><h2>最近操作</h2><a href="#operations">全部任务 ↗</a></div>{!o.data?.items.length ? <Empty>还没有操作任务，前往主机资产体验服务重启</Empty> : o.data.items.slice(0, 4).map(op => <div className="activity" key={op.id}><span className="activity-icon">↻</span><div><b>systemd 服务重启</b><small>{op.reason}</small></div><Badge value={op.status} /></div>)}</section><section className="card"><div className="card-title"><h2>平台动态</h2><a href="#audit">审计日志 ↗</a></div>{a.data?.items.slice(0, 4).map(e => <div className="activity" key={e.id}><span className="activity-icon green">✓</span><div><b>{e.summary}</b><small>{time(e.occurredAt)}</small></div></div>)}</section></div></>;
 }
-function HostTable({ hosts, onSelect }: { hosts: Host[]; onSelect?: (h: Host) => void }) { return <div className="table-wrap"><table><thead><tr><th>主机名称</th><th>状态</th><th>操作系统 / 架构</th><th>能力</th><th>最近心跳</th><th /></tr></thead><tbody>{hosts.map((h, i) => <tr key={h.id}><td><div className="host-name"><span className={`host-icon ${i % 2 ? 'purple' : 'blue'}`}>▤</span><div><b>{h.hostname}</b><small className="mono">{h.id.slice(0, 8)}</small></div></div></td><td><Badge value={h.status} /></td><td>{h.os ?? '未知'} <span className="muted">/ {h.arch ?? '未知'}</span></td><td>{h.capabilities.length ? h.capabilities.map(capability => <span className="chip" key={capability}>{capability}</span>) : <span className="muted">—</span>}</td><td className="muted">{time(h.lastSeenAt)}</td><td>{onSelect ? <button className="link" onClick={() => onSelect(h)}>查看详情 →</button> : <a href="#hosts">详情 ↗</a>}</td></tr>)}</tbody></table>{!hosts.length && <Empty>没有符合条件的主机</Empty>}</div>; }
+function HostTable({ hosts, onSelect }: { hosts: Host[]; onSelect?: (h: Host) => void }) { return <div className="table-wrap"><table><thead><tr><th>主机名称</th><th>状态</th><th>操作系统 / 架构</th><th>最近心跳</th><th /></tr></thead><tbody>{hosts.map((h, i) => <tr key={h.id}><td><div className="host-name"><span className={`host-icon ${i % 2 ? 'purple' : 'blue'}`}>▤</span><div><b>{h.hostname}</b><small className="mono">{h.id.slice(0, 8)}</small></div></div></td><td><Badge value={h.status} /></td><td>{h.os ?? '未知'} <span className="muted">/ {h.arch ?? '未知'}</span></td><td className="muted">{time(h.lastSeenAt)}</td><td>{onSelect ? <button className="link" onClick={() => onSelect(h)}>查看详情 →</button> : <a href="#hosts">详情 ↗</a>}</td></tr>)}</tbody></table>{!hosts.length && <Empty>没有符合条件的主机</Empty>}</div>; }
 function shellQuote(value: string) { return "'" + value.replaceAll("'", "'\\''") + "'"; }
 function enrollmentInstallCommand(enrollment: AgentEnrollmentCreated) {
  const origin = window.location.origin; const fingerprint = enrollment.controllerFingerprint.toLowerCase();
@@ -72,7 +72,6 @@ function HostEnrollmentDialog({ close, onCreated }: { close: () => void; onCreat
  const [error, setError] = useState('');
  const [busy, setBusy] = useState(false);
  const [copied, setCopied] = useState(false);
- const [sshAlias, setSshAlias] = useState('');
  const [sshReason, setSshReason] = useState('');
  const [sshBusy, setSshBusy] = useState(false);
  const [sshError, setSshError] = useState('');
@@ -171,7 +170,7 @@ function HostEnrollmentDialog({ close, onCreated }: { close: () => void; onCreat
    await api('/auth/csrf');
    const result = await api<Operation>(`/hosts/${enrollment.hostId}/ssh/agent/install`, 'POST', {
     enrollmentId: enrollment.enrollmentId, agentId: enrollment.agentId,
-    alias: directTrusted ? null : sshAlias.trim(), token: enrollment.token, reason: sshReason.trim(),
+    token: enrollment.token, reason: sshReason.trim(),
    }, { 'Idempotency-Key': key }, true);
    setSshOperation(result.data);
    if (result.data.status === 'FAILED') setSshKey('');
@@ -180,7 +179,7 @@ function HostEnrollmentDialog({ close, onCreated }: { close: () => void; onCreat
  }
 
  const directSshFields = <>
-  <p className="muted">可选：直接保存目标地址和认证凭据，完成 host key 人工核对后可在此安装 Agent，无需在 Core 配置 SSH alias。</p>
+  <p className="muted">保存目标地址和认证凭据，完成 host key 人工核对后可在此安装 Agent。</p>
   <Field label="SSH 地址（可选）"><input maxLength={253} value={directAddress} onChange={e => setDirectAddress(e.target.value)} placeholder="例如 192.0.2.10 或 host.example.net" /></Field>
   {directAddress.trim() && <>
    <div className="ssh-form-grid"><Field label="端口"><input type="number" min="1" max="65535" required value={directPort} onChange={e => setDirectPort(e.target.value)} /></Field><Field label="用户名"><input required maxLength={128} value={directUsername} onChange={e => setDirectUsername(e.target.value)} /></Field></div>
@@ -196,7 +195,7 @@ function HostEnrollmentDialog({ close, onCreated }: { close: () => void; onCreat
    <p className="muted">为目标主机创建一条资产记录和 15 分钟有效的一次性接入码。首次心跳会自动补齐主机名、系统和架构。</p>
    <Field label="资产名称"><input autoFocus required maxLength={255} value={hostname} onChange={e => setHostname(e.target.value)} placeholder="例如 node-01" /></Field>
    <section className="restart-form"><h3>SSH 直连（可选）</h3>{directSshFields}</section>
-   <div className="alert">Agent 使用独立 mTLS 证书接入并上报主机清单、systemd 服务观测；Helper 默认按主机 root 配置的白名单限制操作，也可通过统一模式配置临时关闭名单匹配。</div>
+   <div className="alert">Agent 使用独立 mTLS 证书接入并上报主机清单、systemd 服务观测；Helper 只接受固定类型操作并校验参数与目标路径。</div>
    {error && <div className="alert error" role="alert">{error}</div>}
    <div className="form-actions"><button type="button" className="secondary" onClick={close}>取消</button><button className="primary" disabled={busy || !hostname.trim()}>{busy ? '正在创建接入码…' : '生成安装命令'}</button></div>
   </form> : <div className="enrollment-result">
@@ -209,12 +208,11 @@ function HostEnrollmentDialog({ close, onCreated }: { close: () => void; onCreat
     {directConfigured && <section className="restart-form"><h3>验证目标 SSH host key</h3><div className="alert">已加密保存：{directUsername}@{directAddress}:{directPort} · {directAuthMethod}</div><p className="muted">指纹探测阶段不会发送 SSH 密码或私钥；请通过可信渠道核对后再确认。</p><Field label="指纹核对原因"><input required maxLength={500} value={directProbeReason} onChange={e => setDirectProbeReason(e.target.value)} placeholder="说明为什么要连接此主机" /></Field><div className="form-actions"><button type="button" className="secondary" disabled={directBusy || !directProbeReason.trim()} onClick={() => void probeDirectSsh()}>{directBusy ? '探测中…' : '探测 host key 指纹'}</button></div>{directProbe && <div className="alert">目标 host key SHA-256：<code className="mono">{directProbe.fingerprint}</code>{directTrusted ? ' · 已信任' : ' · 请先核对指纹'}</div>}{directProbe?.requiresConfirmation && <button type="button" className="secondary" disabled={directBusy} onClick={() => void trustDirectSsh()}>我已核对并信任此 host key</button>}</section>}
     <form className="ssh-install-form" onSubmit={installOverSsh}>
      <h3>通过受限 SSH 初始化</h3>
-     <p className="muted">使用已核对 host key 的资产直连配置，或兼容 root-managed SSH alias；Core 必须配置 HTTPS 公网 Origin。未知结果需先到操作任务对账。</p>
-     {!directTrusted && <Field label="SSH 别名"><input required={!directAddress.trim()} maxLength={100} value={sshAlias} onChange={e => setSshAlias(e.target.value)} placeholder="例如 host-b" /></Field>}
+     <p className="muted">使用已核对 host key 的资产 SSH 配置；Core 必须配置 HTTPS 公网 Origin。未知结果需先到操作任务对账。</p>
      <Field label="SSH 初始化原因"><input required maxLength={500} value={sshReason} onChange={e => setSshReason(e.target.value)} placeholder="说明授权的初始化目的" /></Field>
      {sshError && <div className="alert error" role="alert">{sshError}</div>}
      {sshOperation && <div className="alert" role="status">SSH 初始化任务 {labels[sshOperation.status] ?? sshOperation.status} · {sshOperation.id}{sshOperation.status === 'UNKNOWN' ? '；请对账后再处理接入码。' : ''}</div>}
-     <div className="form-actions"><button className="primary" disabled={sshBusy || !(directTrusted || (!directAddress.trim() && sshAlias.trim())) || !sshReason.trim() || Boolean(sshOperation && ['RUNNING', 'PENDING', 'UNKNOWN', 'SUCCEEDED'].includes(sshOperation.status))}>{sshBusy ? '正在提交 SSH 初始化…' : '通过 SSH 安装 Agent'}</button></div>
+     <div className="form-actions"><button className="primary" disabled={sshBusy || !directTrusted || !sshReason.trim() || Boolean(sshOperation && ['RUNNING', 'PENDING', 'UNKNOWN', 'SUCCEEDED'].includes(sshOperation.status))}>{sshBusy ? '正在提交 SSH 初始化…' : '通过 SSH 安装 Agent'}</button></div>
     </form>
    </>}
    {isMock && <div className="form-actions"><button className="primary" onClick={close}>完成</button></div>}
@@ -228,6 +226,8 @@ function HostDetail({ host, close, notify }: { host: Host; close: () => void; no
  const installation = useResource<AgentInstallation>(!isMock && currentHost.agentId ? '/agent-installation' : '', 0, true);
  const [maintenance, setMaintenance] = useState<AgentMaintenanceMode>();
  const [servicesOpen, setServicesOpen] = useState(false);
+ const [networkOpen, setNetworkOpen] = useState(false);
+ const [filesOpen, setFilesOpen] = useState(false);
  const selfUpdateReported = agent.data?.capabilities.includes('agent.self_update') ?? false;
  const selfUpdateSupported = selfUpdateReported && agent.data?.status === 'ONLINE' && agent.data.helperStatus === 'AVAILABLE';
  return <div className="modal-backdrop"><section className="drawer">
@@ -236,11 +236,90 @@ function HostDetail({ host, close, notify }: { host: Host; close: () => void; no
   <div className="alert">离线状态来自最近心跳；Helper 状态和 Agent 能力来自最近一次在线观测。</div>
   <h3>Agent 与权限边界</h3>{currentHost.agentId ? <><ResourceState {...agent} />{agent.data && <><dl className="info-list"><div><dt>版本 / 实现</dt><dd>{agent.data.version ?? '未知'} / Rust</dd></div><div><dt>Helper 状态</dt><dd><Badge value={agent.data.helperStatus} /></dd></div><div><dt>已报告能力</dt><dd>{agent.data.capabilities.join(', ') || '—'}</dd></div></dl><div className="agent-maintenance-actions"><button className="secondary" onClick={() => setMaintenance('reinstall')}>重新安装 Agent</button><button className="secondary" onClick={() => setMaintenance('update')}>更新 Agent</button></div></>}</> : <p className="muted">尚未绑定 Agent</p>}
   <section className="systemd-summary"><div><h3>systemd 服务</h3><p className="muted">服务列表、重启和日志查看已收纳到详细视图。</p></div><button type="button" className="secondary" onClick={() => setServicesOpen(true)}>详细</button></section>
+  <section className="systemd-summary"><div><h3>网卡、IP 与路由</h3><p className="muted">查看最近 Agent 心跳采集的接口、地址和路由表快照。</p></div><button type="button" className="secondary" onClick={() => setNetworkOpen(true)}>查看网络</button></section>
+  <section className="systemd-summary"><div><h3>主机文件</h3><p className="muted">在目标主机上浏览和管理 UTF-8 文本文件，操作保留审计记录。</p></div><button type="button" className="secondary" disabled={!agent.data?.capabilities.some(capability => ['file.list', 'file.read', 'file.write', 'file.delete'].includes(capability))} onClick={() => setFilesOpen(true)}>文件管理</button></section>
   <HostSshBastionPanel key={`${host.id}-ssh-bastion`} hostId={host.id} hostName={currentHost.hostname} />
   <SshAccessPanel key={`${host.id}-ssh-rescue`} host={currentHost} notify={notify} />
   {agent.data && <HelperOperationPanel host={currentHost} agent={agent.data} notify={notify} refresh={() => { details.refresh(); agent.refresh(); }} />}
- </section>{servicesOpen && <SystemdServicesDialog host={currentHost} helperStatus={agent.data?.helperStatus} close={() => setServicesOpen(false)} notify={notify} />}{maintenance && <AgentMaintenanceDialog agentId={currentHost.agentId ?? ''} mode={maintenance} installation={installation.data} installationError={installation.error} selfUpdateSupported={selfUpdateSupported} selfUpdateReported={selfUpdateReported} agentStatus={agent.data?.status} helperStatus={agent.data?.helperStatus} close={() => setMaintenance(undefined)} />}</div>;
+ </section>{servicesOpen && <SystemdServicesDialog host={currentHost} helperStatus={agent.data?.helperStatus} close={() => setServicesOpen(false)} notify={notify} />}{networkOpen && <HostNetworkDialog host={currentHost} close={() => setNetworkOpen(false)} />}{filesOpen && agent.data && <HostFileManagerDialog host={currentHost} agent={agent.data} close={() => setFilesOpen(false)} notify={notify} />}{maintenance && <AgentMaintenanceDialog agentId={currentHost.agentId ?? ''} mode={maintenance} installation={installation.data} installationError={installation.error} selfUpdateSupported={selfUpdateSupported} selfUpdateReported={selfUpdateReported} agentStatus={agent.data?.status} helperStatus={agent.data?.helperStatus} close={() => setMaintenance(undefined)} />}</div>;
 }
+function HostNetworkDialog({ host, close }: { host: Host; close: () => void }) {
+ const inventory = useResource<HostNetworkInventory>(`/hosts/${host.id}/network-inventory`, 0, true);
+ const [tab, setTab] = useState('interfaces');
+ const interfaces = inventory.data?.interfaces ?? [];
+ const addresses = interfaces.flatMap(networkInterface => networkInterface.addresses.map(address => ({ ...address, interfaceName: networkInterface.name })));
+ const routes: HostNetworkRoute[] = inventory.data?.routes ?? [];
+ return <SecondaryDrawer title={`${host.hostname} · 网络信息`} description="Agent 每 30 秒通过 iproute2 采集一次；离线时显示最近一次快照。" close={close}>
+  <DrawerTabs label="网络信息分类" value={tab} onChange={setTab} tabs={[["interfaces", "网卡接口"], ["addresses", "IP 地址"], ["routes", "路由表"]]} />
+  <div className="form-actions"><span className="muted">最近采集：{time(inventory.data?.observedAt)}</span><button type="button" className="secondary" onClick={inventory.refresh} disabled={inventory.loading}>↻ 刷新</button></div>
+  <ResourceState {...inventory} />
+  {tab === 'interfaces' && <div className="table-wrap"><table><thead><tr><th>接口</th><th>状态</th><th>MAC</th><th>MTU</th></tr></thead><tbody>{interfaces.map(networkInterface => <tr key={networkInterface.name}><td className="mono">{networkInterface.name}</td><td>{networkInterface.state || '—'}</td><td className="mono">{networkInterface.macAddress || '—'}</td><td>{networkInterface.mtu || '—'}</td></tr>)}</tbody></table>{interfaces.length === 0 && !inventory.loading && <Empty>暂无网卡快照；Agent 可能尚未安装 iproute2 或尚未发送首次心跳。</Empty>}</div>}
+  {tab === 'addresses' && <div className="table-wrap"><table><thead><tr><th>接口</th><th>地址</th><th>族</th><th>前缀</th><th>Scope</th></tr></thead><tbody>{addresses.map((address, index) => <tr key={`${address.interfaceName}-${address.address}-${index}`}><td className="mono">{address.interfaceName}</td><td className="mono">{address.address}</td><td>{address.family === 'inet' ? 'IPv4' : 'IPv6'}</td><td>/{address.prefixLength}</td><td>{address.scope || '—'}</td></tr>)}</tbody></table>{addresses.length === 0 && !inventory.loading && <Empty>没有已观测到的 IP 地址</Empty>}</div>}
+  {tab === 'routes' && <div className="table-wrap"><table><thead><tr><th>目标</th><th>网关</th><th>接口</th><th>表 / 协议</th><th>Metric</th></tr></thead><tbody>{routes.map((route, index) => <tr key={`${route.destination}-${route.interfaceName}-${index}`}><td className="mono">{route.destination}</td><td className="mono">{route.gateway || '直连'}</td><td className="mono">{route.interfaceName || '—'}</td><td>{route.table || '—'} / {route.protocol || '—'}</td><td>{route.metric}</td></tr>)}</tbody></table>{routes.length === 0 && !inventory.loading && <Empty>没有已观测到的路由</Empty>}</div>}
+ </SecondaryDrawer>;
+}
+
+function HostFileManagerDialog({ host, agent, close, notify }: {
+ host: Host; agent: Agent; close: () => void; notify: (message: string) => void;
+}) {
+ const [directoryPath, setDirectoryPath] = useState('/etc');
+ const [filePath, setFilePath] = useState('');
+ const [content, setContent] = useState('');
+ const [reason, setReason] = useState('');
+ const [operationId, setOperationId] = useState('');
+ const [submitted, setSubmitted] = useState<{ capability: HostHelperOperationRequest['capability']; target: string }>();
+ const [busy, setBusy] = useState(false);
+ const [error, setError] = useState('');
+ const operation = useResource<Operation>(operationId ? `/operations/${operationId}` : '', operationId ? 1200 : 0, true);
+ const capabilities = agent.capabilities;
+ const ready = agent.status === 'ONLINE' && agent.helperStatus === 'AVAILABLE';
+ const operationRunning = operation.data && ['PENDING', 'RUNNING', 'UNKNOWN'].includes(operation.data.status);
+ const output = operation.data?.result && 'output' in operation.data.result ? operation.data.result.output : '';
+ let listing: HostFileListing | undefined;
+ if (submitted?.capability === 'file.list' && operation.data?.status === 'SUCCEEDED' && output) {
+  try { listing = JSON.parse(output) as HostFileListing; } catch { listing = undefined; }
+ }
+ useEffect(() => {
+  if (submitted?.capability === 'file.read' && operation.data?.status === 'SUCCEEDED' && output) {
+   setContent(output); setFilePath(submitted.target);
+  }
+ }, [operation.data?.id, operation.data?.status, operation.data?.updatedAt, output, submitted]);
+ async function run(capability: 'file.list' | 'file.read' | 'file.write' | 'file.delete', target: string, payload?: { content: string }) {
+  if (!ready || !capabilities.includes(capability)) return;
+  if (!reason.trim()) { setError('请填写本次文件操作原因'); return; }
+  setBusy(true); setError('');
+  const request: HostHelperOperationRequest = {
+   capability, target, reason: reason.trim(), timeoutSeconds: 60, expectedGeneration: host.generation,
+   ...(payload ? { payload } : {}),
+  };
+  try {
+   const result = await api<Operation>(`/hosts/${host.id}/operations`, 'POST', request, { 'Idempotency-Key': createUuid() }, true);
+   setSubmitted({ capability, target }); setOperationId(result.data.id);
+   notify(`${isMock ? '模拟' : ''}文件操作任务已提交`);
+  } catch (cause) { setError((cause as Error).message); }
+  finally { setBusy(false); }
+ }
+ function parentDirectory(path: string) {
+  if (path === '/') return '/';
+  const parent = path.replace(/\/$/, '').split('/').slice(0, -1).join('/');
+  return parent || '/';
+ }
+ const missingCapabilities = (['file.list', 'file.read', 'file.write', 'file.delete'] as const).filter(capability => !capabilities.includes(capability));
+ return <SecondaryDrawer title={`${host.hostname} · 文件管理`} description="Root Helper 通过目标主机文件系统操作；路径不允许跳转组件或符号链接。读文件内容会保存在操作任务结果中。" close={close}>
+  {!ready && <div className="alert">Agent 或 Helper 当前不可用。</div>}
+  {missingCapabilities.length > 0 && <div className="alert">文件管理能力未上报。请确认主机 Helper 已更新并重新启动 Agent。</div>}
+  <div className="alert">支持普通 UTF-8 文件：单次读取上限 64 KiB，写入上限 32 KiB；仅删除普通文件。写入操作会直接修改目标主机上的文件，请核对路径和内容。</div>
+  <Field label="操作原因"><textarea required maxLength={500} value={reason} onChange={event => setReason(event.target.value)} placeholder="说明本次浏览、读取或修改文件的目的" /></Field>
+  <div className="form-actions"><button type="button" className="secondary" disabled={directoryPath === '/' || busy || Boolean(operationRunning)} onClick={() => { const path = parentDirectory(directoryPath); setDirectoryPath(path); void run('file.list', path); }}>上级目录</button><Field label="目录路径"><input maxLength={4096} value={directoryPath} onChange={event => setDirectoryPath(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void run('file.list', directoryPath); } }} /></Field><button type="button" className="secondary" disabled={busy || Boolean(operationRunning) || !capabilities.includes('file.list')} onClick={() => void run('file.list', directoryPath)}>读取目录</button></div>
+  <ResourceState {...operation} />
+  {operation.data?.error && <div className="alert error">{operation.data.error.message}</div>}
+  {operation.data?.status === 'UNKNOWN' && <div className="alert">文件操作结果尚未确认，请等待 Agent 对账后再继续。</div>}
+  {listing && <div className="table-wrap"><table><thead><tr><th>名称</th><th>类型</th><th>大小</th><th /></tr></thead><tbody>{listing.entries.map(entry => <tr key={entry.name}><td className="mono">{entry.name}</td><td>{entry.kind}</td><td>{entry.sizeBytes == null ? '—' : `${entry.sizeBytes} B`}</td><td>{entry.kind === 'directory' ? <button type="button" className="link" disabled={busy || Boolean(operationRunning)} onClick={() => { const next = listing!.path === '/' ? `/${entry.name}` : `${listing!.path}/${entry.name}`; setDirectoryPath(next); void run('file.list', next); }}>打开目录 →</button> : entry.kind === 'file' ? <button type="button" className="link" disabled={busy || Boolean(operationRunning) || !capabilities.includes('file.read')} onClick={() => void run('file.read', listing!.path === '/' ? `/${entry.name}` : `${listing!.path}/${entry.name}`)}>读取</button> : <span className="muted">不跟随</span>}</td></tr>)}</tbody></table>{listing.entries.length === 0 && <Empty>此目录为空</Empty>}{listing.truncated && <p className="muted">目录超过 200 项，列表已截断。</p>}</div>}
+  <div className="restart-form"><h3>读取、创建或修改文本文件</h3><Field label="绝对文件路径"><input required maxLength={4096} value={filePath} onChange={event => setFilePath(event.target.value)} placeholder="例如 /etc/example.conf" /></Field><Field label="UTF-8 文件内容"><textarea value={content} maxLength={65536} onChange={event => setContent(event.target.value)} rows={12} placeholder="读取现有文件，或输入内容创建一个新文件" /></Field><small className="muted">当前 {new TextEncoder().encode(content).length} 字节 · 保存上限 32 KiB</small><div className="form-actions"><button type="button" className="secondary" disabled={busy || Boolean(operationRunning) || !filePath.startsWith('/') || !capabilities.includes('file.write') || new TextEncoder().encode(content).length > 32768} onClick={() => void run('file.write', filePath, { content })}>保存文件</button><button type="button" className="secondary" disabled={busy || Boolean(operationRunning) || !filePath.startsWith('/') || !capabilities.includes('file.delete')} onClick={() => { if (window.confirm(`确认删除主机文件 ${filePath}？`)) void run('file.delete', filePath); }}>删除文件</button><button type="button" className="secondary" onClick={operation.refresh} disabled={!operationId || operation.loading}>↻ 刷新任务</button></div></div>
+  {error && <div className="alert error" role="alert">{error}</div>}
+ </SecondaryDrawer>;
+}
+
 function SystemdServicesDialog({ host, helperStatus, close, notify }: {
  host: Host; helperStatus?: string; close: () => void; notify: (message: string) => void;
 }) {
@@ -287,15 +366,15 @@ function SystemdServicesDialog({ host, helperStatus, close, notify }: {
  }
  const unavailableMessage = helperStatus !== 'AVAILABLE'
   ? 'Agent 或 root Helper 当前不可用，暂时不能执行服务操作。'
-  : '操作需要目标主机 root 管理员逐项授权：重启写入 /etc/nanpanel/managed/systemd-units.allowlist，日志读取写入 /etc/nanpanel/managed/journal-units.allowlist；每行一个 .service unit。若要临时关闭全部 Helper allowlist 匹配，将统一配置 /etc/nanpanel/managed/allowlist-mode 内容设为 disabled。修改后重启 nanpanel-helper.service 和 nanpanel-agent.service 以刷新授权。';
+  : 'Helper 尚未报告所需的 systemd 操作能力。请确认 Agent 和 Helper 在线，并刷新主机观测。';
  return <div className="modal-backdrop systemd-services-backdrop"><section className="modal systemd-services-modal" role="dialog" aria-modal="true" aria-label={`${host.hostname} systemd 服务`}>
   <div className="card-title"><div><span className="eyebrow">SYSTEMD SERVICES</span><h2>{host.hostname} · systemd 服务</h2><p className="muted">每页最多 25 个服务；操作结果与日志会直接显示在此弹窗。</p></div><button className="icon-button" aria-label="关闭 systemd 服务详情" onClick={close}>×</button></div>
   <div className="systemd-services-content">
    <ResourceState {...services} />
-   {helperStatus !== 'AVAILABLE' || services.data?.items.some(service => service.allowedActions.length < 2) ? <div className="alert systemd-allowlist-hint">{unavailableMessage}</div> : null}
+   {helperStatus !== 'AVAILABLE' || services.data?.items.some(service => service.supportedActions.length < 2) ? <div className="alert systemd-services-hint">{unavailableMessage}</div> : null}
    <div className="table-wrap"><table className="systemd-services-table"><thead><tr><th>Unit</th><th>服务名称</th><th>状态</th><th>最近观测</th><th>操作</th></tr></thead><tbody>{services.data?.items.map(service => {
-    const canRestart = service.allowedActions.includes('RESTART') && helperStatus === 'AVAILABLE' && !service.observationStale && !running;
-    const canReadJournal = service.allowedActions.includes('READ_JOURNAL') && helperStatus === 'AVAILABLE' && !service.observationStale && !running;
+    const canRestart = service.supportedActions.includes('RESTART') && helperStatus === 'AVAILABLE' && !service.observationStale && !running;
+    const canReadJournal = service.supportedActions.includes('READ_JOURNAL') && helperStatus === 'AVAILABLE' && !service.observationStale && !running;
     return <tr key={service.id}><td className="mono">{service.unitName}</td><td>{service.displayName}</td><td><Badge value={service.activeState} />{service.observationStale && <small className="warning">观测已过期</small>}</td><td className="muted">{time(service.observedAt)}</td><td><div className="systemd-service-actions"><button type="button" className="secondary" title={canReadJournal ? '读取此服务日志' : unavailableMessage} disabled={!canReadJournal} onClick={() => void prepare(service, 'READ_JOURNAL')}>查看日志</button><button type="button" className="secondary" title={canRestart ? '重启此服务' : unavailableMessage} disabled={!canRestart} onClick={() => void prepare(service, 'RESTART')}>↻ 重启</button></div></td></tr>;
    })}</tbody></table>{services.data?.items.length === 0 && !services.loading && <Empty>尚无服务观测</Empty>}</div>
    <div className="form-actions systemd-pagination"><button className="secondary" disabled={cursors.length < 2 || services.loading} onClick={() => setCursors(value => value.slice(0, -1))}>上一页</button><span className="muted">第 {cursors.length} 页 · 每页 25 个</span><button className="secondary" disabled={!services.data?.nextCursor || services.loading} onClick={() => { if (services.data?.nextCursor) setCursors(value => [...value, services.data!.nextCursor]); }}>下一页</button><button type="button" className="secondary" onClick={services.refresh} disabled={services.loading}>↻ 刷新</button></div>
@@ -318,15 +397,15 @@ function DrawerTabs({ label, value, onChange, tabs }: {
  return <div className="drawer-tabs" role="tablist" aria-label={label}>{tabs.map(([id, title]) => <button key={id} type="button" role="tab" aria-selected={value === id} className={value === id ? 'active' : ''} onClick={() => onChange(id)}>{title}</button>)}</div>;
 }
 function SshAccessPanel({ host, notify }: { host: Host; notify: (s: string) => void }) {
- const [alias, setAlias] = useState(''); const [reason, setReason] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
+ const [reason, setReason] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState('');
  const [unitName, setUnitName] = useState(''); const [restartReason, setRestartReason] = useState(''); const [restartBusy, setRestartBusy] = useState(false); const [restartError, setRestartError] = useState(''); const [restartKey, setRestartKey] = useState(createUuid());
  const [diagnosticReason, setDiagnosticReason] = useState(''); const [journalLines, setJournalLines] = useState('50'); const [diagnosticBusy, setDiagnosticBusy] = useState(false); const [diagnosticError, setDiagnosticError] = useState(''); const [status, setStatus] = useState<SshSystemdStatusResult>(); const [journal, setJournal] = useState<SshSystemdJournalResult>();
  const [drawerOpen, setDrawerOpen] = useState(false); const [rescueTab, setRescueTab] = useState('probe');
  async function probe(event: FormEvent) {
   event.preventDefault(); setBusy(true); setError('');
   try {
-   const result = await api<SshProbeResult>(`/hosts/${host.id}/ssh/probe`, 'POST', { alias: alias.trim(), reason }, {}, true);
-   notify(`${isMock ? '模拟' : ''}SSH host key 验证成功：${result.data.alias}`); setReason('');
+   const result = await api<SshProbeResult>(`/hosts/${host.id}/ssh/probe`, 'POST', { reason }, {}, true);
+   notify(`${isMock ? '模拟' : ''}SSH host key 验证成功：${result.data.address}:${result.data.port}`); setReason('');
   } catch (e) { setError((e as Error).message); }
   finally { setBusy(false); }
  }
@@ -354,26 +433,25 @@ function SshAccessPanel({ host, notify }: { host: Host; notify: (s: string) => v
  }
  return <>
   <section className="ssh-entry-card">
-   <div><span className="eyebrow">ALLOWLISTED SSH</span><h3>受限 SSH 救援</h3><p>用于固定别名连通性检查、allowlist systemd 重启和只读诊断；不开放交互式 Shell。</p></div>
+   <div><span className="eyebrow">SSH ACCESS</span><h3>SSH 救援</h3><p>使用主机资产中已确认 host key 的 SSH 配置执行固定服务操作和只读诊断。</p></div>
    <button type="button" className="secondary" onClick={() => setDrawerOpen(true)}>打开救援工具</button>
   </section>
-  {drawerOpen && <SecondaryDrawer title={`${host.hostname} · SSH 救援`} description="这些操作使用主控侧固定 alias 与 allowlist，不读取主机资产中的直连凭据。" close={() => setDrawerOpen(false)}>
+  {drawerOpen && <SecondaryDrawer title={`${host.hostname} · SSH 救援`} description="这些固定操作使用主机资产中加密保存的 SSH 凭据，并校验已确认的 host key。" close={() => setDrawerOpen(false)}>
    <DrawerTabs label="SSH 救援操作" value={rescueTab} onChange={setRescueTab} tabs={[["probe", "连通性探测"], ["restart", "服务重启"], ["diagnostics", "只读诊断"]]} />
    {rescueTab === 'probe' && <form className="restart-form" onSubmit={probe}>
-    <p className="muted">只探测主控 root allowlist 中的别名，强制校验固定 known_hosts，只运行无副作用的 true 命令。SSH 私钥留在主控的 OpenSSH 配置中，不保存到数据库；别名 allowlist 默认为空。</p>
-    <Field label="SSH 别名"><input required maxLength={100} value={alias} onChange={event => setAlias(event.target.value)} placeholder="例如 host-b" /></Field>
+    <p className="muted">只使用资产中配置的 SSH 地址、账号和认证信息，校验已确认的 host key，并运行无副作用的 true 命令。</p>
     <Field label="SSH 探测原因"><textarea required maxLength={500} value={reason} onChange={event => setReason(event.target.value)} placeholder="记录本次 SSH 连通性检查的原因" /></Field>
     {error && <div className="alert error" role="alert">{error}</div>}
-    <div className="form-actions"><button className="primary" disabled={busy || !alias.trim() || !reason.trim()}>{busy ? '正在验证…' : '验证 SSH 通道'}</button></div>
+    <div className="form-actions"><button className="primary" disabled={busy || !reason.trim()}>{busy ? '正在验证…' : '验证 SSH 通道'}</button></div>
    </form>}
    {rescueTab === 'restart' && <form className="restart-form" onSubmit={restart}>
-    <p className="muted">只执行固定的 systemctl restart 和 active 状态校验。unit 必须由 Core 主机上的 root 管理员写入 /etc/nanpanel/ssh-units.allowlist；默认无授权项，不开放 SSH shell。</p>
-    <Field label="allowlist systemd unit"><input required maxLength={256} value={unitName} onChange={event => setUnitName(event.target.value)} placeholder="例如 nanpanel-agent.service" /></Field>
+    <p className="muted">仅执行固定的 systemctl restart 和 active 状态校验，操作结果与原因会写入审计。</p>
+    <Field label="systemd unit"><input required maxLength={256} value={unitName} onChange={event => setUnitName(event.target.value)} placeholder="例如 nanpanel-agent.service" /></Field>
     <Field label="SSH 救援原因"><textarea required maxLength={500} value={restartReason} onChange={event => setRestartReason(event.target.value)} placeholder="记录本次 SSH 救援原因" /></Field>
     {restartError && <div className="alert error" role="alert">{restartError}</div>}
-    <div className="form-actions"><button className="primary" disabled={restartBusy || !unitName.trim() || !restartReason.trim()}>{restartBusy ? '正在执行…' : '重启 allowlist 服务'}</button></div>
+    <div className="form-actions"><button className="primary" disabled={restartBusy || !unitName.trim() || !restartReason.trim()}>{restartBusy ? '正在执行…' : '重启服务'}</button></div>
    </form>}
-   {rescueTab === 'diagnostics' && <section className="restart-form"><h4>SSH 只读诊断</h4><p className="muted">读取固定 systemctl 状态或最多 100 行 journal。unit 必须显式列入主控 root 管理的 host-bound SSH allowlist；命令输出有字节和时间上限，内容不会写入审计摘要。</p>
+   {rescueTab === 'diagnostics' && <section className="restart-form"><h4>SSH 只读诊断</h4><p className="muted">读取固定 systemctl 状态或最多 100 行 journal。命令输出有字节和时间上限，内容不会写入审计摘要。</p>
     <Field label="SSH 诊断 unit"><input required maxLength={256} value={unitName} onChange={event => setUnitName(event.target.value)} placeholder="例如 nanpanel-agent.service" /></Field>
     <Field label="日志行数"><input type="number" min="1" max="100" value={journalLines} onChange={event => setJournalLines(event.target.value)} /></Field>
     <Field label="SSH 诊断原因"><textarea required maxLength={500} value={diagnosticReason} onChange={event => setDiagnosticReason(event.target.value)} placeholder="说明读取服务状态或日志的目的" /></Field>
@@ -602,16 +680,17 @@ function BastionReplay({ session, items, commands, close }: { session: BastionSe
  return <div className="modal-backdrop bastion-terminal-backdrop"><section className="modal bastion-terminal-modal"><div className="card-title"><div><span className="eyebrow">BASTION RECORDING</span><h2>{session.targetUsername}@{session.targetAddress}:{session.targetPort}</h2></div><button className="icon-button" onClick={close}>×</button></div><div className="bastion-terminal bastion-replay-terminal" ref={terminalElement} />{commands && <ol className="bastion-command-list">{commands.map(command => <li key={command.sequence}><time>{time(command.occurredAt)}</time><code>{command.command}</code></li>)}</ol>}<div className="form-actions"><button className="secondary" onClick={close}>关闭回放</button></div></section></div>;
 }
 function HelperOperationPanel({ host, agent, notify, refresh }: { host: Host; agent: Agent; notify: (s: string) => void; refresh: () => void }) {
- const actionLabels: Record<HostHelperOperationRequest['capability'], string> = {
+ type StandardCapability = Exclude<HostHelperOperationRequest['capability'], 'file.list' | 'file.read' | 'file.write' | 'file.delete'>;
+ const actionLabels: Record<StandardCapability, string> = {
   'package.install': '安装软件包', 'file.write.protected': '写入受保护目录文件',
   'container.list': '列出容器', 'container.logs': '读取容器日志',
   'container.start': '启动容器', 'container.stop': '停止容器',
   'container.deploy': '部署容器', 'network.firewall.expose': '临时开放防火墙端口'
  };
- const supported = (['package.install', 'file.write.protected', 'container.list', 'container.logs', 'container.start', 'container.stop', 'container.deploy', 'network.firewall.expose'] as const)
+ const supported = (['package.install', 'file.write.protected', 'container.list', 'container.logs', 'container.start', 'container.stop', 'container.deploy', 'network.firewall.expose'] as const satisfies readonly StandardCapability[])
   .filter(capability => agent.capabilities.includes(capability));
  const helperReady = agent.status === 'ONLINE' && agent.helperStatus === 'AVAILABLE';
- const [capability, setCapability] = useState<HostHelperOperationRequest['capability']>(supported[0] ?? 'container.list');
+ const [capability, setCapability] = useState<StandardCapability>(supported[0] ?? 'container.list');
  const [target, setTarget] = useState(''); const [packages, setPackages] = useState(''); const [content, setContent] = useState(''); const [rollbackSeconds, setRollbackSeconds] = useState('90');
  const [image, setImage] = useState('nginx:1.27'); const [hostPort, setHostPort] = useState(''); const [containerPort, setContainerPort] = useState('');
  const [firewallInterface, setFirewallInterface] = useState(''); const [firewallProtocol, setFirewallProtocol] = useState<'tcp' | 'udp'>('tcp'); const [firewallPort, setFirewallPort] = useState('');
@@ -633,18 +712,18 @@ function HelperOperationPanel({ host, agent, notify, refresh }: { host: Host; ag
   } catch (e) { setError((e as Error).message); }
   finally { setBusy(false); }
  }
- if (supported.length === 0) return <><h3>Helper 主机操作</h3><p className="muted">主机尚未上报可用操作。allowlist 默认逐项限制，可由 root 在 /etc/nanpanel/managed/allowlist-mode 中设置 disabled；容器和防火墙还需要对应运行时及系统工具。</p></>;
+ if (supported.length === 0) return <><h3>Helper 主机操作</h3><p className="muted">主机尚未上报可用操作。请确认 Agent 与 Helper 在线；容器和防火墙操作还需要对应运行时及系统工具。</p></>;
  const deploymentPortsMismatch = Boolean(hostPort.trim()) !== Boolean(containerPort.trim());
  return <><h3>Helper 主机操作</h3><form className="restart-form" onSubmit={submit}>
-  <p className="muted">操作通过固定 Helper 能力执行，不开放任意命令或路径。allowlist 默认逐项限制；主机 root 可在 /etc/nanpanel/managed/allowlist-mode 中设置 disabled 关闭全部 Helper allowlist 匹配。固定参数校验、受保护目录、容器资源限制和防火墙自动回滚仍生效。</p>
-  <Field label="操作类型"><select value={capability} onChange={event => { setCapability(event.target.value as HostHelperOperationRequest['capability']); setKey(createUuid()); setError(''); }}>
+  <p className="muted">操作通过固定 Helper 能力执行，不开放任意命令。Helper 校验操作类型、参数和文件路径，并保留容器资源限制与防火墙自动回滚。</p>
+  <Field label="操作类型"><select value={capability} onChange={event => { setCapability(event.target.value as StandardCapability); setKey(createUuid()); setError(''); }}>
    {supported.map(item => <option key={item} value={item}>{actionLabels[item]}</option>)}
   </select></Field>
-  {needsTarget && <Field label={capability === 'file.write.protected' ? '文件名' : capability === 'network.firewall.expose' ? '规则名（受限模式需匹配授权项）' : '容器名（受限模式需匹配授权项）'}><input required maxLength={128} value={target} onChange={event => setTarget(event.target.value)} placeholder={capability === 'file.write.protected' ? '例如 app.conf' : capability === 'network.firewall.expose' ? '例如 ssh-test' : '例如 web-gateway'} /></Field>}
+  {needsTarget && <Field label={capability === 'file.write.protected' ? '文件名' : capability === 'network.firewall.expose' ? '规则名' : '容器名'}><input required maxLength={128} value={target} onChange={event => setTarget(event.target.value)} placeholder={capability === 'file.write.protected' ? '例如 app.conf' : capability === 'network.firewall.expose' ? '例如 ssh-test' : '例如 web-gateway'} /></Field>}
   {capability === 'package.install' && <Field label="软件包名（逗号分隔）"><input required maxLength={512} value={packages} onChange={event => setPackages(event.target.value)} placeholder="例如 curl, jq" /></Field>}
   {capability === 'file.write.protected' && <Field label="文件内容"><textarea required maxLength={32768} value={content} onChange={event => setContent(event.target.value)} placeholder="最多 32 KiB；写入主机 root 管理的固定目录" /></Field>}
-  {capability === 'container.deploy' && <><Field label="容器镜像"><input required maxLength={255} pattern="[A-Za-z0-9][A-Za-z0-9._:/@-]{0,254}" value={image} onChange={event => setImage(event.target.value)} placeholder="例如 nginx:1.27" /></Field><div className="ssh-form-grid"><Field label="Loopback 主机端口（可选）"><input type="number" min={1} max={65535} value={hostPort} onChange={event => setHostPort(event.target.value)} /></Field><Field label="容器端口（可选）"><input type="number" min={1} max={65535} value={containerPort} onChange={event => setContainerPort(event.target.value)} /></Field></div><small className="muted">两个端口必须同时填写或留空；端口发布仍仅绑定 127.0.0.1。受限模式下镜像和端口必须匹配主机授权规格。</small></>}
-  {capability === 'network.firewall.expose' && <><div className="ssh-form-grid"><Field label="网络接口"><input required maxLength={15} pattern="[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}" value={firewallInterface} onChange={event => setFirewallInterface(event.target.value)} placeholder="例如 eth0" /></Field><Field label="协议"><select value={firewallProtocol} onChange={event => setFirewallProtocol(event.target.value as 'tcp' | 'udp')}><option value="tcp">TCP</option><option value="udp">UDP</option></select></Field></div><Field label="端口"><input required type="number" min={1} max={65535} step={1} value={firewallPort} onChange={event => setFirewallPort(event.target.value)} /></Field><Field label="自动回滚秒数"><input required type="number" min={30} max={300} step={1} value={rollbackSeconds} onChange={event => setRollbackSeconds(event.target.value)} /><small className="muted">临时添加接口/协议/端口规则，执行前先挂载 systemd 定时回滚；受限模式下参数必须匹配主机授权项。</small></Field></>}
+  {capability === 'container.deploy' && <><Field label="容器镜像"><input required maxLength={255} pattern="[A-Za-z0-9][A-Za-z0-9._:/@-]{0,254}" value={image} onChange={event => setImage(event.target.value)} placeholder="例如 nginx:1.27" /></Field><div className="ssh-form-grid"><Field label="Loopback 主机端口（可选）"><input type="number" min={1} max={65535} value={hostPort} onChange={event => setHostPort(event.target.value)} /></Field><Field label="容器端口（可选）"><input type="number" min={1} max={65535} value={containerPort} onChange={event => setContainerPort(event.target.value)} /></Field></div><small className="muted">两个端口必须同时填写或留空；端口发布仍仅绑定 127.0.0.1。镜像和端口受固定参数校验与容器资源限制约束。</small></>}
+  {capability === 'network.firewall.expose' && <><div className="ssh-form-grid"><Field label="网络接口"><input required maxLength={15} pattern="[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}" value={firewallInterface} onChange={event => setFirewallInterface(event.target.value)} placeholder="例如 eth0" /></Field><Field label="协议"><select value={firewallProtocol} onChange={event => setFirewallProtocol(event.target.value as 'tcp' | 'udp')}><option value="tcp">TCP</option><option value="udp">UDP</option></select></Field></div><Field label="端口"><input required type="number" min={1} max={65535} step={1} value={firewallPort} onChange={event => setFirewallPort(event.target.value)} /></Field><Field label="自动回滚秒数"><input required type="number" min={30} max={300} step={1} value={rollbackSeconds} onChange={event => setRollbackSeconds(event.target.value)} /><small className="muted">临时添加接口/协议/端口规则，执行前先挂载 systemd 定时回滚；系统会在执行前校验参数，并自动回滚临时规则。</small></Field></>}
   <Field label="操作原因"><textarea required maxLength={500} value={reason} onChange={event => setReason(event.target.value)} placeholder="记录本次运维操作的原因" /></Field>
   {error && <div className="alert error" role="alert">{error}</div>}
   <div className="form-actions"><span className="muted">主机版本 {host.generation} · 截止 60–300 秒</span><button className="primary" disabled={busy || !helperReady || !reason.trim() || (needsTarget && !target.trim()) || (capability === 'container.deploy' && (!image.trim() || deploymentPortsMismatch))}>{busy ? '正在下发…' : '提交 Helper 操作'}</button></div>

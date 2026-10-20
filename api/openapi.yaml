@@ -2,7 +2,7 @@ openapi: 3.1.1
 info:
   title: NaNPanel 管理 API
   version: 0.1.0-draft.2
-  description: 契约优先的 Web 平台 API。管理操作使用 HttpOnly Cookie 会话和写请求 CSRF；Agent 使用独立的一次性接入码、客户端证书和 mTLS/gRPC。除 host-bound alias 管理外，主机资产可保存 AES-GCM 加密的直连 SSH 密码或私钥，并支持指纹确认后自动安装 Agent。管理员可开启经一次性 WebSocket 票据授权的交互式 SSH 堡垒 Shell；会话、命令行和有界终端录像独立持久化。Agent/Helper 操作 allowlist 默认逐项生效，主机 root 可通过统一 allowlist-mode 配置临时关闭；Core 侧 SSH alias/unit 管理仍使用独立 allowlist。ADR-011 安装时签名备用名单已实现；真实 DNS/故障验收仍待完成。
+  description: 契约优先的 Web 平台 API。管理操作使用 HttpOnly Cookie 会话和写请求 CSRF；Agent 使用独立的一次性接入码、客户端证书和 mTLS/gRPC。主机资产保存 AES-GCM 加密的 SSH 密码或私钥，确认 host key 后可固定安装 Agent，并可开启经一次性 WebSocket 票据授权的交互式 SSH 堡垒 Shell；会话、命令行和有界终端录像独立持久化。Helper 暴露固定类型操作并校验输入参数、目标路径和运行条件；Core 使用用户权限、主机身份校验、审计及幂等任务管理控制操作。不接收任意 Helper 命令。Agent 安装时签名的故障切换端点清单已实现；真实 DNS/故障验收仍待完成。
   x-status: draft
 servers:
 - url: http://127.0.0.1:8080
@@ -19,7 +19,7 @@ tags:
 - name: SystemServices
   description: 主机 systemd 服务管理
 - name: SshAccess
-  description: root allowlist 管理的 SSH 探测及固定 systemd 恢复操作
+  description: 基于主机资产 SSH 配置执行的固定探测与 systemd 操作
 - name: SshBastion
   description: 主机资产 SSH 凭据、host key 信任和可审计堡垒终端
 - name: Operations
@@ -177,6 +177,32 @@ paths:
           $ref: '#/components/responses/InternalError'
         '404':
           $ref: '#/components/responses/NotFound'
+  /api/v1/hosts/{hostId}/network-inventory:
+    parameters:
+    - $ref: '#/components/parameters/HostId'
+    get:
+      tags: [Hosts]
+      operationId: getHostNetworkInventory
+      summary: 查询主机网卡、IP 地址和路由快照
+      description: 返回 Agent 最近一次只读采集的接口、地址和路由表；GET 不触发远程执行。Agent 每 30 秒使用 iproute2 更新快照。尚无采集结果时返回空数组与 null 时间。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 最近一次网络观测。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HostNetworkInventory'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
   /api/v1/agents/{agentId}:
     parameters:
     - $ref: '#/components/parameters/AgentId'
@@ -320,7 +346,7 @@ paths:
                       subState: running
                       generation: 7
                       observedAt: '2026-10-18T12:00:00Z'
-                      allowedActions:
+                      supportedActions:
                       - RESTART
                       observationStale: false
                     nextCursor: null
@@ -370,7 +396,7 @@ paths:
                     subState: running
                     generation: 7
                     observedAt: '2026-10-18T12:00:00Z'
-                    allowedActions:
+                    supportedActions:
                     - RESTART
                     observationStale: false
                 stale:
@@ -383,7 +409,7 @@ paths:
                     subState: null
                     generation: 7
                     observedAt: '2026-10-18T12:00:00Z'
-                    allowedActions: []
+                    supportedActions: []
                     observationStale: true
           headers:
             ETag:
@@ -534,7 +560,7 @@ paths:
       - SystemServices
       operationId: readSystemdJournal
       summary: 查询服务的最近 journal 记录
-      description: 默认仅对 root Helper journal allowlist 中的 unit 开放；主机 root 可通过统一 /etc/nanpanel/managed/allowlist-mode 配置临时关闭所有 Helper allowlist 匹配。Core 检查新鲜观测、Agent/Helper 状态和已报告能力，持久化审计任务后通过 mTLS Agent 路径读取最多 12 行；结果截断并在 Operation.result 中返回。需携带 If-Match 与 Idempotency-Key。查询不会执行任意命令。
+      description: Core 检查新鲜观测、Agent/Helper 状态和已报告能力，持久化审计任务后通过 mTLS Agent 路径读取最多 12 行；结果截断并在 Operation.result 中返回。需携带 If-Match 与 Idempotency-Key。查询不会执行任意命令。
       x-implementation-status: implemented
       parameters:
       - $ref: '#/components/parameters/IdempotencyKey'
@@ -595,8 +621,8 @@ paths:
     post:
       tags: [SshAccess]
       operationId: probeHostSshAccess
-      summary: 使用 root allowlist SSH 别名探测主机可达性
-      description: alias 必须与此 hostId 在 root 管理的 /etc/nanpanel/ssh-aliases.allowlist 中精确绑定；每行格式为 <host-UUID> <alias>，默认为空。Core 不保存私钥或密码；OpenSSH 从 root 管理的固定配置和密钥代理读取凭据，使用固定 known_hosts，强制 BatchMode 与 StrictHostKeyChecking，并只执行固定的 true 命令。操作结果写入审计。此端点只验证连通性，不提供任意 SSH 命令。
+      summary: 使用主机资产 SSH 配置探测主机可达性
+      description: 使用主机资产中 AES-GCM 加密保存且已确认 host key 的 SSH 凭据，执行固定的 true 命令并写入审计。凭据不会出现在操作参数或审计摘要中。此端点只验证连通性，不提供任意 SSH 命令。
       x-implementation-status: implemented
       requestBody:
         required: true
@@ -638,8 +664,8 @@ paths:
     post:
       tags: [SshAccess]
       operationId: restartHostSystemdOverSsh
-      summary: 通过受限 SSH 通道恢复 allowlist systemd unit
-      description: 仅执行固定的 sudo systemctl restart 与 is-active 校验，不接受远程命令文本。hostId 必须绑定 root 管理的 SSH alias，unit 必须在 /etc/nanpanel/ssh-units.allowlist 中以 <host-UUID> <unit.service> 显式授权；文件缺失或为空时默认禁用。强制使用固定 known_hosts、BatchMode、无转发和无 TTY。操作持久化为 Operation 并审计；连接超时或 SSH 返回 255 时置为 UNKNOWN，不得换新幂等键重试。
+      summary: 通过主机资产 SSH 配置恢复 systemd unit
+      description: 仅执行固定的 sudo systemctl restart 与 is-active 校验，不接受远程命令文本。需要主机资产中已确认 host key 的 SSH 凭据；unit 名称必须符合 systemd service 格式。操作持久化为 Operation 并审计；连接超时或 SSH 返回 255 时置为 UNKNOWN，不得换新幂等键重试。
       x-implementation-status: implemented
       parameters:
       - $ref: '#/components/parameters/IdempotencyKey'
@@ -690,8 +716,8 @@ paths:
     post:
       tags: [SshAccess]
       operationId: readHostSystemdStatusOverSsh
-      summary: 通过受限 SSH 读取 allowlist 服务状态
-      description: 仅执行固定 systemctl show 命令，unit 必须同时获 host-bound SSH alias 和 root 管理的 ssh-units.allowlist 授权。SSH 输出限制为 4 KiB，连接超时 10 秒；仅写审计，不创建可执行操作。
+      summary: 通过主机资产 SSH 配置读取 systemd 服务状态
+      description: 仅执行固定 systemctl show 命令，unit 名称必须符合 systemd service 格式。SSH 输出限制为 4 KiB，连接超时 10 秒；仅写审计，不创建可执行操作。
       x-implementation-status: implemented
       requestBody:
         required: true
@@ -731,8 +757,8 @@ paths:
     post:
       tags: [SshAccess]
       operationId: readHostSystemdJournalOverSsh
-      summary: 通过受限 SSH 读取 allowlist 服务日志
-      description: 仅执行固定 journalctl 命令；unit 必须同时获 host-bound SSH alias 和 root 管理 allowlist 授权。请求最多 100 行，响应最多 24 KiB，连接超时 12 秒；日志内容不会写入审计摘要。
+      summary: 通过主机资产 SSH 配置读取 systemd 服务日志
+      description: 仅执行固定 journalctl 命令；unit 名称必须符合 systemd service 格式。请求最多 100 行，响应最多 24 KiB，连接超时 12 秒；日志内容不会写入审计摘要。
       x-implementation-status: implemented
       requestBody:
         required: true
@@ -1115,7 +1141,7 @@ paths:
       tags: [Operations]
       operationId: submitHostHelperOperation
       summary: 提交类型化主机 Helper 操作
-      description: 支持软件包安装、受保护文件原子写入、Docker/Podman 容器操作和临时防火墙规则。Helper allowlist 默认逐项限制；主机 root 可通过统一 /etc/nanpanel/managed/allowlist-mode 配置临时关闭所有 Helper allowlist 匹配。关闭匹配不关闭目标名/参数校验、受保护文件目录、容器运行参数限制、loopback 端口绑定和容器资源上限；网络规则仍先调度 30–300 秒 systemd 自动回滚，并由最小权限工作进程核验。无任意 Shell 或任意路径入口。Core 检查主机版本、Agent 能力、在线状态和 Helper 状态；结果通过 durable Operation 回传。
+      description: 支持软件包安装、受保护文件写入、Docker/Podman 容器操作、临时防火墙规则和主机文件浏览/读写/删除。Helper 校验固定操作类型和参数；不提供任意 Shell。文件管理拒绝 .、.. 和符号链接路径组件，只读取 UTF-8 普通文件（最多 64 KiB），写入最多 32 KiB，删除仅针对普通文件；目录列表最多 200 项。读取的文件内容会出现在 Operation 结果中并留在持久化任务记录里。Core 检查主机版本、Agent 能力、在线状态和 Helper 状态；结果通过 durable Operation 回传。
       x-implementation-status: implemented
       parameters:
       - $ref: '#/components/parameters/IdempotencyKey'
@@ -1126,7 +1152,7 @@ paths:
             schema:
               $ref: '#/components/schemas/HostHelperOperationRequest'
             examples:
-              installAllowlistedPackage:
+              installPackage:
                 value:
                   capability: package.install
                   target: ''
@@ -1135,7 +1161,7 @@ paths:
                   reason: Install a diagnostic utility
                   timeoutSeconds: 300
                   expectedGeneration: 1
-              listAllowedContainers:
+              listContainers:
                 value:
                   capability: container.list
                   target: ''
@@ -2883,6 +2909,93 @@ components:
         createdAt:
           type: string
           format: date-time
+    HostNetworkInventory:
+      type: object
+      additionalProperties: false
+      required: [interfaces, routes, observedAt]
+      properties:
+        interfaces:
+          type: array
+          items:
+            $ref: '#/components/schemas/HostNetworkInterface'
+        routes:
+          type: array
+          items:
+            $ref: '#/components/schemas/HostNetworkRoute'
+        observedAt:
+          type: [string, 'null']
+          format: date-time
+    HostNetworkInterface:
+      type: object
+      additionalProperties: false
+      required: [name, macAddress, mtu, state, addresses]
+      properties:
+        name:
+          type: string
+          maxLength: 15
+        macAddress:
+          type: string
+          maxLength: 32
+        mtu:
+          type: integer
+          format: int64
+          minimum: 0
+        state:
+          type: string
+          maxLength: 32
+        addresses:
+          type: array
+          maxItems: 32
+          items:
+            $ref: '#/components/schemas/HostNetworkAddress'
+    HostNetworkAddress:
+      type: object
+      additionalProperties: false
+      required: [family, address, prefixLength, scope]
+      properties:
+        family:
+          type: string
+          enum: [inet, inet6]
+        address:
+          type: string
+          maxLength: 45
+        prefixLength:
+          type: integer
+          minimum: 0
+          maximum: 128
+        scope:
+          type: string
+          maxLength: 32
+    HostNetworkRoute:
+      type: object
+      additionalProperties: false
+      required: [destination, gateway, interfaceName, protocol, scope, routeType, table, metric]
+      properties:
+        destination:
+          type: string
+          maxLength: 128
+        gateway:
+          type: string
+          maxLength: 45
+        interfaceName:
+          type: string
+          maxLength: 15
+        protocol:
+          type: string
+          maxLength: 32
+        scope:
+          type: string
+          maxLength: 32
+        routeType:
+          type: string
+          maxLength: 32
+        table:
+          type: string
+          maxLength: 64
+        metric:
+          type: integer
+          format: int64
+          minimum: 0
     CreateAgentEnrollmentRequest:
       type: object
       additionalProperties: false
@@ -3085,7 +3198,7 @@ components:
       - subState
       - generation
       - observedAt
-      - allowedActions
+      - supportedActions
       - observationStale
       properties:
         id:
@@ -3119,13 +3232,13 @@ components:
           type: integer
           format: int64
           minimum: 1
-          description: 平台管理配置/权限策略版本；观测状态更新不递增此值。服务重建或授权策略变更须使旧 ETag 失效。
+          description: 主机配置版本；观测状态更新不递增此值。版本变化会使旧 ETag 失效。
         observedAt:
           type:
           - string
           - 'null'
           format: date-time
-        allowedActions:
+        supportedActions:
           type: array
           uniqueItems: true
           items:
@@ -3133,7 +3246,7 @@ components:
             enum:
             - RESTART
             - READ_JOURNAL
-          description: 结合调用者权限与最近能力信息的 UI 提示；执行时必须重新授权。
+          description: 根据 Agent 最近报告的主机级能力与观测新鲜度生成的 UI 提示；执行时仍会校验 Agent、Helper 和主机级能力。
         observationStale:
           type: boolean
           description: true 时仅为历史观测，不能表示当前实际状态。
@@ -3181,14 +3294,19 @@ components:
           - container.stop
           - container.deploy
           - network.firewall.expose
+          - file.list
+          - file.read
+          - file.write
+          - file.delete
         target:
           type: string
-          maxLength: 128
-          description: 容器或网络操作的目标名；文件写入为单一文件名；其余能力为空字符串。allowlist-mode=disabled 时仍要求符合固定名称格式。
+          maxLength: 4096
+          description: 容器或网络操作的目标名；文件管理使用绝对主机路径。路径不得包含 .、.. 或符号链接组件；file.list 可访问 /，其他文件操作须指向普通文件。
         payload:
           oneOf:
           - $ref: '#/components/schemas/PackageInstallPayload'
           - $ref: '#/components/schemas/ProtectedFilePayload'
+          - $ref: '#/components/schemas/HostFileWritePayload'
           - $ref: '#/components/schemas/ContainerDeployPayload'
           - $ref: '#/components/schemas/NetworkFirewallPayload'
           - type: 'null'
@@ -3210,12 +3328,8 @@ components:
     SshProbeRequest:
       type: object
       additionalProperties: false
-      required: [alias, reason]
+      required: [reason]
       properties:
-        alias:
-          type: string
-          pattern: '^[A-Za-z0-9][A-Za-z0-9_.@-]{0,99}$'
-          description: 必须在主控 root 管理的 alias allowlist 中绑定到路径 hostId 的唯一 SSH 别名。
         reason:
           type: string
           minLength: 1
@@ -3230,7 +3344,7 @@ components:
           type: string
           minLength: 1
           maxLength: 253
-          description: IPv4、IPv6 或 DNS 主机名，不包含 SSH alias、用户名或 URL scheme。
+          description: IPv4、IPv6 或 DNS 主机名，不包含用户名或 URL scheme。
         port:
           type: integer
           minimum: 1
@@ -3385,13 +3499,17 @@ components:
     SshProbeResult:
       type: object
       additionalProperties: false
-      required: [hostId, alias, status, verifiedAt, evidence]
+      required: [hostId, address, port, status, verifiedAt, evidence]
       properties:
         hostId:
           type: string
           format: uuid
-        alias:
+        address:
           type: string
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
         status:
           type: string
           const: SUCCEEDED
@@ -3408,7 +3526,7 @@ components:
         unitName:
           type: string
           pattern: '^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,247}\.service$'
-          description: Must exactly match a unit in the root-managed host-bound SSH allowlist.
+          description: Must be a valid systemd service unit name.
         reason:
           type: string
           minLength: 1
@@ -3503,10 +3621,6 @@ components:
         agentId:
           type: string
           format: uuid
-        alias:
-          type: [string, 'null']
-          pattern: '^[A-Za-z0-9][A-Za-z0-9_.@-]{0,99}$'
-          description: Optional legacy SSH alias. Omit or use null to connect through the host asset's saved direct SSH configuration and pinned host key.
         token:
           type: string
           minLength: 40
@@ -3539,6 +3653,45 @@ components:
           type: string
           maxLength: 32768
           description: UTF-8 文件内容；目标文件为 root-managed files 目录内的单层文件。
+    HostFileWritePayload:
+      type: object
+      additionalProperties: false
+      required: [content]
+      properties:
+        content:
+          type: string
+          maxLength: 32768
+          description: UTF-8 文本文件内容，不能包含 NUL 字节。
+    HostFileListing:
+      type: object
+      additionalProperties: false
+      required: [path, entries, truncated]
+      properties:
+        path:
+          type: string
+          maxLength: 4096
+        entries:
+          type: array
+          maxItems: 200
+          items:
+            $ref: '#/components/schemas/HostFileEntry'
+        truncated:
+          type: boolean
+    HostFileEntry:
+      type: object
+      additionalProperties: false
+      required: [name, kind, sizeBytes]
+      properties:
+        name:
+          type: string
+          maxLength: 255
+        kind:
+          type: string
+          enum: [directory, file, symlink, other]
+        sizeBytes:
+          type: [integer, 'null']
+          format: int64
+          minimum: 0
     ContainerDeployPayload:
       type: object
       additionalProperties: false

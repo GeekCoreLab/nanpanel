@@ -21,9 +21,10 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity
 use tracing::{info, warn};
 
 use crate::v1::{
-    AgentMessage, ControlMessage, Heartbeat, OperationResult, RelayMessage, SystemdService,
-    agent_gateway_client::AgentGatewayClient, agent_message::Payload,
-    control_relay_client::ControlRelayClient, relay_message::Payload as RelayPayload,
+    AgentMessage, ControlMessage, Heartbeat, NetworkAddress, NetworkInterface, NetworkRoute,
+    OperationResult, RelayMessage, SystemdService, agent_gateway_client::AgentGatewayClient,
+    agent_message::Payload, control_relay_client::ControlRelayClient,
+    relay_message::Payload as RelayPayload,
 };
 
 use crate::{
@@ -36,6 +37,43 @@ struct HostSnapshot {
     hostname: String,
     os: String,
     arch: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct IpAddressInfo {
+    family: Option<String>,
+    local: Option<String>,
+    prefixlen: Option<u32>,
+    scope: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct IpInterfaceInfo {
+    ifname: Option<String>,
+    address: Option<String>,
+    mtu: Option<u32>,
+    operstate: Option<String>,
+    addr_info: Option<Vec<IpAddressInfo>>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct IpRouteInfo {
+    dst: Option<String>,
+    gateway: Option<String>,
+    dev: Option<String>,
+    protocol: Option<String>,
+    scope: Option<String>,
+    #[serde(rename = "type")]
+    route_type: Option<String>,
+    table: Option<serde_json::Value>,
+    metric: Option<u32>,
+}
+
+#[derive(Clone, Debug)]
+struct NetworkInventory {
+    interfaces: Vec<NetworkInterface>,
+    routes: Vec<NetworkRoute>,
+    observed_at_epoch_ms: i64,
 }
 
 #[derive(Deserialize)]
@@ -420,32 +458,28 @@ async fn connect_once(
     let heartbeat_helper_available = Arc::clone(&helper_available);
     let heartbeat_helper_socket = config.helper_socket.clone();
     let heartbeat_sender = sender.clone();
-    let restart_allowlist = allowed_systemd_restart_units();
-    let journal_allowlist = allowed_systemd_journal_units();
-    let allowlists_disabled = allowlists_disabled();
     let heartbeat_task = tokio::spawn(async move {
         let mut ticker = time::interval(interval);
         ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
-        let mut systemd_services =
-            collect_systemd_services(&restart_allowlist, &journal_allowlist, allowlists_disabled)
-                .await;
+        let mut systemd_services = collect_systemd_services().await;
         let mut systemd_observed_at = systemd_services.as_ref().and_then(|_| epoch_ms().ok());
         let mut systemd_refresh_at = time::Instant::now();
+        let mut network_inventory = collect_network_inventory().await;
+        let mut network_refresh_at = time::Instant::now();
         loop {
             ticker.tick().await;
             if systemd_refresh_at.elapsed() >= Duration::from_secs(30) {
-                systemd_services = collect_systemd_services(
-                    &restart_allowlist,
-                    &journal_allowlist,
-                    allowlists_disabled,
-                )
-                .await;
+                systemd_services = collect_systemd_services().await;
                 systemd_observed_at = if systemd_services.is_some() {
                     epoch_ms().ok()
                 } else {
                     None
                 };
                 systemd_refresh_at = time::Instant::now();
+            }
+            if network_refresh_at.elapsed() >= Duration::from_secs(30) {
+                network_inventory = collect_network_inventory().await;
+                network_refresh_at = time::Instant::now();
             }
             let helper_is_available = helper::status(&heartbeat_helper_socket)
                 .await
@@ -465,6 +499,10 @@ async fn connect_once(
                                     | "systemd.journal.read"
                                     | "package.install"
                                     | "file.write.protected"
+                                    | "file.list"
+                                    | "file.read"
+                                    | "file.write"
+                                    | "file.delete"
                                     | "container.list"
                                     | "container.logs"
                                     | "container.start"
@@ -480,6 +518,9 @@ async fn connect_once(
             }
             if systemd_services.is_some() {
                 capabilities.push("systemd.read".to_owned());
+            }
+            if network_inventory.is_some() {
+                capabilities.push("network.inventory".to_owned());
             }
             let mut sequence_guard = heartbeat_sequence.lock().await;
             *sequence_guard = sequence_guard.saturating_add(1);
@@ -516,14 +557,23 @@ async fn connect_once(
                                     display_name: service.display_name.clone(),
                                     active_state: service.active_state.clone(),
                                     sub_state: service.sub_state.clone(),
-                                    restart_allowed: helper_is_available && service.restart_allowed,
-                                    journal_read_allowed: helper_is_available
-                                        && service.journal_read_allowed,
                                 })
                                 .collect()
                         })
                         .unwrap_or_default(),
                     systemd_observed_at_epoch_ms: systemd_observed_at.unwrap_or_default(),
+                    network_interfaces: network_inventory
+                        .as_ref()
+                        .map(|inventory| inventory.interfaces.clone())
+                        .unwrap_or_default(),
+                    network_routes: network_inventory
+                        .as_ref()
+                        .map(|inventory| inventory.routes.clone())
+                        .unwrap_or_default(),
+                    network_observed_at_epoch_ms: network_inventory
+                        .as_ref()
+                        .map(|inventory| inventory.observed_at_epoch_ms)
+                        .unwrap_or_default(),
                 })),
             };
             if heartbeat_sender.send(message).await.is_err() {
@@ -884,11 +934,7 @@ fn is_direct_dns_fallback_allowed(host: &str, tls_domain: &str) -> bool {
         })
 }
 
-async fn collect_systemd_services(
-    restart_allowlist: &HashSet<String>,
-    journal_allowlist: &HashSet<String>,
-    allowlists_disabled: bool,
-) -> Option<Vec<SystemdService>> {
+async fn collect_systemd_services() -> Option<Vec<SystemdService>> {
     let output = time::timeout(
         Duration::from_secs(3),
         tokio::process::Command::new("systemctl")
@@ -908,20 +954,175 @@ async fn collect_systemd_services(
     if !output.status.success() {
         return None;
     }
-    parse_systemd_services(
-        &output.stdout,
-        restart_allowlist,
-        journal_allowlist,
-        allowlists_disabled,
+    parse_systemd_services(&output.stdout)
+}
+
+async fn collect_network_inventory() -> Option<NetworkInventory> {
+    let addresses = run_ip_json(&["-j", "address", "show"]).await?;
+    let ipv4_routes = run_ip_json(&["-j", "route", "show", "table", "all"]).await?;
+    let ipv6_routes = run_ip_json(&["-j", "-6", "route", "show", "table", "all"]).await?;
+    let interfaces = parse_network_interfaces(&addresses)?;
+    let mut routes = parse_network_routes(&ipv4_routes)?;
+    routes.extend(parse_network_routes(&ipv6_routes)?);
+    Some(NetworkInventory {
+        interfaces,
+        routes: routes.into_iter().take(2048).collect(),
+        observed_at_epoch_ms: epoch_ms().ok()?,
+    })
+}
+
+async fn run_ip_json(arguments: &[&str]) -> Option<Vec<u8>> {
+    let output = time::timeout(
+        Duration::from_secs(3),
+        tokio::process::Command::new("ip")
+            .args(arguments)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() || output.stdout.len() > 256 * 1024 {
+        return None;
+    }
+    Some(output.stdout)
+}
+
+fn parse_network_interfaces(output: &[u8]) -> Option<Vec<NetworkInterface>> {
+    let parsed: Vec<IpInterfaceInfo> = serde_json::from_slice(output).ok()?;
+    if parsed.len() > 128 {
+        return None;
+    }
+    Some(
+        parsed
+            .into_iter()
+            .filter_map(|interface| {
+                let name = interface.ifname?;
+                if !valid_network_interface(&name) {
+                    return None;
+                }
+                let addresses = interface
+                    .addr_info
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|address| {
+                        let family = address.family?;
+                        let local = address.local?;
+                        let parsed_address = local.parse::<std::net::IpAddr>().ok()?;
+                        let prefix_length = address.prefixlen?;
+                        let family_matches = matches!(
+                            (family.as_str(), parsed_address),
+                            ("inet", std::net::IpAddr::V4(_)) | ("inet6", std::net::IpAddr::V6(_))
+                        );
+                        if !family_matches
+                            || prefix_length > if family == "inet" { 32 } else { 128 }
+                            || !valid_short_text(address.scope.as_deref().unwrap_or(""), 32)
+                        {
+                            return None;
+                        }
+                        Some(NetworkAddress {
+                            family,
+                            address: local,
+                            prefix_length,
+                            scope: address.scope.unwrap_or_default(),
+                        })
+                    })
+                    .take(32)
+                    .collect();
+                let mac_address = interface
+                    .address
+                    .filter(|value| value.len() <= 32 && valid_short_text(value, 32))
+                    .unwrap_or_default();
+                let state = interface
+                    .operstate
+                    .filter(|value| valid_short_text(value, 32))
+                    .unwrap_or_default();
+                Some(NetworkInterface {
+                    name,
+                    mac_address,
+                    mtu: interface.mtu.unwrap_or_default(),
+                    state,
+                    addresses,
+                })
+            })
+            .collect(),
     )
 }
 
-fn parse_systemd_services(
-    output: &[u8],
-    restart_allowlist: &HashSet<String>,
-    journal_allowlist: &HashSet<String>,
-    allowlists_disabled: bool,
-) -> Option<Vec<SystemdService>> {
+fn parse_network_routes(output: &[u8]) -> Option<Vec<NetworkRoute>> {
+    let parsed: Vec<IpRouteInfo> = serde_json::from_slice(output).ok()?;
+    if parsed.len() > 2048 {
+        return None;
+    }
+    Some(
+        parsed
+            .into_iter()
+            .filter_map(|route| {
+                let destination = route.dst.unwrap_or_else(|| "default".to_owned());
+                if !valid_route_destination(&destination) {
+                    return None;
+                }
+                let gateway = route.gateway.unwrap_or_default();
+                if !gateway.is_empty() && gateway.parse::<std::net::IpAddr>().is_err() {
+                    return None;
+                }
+                let interface_name = route.dev.unwrap_or_default();
+                if !interface_name.is_empty() && !valid_network_interface(&interface_name) {
+                    return None;
+                }
+                let table = route
+                    .table
+                    .and_then(|value| match value {
+                        serde_json::Value::String(value) => Some(value),
+                        serde_json::Value::Number(value) => Some(value.to_string()),
+                        _ => None,
+                    })
+                    .filter(|value| valid_short_text(value, 64))
+                    .unwrap_or_default();
+                let protocol = route
+                    .protocol
+                    .filter(|value| valid_short_text(value, 32))
+                    .unwrap_or_default();
+                let scope = route
+                    .scope
+                    .filter(|value| valid_short_text(value, 32))
+                    .unwrap_or_default();
+                let route_type = route
+                    .route_type
+                    .filter(|value| valid_short_text(value, 32))
+                    .unwrap_or_default();
+                Some(NetworkRoute {
+                    destination,
+                    gateway,
+                    interface_name,
+                    protocol,
+                    scope,
+                    route_type,
+                    table,
+                    metric: route.metric.unwrap_or_default(),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn valid_short_text(value: &str, max_bytes: usize) -> bool {
+    value.len() <= max_bytes && !value.chars().any(char::is_control)
+}
+
+fn valid_route_destination(value: &str) -> bool {
+    if value == "default" {
+        return true;
+    }
+    let (address, prefix) = value.split_once('/').unwrap_or((value, ""));
+    address.parse::<std::net::IpAddr>().is_ok()
+        && (prefix.is_empty()
+            || prefix
+                .parse::<u8>()
+                .is_ok_and(|bits| bits <= if address.contains(':') { 128 } else { 32 }))
+}
+
+fn parse_systemd_services(output: &[u8]) -> Option<Vec<SystemdService>> {
     let units: serde_json::Value = serde_json::from_slice(output).ok()?;
     let units = units.as_array()?;
     let services = units
@@ -952,10 +1153,6 @@ fn parse_systemd_services(
                 }
                 .to_owned(),
                 sub_state: sub_state.to_owned(),
-                restart_allowed: allowlists_disabled
-                    || unit_name == "nanpanel-agent.service"
-                    || restart_allowlist.contains(unit_name),
-                journal_read_allowed: allowlists_disabled || journal_allowlist.contains(unit_name),
             })
         })
         .take(512)
@@ -1067,45 +1264,6 @@ fn valid_container_image(image: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"._:/@-".contains(&byte))
 }
 
-fn allowed_systemd_restart_units() -> HashSet<String> {
-    let Ok(contents) = std::fs::read_to_string("/etc/nanpanel/managed/systemd-units.allowlist")
-    else {
-        return HashSet::new();
-    };
-    contents
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .filter(|unit| valid_service_unit(unit))
-        .take(128)
-        .map(str::to_owned)
-        .collect()
-}
-
-fn allowed_systemd_journal_units() -> HashSet<String> {
-    let Ok(contents) = std::fs::read_to_string("/etc/nanpanel/managed/journal-units.allowlist")
-    else {
-        return HashSet::new();
-    };
-    contents
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .filter(|unit| valid_service_unit(unit))
-        .take(128)
-        .map(str::to_owned)
-        .collect()
-}
-
-fn allowlists_disabled() -> bool {
-    std::fs::read_to_string("/etc/nanpanel/managed/allowlist-mode")
-        .is_ok_and(|mode| allowlist_mode_is_disabled(&mode))
-}
-
-fn allowlist_mode_is_disabled(mode: &str) -> bool {
-    mode.trim() == "disabled"
-}
-
 async fn send_operation_result(
     sender: &mpsc::Sender<AgentMessage>,
     agent_id: &str,
@@ -1182,6 +1340,42 @@ fn host_snapshot() -> HostSnapshot {
 mod tests {
     use super::*;
     use ring::signature::KeyPair;
+
+    #[test]
+    fn parses_bounded_network_interface_addresses_and_routes() -> Result<()> {
+        let interfaces = parse_network_interfaces(
+            br#"[{"ifname":"eth0","address":"02:00:00:00:00:01","mtu":1500,"operstate":"UP","addr_info":[{"family":"inet","local":"192.0.2.10","prefixlen":24,"scope":"global"},{"family":"inet6","local":"2001:db8::10","prefixlen":64,"scope":"global"}]}]"#,
+        )
+        .context("parse interface fixture")?;
+        assert_eq!(interfaces.len(), 1);
+        assert_eq!(interfaces[0].name, "eth0");
+        assert_eq!(interfaces[0].addresses.len(), 2);
+        assert_eq!(interfaces[0].addresses[0].address, "192.0.2.10");
+        assert_eq!(interfaces[0].addresses[1].family, "inet6");
+
+        let routes = parse_network_routes(
+            br#"[{"dst":"default","gateway":"192.0.2.1","dev":"eth0","protocol":"static","scope":"global","type":"unicast","table":254,"metric":100}]"#,
+        )
+        .context("parse route fixture")?;
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].destination, "default");
+        assert_eq!(routes[0].gateway, "192.0.2.1");
+        assert_eq!(routes[0].table, "254");
+        Ok(())
+    }
+
+    #[test]
+    fn drops_invalid_network_entries_and_rejects_malformed_snapshots() -> Result<()> {
+        let interfaces = parse_network_interfaces(
+            br#"[{"ifname":"bad/name","addr_info":[]},{"ifname":"eth0","addr_info":[{"family":"inet","local":"not-an-ip","prefixlen":24,"scope":"global"}]}]"#,
+        )
+        .context("parse mixed validity fixture")?;
+        assert_eq!(interfaces.len(), 1);
+        assert!(interfaces[0].addresses.is_empty());
+        assert!(parse_network_routes(b"not-json").is_none());
+        assert!(!valid_route_destination("../../etc/passwd"));
+        Ok(())
+    }
 
     #[test]
     fn normalizes_and_bounds_gateway_endpoint_origins() -> Result<()> {
@@ -1287,47 +1481,26 @@ mod tests {
           {"unit":"bad.service;touch /tmp/pwned","description":"bad","active":"active","sub":"running"},
           {"unit":"failed.service","description":"Failed fixture","active":"failed","sub":"failed"}
         ]"#;
-        let services = parse_systemd_services(
-            input,
-            &HashSet::from(["ssh.service".to_owned()]),
-            &HashSet::from(["failed.service".to_owned()]),
-            false,
-        )
-        .ok_or_else(|| anyhow!("valid systemd JSON should parse"))?;
+        let services = parse_systemd_services(input)
+            .ok_or_else(|| anyhow!("valid systemd JSON should parse"))?;
         assert_eq!(services.len(), 2);
         assert_eq!(services[0].unit_name, "ssh.service");
         assert_eq!(services[0].active_state, "ACTIVE");
         assert_eq!(services[0].sub_state, "running");
         assert_eq!(services[1].active_state, "FAILED");
-        assert!(services[0].restart_allowed);
-        assert!(!services[0].journal_read_allowed);
-        assert!(services[1].journal_read_allowed);
-        let unrestricted = parse_systemd_services(input, &HashSet::new(), &HashSet::new(), true)
-            .ok_or_else(|| anyhow!("valid systemd JSON should parse in unrestricted mode"))?;
-        assert!(unrestricted.iter().all(|service| service.restart_allowed));
-        assert!(
-            unrestricted
-                .iter()
-                .all(|service| service.journal_read_allowed)
-        );
+        assert_eq!(services[1].unit_name, "failed.service");
         Ok(())
     }
 
     #[test]
     fn rejects_invalid_systemd_json() {
-        let none = HashSet::new();
-        assert!(parse_systemd_services(b"not-json", &none, &none, false).is_none());
-        assert!(
-            parse_systemd_services(br#"{"unit":"ssh.service"}"#, &none, &none, false).is_none()
-        );
+        assert!(parse_systemd_services(b"not-json").is_none());
+        assert!(parse_systemd_services(br#"{"unit":"ssh.service"}"#).is_none());
         assert!(!valid_service_unit("--help.service"));
-        assert!(!allowlist_mode_is_disabled("restricted\n"));
-        assert!(allowlist_mode_is_disabled("disabled\n"));
-        assert!(!allowlist_mode_is_disabled("DISABLED\n"));
     }
 
     #[test]
-    fn validates_temporary_firewall_control_payload_and_allowlisted_target_shape() {
+    fn validates_temporary_firewall_control_payload_and_target_shape() {
         assert!(valid_control(
             "network.firewall.expose",
             "ssh-test",

@@ -679,7 +679,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn relay_requires_a_specific_core_certificate_allowlist() {
+    fn relay_requires_a_trusted_core_certificate_fingerprint() {
         assert!(Relay::new("r1".into(), "cluster".into(), vec![]).is_err());
         assert!(Relay::new("r1".into(), "cluster".into(), vec!["A".repeat(64)]).is_err());
         assert!(Relay::new("r1".into(), "cluster".into(), vec!["a".repeat(64)]).is_ok());

@@ -61,10 +61,13 @@ public class SystemServiceResource {
     return store.transaction(c -> {
       var hosts = query(c, "SELECT id FROM host WHERE id=?", host);
       if (hosts.isEmpty()) throw fail(404, "NOT_FOUND", "主机不存在");
+      String capabilities = "h.capabilities" +
+          (c.getMetaData().getDatabaseProductName().equalsIgnoreCase("PostgreSQL")
+              ? "::text" : "") + " AS capabilities,";
       var rows = query(c,
           "SELECT s.id,s.host_id,s.unit_name,s.display_name,s.active_state,s.sub_state," +
-              "s.observed_at,h.generation,(SELECT MAX(a.last_seen) FROM agent a " +
-              "WHERE a.host_id=h.id) AS last_seen,s.restart_allowed,s.journal_read_allowed," +
+              "s.observed_at,h.generation," + capabilities +
+              "(SELECT MAX(a.last_seen) FROM agent a WHERE a.host_id=h.id) AS last_seen," +
               "p.host_offline_after_seconds " +
               "FROM system_service_observation s JOIN host h ON h.id=s.host_id " +
               "JOIN platform_settings p ON p.id=1 WHERE s.host_id=?" +
@@ -98,11 +101,14 @@ public class SystemServiceResource {
     UUID host = uuid(hostId, "hostId");
     UUID service = uuid(serviceId, "serviceId");
     return store.transaction(c -> {
+      String capabilities = "h.capabilities" +
+          (c.getMetaData().getDatabaseProductName().equalsIgnoreCase("PostgreSQL")
+              ? "::text" : "") + " AS capabilities,";
       var rows = query(c,
           "SELECT s.id,s.host_id,s.unit_name,s.display_name,s.active_state,s.sub_state," +
-              "s.observed_at,h.generation,(SELECT MAX(a.last_seen) FROM agent a " +
-              "WHERE a.host_id=h.id) AS last_seen,s.restart_allowed,s.journal_read_allowed," +
-              "h.capabilities,p.host_offline_after_seconds " +
+              "s.observed_at,h.generation," + capabilities +
+              "(SELECT MAX(a.last_seen) FROM agent a WHERE a.host_id=h.id) AS last_seen," +
+              "p.host_offline_after_seconds " +
               "FROM system_service_observation s JOIN host h ON h.id=s.host_id " +
               "JOIN platform_settings p ON p.id=1 WHERE s.host_id=? AND s.id=?",
           host, service);
@@ -129,13 +135,25 @@ public class SystemServiceResource {
     value.put("subState", stale ? null : row.get("sub_state"));
     value.put("generation", ((Number)row.get("generation")).longValue());
     value.put("observedAt", observedAt == null ? null : observedAt.toString());
-    boolean restartAllowed = Boolean.TRUE.equals(row.get("restart_allowed"));
-    boolean journalReadAllowed = Boolean.TRUE.equals(row.get("journal_read_allowed"));
-    value.put("allowedActions", stale ? List.of() : java.util.stream.Stream.of(
-        restartAllowed ? "RESTART" : null,
-        journalReadAllowed ? "READ_JOURNAL" : null).filter(java.util.Objects::nonNull).toList());
+    var supportedActions = new java.util.ArrayList<String>();
+    boolean observed = !stale && !"UNKNOWN".equals(row.get("active_state"));
+    if (observed && supports(row, "systemd.restart")) supportedActions.add("RESTART");
+    if (observed && supports(row, "systemd.journal.read")) supportedActions.add("READ_JOURNAL");
+    value.put("supportedActions", List.copyOf(supportedActions));
     value.put("observationStale", stale);
     return value;
+  }
+
+  private boolean supports(Map<String, Object> row, String capability) {
+    try {
+      var capabilities = mapper.readTree(String.valueOf(row.get("capabilities")));
+      if (!capabilities.isArray()) return false;
+      for (var value : capabilities)
+        if (capability.equals(value.asText())) return true;
+      return false;
+    } catch (java.io.IOException e) {
+      return false;
+    }
   }
 
   String etag(Map<String, Object> body) throws Exception {

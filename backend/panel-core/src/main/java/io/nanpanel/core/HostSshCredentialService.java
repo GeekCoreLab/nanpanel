@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
 import java.security.MessageDigest;
@@ -14,13 +16,16 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.Base64;
 import java.util.Collection;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.TimeUnit;
 import javax.crypto.Cipher;
 import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 import org.apache.sshd.client.SshClient;
 import org.apache.sshd.client.session.ClientSession;
+import org.apache.sshd.client.channel.ClientChannelEvent;
 import org.apache.sshd.client.config.hosts.HostConfigEntryResolver;
 import org.apache.sshd.common.NamedResource;
 import org.apache.sshd.common.config.keys.FilePasswordProvider;
@@ -50,6 +55,8 @@ public class HostSshCredentialService {
                            java.time.Instant probedAt) {}
 
   public record Secret(String password, String privateKey, String privateKeyPassphrase) {}
+
+  record CommandResult(int exitCode, boolean timedOut, String output, boolean truncated) {}
 
   public record Connection(SshClient client, ClientSession session) implements AutoCloseable {
     @Override
@@ -227,6 +234,57 @@ public class HostSshCredentialService {
       if (session != null) session.close(true);
       client.stop();
       throw e;
+    }
+  }
+
+  CommandResult execute(HostConfig config, String command, int timeoutSeconds, int outputLimit)
+      throws Exception {
+    BoundedOutputStream output = new BoundedOutputStream(outputLimit);
+    try (Connection connection = connect(config);
+        var channel = connection.session().createExecChannel(command)) {
+      channel.setOut(output);
+      channel.setErr(output);
+      channel.open().verify(timeoutSeconds, TimeUnit.SECONDS);
+      var events = channel.waitFor(EnumSet.of(ClientChannelEvent.CLOSED), timeoutSeconds * 1_000L);
+      if (!events.contains(ClientChannelEvent.CLOSED)) {
+        channel.close(true);
+        return new CommandResult(124, true, output.text(), output.truncated());
+      }
+      Integer exitStatus = channel.getExitStatus();
+      return new CommandResult(exitStatus == null ? 255 : exitStatus, false,
+          output.text(), output.truncated());
+    }
+  }
+
+  private static final class BoundedOutputStream extends OutputStream {
+    private final int maximum;
+    private final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+    private boolean truncated;
+
+    BoundedOutputStream(int maximum) {
+      this.maximum = maximum;
+    }
+
+    @Override
+    public synchronized void write(int value) {
+      if (bytes.size() < maximum) bytes.write(value);
+      else truncated = true;
+    }
+
+    @Override
+    public synchronized void write(byte[] buffer, int offset, int length) {
+      int remaining = maximum - bytes.size();
+      int accepted = Math.min(Math.max(remaining, 0), length);
+      if (accepted > 0) bytes.write(buffer, offset, accepted);
+      if (accepted < length) truncated = true;
+    }
+
+    synchronized String text() {
+      return bytes.toString(StandardCharsets.UTF_8).replace("\r\n", "\n");
+    }
+
+    synchronized boolean truncated() {
+      return truncated;
     }
   }
 

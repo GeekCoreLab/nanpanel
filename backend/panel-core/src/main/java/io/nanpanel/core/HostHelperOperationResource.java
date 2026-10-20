@@ -42,7 +42,8 @@ public class HostHelperOperationResource {
       .connectTimeout(Duration.ofSeconds(2)).build();
   private static final Set<String> CAPABILITIES = Set.of(
       "package.install", "file.write.protected", "container.list", "container.logs",
-      "container.start", "container.stop", "container.deploy", "network.firewall.expose");
+      "container.start", "container.stop", "container.deploy", "network.firewall.expose",
+      "file.list", "file.read", "file.write", "file.delete");
   private static final java.util.regex.Pattern PACKAGE_NAME =
       java.util.regex.Pattern.compile("[A-Za-z0-9][A-Za-z0-9+_.:-]{0,127}");
   private static final java.util.regex.Pattern FILE_NAME =
@@ -274,6 +275,8 @@ public class HostHelperOperationResource {
     boolean validTarget = switch (capability) {
       case "package.install", "container.list" -> target.isEmpty();
       case "file.write.protected" -> FILE_NAME.matcher(target).matches();
+      case "file.list" -> validHostPath(target, true);
+      case "file.read", "file.write", "file.delete" -> validHostPath(target, false);
       case "container.logs", "container.start", "container.stop", "container.deploy" ->
           CONTAINER_NAME.matcher(target).matches();
       case "network.firewall.expose" -> NETWORK_RULE_NAME.matcher(target).matches();
@@ -299,6 +302,16 @@ public class HostHelperOperationResource {
           !content.isTextual() || content.asText().contains("\0") ||
           content.asText().getBytes(StandardCharsets.UTF_8).length > 32 * 1024)
         throw fail(422, "VALIDATION_FAILED", "受保护文件内容无效或超过 32 KiB");
+      return;
+    }
+    if (capability.equals("file.write")) {
+      JsonNode content = payload == null ? null : payload.get("content");
+      if (payload == null || !payload.isObject() || payload.size() != 1 || content == null ||
+          !content.isTextual() || content.asText().chars().anyMatch(character ->
+              Character.isISOControl(character) && character != '\n' && character != '\r' &&
+                  character != '\t') ||
+          content.asText().getBytes(StandardCharsets.UTF_8).length > 32 * 1024)
+        throw fail(422, "VALIDATION_FAILED", "文件内容无效或超过 32 KiB");
       return;
     }
     if (capability.equals("container.deploy") && payload != null && !payload.isNull()) {
@@ -330,7 +343,17 @@ public class HostHelperOperationResource {
       return;
     }
     if (payload != null && !payload.isNull())
-      throw fail(422, "VALIDATION_FAILED", "该容器操作不接受附加参数");
+      throw fail(422, "VALIDATION_FAILED", "该 Helper 操作不接受附加参数");
+  }
+
+  private boolean validHostPath(String target, boolean allowRoot) {
+    if (target == null || target.length() > 4096 || !target.startsWith("/") ||
+        target.chars().anyMatch(Character::isISOControl))
+      return false;
+    if (target.equals("/")) return allowRoot;
+    String[] components = target.substring(1).split("/", -1);
+    return components.length > 0 && java.util.Arrays.stream(components).allMatch(component ->
+        !component.isEmpty() && !component.equals(".") && !component.equals(".."));
   }
 
   private boolean validPort(JsonNode value) {

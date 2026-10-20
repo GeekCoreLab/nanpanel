@@ -1,0 +1,2 @@
+ALTER TABLE system_service_observation DROP COLUMN restart_allowed;
+ALTER TABLE system_service_observation DROP COLUMN journal_read_allowed;

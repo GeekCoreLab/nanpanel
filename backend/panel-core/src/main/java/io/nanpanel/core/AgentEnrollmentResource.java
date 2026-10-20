@@ -4,6 +4,7 @@ import static io.nanpanel.core.AuthResource.fail;
 import static io.nanpanel.core.AuthStore.query;
 import static io.nanpanel.core.AuthStore.update;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.Context;
@@ -58,11 +59,20 @@ public class AgentEnrollmentResource {
       List<String> capabilities,
       String helperStatus,
       Long systemdObservedAtEpochMs,
-      List<SystemdServiceReport> systemdServices) {}
+      List<SystemdServiceReport> systemdServices,
+      Long networkObservedAtEpochMs,
+      List<NetworkInterfaceReport> networkInterfaces,
+      List<NetworkRouteReport> networkRoutes) {}
+  @JsonIgnoreProperties(ignoreUnknown = true)
   public record SystemdServiceReport(String unitName, String displayName,
-                                     String activeState, String subState,
-                                     boolean restartAllowed,
-                                     boolean journalReadAllowed) {}
+                                     String activeState, String subState) {}
+  public record NetworkInterfaceReport(String name, String macAddress, long mtu,
+                                       String state, List<NetworkAddressReport> addresses) {}
+  public record NetworkAddressReport(String family, String address, long prefixLength,
+                                     String scope) {}
+  public record NetworkRouteReport(String destination, String gateway, String interfaceName,
+                                   String protocol, String scope, String routeType,
+                                   String table, long metric) {}
 
   private String actor() {
     @SuppressWarnings("unchecked")

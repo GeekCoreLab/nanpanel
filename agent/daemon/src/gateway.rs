@@ -373,6 +373,41 @@ impl Gateway {
                     capabilities: heartbeat.capabilities,
                     helper_status: heartbeat.helper_status,
                     systemd_observed_at_epoch_ms: heartbeat.systemd_observed_at_epoch_ms,
+                    network_observed_at_epoch_ms: heartbeat.network_observed_at_epoch_ms,
+                    network_interfaces: heartbeat
+                        .network_interfaces
+                        .into_iter()
+                        .map(|interface| NetworkInterfaceReport {
+                            name: interface.name,
+                            mac_address: interface.mac_address,
+                            mtu: interface.mtu,
+                            state: interface.state,
+                            addresses: interface
+                                .addresses
+                                .into_iter()
+                                .map(|address| NetworkAddressReport {
+                                    family: address.family,
+                                    address: address.address,
+                                    prefix_length: address.prefix_length,
+                                    scope: address.scope,
+                                })
+                                .collect(),
+                        })
+                        .collect(),
+                    network_routes: heartbeat
+                        .network_routes
+                        .into_iter()
+                        .map(|route| NetworkRouteReport {
+                            destination: route.destination,
+                            gateway: route.gateway,
+                            interface_name: route.interface_name,
+                            protocol: route.protocol,
+                            scope: route.scope,
+                            route_type: route.route_type,
+                            table: route.table,
+                            metric: route.metric,
+                        })
+                        .collect(),
                     systemd_services: heartbeat
                         .systemd_services
                         .into_iter()
@@ -381,8 +416,6 @@ impl Gateway {
                             display_name: service.display_name,
                             active_state: service.active_state,
                             sub_state: service.sub_state,
-                            restart_allowed: service.restart_allowed,
-                            journal_read_allowed: service.journal_read_allowed,
                         })
                         .collect(),
                 };
@@ -481,6 +514,41 @@ struct HeartbeatReport {
     helper_status: String,
     systemd_observed_at_epoch_ms: i64,
     systemd_services: Vec<SystemdServiceReport>,
+    network_observed_at_epoch_ms: i64,
+    network_interfaces: Vec<NetworkInterfaceReport>,
+    network_routes: Vec<NetworkRouteReport>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NetworkInterfaceReport {
+    name: String,
+    mac_address: String,
+    mtu: u32,
+    state: String,
+    addresses: Vec<NetworkAddressReport>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NetworkAddressReport {
+    family: String,
+    address: String,
+    prefix_length: u32,
+    scope: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NetworkRouteReport {
+    destination: String,
+    gateway: String,
+    interface_name: String,
+    protocol: String,
+    scope: String,
+    route_type: String,
+    table: String,
+    metric: u32,
 }
 
 #[derive(Serialize)]
@@ -490,8 +558,6 @@ struct SystemdServiceReport {
     display_name: String,
     active_state: String,
     sub_state: String,
-    restart_allowed: bool,
-    journal_read_allowed: bool,
 }
 
 #[derive(Serialize)]
@@ -806,6 +872,42 @@ impl AgentGateway for Gateway {
                                     helper_status: heartbeat.helper_status,
                                     systemd_observed_at_epoch_ms: heartbeat
                                         .systemd_observed_at_epoch_ms,
+                                    network_observed_at_epoch_ms: heartbeat
+                                        .network_observed_at_epoch_ms,
+                                    network_interfaces: heartbeat
+                                        .network_interfaces
+                                        .into_iter()
+                                        .map(|interface| NetworkInterfaceReport {
+                                            name: interface.name,
+                                            mac_address: interface.mac_address,
+                                            mtu: interface.mtu,
+                                            state: interface.state,
+                                            addresses: interface
+                                                .addresses
+                                                .into_iter()
+                                                .map(|address| NetworkAddressReport {
+                                                    family: address.family,
+                                                    address: address.address,
+                                                    prefix_length: address.prefix_length,
+                                                    scope: address.scope,
+                                                })
+                                                .collect(),
+                                        })
+                                        .collect(),
+                                    network_routes: heartbeat
+                                        .network_routes
+                                        .into_iter()
+                                        .map(|route| NetworkRouteReport {
+                                            destination: route.destination,
+                                            gateway: route.gateway,
+                                            interface_name: route.interface_name,
+                                            protocol: route.protocol,
+                                            scope: route.scope,
+                                            route_type: route.route_type,
+                                            table: route.table,
+                                            metric: route.metric,
+                                        })
+                                        .collect(),
                                     systemd_services: heartbeat
                                         .systemd_services
                                         .into_iter()
@@ -814,8 +916,6 @@ impl AgentGateway for Gateway {
                                             display_name: service.display_name,
                                             active_state: service.active_state,
                                             sub_state: service.sub_state,
-                                            restart_allowed: service.restart_allowed,
-                                            journal_read_allowed: service.journal_read_allowed,
                                         })
                                         .collect(),
                                 };
@@ -1079,7 +1179,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_only_accepts_bounded_allowlisted_firewall_requests() {
+    fn dispatch_only_accepts_bounded_firewall_requests() {
         assert!(valid_dispatch_target("network.firewall.expose", "ssh-test"));
         assert!(!valid_dispatch_target(
             "network.firewall.expose",

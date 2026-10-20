@@ -2,7 +2,7 @@
 
 This service accepts mTLS connections from Agents and the Core Gateway. It stores live connection routes in memory and persists only the highest accepted Core fencing epoch to its state volume; restarting it drops sessions and clients reconnect without allowing an older Core epoch to take over. It does not hold Cloudflare credentials, execute operations, or access a root Helper.
 
-Create `.env` from `.env.example`, replace every placeholder, and place the Relay certificate, private key, and client CA bundle under `certs/`. The client CA bundle must trust Agent and Core client certificates. `NANPANEL_RELAY_CORE_CERT_FINGERPRINTS` is a comma-separated allowlist of lowercase SHA-256 fingerprints for authorized Core client certificates. The Core still validates each Agent fingerprint through its normal heartbeat path before the Relay enables task routing.
+Create `.env` from `.env.example`, replace every placeholder, and place the Relay certificate, private key, and client CA bundle under `certs/`. The client CA bundle must trust Agent and Core client certificates. `NANPANEL_RELAY_CORE_CERT_FINGERPRINTS` is a comma-separated set of trusted lowercase SHA-256 fingerprints for Core client certificates. The Core still validates each Agent fingerprint through its normal heartbeat path before the Relay enables task routing.
 
 Build and run with Podman Compose:
 
