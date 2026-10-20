@@ -59,7 +59,7 @@ function Device({ data, selected }: NodeProps<DeviceNode>) {
     {node.kind === 'GATEWAY' && <div className="gateway-asset-control nodrag">
       <label htmlFor={`gateway-asset-search-${node.id}`}>绑定主机资产</label>
       <input id={`gateway-asset-search-${node.id}`} className="nodrag" role="combobox" aria-label="搜索 Gateway 主机资产" aria-autocomplete="list" aria-expanded={!!data.gatewayAssetOpen} aria-controls={gatewayListId} placeholder={data.asset?.hostname ?? '输入主机名搜索…'} value={data.gatewayAssetSearch ?? ''} onFocus={() => data.onGatewayAssetFocus?.(node.id)} onBlur={() => data.onGatewayAssetClose?.(node.id)} onChange={event => data.onGatewayAssetSearch?.(node.id, event.target.value)} onKeyDown={event => { if (event.key === 'Escape') data.onGatewayAssetClose?.(node.id); }} />
-      {data.gatewayAssetOpen && <div className="gateway-asset-dropdown" id={gatewayListId} role="listbox" aria-label="可绑定的主机资产">
+      {data.gatewayAssetOpen && <div className="gateway-asset-dropdown nowheel" id={gatewayListId} role="listbox" aria-label="可绑定的主机资产">
         {filteredGatewayChoices.map(host => {
           const boundElsewhere = (data.gatewayBoundAssetIds ?? []).includes(host.id) && host.id !== node.assetId;
           return <button type="button" className="gateway-asset-option nodrag" role="option" aria-selected={node.assetId === host.id} disabled={boundElsewhere} key={host.id} onMouseDown={event => event.preventDefault()} onClick={() => data.onGatewayAssetSelect?.(node.id, host)}><span><strong>{host.hostname}</strong><small>{host.os ?? 'OS 未知'} · {host.arch ?? '架构未知'}</small></span><span className={`badge ${boundElsewhere ? '' : host.status === 'ONLINE' ? 'online' : host.status === 'OFFLINE' ? 'offline' : 'unknown'}`}>{boundElsewhere ? '已绑定' : host.status}</span></button>;
@@ -123,7 +123,7 @@ function Editor() {
   async function loadHostAssets() {
     setAssetPickerBusy(true); setError('');
     try {
-      const result = await api<HostPage>('/hosts?limit=100');
+      const result = await api<HostPage>('/hosts?limit=100', 'GET', undefined, {}, true);
       setAssetChoices(result.data.items); setAssetNextCursor(result.data.nextCursor); setAssetPickerOpen(true);
     } catch (e) { setError((e as Error).message); }
     finally { setAssetPickerBusy(false); }
@@ -132,7 +132,7 @@ function Editor() {
     if (!assetNextCursor) return;
     setAssetPickerBusy(true);
     try {
-      const result = await api<HostPage>(`/hosts?limit=100&cursor=${encodeURIComponent(assetNextCursor)}`);
+      const result = await api<HostPage>(`/hosts?limit=100&cursor=${encodeURIComponent(assetNextCursor)}`, 'GET', undefined, {}, true);
       setAssetChoices(current => [...current, ...result.data.items]); setAssetNextCursor(result.data.nextCursor);
     } catch (e) { setError((e as Error).message); }
     finally { setAssetPickerBusy(false); }
@@ -141,7 +141,7 @@ function Editor() {
     setGatewayAssetLoading(true);
     try {
       const query = cursor ? `?limit=100&cursor=${encodeURIComponent(cursor)}` : '?limit=100';
-      const result = await api<HostPage>(`/hosts${query}`);
+      const result = await api<HostPage>(`/hosts${query}`, 'GET', undefined, {}, true);
       setGatewayAssetChoices(current => cursor ? [...current, ...result.data.items] : result.data.items);
       setGatewayAssetNextCursor(result.data.nextCursor);
       setGatewayAssetsLoaded(true);
@@ -184,7 +184,7 @@ function Editor() {
     let cancelled = false;
     void Promise.all(missing.map(async id => {
       try {
-        const [host, inventory] = await Promise.all([api<Host>(`/hosts/${id}`), api<HostNetworkInventory>(`/hosts/${id}/network-inventory`)]);
+        const [host, inventory] = await Promise.all([api<Host>(`/hosts/${id}`, 'GET', undefined, {}, true), api<HostNetworkInventory>(`/hosts/${id}/network-inventory`, 'GET', undefined, {}, true)]);
         return [id, { host: host.data, inventory: inventory.data }] as const;
       } catch { return null; }
     })).then(results => {
