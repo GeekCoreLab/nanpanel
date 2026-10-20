@@ -161,7 +161,8 @@ public class SessionFilter
       limit("ip:" + http.remoteAddress().host());
     if (csrf)
       limit("csrf:" + http.remoteAddress().host());
-    if ((path.startsWith("api/v1/admin/") || path.startsWith("api/v1/network-providers/")) && write &&
+    if ((path.startsWith("api/v1/admin/") || path.startsWith("api/v1/network-providers/")
+        || path.startsWith("api/v1/plugins/") || path.startsWith("api/v1/config-translators/")) && write &&
         r.getCookies().get(COOKIE) != null)
       limit("admin:" + digest(r.getCookies().get(COOKIE).getValue()));
     var cookie = r.getCookies().get(COOKIE);

@@ -1,5 +1,14 @@
 import { createUuid } from './uuid.ts';
-import type { TopologyDraftWrite, TopologyLink, TopologyNode, TopologyNodeKind } from './types';
+import type { TopologyDraftWrite, TopologyLink, TopologyNode, TopologyNodeKind, TopologyPort } from './types';
+
+const defaultPort = (id: string, direction: TopologyPort['direction']): TopologyPort => ({ id, direction, layer: 'L4', protocols: ['TCP', 'UDP'] });
+const portsFor = (inputs: number, outputs: number): TopologyPort[] => [
+  ...Array.from({ length: inputs }, (_, index) => defaultPort(`in-${index + 1}`, 'INPUT')),
+  ...Array.from({ length: outputs }, (_, index) => defaultPort(`out-${index + 1}`, 'OUTPUT')),
+];
+const protocolLayer: Record<TopologyPort['layer'], TopologyPort['protocols'][number][]> = {
+  L2: ['ETHERNET'], L3: ['IP'], L4: ['TCP', 'UDP', 'SCTP'], L7: ['HTTP', 'HTTPS'],
+};
 
 export const nodePresets: Record<TopologyNodeKind, { name: string; inputs: number; outputs: number; description: string }> = {
   GATEWAY: { name: '公网 Gateway', inputs: 0, outputs: 1, description: '公网流量源' },
@@ -12,7 +21,7 @@ export const nodePresets: Record<TopologyNodeKind, { name: string; inputs: numbe
 };
 export function createTopologyNode(kind: TopologyNodeKind, position: { x: number; y: number }): TopologyNode {
   const preset = nodePresets[kind];
-  return { id: createUuid(), kind, name: preset.name, position, inputCount: preset.inputs, outputCount: preset.outputs };
+  return { id: createUuid(), kind, name: preset.name, position, inputCount: preset.inputs, outputCount: preset.outputs, ports: portsFor(preset.inputs, preset.outputs) };
 }
 export function initialTopology(): TopologyDraftWrite {
   return { nodes: [createTopologyNode('GATEWAY', { x: 0, y: 100 }), createTopologyNode('HOST', { x: 350, y: 180 }), createTopologyNode('SERVICE', { x: 700, y: 100 })], links: [] };
@@ -20,6 +29,11 @@ export function initialTopology(): TopologyDraftWrite {
 export function validNodeShape(node: TopologyNode): boolean {
   const i = node.inputCount, o = node.outputCount;
   if (![i, o].every(n => Number.isInteger(n) && n >= 0 && n <= 16)) return false;
+  if (!Array.isArray(node.ports) || node.ports.length !== i + o) return false;
+  const expected = portsFor(i, o);
+  if (node.ports.some((port, index) => !port || port.id !== expected[index].id || port.direction !== expected[index].direction
+    || !['L2', 'L3', 'L4', 'L7'].includes(port.layer) || !Array.isArray(port.protocols) || !port.protocols.length
+    || port.protocols.some(protocol => !protocolLayer[port.layer]?.includes(protocol)))) return false;
   switch (node.kind) {
     case 'GATEWAY': return i === 0 && o >= 1;
     case 'SERVICE': return i >= 1 && o === 0;
@@ -36,6 +50,9 @@ export function connectionError(nodes: TopologyNode[], links: TopologyLink[], ca
   if (source.id === target.id) return '不允许节点连接自身';
   if (!/^out-([1-9]|1[0-6])$/.test(candidate.sourcePort) || !/^in-([1-9]|1[0-6])$/.test(candidate.targetPort)) return '只能从绿色出口连接到蓝色入口';
   if (Number(candidate.sourcePort.slice(4)) > source.outputCount || Number(candidate.targetPort.slice(3)) > target.inputCount) return '连接引用的端口不存在';
+  const sourcePort = source.ports.find(port => port.id === candidate.sourcePort), targetPort = target.ports.find(port => port.id === candidate.targetPort);
+  if (!['L2', 'L3', 'L4', 'L7'].includes(candidate.layer) || !protocolLayer[candidate.layer]?.includes(candidate.protocol) || sourcePort?.layer !== candidate.layer || targetPort?.layer !== candidate.layer
+    || !sourcePort.protocols.includes(candidate.protocol) || !targetPort.protocols.includes(candidate.protocol)) return '连接的网络层与协议必须同时受两端口支持';
   if (links.some(l => (l.sourceNodeId === source.id && l.sourcePort === candidate.sourcePort) || (l.targetNodeId === target.id && l.targetPort === candidate.targetPort))) return '端口已被占用，请增加端口或添加转发节点';
   const visited = new Set<string>();
   const reaches = (id: string): boolean => { if (id === source.id) return true; if (visited.has(id)) return false; visited.add(id); return links.filter(l => l.sourceNodeId === id).some(l => reaches(l.targetNodeId)); };
@@ -50,14 +67,15 @@ export function draftError(value: unknown): string | null {
   if (value.nodes.length > 100 || value.links.length > 800) return '草稿最多包含 100 个节点与 800 条连接';
   const ids = new Set<string>();
   for (const n of value.nodes) {
-    if (!record(n) || !keysAre(n, ['id', 'kind', 'name', 'position', 'inputCount', 'outputCount']) || typeof n.id !== 'string' || !uuid.test(n.id) || ids.has(n.id)) return '节点 ID 必须为唯一 UUID，且不能包含未定义字段';
+    if (!record(n) || !keysAre(n, ['id', 'kind', 'name', 'position', 'inputCount', 'outputCount', 'ports']) || typeof n.id !== 'string' || !uuid.test(n.id) || ids.has(n.id)) return '节点 ID 必须为唯一 UUID，且不能包含未定义字段';
     ids.add(n.id);
     if (typeof n.name !== 'string' || !n.name.trim() || [...n.name].length > 100 || !record(n.position) || !keysAre(n.position, ['x', 'y']) || ![n.position.x, n.position.y].every(v => typeof v === 'number' && Number.isFinite(v) && Math.abs(v) <= 10000)) return '节点名称或坐标无效';
+    if (!Array.isArray(n.ports) || n.ports.some(port => !record(port) || !keysAre(port, ['id', 'direction', 'layer', 'protocols']) || typeof port.id !== 'string' || !['INPUT', 'OUTPUT'].includes(String(port.direction)) || !['L2', 'L3', 'L4', 'L7'].includes(String(port.layer)) || !Array.isArray(port.protocols) || !port.protocols.length)) return '端口必须包含唯一 ID、方向、网络层与协议';
     if (!validNodeShape(n as unknown as TopologyNode)) return '节点种类或入口/出口数量不符合约束';
   }
   const links: TopologyLink[] = []; ids.clear();
   for (const l of value.links) {
-    if (!record(l) || !keysAre(l, ['id', 'sourceNodeId', 'sourcePort', 'targetNodeId', 'targetPort', 'status']) || typeof l.id !== 'string' || !uuid.test(l.id) || ids.has(l.id) || l.status !== 'UNVERIFIED' || typeof l.sourcePort !== 'string' || typeof l.targetPort !== 'string') return '连接 ID、端口或未验证状态无效';
+    if (!record(l) || !keysAre(l, ['id', 'sourceNodeId', 'sourcePort', 'targetNodeId', 'targetPort', 'layer', 'protocol', 'status']) || typeof l.id !== 'string' || !uuid.test(l.id) || ids.has(l.id) || l.status !== 'UNVERIFIED' || typeof l.sourcePort !== 'string' || typeof l.targetPort !== 'string' || typeof l.layer !== 'string' || typeof l.protocol !== 'string') return '连接 ID、端口或未验证状态无效';
     ids.add(l.id);
     const error = connectionError(value.nodes as TopologyNode[], links, l as unknown as TopologyLink);
     if (error) return error;

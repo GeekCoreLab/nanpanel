@@ -1,6 +1,6 @@
 import { createUuid } from './uuid.ts';
 import { initialTopology, draftError } from './topology-model.ts';
-import type { TopologyDraft } from './types';
+import type { TopologyDraft, TopologyLink } from './types';
 import type { Host, SystemService, AdminUser, PlatformSettings, Operation, AuditEvent, WebSession, NetworkProviderOperation } from './types';
 const now = () => new Date().toISOString();
 const id = () => createUuid();
@@ -18,7 +18,7 @@ let settings: PlatformSettings = { siteName: 'NaNPanel', defaultTimezone: 'Asia/
 const versions = new Map<string, number>();
 const etag = (key: string) => `"mock-${key}-${versions.get(key) ?? 1}"`;
 const bump = (key: string) => versions.set(key, (versions.get(key) ?? 1) + 1);
-let topology: TopologyDraft = { ...initialTopology(), updatedAt: now(), updatedBy: null };
+let topology: TopologyDraft = { ...initialTopology(), revisionId: id(), generation: 0, updatedAt: now(), updatedBy: null };
 const operations: Operation[] = [];
 const audit: AuditEvent[] = [];
 const mockFileContents = new Map<string, Map<string, string>>();
@@ -130,7 +130,7 @@ export async function mockRequest(path: string, options: RequestInit, authentica
   if (!headers.has('If-Match')) return fail(428, 'PRECONDITION_REQUIRED', '保存草稿需要 If-Match');
   if (!match('topology')) return fail(412, 'PRECONDITION_FAILED', '草稿已被修改，请重新读取后检查再保存');
   const error = draftError(b); if (error) return fail(422, 'INVALID_TOPOLOGY', error);
-  topology = { ...structuredClone(b), updatedAt: now(), updatedBy: current.id }; bump('topology');
+  topology = { ...structuredClone(b), links: b.links.map((link: TopologyLink) => ({ ...link, state: 'PENDING' })), revisionId: id(), generation: topology.generation + 1, updatedAt: now(), updatedBy: current.id }; bump('topology');
   log('TOPOLOGY_DRAFT_UPDATED', 'topology', null, `保存期望拓扑草稿：${topology.nodes.length} 个节点、${topology.links.length} 条未验证连接`);
   return ok(topology, 200, { ETag: etag('topology'), 'Cache-Control': 'no-store' });
  }

@@ -104,7 +104,7 @@ paths:
       tags: [NetworkProviders]
       operationId: createNetworkProviderPlan
       summary: 创建并持久化网络 Provider 计划
-      description: NetBird Provider 只管理配置前缀内的专属分组。外部 API 凭据只来自 Core 服务端环境；desiredSnapshot 包含 groupName、generation 和 peerIds。observedSnapshot 可省略，或传入 Provider observe 返回的 drift precondition token。
+      description: Provider 根据自身能力解释 desiredSnapshot 与可选的 observedSnapshot；Provider 凭据和执行配置只来自 Core 服务端环境，不写入请求。
       x-implementation-status: implemented
       requestBody:
         required: true
@@ -264,6 +264,146 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/NetworkProviderOperation'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/config-translators:
+    get:
+      tags: [NetworkProviders]
+      operationId: listConfigTranslators
+      summary: 查询已装载的配置 Translator
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: Translator ID 与支持的配置格式。
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ConfigTranslatorDescriptor'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/config-translators/{translatorId}/normalize:
+    parameters:
+    - name: translatorId
+      in: path
+      required: true
+      schema: {type: string, maxLength: 80}
+    post:
+      tags: [NetworkProviders]
+      operationId: normalizeProviderConfig
+      summary: 将原生配置转换为 Provider 标准模型
+      description: Translator 必须保留未识别字段并明确记录警告；超过 10 秒或 1 MiB 的请求会被拒绝。
+      x-implementation-status: implemented
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfigTranslationRequest'
+      responses:
+        '200':
+          description: 规范化配置、保留字段清单与警告。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigTranslationResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+  /api/v1/config-translators/{translatorId}/render:
+    parameters:
+    - name: translatorId
+      in: path
+      required: true
+      schema: {type: string, maxLength: 80}
+    post:
+      tags: [NetworkProviders]
+      operationId: renderProviderConfig
+      summary: 从标准模型生成原生配置
+      x-implementation-status: implemented
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfigTranslationRequest'
+      responses:
+        '200':
+          description: 原生配置快照、保留字段清单与警告。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigTranslationResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+  /api/v1/plugins:
+    get:
+      tags: [NetworkProviders]
+      operationId: listPlugins
+      summary: 查询已发现 Plugin 及其生命周期状态
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 已发现插件、版本、状态和已启动扩展。
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PluginStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/plugins/{pluginId}/enabled:
+    parameters:
+    - name: pluginId
+      in: path
+      required: true
+      schema: {type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$'}
+    put:
+      tags: [NetworkProviders]
+      operationId: setPluginEnabled
+      summary: 启用或停用已发现 Plugin
+      description: 需要有效的管理员会话、CSRF 防护和最近一次身份验证；停用前必须完成插件负责的在途 Provider 操作。停用不卸载插件、不删除其数据。
+      x-implementation-status: implemented
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [enabled]
+              properties:
+                enabled: {type: boolean}
+      responses:
+        '200':
+          description: Plugin 生命周期状态已更新。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PluginStatus'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -2770,11 +2910,11 @@ paths:
       - Topology
       operationId: getTopologyDraft
       summary: 读取拓扑期望草稿
-      x-implementation-status: planned
-      description: 要求 ACTIVE 管理员会话且已完成强制改密。只读保存的期望状态，不探测网络或部署。详见 topology.md。
+      x-implementation-status: implemented
+      description: 要求 ACTIVE 管理员会话且已完成强制改密。读取当前不可变 Revision；链路状态默认为 PENDING，保存期望状态不代表部署或验证。详见 topology.md。
       responses:
         '200':
-          description: 期望草稿；所有连接始终未验证。
+          description: 当前拓扑 Revision、强 ETag 与运行状态视图。
           headers:
             Cache-Control:
               $ref: '#/components/headers/NoStore'
@@ -2798,8 +2938,8 @@ paths:
       - cookieAuth: []
         csrfToken: []
       summary: 原子替换拓扑期望草稿
-      x-implementation-status: planned
-      description: 要求 ACTIVE 管理员会话、CSRF 与 If-Match。检查端口方向、节点形状、单端口占用、引用、重复与环路后原子替换，并记录审计。不执行真实转发；不要求最近五分钟重新认证。详见
+      x-implementation-status: implemented
+      description: 要求 ACTIVE 管理员会话、CSRF 与 If-Match。检查端口方向、层与协议、节点形状、单端口占用、引用、重复与环路后创建不可变 Revision，并以条件更新推进当前版本。不执行真实转发；不要求最近五分钟重新认证。详见
         topology.md。
       parameters:
       - $ref: '#/components/parameters/ResourceIfMatch'
@@ -2811,7 +2951,7 @@ paths:
               $ref: '#/components/schemas/TopologyDraftWrite'
       responses:
         '200':
-          description: 期望草稿；所有连接始终未验证。
+          description: 新的当前拓扑 Revision。
           headers:
             Cache-Control:
               $ref: '#/components/headers/NoStore'
@@ -2833,6 +2973,67 @@ paths:
           $ref: '#/components/responses/PreconditionFailed'
         '428':
           $ref: '#/components/responses/PreconditionRequired'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
+  /api/v1/topology/revisions:
+    get:
+      tags:
+      - Topology
+      operationId: listTopologyRevisions
+      summary: 列出拓扑历史 Revision
+      x-implementation-status: implemented
+      parameters:
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
+      responses:
+        '200':
+          description: 按 generation 倒序排列的不可变拓扑历史。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TopologyRevisionSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /api/v1/topology/revisions/{revisionId}:
+    get:
+      tags:
+      - Topology
+      operationId: getTopologyRevision
+      summary: 读取一个历史拓扑 Revision
+      x-implementation-status: implemented
+      parameters:
+      - name: revisionId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      responses:
+        '200':
+          description: 不可变 Revision 内容。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TopologyDraft'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '415':
           $ref: '#/components/responses/UnsupportedMediaType'
         '422':
@@ -3145,6 +3346,31 @@ components:
           type: number
           minimum: -10000
           maximum: 10000
+    TopologyLayer:
+      type: string
+      enum: [L2, L3, L4, L7]
+    TopologyProtocol:
+      type: string
+      enum: [ETHERNET, IP, TCP, UDP, SCTP, HTTP, HTTPS]
+    TopologyPort:
+      type: object
+      additionalProperties: false
+      required: [id, direction, layer, protocols]
+      properties:
+        id:
+          type: string
+          pattern: ^(in|out)-([1-9]|1[0-6])$
+        direction:
+          type: string
+          enum: [INPUT, OUTPUT]
+        layer:
+          $ref: '#/components/schemas/TopologyLayer'
+        protocols:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/TopologyProtocol'
     TopologyNode:
       type: object
       additionalProperties: false
@@ -3155,6 +3381,7 @@ components:
       - position
       - inputCount
       - outputCount
+      - ports
       properties:
         id: &id001
           type: string
@@ -3175,6 +3402,11 @@ components:
           type: integer
           minimum: 0
           maximum: 16
+        ports:
+          type: array
+          maxItems: 32
+          items:
+            $ref: '#/components/schemas/TopologyPort'
     TopologyLink:
       type: object
       additionalProperties: false
@@ -3184,6 +3416,8 @@ components:
       - sourcePort
       - targetNodeId
       - targetPort
+      - layer
+      - protocol
       - status
       properties:
         id: *id001
@@ -3195,9 +3429,17 @@ components:
         targetPort:
           type: string
           pattern: ^in-([1-9]|1[0-6])$
+        layer:
+          $ref: '#/components/schemas/TopologyLayer'
+        protocol:
+          $ref: '#/components/schemas/TopologyProtocol'
         status:
           type: string
           const: UNVERIFIED
+        state:
+          type: string
+          enum: [PENDING, VERIFIED, ERROR, UNSUPPORTED]
+          readOnly: true
     TopologyDraftWrite:
       type: object
       additionalProperties: false
@@ -3219,11 +3461,19 @@ components:
       type: object
       additionalProperties: false
       required:
+      - revisionId
+      - generation
       - nodes
       - links
       - updatedAt
       - updatedBy
       properties:
+        revisionId:
+          type: string
+          format: uuid
+        generation:
+          type: integer
+          minimum: 0
         nodes:
           type: array
           maxItems: 100
@@ -3234,6 +3484,31 @@ components:
           maxItems: 800
           items:
             $ref: '#/components/schemas/TopologyLink'
+        updatedAt:
+          type: string
+          format: date-time
+        updatedBy:
+          type:
+          - string
+          - 'null'
+          format: uuid
+    TopologyRevisionSummary:
+      type: object
+      additionalProperties: false
+      required: [revisionId, generation, nodeCount, linkCount, updatedAt, updatedBy]
+      properties:
+        revisionId:
+          type: string
+          format: uuid
+        generation:
+          type: integer
+          minimum: 0
+        nodeCount:
+          type: integer
+          minimum: 0
+        linkCount:
+          type: integer
+          minimum: 0
         updatedAt:
           type: string
           format: date-time
@@ -3353,11 +3628,106 @@ components:
         id:
           type: string
           maxLength: 80
+        name:
+          type: string
+          maxLength: 100
+        version:
+          type: string
+          maxLength: 40
+        apiVersion:
+          type: string
+          maxLength: 80
         capabilities:
           type: array
           items:
             type: string
             maxLength: 80
+        capabilityDetails:
+          type: array
+          items:
+            $ref: '#/components/schemas/NetworkProviderCapability'
+    NetworkProviderCapability:
+      type: object
+      additionalProperties: false
+      required: [id, operations, layers, protocols]
+      properties:
+        id:
+          type: string
+          maxLength: 80
+        operations:
+          type: array
+          items:
+            type: string
+            maxLength: 80
+        layers:
+          type: array
+          items:
+            $ref: '#/components/schemas/TopologyLayer'
+        protocols:
+          type: array
+          items:
+            $ref: '#/components/schemas/TopologyProtocol'
+    ConfigTranslatorDescriptor:
+      type: object
+      additionalProperties: false
+      required: [id, sourceFormats]
+      properties:
+        id:
+          type: string
+          maxLength: 80
+        sourceFormats:
+          type: array
+          items:
+            type: string
+            maxLength: 80
+    PluginStatus:
+      type: object
+      additionalProperties: false
+      required: [id, version, state, providerIds, translatorIds]
+      properties:
+        id: {type: string, maxLength: 80}
+        version: {type: string, maxLength: 40}
+        state: {type: string, enum: [CREATED, DISABLED, RESOLVED, STARTED, STOPPED, FAILED, UNLOADED]}
+        providerIds:
+          type: array
+          items: {type: string, maxLength: 80}
+        translatorIds:
+          type: array
+          items: {type: string, maxLength: 80}
+    ConfigTranslationRequest:
+      type: object
+      additionalProperties: false
+      required: [sourceFormat, snapshot, targetFormat]
+      properties:
+        sourceFormat:
+          type: string
+          minLength: 1
+          maxLength: 80
+        snapshot:
+          type: string
+          maxLength: 1048576
+        targetFormat:
+          type: string
+          minLength: 1
+          maxLength: 80
+    ConfigTranslationResult:
+      type: object
+      additionalProperties: false
+      required: [snapshot, preservedFields, warnings]
+      properties:
+        snapshot:
+          type: string
+          maxLength: 1048576
+        preservedFields:
+          type: array
+          items:
+            type: string
+            maxLength: 200
+        warnings:
+          type: array
+          items:
+            type: string
+            maxLength: 500
     NetworkProviderPlanRequest:
       type: object
       additionalProperties: false
@@ -3366,11 +3736,11 @@ components:
         desiredSnapshot:
           type: string
           maxLength: 65536
-          description: JSON string containing groupName, generation, and peerIds for the NetBird group provider.
+          description: Provider-defined desired state encoded as JSON text.
         observedSnapshot:
           type: [string, 'null']
           maxLength: 65536
-          description: Optional JSON observation token returned by the NetBird Provider observe operation.
+          description: Optional opaque observation token returned by this Provider's observe operation.
     NetworkProviderObservationRequest:
       type: object
       additionalProperties: false
@@ -3379,8 +3749,8 @@ components:
         resourceKey:
           type: string
           minLength: 1
-          maxLength: 63
-          description: NetBird managed group name.
+          maxLength: 253
+          description: Provider-defined resource identifier; control characters are rejected.
     NetworkProviderObservation:
       type: object
       additionalProperties: false
@@ -5519,6 +5889,20 @@ components:
             detail: 控制面发生内部错误；请依据 traceId 排查。
             instance: /api/v1/hosts/8b395d24-5d5d-4f27-b70b-293cd30da621/services/6c0f837a-2fd9-4db8-9e87-c31d765c5bf1/restart
             code: INTERNAL_ERROR
+            traceId: example-trace-001
+    GatewayTimeout:
+      description: 配置转换超过 10 秒；不会返回不完整的结果。
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: about:blank
+            title: 配置转换超时
+            status: 504
+            detail: 配置转换超过 10 秒。
+            instance: /api/v1/config-translators/example/normalize
+            code: TRANSLATION_TIMEOUT
             traceId: example-trace-001
     LegacyBasicUnauthorized:
       description: 缺少凭据或凭据无效。

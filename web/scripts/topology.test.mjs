@@ -3,7 +3,11 @@ import assert from 'node:assert/strict';
 import { connectionError, createTopologyNode, draftError, initialTopology, validNodeShape } from '../src/lib/topology-model.ts';
 import { mockRequest, DEMO_PASSWORD } from '../src/lib/mock.ts';
 const node = kind => createTopologyNode(kind, { x: 0, y: 0 });
-const link = (source, target, out = 'out-1', input = 'in-1') => ({ id: crypto.randomUUID(), sourceNodeId: source.id, sourcePort: out, targetNodeId: target.id, targetPort: input, status: 'UNVERIFIED' });
+const link = (source, target, out = 'out-1', input = 'in-1', layer = 'L4', protocol = 'TCP') => ({ id: crypto.randomUUID(), sourceNodeId: source.id, sourcePort: out, targetNodeId: target.id, targetPort: input, layer, protocol, status: 'UNVERIFIED' });
+const ports = (inputs, outputs) => [
+  ...Array.from({ length: inputs }, (_, i) => ({ id: `in-${i + 1}`, direction: 'INPUT', layer: 'L4', protocols: ['TCP', 'UDP'] })),
+  ...Array.from({ length: outputs }, (_, i) => ({ id: `out-${i + 1}`, direction: 'OUTPUT', layer: 'L4', protocols: ['TCP', 'UDP'] })),
+];
 
 test('direction, explicit fan-in/fan-out, port occupancy, references and cycles', () => {
   const gateway = node('GATEWAY'), merge = node('MERGE'), split = node('SPLIT'), service = node('SERVICE');
@@ -23,11 +27,12 @@ test('direction, explicit fan-in/fan-out, port occupancy, references and cycles'
   assert.equal(draftError({ nodes: [...sources, merge, split, ...targets], links: fanLinks }), null);
   assert.equal(validNodeShape({ ...merge, outputCount: 2 }), false);
   assert.equal(validNodeShape({ ...split, inputCount: 2 }), false);
-  assert.equal(validNodeShape({ ...node('SWITCH'), inputCount: 16, outputCount: 16 }), true);
+  assert.equal(validNodeShape({ ...node('SWITCH'), inputCount: 16, outputCount: 16, ports: ports(16, 16) }), true);
   assert.equal(validNodeShape({ ...node('FORWARDER'), inputCount: 17 }), false);
   assert.ok(draftError({ nodes: [gateway, gateway], links: [] }));
   assert.ok(draftError({ nodes: [{ ...gateway, position: { x: Infinity, y: 0 } }], links: [] }));
   assert.ok(draftError({ nodes, links: [{ ...link(gateway, merge), status: 'HEALTHY' }] }));
+  assert.ok(draftError({ nodes, links: [link(gateway, merge, 'out-1', 'in-1', 'L4', 'HTTP')] }));
   assert.ok(draftError({ nodes, links: [link(gateway, node('HOST'))] }));
   assert.ok(draftError({ ...initialTopology(), deployed: true }));
 });

@@ -8,14 +8,16 @@ import { api, isMock, isP0Lab, mockBusiness } from './lib/api';
 import { createUuid } from './lib/uuid.ts';
 import NetbirdProviderPanel from './NetbirdProviderPanel';
 import { connectionError, createTopologyNode, draftError, nodePresets, validNodeShape } from './lib/topology-model';
+import './topology-status.css';
 import type { KubernetesServiceInventorySnapshot, KubernetesServiceProbeSnapshot, TopologyDraft, TopologyDraftWrite, TopologyLink, TopologyNode, TopologyNodeKind } from './lib/types';
 
 type DeviceNode = Node<{ model: TopologyNode }, 'device'>;
 type P0RouteEvidence = { status: 'VERIFIED'; route: string; httpStatus: number; responseBody: string; configSha256: string; diff: string; verifiedAt: string };
 const virtualKinds: TopologyNodeKind[] = ['SWITCH', 'MERGE', 'SPLIT', 'FORWARDER'];
 const asNode = (model: TopologyNode): DeviceNode => ({ id: model.id, type: 'device', position: model.position, data: { model } });
-const asEdge = (link: TopologyLink): Edge => ({ id: link.id, source: link.sourceNodeId, sourceHandle: link.sourcePort, target: link.targetNodeId, targetHandle: link.targetPort, type: 'directed', markerEnd: { type: MarkerType.ArrowClosed, color: '#4a86ed' }, data: { status: 'UNVERIFIED' }, ariaLabel: '期望连接，未验证' });
-const asLink = (edge: Edge): TopologyLink => ({ id: edge.id, sourceNodeId: edge.source, sourcePort: edge.sourceHandle ?? '', targetNodeId: edge.target, targetPort: edge.targetHandle ?? '', status: 'UNVERIFIED' });
+const asEdge = (link: TopologyLink): Edge => ({ id: link.id, source: link.sourceNodeId, sourceHandle: link.sourcePort, target: link.targetNodeId, targetHandle: link.targetPort, type: 'directed', markerEnd: { type: MarkerType.ArrowClosed, color: '#4a86ed' }, data: { status: 'UNVERIFIED', state: link.state ?? 'PENDING', layer: link.layer, protocol: link.protocol }, ariaLabel: `期望连接，${link.state ?? 'PENDING'} · ${link.layer}/${link.protocol}` });
+const asLink = (edge: Edge): TopologyLink => ({ id: edge.id, sourceNodeId: edge.source, sourcePort: edge.sourceHandle ?? '', targetNodeId: edge.target, targetPort: edge.targetHandle ?? '', layer: 'L4', protocol: 'TCP', status: 'UNVERIFIED' });
+const linkStateLabels = { PENDING: '待部署', VERIFIED: '已验证', ERROR: '异常', UNSUPPORTED: '不可支持' } as const;
 
 function p0RouteError(graph: TopologyDraftWrite): string | null {
   if (graph.nodes.length !== 3 || graph.links.length !== 2) return 'P0 实验要求一条 Gateway → NAT Host → Service 路径';
@@ -34,14 +36,16 @@ function Device({ data, selected }: NodeProps<DeviceNode>) {
   return <div className={`topology-device ${selected ? 'is-selected' : ''}`}>
     <div className="device-title"><span className="device-symbol">{node.kind === 'SWITCH' ? '▦' : virtualKinds.includes(node.kind) ? '⇄' : '▤'}</span><div><strong>{node.name}</strong><small>{nodePresets[node.kind].description}</small></div></div>
     <div className="device-ports" style={{ height }}>
-      {Array.from({ length: node.inputCount }, (_, i) => <div className="device-port port-in" key={`in-${i + 1}`} style={{ top: 12 + i * 26 }}><Handle id={`in-${i + 1}`} type="target" position={Position.Left} aria-label={`${node.name} 入口 ${i + 1}`} /><span>入口 {i + 1}</span></div>)}
-      {Array.from({ length: node.outputCount }, (_, i) => <div className="device-port port-out" key={`out-${i + 1}`} style={{ top: 12 + i * 26 }}><span>出口 {i + 1}</span><Handle id={`out-${i + 1}`} type="source" position={Position.Right} aria-label={`${node.name} 出口 ${i + 1}`} /></div>)}
+      {Array.from({ length: node.inputCount }, (_, i) => <div className="device-port port-in" key={`in-${i + 1}`} style={{ top: 12 + i * 26 }}><Handle id={`in-${i + 1}`} type="target" position={Position.Left} aria-label={`${node.name} 入口 ${i + 1}`} /><span>入口 {i + 1} · L4</span></div>)}
+      {Array.from({ length: node.outputCount }, (_, i) => <div className="device-port port-out" key={`out-${i + 1}`} style={{ top: 12 + i * 26 }}><span>出口 {i + 1} · L4</span><Handle id={`out-${i + 1}`} type="source" position={Position.Right} aria-label={`${node.name} 出口 ${i + 1}`} /></div>)}
     </div><div className="device-status">期望节点 · 未部署</div>
   </div>;
 }
 function DirectedEdge(props: EdgeProps) {
   const [path] = getBezierPath(props); const gradient = `link-${props.id}`;
-  return <g><defs><linearGradient id={gradient} gradientUnits="userSpaceOnUse" x1={props.sourceX} y1={props.sourceY} x2={props.targetX} y2={props.targetY}><stop offset="0%" stopColor="#2eaf83" /><stop offset="100%" stopColor="#4a86ed" /></linearGradient></defs><BaseEdge id={props.id} path={path} markerEnd={props.markerEnd} style={{ stroke: `url(#${gradient})`, strokeWidth: props.selected ? 3 : 2, strokeDasharray: '6 4' }} /></g>;
+  const state = (props.data?.state ?? 'PENDING') as keyof typeof linkStateLabels;
+  const colors = { PENDING: '#8897ab', VERIFIED: '#2eaf83', ERROR: '#d46c68', UNSUPPORTED: '#aa8ec2' };
+  return <g className={`link-state-${state.toLowerCase()}`} aria-label={linkStateLabels[state]}><BaseEdge id={props.id} path={path} markerEnd={props.markerEnd} style={{ stroke: colors[state], strokeWidth: props.selected ? 3 : 2, strokeDasharray: state === 'VERIFIED' || state === 'ERROR' ? undefined : '6 4' }} /></g>;
 }
 const nodeTypes = { device: Device };
 const edgeTypes = { directed: DirectedEdge };
@@ -62,7 +66,7 @@ function Editor() {
   const draft = (): TopologyDraftWrite => ({ nodes: nodes.map(n => ({ ...n.data.model, position: n.position })), links: edges.map(asLink) });
   async function load() {
     setBusy(true); setError(''); setMenu(undefined);
-    try { const r = await api<TopologyDraft>('/topology/draft'); const payload = { nodes: r.data.nodes, links: r.data.links }; const invalid = draftError(payload); if (invalid) throw new Error(invalid); setNodes(payload.nodes.map(asNode)); setEdges(payload.links.map(asEdge)); setEtag(r.etag ?? ''); setDirty(false); setLoaded(true); setMessage('已读取期望草稿，所有连接尚未验证'); requestAnimationFrame(() => { void fitView({ padding: .2 }); }); }
+    try { const r = await api<TopologyDraft>('/topology/draft'); const payload = { nodes: r.data.nodes, links: r.data.links.map(({ state: _state, ...link }) => link) }; const invalid = draftError(payload); if (invalid) throw new Error(invalid); setNodes(payload.nodes.map(asNode)); setEdges(r.data.links.map(asEdge)); setEtag(r.etag ?? ''); setDirty(false); setLoaded(true); setMessage(`已读取 Revision ${r.data.generation}；链路状态来自运行观测`); requestAnimationFrame(() => { void fitView({ padding: .2 }); }); }
     catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   }
   async function loadServiceInventory(refresh = false) {
@@ -123,7 +127,7 @@ function Editor() {
     const model = createTopologyNode(kind, position);
     setNodes(current => [...current, asNode(model)]); setDirty(true); setRouteEvidence(undefined); setMenu(undefined); setError(''); setMessage(`已添加${model.name}：${model.inputCount} 入 / ${model.outputCount} 出`); requestAnimationFrame(() => { void fitView({ padding: .2 }); });
   }
-  const candidate = (connection: Connection | Edge): TopologyLink => ({ id: createUuid(), sourceNodeId: connection.source, sourcePort: connection.sourceHandle ?? '', targetNodeId: connection.target, targetPort: connection.targetHandle ?? '', status: 'UNVERIFIED' });
+  const candidate = (connection: Connection | Edge): TopologyLink => ({ id: createUuid(), sourceNodeId: connection.source, sourcePort: connection.sourceHandle ?? '', targetNodeId: connection.target, targetPort: connection.targetHandle ?? '', layer: 'L4', protocol: 'TCP', status: 'UNVERIFIED' });
   const validConnection: IsValidConnection = connection => loaded && !busy && edges.length < 800 && !connectionError(draft().nodes, edges.map(asLink), candidate(connection));
   function connect(connection: Connection) {
     if (edges.length >= 800) { setError('最多添加 800 条连接'); return; }
@@ -132,18 +136,41 @@ function Editor() {
     setEdges(current => [...current, asEdge(link)]); setDirty(true); setRouteEvidence(undefined); setError(''); setMessage('已添加绿色出口 → 蓝色入口的期望连接');
   }
   function removeNode(id: string) { setNodes(current => current.filter(n => n.id !== id)); setEdges(current => current.filter(e => e.source !== id && e.target !== id)); setDirty(true); setRouteEvidence(undefined); setMenu(undefined); setMessage('节点及关联连接已删除'); }
+  function portChangeCandidate(node: TopologyNode, direction: 'inputCount' | 'outputCount', delta: number): TopologyNode | null {
+    const input = direction === 'inputCount';
+    const portId = `${input ? 'in' : 'out'}-${input ? node.inputCount : node.outputCount}`;
+    if (delta < 0 && edges.some(e => input ? e.target === node.id && e.targetHandle === portId : e.source === node.id && e.sourceHandle === portId)) return null;
+    const nextCount = node[direction] + delta;
+    if (nextCount < 0 || nextCount > 16) return null;
+    const addedPort = { id: `${input ? 'in' : 'out'}-${nextCount}`, direction: input ? 'INPUT' as const : 'OUTPUT' as const, layer: 'L4' as const, protocols: ['TCP', 'UDP'] as ('TCP' | 'UDP')[] };
+    const ports = delta > 0
+      ? input
+        ? [...node.ports.filter(port => port.direction === 'INPUT'), addedPort, ...node.ports.filter(port => port.direction === 'OUTPUT')]
+        : [...node.ports, addedPort]
+      : node.ports.filter(port => port.id !== portId);
+    const model = { ...node, [direction]: nextCount, ports };
+    return validNodeShape(model) ? model : null;
+  }
   function changePorts(node: TopologyNode, direction: 'inputCount' | 'outputCount', delta: number) {
-    const model = { ...node, [direction]: node[direction] + delta }; if (!validNodeShape(model)) return;
-    if (delta < 0 && edges.some(e => direction === 'inputCount' ? e.target === node.id && e.targetHandle === `in-${node.inputCount}` : e.source === node.id && e.sourceHandle === `out-${node.outputCount}`)) { setError('最后一个端口仍有连接，请先删除关联连线'); setMenu(undefined); return; }
+    const input = direction === 'inputCount';
+    const portId = `${input ? 'in' : 'out'}-${input ? node.inputCount : node.outputCount}`;
+    const model = portChangeCandidate(node, direction, delta);
+    if (!model) {
+      if (delta < 0 && edges.some(e => input ? e.target === node.id && e.targetHandle === portId : e.source === node.id && e.sourceHandle === portId)) {
+        setError('最后一个端口仍有连接，请先删除关联连线'); setMenu(undefined);
+      }
+      return;
+    }
     setNodes(current => current.map(n => n.id === node.id ? { ...n, data: { model } } : n)); setDirty(true); setRouteEvidence(undefined); setMenu(undefined); setMessage('端口数量已更新');
   }
   const contextNode = nodes.find(n => n.id === menu?.nodeId)?.data.model;
+  const contextEdge = edges.find(edge => edge.id === menu?.edgeId);
   return <>
     <div className="page-heading"><div><h1>{isP0Lab ? '拓扑到实际路由 P0 实验' : '网络拓扑实验室'}</h1><p>绿色出口 → 蓝色入口，用多端口节点组织期望转发路径。</p></div><div className="topology-actions"><button className="secondary" disabled={busy} onClick={load}>{dirty ? '重新读取（丢弃未保存）' : '↻ 重新读取'}</button><button className="primary" disabled={!loaded || busy || !dirty || !etag} onClick={save}>{busy ? '处理中…' : '保存草稿'}</button>{isP0Lab && <button className="primary" disabled={!loaded || busy || !!draftError(draft()) || !!p0RouteError(draft())} onClick={applyP0Route}>{busy ? '处理中…' : '应用到 FRP 实际路由'}</button>}</div></div>
     <div className="alert">右键画布添加交换机与转发器，右键节点调整端口，右键连线删除。每个端口仅连接一条线；同色连接、自连接与环路均不允许。{isP0Lab ? 'P0 实验仅接受 Gateway → NAT Host → Service，并把配置部署到隔离 FRP 容器。' : '草稿不执行真实转发。'}</div>
     {error && <div className="alert error" role="alert">{error}</div>}
     {routeEvidence && <div className="alert" role="status"><strong>实际路由已验证</strong> · {routeEvidence.route} · HTTP {routeEvidence.httpStatus} · 响应 {routeEvidence.responseBody} · SHA-256 {routeEvidence.configSha256}<pre className="p0-route-diff">{routeEvidence.diff}</pre></div>}
-    <div className="topology-tools"><div className="port-legend"><span><i className="input-dot" />蓝色：入口</span><span><i className="output-dot" />绿色：出口</span><span>⇢ 虚线：未验证</span></div><div className="topology-actions"><button className="secondary" disabled={!loaded || busy} onClick={e => { const rect = e.currentTarget.getBoundingClientRect(); const canvas = canvasRef.current?.getBoundingClientRect(); openMenu({ preventDefault() {}, clientX: rect.left, clientY: rect.bottom + 8 }, undefined, undefined, canvas ? { x: canvas.left + canvas.width / 2, y: canvas.top + canvas.height / 2 } : undefined); }}>＋ 添加节点</button><button className="secondary" disabled={busy || !edges.length} onClick={() => { setEdges([]); setDirty(true); setRouteEvidence(undefined); }}>清空连接</button></div></div>
+    <div className="topology-tools"><div className="port-legend"><span><i className="input-dot" />蓝色：入口</span><span><i className="output-dot" />绿色：出口</span>{Object.entries(linkStateLabels).map(([state, label]) => <span key={state}><i className={`state-dot ${state.toLowerCase()}`} />{label}</span>)}</div><div className="topology-actions"><button className="secondary" disabled={!loaded || busy} onClick={e => { const rect = e.currentTarget.getBoundingClientRect(); const canvas = canvasRef.current?.getBoundingClientRect(); openMenu({ preventDefault() {}, clientX: rect.left, clientY: rect.bottom + 8 }, undefined, undefined, canvas ? { x: canvas.left + canvas.width / 2, y: canvas.top + canvas.height / 2 } : undefined); }}>＋ 添加节点</button><button className="secondary" disabled={busy || !edges.length} onClick={() => { setEdges([]); setDirty(true); setRouteEvidence(undefined); }}>清空连接</button></div></div>
     <section className="topology card" aria-label="拓扑编辑器" ref={canvasRef}>
       <ReactFlow<DeviceNode> nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
         onNodesChange={changes => { onNodesChange(changes); if (changes.some(c => c.type === 'position' && c.position || c.type === 'remove')) { setDirty(true); setRouteEvidence(undefined); } }}
@@ -176,7 +203,7 @@ function Editor() {
     <NetbirdProviderPanel />
     <div className="topology-caption"><span>{nodes.length} 个节点 · {edges.length} 条未验证连接 · {dirty ? '有未保存的修改' : '草稿未修改'}</span><span role="status">{message || (busy ? '正在读取草稿…' : '')}</span></div>
     {menu && <div className="topology-menu" role="menu" aria-label="拓扑右键菜单" ref={menuRef} style={{ left: menu.x, top: menu.y } as CSSProperties}>
-      {contextNode ? <><strong>{contextNode.name} · {contextNode.inputCount} 入 / {contextNode.outputCount} 出</strong>{(['inputCount', 'outputCount'] as const).map(direction => <div key={direction} className="menu-port-actions">{[1, -1].map(delta => <button role="menuitem" key={delta} disabled={!validNodeShape({ ...contextNode, [direction]: contextNode[direction] + delta })} onClick={() => changePorts(contextNode, direction, delta)}>{delta > 0 ? '增加' : '减少'}{direction === 'inputCount' ? '入口' : '出口'}</button>)}</div>)}<button role="menuitem" className="danger" onClick={() => removeNode(contextNode.id)}>删除节点及关联连接</button></> : menu.edgeId ? <><strong>期望连接 · 未验证</strong><button role="menuitem" className="danger" onClick={() => { setEdges(current => current.filter(e => e.id !== menu.edgeId)); setDirty(true); setRouteEvidence(undefined); setMenu(undefined); }}>删除连接</button></> : <><strong>添加虚拟节点</strong>{(Object.keys(nodePresets) as TopologyNodeKind[]).map(kind => <button role="menuitem" key={kind} onClick={() => addNode(kind)}><span>{nodePresets[kind].name}</span><small>{nodePresets[kind].inputs} 入 / {nodePresets[kind].outputs} 出</small></button>)}</>}
+      {contextNode ? <><strong>{contextNode.name} · {contextNode.inputCount} 入 / {contextNode.outputCount} 出</strong>{(['inputCount', 'outputCount'] as const).map(direction => <div key={direction} className="menu-port-actions">{[1, -1].map(delta => <button role="menuitem" key={delta} disabled={!portChangeCandidate(contextNode, direction, delta)} onClick={() => changePorts(contextNode, direction, delta)}>{delta > 0 ? '增加' : '减少'}{direction === 'inputCount' ? '入口' : '出口'}</button>)}</div>)}<button role="menuitem" className="danger" onClick={() => removeNode(contextNode.id)}>删除节点及关联连接</button></> : menu.edgeId ? <><strong>期望连接 · {linkStateLabels[(contextEdge?.data?.state ?? 'PENDING') as keyof typeof linkStateLabels]} · L4/{(contextEdge?.data?.protocol ?? 'TCP') as string}</strong><button role="menuitem" className="danger" onClick={() => { setEdges(current => current.filter(e => e.id !== menu.edgeId)); setDirty(true); setRouteEvidence(undefined); setMenu(undefined); }}>删除连接</button></> : <><strong>添加虚拟节点</strong>{(Object.keys(nodePresets) as TopologyNodeKind[]).map(kind => <button role="menuitem" key={kind} onClick={() => addNode(kind)}><span>{nodePresets[kind].name}</span><small>{nodePresets[kind].inputs} 入 / {nodePresets[kind].outputs} 出</small></button>)}</>}
       <button role="menuitem" className="menu-cancel" onClick={() => setMenu(undefined)}>关闭菜单 · Esc</button>
     </div>}
   </>;

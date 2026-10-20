@@ -10,9 +10,11 @@ import org.pf4j.DefaultPluginLoader;
 import org.pf4j.PluginClassLoader;
 import org.pf4j.PluginDescriptor;
 import org.pf4j.PluginWrapper;
+import org.pf4j.PluginState;
 import org.pf4j.DevelopmentPluginLoader;
 import org.pf4j.JarPluginLoader;
 import io.nanpanel.plugin.api.NetworkProvider;
+import io.nanpanel.plugin.api.ConfigTranslator;
 /** Trusted plugin lifecycle only; permission enforcement belongs to Core/Gateway. */
 public final class ProviderRuntime implements AutoCloseable {
     private final DefaultPluginManager manager;
@@ -48,7 +50,36 @@ public final class ProviderRuntime implements AutoCloseable {
         return new PluginClassLoader(manager, descriptor, ProviderRuntime.class.getClassLoader(), ClassLoadingStrategy.APD);
     }
     public void start() { manager.loadPlugins(); manager.startPlugins(); }
-    public List<NetworkProvider> providers() { return List.copyOf(manager.getExtensions(NetworkProvider.class)); }
+    public List<NetworkProvider> providers() {
+        return manager.getStartedPlugins().stream()
+                .flatMap(plugin -> manager.getExtensions(NetworkProvider.class, plugin.getPluginId()).stream())
+                .toList();
+    }
+    public List<ConfigTranslator> translators() {
+        return manager.getStartedPlugins().stream()
+                .flatMap(plugin -> manager.getExtensions(ConfigTranslator.class, plugin.getPluginId()).stream())
+                .toList();
+    }
+    public List<PluginStatus> pluginStatuses() {
+        return manager.getPlugins().stream().map(plugin -> {
+            boolean started = plugin.getPluginState().isStarted();
+            List<String> providerIds = started
+                    ? manager.getExtensions(NetworkProvider.class, plugin.getPluginId()).stream()
+                            .map(NetworkProvider::id).toList() : List.of();
+            List<String> translatorIds = started
+                    ? manager.getExtensions(ConfigTranslator.class, plugin.getPluginId()).stream()
+                            .map(ConfigTranslator::id).toList() : List.of();
+            return new PluginStatus(plugin.getPluginId(), plugin.getDescriptor().getVersion(),
+                    plugin.getPluginState().toString(), providerIds, translatorIds);
+        }).toList();
+    }
+    public boolean disable(String pluginId) {
+        return manager.disablePlugin(pluginId);
+    }
+    public boolean enable(String pluginId) {
+        if (!manager.enablePlugin(pluginId)) return false;
+        return manager.startPlugin(pluginId) == PluginState.STARTED;
+    }
     public boolean unload(String pluginId) { return manager.unloadPlugin(pluginId); }
     public List<String> pluginIds() { return manager.getPlugins().stream().map(PluginWrapper::getPluginId).toList(); }
 
@@ -62,9 +93,27 @@ public final class ProviderRuntime implements AutoCloseable {
     }
 
     record UnloadEvidence(boolean unloaded, boolean classLoaderClosed, WeakReference<ClassLoader> classLoaderReference) {}
+    public record PluginStatus(String id, String version, String state,
+                               List<String> providerIds, List<String> translatorIds) {}
 
     @Override public void close() {
-        manager.stopPlugins();
-        for (var plugin : List.copyOf(manager.getPlugins())) manager.unloadPlugin(plugin.getPluginId());
+        RuntimeException failure = null;
+        for (var plugin : List.copyOf(manager.getStartedPlugins())) {
+            try {
+                manager.stopPlugin(plugin.getPluginId());
+            } catch (RuntimeException stopFailure) {
+                if (failure == null) failure = new IllegalStateException("Failed to stop one or more plugins");
+                failure.addSuppressed(stopFailure);
+            }
+        }
+        for (var plugin : List.copyOf(manager.getPlugins())) {
+            try {
+                manager.unloadPlugin(plugin.getPluginId());
+            } catch (RuntimeException unloadFailure) {
+                if (failure == null) failure = new IllegalStateException("Failed to unload one or more plugins");
+                failure.addSuppressed(unloadFailure);
+            }
+        }
+        if (failure != null) throw failure;
     }
 }

@@ -31,6 +31,7 @@
         <module>backend/panel-persistence</module>
         <module>backend/panel-core</module>
         <module>plugins/provider-netbird</module>
+        <module>plugins/provider-frp</module>
     </modules>
     
 

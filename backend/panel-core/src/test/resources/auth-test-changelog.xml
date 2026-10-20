@@ -85,4 +85,10 @@
     <changeSet id="api-keys-test" author="nanpanel">
         <sqlFile path="db/changelog/026-api-keys.sql"/>
     </changeSet>
+    <changeSet id="topology-revisions-test" author="nanpanel">
+        <sql>CREATE TABLE topology_revision (id VARCHAR(36) PRIMARY KEY, generation BIGINT NOT NULL UNIQUE CHECK (generation &gt;= 0), snapshot VARCHAR(16777216) NOT NULL, updated_by VARCHAR(36), updated_at BIGINT NOT NULL);</sql>
+        <sql>CREATE TABLE topology_head (id INTEGER PRIMARY KEY CHECK (id = 1), revision_id VARCHAR(36) NOT NULL, generation BIGINT NOT NULL CHECK (generation &gt;= 0), snapshot VARCHAR(16777216) NOT NULL, updated_by VARCHAR(36), updated_at BIGINT NOT NULL);</sql>
+        <sql>INSERT INTO topology_revision VALUES ('00000000-0000-0000-0000-000000000001', 0, '{"nodes":[],"links":[]}', NULL, 0);</sql>
+        <sql>INSERT INTO topology_head VALUES (1, '00000000-0000-0000-0000-000000000001', 0, '{"nodes":[],"links":[]}', NULL, 0);</sql>
+    </changeSet>
 </databaseChangeLog>

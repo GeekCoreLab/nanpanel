@@ -19,12 +19,14 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 @Path("/api/v1/network-providers")
 @Produces(MediaType.APPLICATION_JSON)
 public class NetworkProviderResource {
-  private static final String NETBIRD_GROUPS = "netbird-groups";
-
   @Inject AuthStore store;
   @Inject NetworkProviderRegistry registry;
   @Inject io.vertx.core.http.HttpServerRequest http;
@@ -66,8 +68,17 @@ public class NetworkProviderResource {
   @GET
   public List<Map<String, Object>> providers() {
     session();
-    return registry.providers().stream().map(value -> Map.<String, Object>of(
-        "id", value.id(), "capabilities", value.capabilities())).toList();
+    return registry.providers().stream().map(value -> {
+      Map<String, Object> result = new LinkedHashMap<>();
+      var descriptor = value.descriptor();
+      result.put("id", value.id());
+      result.put("name", descriptor.name());
+      result.put("version", descriptor.version());
+      result.put("apiVersion", descriptor.apiVersion());
+      result.put("capabilities", value.capabilities());
+      result.put("capabilityDetails", value.capabilityDescriptors());
+      return result;
+    }).toList();
   }
 
   @POST
@@ -77,15 +88,18 @@ public class NetworkProviderResource {
                                      ObserveRequest input) {
     Map<String, Object> actor = session();
     recent(actor);
-    if (!NETBIRD_GROUPS.equals(providerId) || input == null || input.resourceKey() == null
-        || input.resourceKey().length() > 63) {
+    if (input == null || input.resourceKey() == null || input.resourceKey().isBlank()
+        || input.resourceKey().length() > 253 || input.resourceKey().chars().anyMatch(Character::isISOControl)) {
       throw fail(400, "VALIDATION_FAILED", "Provider 观察资源标识无效");
     }
     String snapshot;
     try {
-      snapshot = provider(providerId).observe(input.resourceKey()).toCompletableFuture().join();
+      snapshot = await(provider(providerId).observe(input.resourceKey()));
     } catch (RuntimeException failure) {
       throw fail(409, "PROVIDER_OBSERVE_FAILED", "Provider 无法读取当前外部状态");
+    }
+    if (snapshot == null || snapshot.length() > 65536) {
+      throw fail(502, "PROVIDER_OBSERVATION_INVALID", "Provider 返回了无效或过大的观察结果");
     }
     return Map.of("providerId", providerId, "resourceKey", input.resourceKey(), "snapshot", snapshot);
   }
@@ -96,7 +110,7 @@ public class NetworkProviderResource {
   public Response plan(@PathParam("providerId") String providerId, PlanRequest input) {
     Map<String, Object> actor = session();
     recent(actor);
-    if (!NETBIRD_GROUPS.equals(providerId) || input == null
+    if (input == null
         || input.desiredSnapshot() == null || input.desiredSnapshot().length() > 65536
         || (input.observedSnapshot() != null && input.observedSnapshot().length() > 65536)) {
       throw fail(400, "VALIDATION_FAILED", "网络 Provider 计划参数无效");
@@ -104,10 +118,15 @@ public class NetworkProviderResource {
     NetworkProvider provider = provider(providerId);
     ChangePlan plan;
     try {
-      plan = provider.plan(input.desiredSnapshot(), input.observedSnapshot())
-          .toCompletableFuture().join();
+      plan = await(provider.plan(input.desiredSnapshot(), input.observedSnapshot()));
     } catch (RuntimeException failure) {
       throw fail(409, "PROVIDER_PLAN_REJECTED", "Provider 无法为当前状态创建计划");
+    }
+    if (plan == null || plan.id() == null || plan.generation() < 1
+        || plan.idempotencyKey() == null
+        || !plan.idempotencyKey().matches("[A-Za-z0-9_-]{16,128}")
+        || plan.configuration() == null || plan.configuration().length() > 65536) {
+      throw fail(502, "PROVIDER_PLAN_INVALID", "Provider 返回了无效或过大的计划");
     }
     long now = System.currentTimeMillis();
     Map<String, Object> saved = store.transaction(c -> {
@@ -127,7 +146,7 @@ public class NetworkProviderResource {
           actor.get("user_id"), now, now);
       audit(c, String.valueOf(actor.get("user_id")), "network.provider.plan",
           "network-provider-operation", plan.id().toString(), "SUCCEEDED", remoteAddress(),
-          "NetBird managed group plan persisted");
+          "Provider " + providerId + " plan persisted");
       return query(c, "SELECT * FROM network_provider_operation WHERE id=?", plan.id().toString())
           .getFirst();
     });
@@ -171,7 +190,7 @@ public class NetworkProviderResource {
     row = transition(row, actor, "APPLYING", "Apply started; outcome will be reconciled", plan.id().toString(),
         "network.provider.apply.started", "ACCEPTED");
     try {
-      UUID externalId = provider.apply(plan).toCompletableFuture().join();
+      UUID externalId = await(provider.apply(plan));
       if (externalId == null) {
         throw new IllegalStateException("Provider returned no operation ID");
       }
@@ -222,10 +241,11 @@ public class NetworkProviderResource {
     row = transition(row, actor, "COMPENSATING", "Compensation started", externalId.toString(),
         "network.provider.compensate.started", "ACCEPTED");
     ValidationResult restored = invoke(() -> provider.restoreOperation(plan, externalId));
-    ValidationResult result = invoke(() -> provider.compensate(externalId));
-    if (!restored.successful() && result.successful()) {
-      result = new ValidationResult(false, "Operation restoration precondition was not met");
+    if (!restored.successful()) {
+      return transition(row, actor, "DRIFTED", restored.detail(), externalId.toString(),
+          "network.provider.compensate", "FAILED");
     }
+    ValidationResult result = invoke(() -> provider.compensate(externalId));
     return transition(row, actor, result.successful() ? "COMPENSATED" : "DRIFTED",
         result.detail(), externalId.toString(), "network.provider.compensate",
         result.successful() ? "SUCCEEDED" : "FAILED");
@@ -233,9 +253,33 @@ public class NetworkProviderResource {
 
   private ValidationResult invoke(java.util.function.Supplier<java.util.concurrent.CompletionStage<ValidationResult>> action) {
     try {
-      return action.get().toCompletableFuture().join();
+      ValidationResult result = await(action.get());
+      if (result == null || result.detail() == null || result.detail().length() > 512) {
+        return new ValidationResult(false, "Provider returned an invalid result");
+      }
+      return result;
     } catch (RuntimeException failure) {
       return new ValidationResult(false, "Provider operation could not be confirmed");
+    }
+  }
+
+  private <T> T await(CompletionStage<T> action) {
+    var future = action.toCompletableFuture();
+    try {
+      return future.get(30, TimeUnit.SECONDS);
+    } catch (InterruptedException failure) {
+      future.cancel(true);
+      Thread.currentThread().interrupt();
+      throw new IllegalStateException("Provider operation was interrupted", failure);
+    } catch (TimeoutException failure) {
+      future.cancel(true);
+      throw new IllegalStateException("Provider operation timed out", failure);
+    } catch (ExecutionException failure) {
+      Throwable cause = failure.getCause();
+      if (cause instanceof RuntimeException runtimeFailure) {
+        throw runtimeFailure;
+      }
+      throw new IllegalStateException("Provider operation failed", cause);
     }
   }
 

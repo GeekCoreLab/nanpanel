@@ -1,6 +1,7 @@
 package io.nanpanel.core;
 
 import io.nanpanel.plugin.api.NetworkProvider;
+import io.nanpanel.plugin.api.ConfigTranslator;
 import io.nanpanel.plugin.runtime.ProviderRuntime;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -36,6 +37,22 @@ public class NetworkProviderRegistry {
 
   public List<NetworkProvider> providers() {
     return runtime == null ? List.of() : runtime.providers();
+  }
+
+  public List<ConfigTranslator> translators() {
+    return runtime == null ? List.of() : runtime.translators();
+  }
+
+  public List<ProviderRuntime.PluginStatus> pluginStatuses() {
+    return runtime == null ? List.of() : runtime.pluginStatuses();
+  }
+
+  public boolean disablePlugin(String pluginId) {
+    return runtime != null && runtime.disable(pluginId);
+  }
+
+  public boolean enablePlugin(String pluginId) {
+    return runtime != null && runtime.enable(pluginId);
   }
 
   @PreDestroy

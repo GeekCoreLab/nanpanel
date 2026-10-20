@@ -8,6 +8,13 @@ import org.pf4j.ExtensionPoint;
 public interface NetworkProvider extends ExtensionPoint {
     String id();
     Set<String> capabilities();
+    default ProviderDescriptor descriptor() {
+        return new ProviderDescriptor(id(), id(), "0.1.0", "panel.io/plugins/v1");
+    }
+    default Set<Capability> capabilityDescriptors() {
+        return capabilities().stream().map(value -> new Capability(value, Set.of(), Set.of(), Set.of()))
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+    }
     default CompletionStage<String> observe(String resourceKey) {
         return CompletableFuture.failedFuture(new UnsupportedOperationException("Provider observation is unsupported"));
     }
@@ -23,4 +30,12 @@ public interface NetworkProvider extends ExtensionPoint {
     }
     record ChangePlan(UUID id, long generation, String idempotencyKey, String configuration) {}
     record ValidationResult(boolean successful, String detail) {}
+    record ProviderDescriptor(String id, String name, String version, String apiVersion) {}
+    record Capability(String id, Set<String> operations, Set<String> layers, Set<String> protocols) {
+        public Capability {
+            operations = Set.copyOf(operations);
+            layers = Set.copyOf(layers);
+            protocols = Set.copyOf(protocols);
+        }
+    }
 }

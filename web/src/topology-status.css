@@ -1,0 +1,4 @@
+.state-dot{width:8px;height:8px;border-radius:50%;display:inline-block;background:#8897ab}
+.state-dot.verified{background:#2eaf83}
+.state-dot.error{background:#d46c68}
+.state-dot.unsupported{background:#aa8ec2}

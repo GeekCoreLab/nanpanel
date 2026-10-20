@@ -1,14 +1,23 @@
 // Generated from api/openapi.yaml. Regenerate with scripts/generate-types.py.
 export type TopologyNodeKind = "GATEWAY" | "HOST" | "SERVICE" | "SWITCH" | "MERGE" | "SPLIT" | "FORWARDER";
 export type TopologyPosition = { x: number; y: number };
-export type TopologyNode = { id: string; kind: TopologyNodeKind; name: string; position: TopologyPosition; inputCount: number; outputCount: number };
-export type TopologyLink = { id: string; sourceNodeId: string; sourcePort: string; targetNodeId: string; targetPort: string; status: "UNVERIFIED" };
+export type TopologyLayer = "L2" | "L3" | "L4" | "L7";
+export type TopologyProtocol = "ETHERNET" | "IP" | "TCP" | "UDP" | "SCTP" | "HTTP" | "HTTPS";
+export type TopologyPort = { id: string; direction: "INPUT" | "OUTPUT"; layer: TopologyLayer; protocols: (TopologyProtocol)[] };
+export type TopologyNode = { id: string; kind: TopologyNodeKind; name: string; position: TopologyPosition; inputCount: number; outputCount: number; ports: (TopologyPort)[] };
+export type TopologyLink = { id: string; sourceNodeId: string; sourcePort: string; targetNodeId: string; targetPort: string; layer: TopologyLayer; protocol: TopologyProtocol; status: "UNVERIFIED"; state?: "PENDING" | "VERIFIED" | "ERROR" | "UNSUPPORTED" };
 export type TopologyDraftWrite = { nodes: (TopologyNode)[]; links: (TopologyLink)[] };
-export type TopologyDraft = { nodes: (TopologyNode)[]; links: (TopologyLink)[]; updatedAt: string; updatedBy: string | null };
+export type TopologyDraft = { revisionId: string; generation: number; nodes: (TopologyNode)[]; links: (TopologyLink)[]; updatedAt: string; updatedBy: string | null };
+export type TopologyRevisionSummary = { revisionId: string; generation: number; nodeCount: number; linkCount: number; updatedAt: string; updatedBy: string | null };
 export type SystemInfo = { name: string; version: string; stage: string };
 export type Host = { id: string; hostname: string; os: string | null; arch: string | null; generation: number; status: "UNKNOWN" | "ONLINE" | "OFFLINE"; capabilities: (string)[]; agentId: string | null; lastSeenAt: string | null; createdAt: string };
 export type HostNetworkInventory = { interfaces: (HostNetworkInterface)[]; routes: (HostNetworkRoute)[]; observedAt: string | null; overlay: HostOverlayInventory | null; overlayPeers: (HostOverlayPeerPath)[]; overlayPeersObservedAt: string | null };
-export type NetworkProvider = { id: string; capabilities: (string)[] };
+export type NetworkProvider = { id: string; name?: string; version?: string; apiVersion?: string; capabilities: (string)[]; capabilityDetails?: (NetworkProviderCapability)[] };
+export type NetworkProviderCapability = { id: string; operations: (string)[]; layers: (TopologyLayer)[]; protocols: (TopologyProtocol)[] };
+export type ConfigTranslatorDescriptor = { id: string; sourceFormats: (string)[] };
+export type PluginStatus = { id: string; version: string; state: "CREATED" | "DISABLED" | "RESOLVED" | "STARTED" | "STOPPED" | "FAILED" | "UNLOADED"; providerIds: (string)[]; translatorIds: (string)[] };
+export type ConfigTranslationRequest = { sourceFormat: string; snapshot: string; targetFormat: string };
+export type ConfigTranslationResult = { snapshot: string; preservedFields: (string)[]; warnings: (string)[] };
 export type NetworkProviderPlanRequest = { desiredSnapshot: string; observedSnapshot?: string | null };
 export type NetworkProviderObservationRequest = { resourceKey: string };
 export type NetworkProviderObservation = { providerId: string; resourceKey: string; snapshot: string };

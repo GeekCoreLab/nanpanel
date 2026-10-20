@@ -1,60 +1,81 @@
-# 拓扑期望草稿 API 与编辑语义
+# NetworkGraph and topology Revision API
 
-接口和 DTO 定义在 [openapi.yaml](openapi.yaml)。这是规划接口，前端与浏览器内 Mock 已接入；Core 尚未实现。仅描述期望图，不部署软件、执行转发、探测链路或声明业务健康。
+The Core persists one shared workspace graph as immutable Revisions. Saving a desired graph creates a new Revision and advances the current pointer. A saved graph does not mean that routes were deployed or verified.
 
-## 方向与端口
+## Typed graph
 
-- 节点左侧蓝色端口是入口：`in-1` 至 `in-16`。
-- 节点右侧绿色端口是出口：`out-1` 至 `out-16`。
-- 连接必须从源节点绿色出口指向目标节点蓝色入口；模型中的 source/target 始终按流向保存。虚线、绿色到蓝色的渐变与箭头仅表示期望方向，连接状态固定 `UNVERIFIED`。
-- 每个入口、出口只能占用一次。需要汇聚或分发时添加显式多端口节点，不允许绕过端口容量直接将一根线连接多个节点。
-- 拒绝缺失引用、同色端口、自连接、重复连接、重复 ID、超出端口范围、环路和额外字段。空草稿允许。节点最多 100 个，连接最多 800 条。
+Nodes keep editor coordinates and explicit typed ports. A port has an ID, direction (`INPUT` or `OUTPUT`), layer (`L2`, `L3`, `L4`, `L7`) and supported protocols. Supported protocol values are `ETHERNET`, `IP`, `TCP`, `UDP`, `SCTP`, `HTTP` and `HTTPS`; they must match the declared layer. A link declares its layer and protocol, and both endpoint ports must support them.
 
-## 节点种类
+The editor currently creates `L4` ports that support TCP and UDP, and creates TCP links by default. A link always points from an output port to an input port. Each port can be used once. Missing references, self-links, duplicate IDs, invalid node shapes, incompatible port types, excess ports, cycles and unknown fields are rejected. Empty graphs are allowed; the limits are 100 nodes and 800 links.
 
-| kind | 节点 | 默认入口 / 出口 | 可调整范围 |
-| --- | --- | --- | --- |
-| GATEWAY | 公网 Gateway | 0 / 1 | 入口固定 0，出口 1–16 |
-| HOST | NAT Host | 1 / 1 | 入口、出口各 1–16 |
-| SERVICE | K3s Service | 1 / 0 | 入口 1–16，出口固定 0 |
-| SWITCH | 虚拟交换机 | 4 / 4 | 入口、出口各 2–16 |
-| MERGE | 多合一转发器 | 3 / 1 | 入口 2–16，出口固定 1 |
-| SPLIT | 一分多转发器 | 1 / 3 | 入口固定 1，出口 2–16 |
-| FORWARDER | 多进多出转发器 | 3 / 3 | 入口、出口各 2–16 |
-
-这些都是逻辑期望节点，未绑定真实 Host、Provider 或设备。MERGE 描述多个入口汇聚至单个出口；SPLIT 描述从单入口到多个出口的候选分发关系；SWITCH 描述多入口/出口可参与互联；FORWARDER 的期望转发语义为：所有入口的流量都会被发送给所有出口。该语义目前仅用于描述期望行为，尚未实现实际流量复制；其他节点不据此定义流量复制、负载均衡、MAC 学习、广播、L2 语义、端口映射规则或路由选择算法。真实执行前必须另行定义 Provider 能力、转发策略、计划及验证契约，不能根据名称推断底层部署能力。
-
-编辑器右键空白区域添加节点，按点击位置换算画布坐标；右键节点可增加/减少入口与出口，右键连线可删除连接。减少端口只删除最后一个未占用端口；占用时拒绝，要求先删除连线。删除节点同时删除关联连线。顶部“添加节点”按钮提供触屏与键盘可用的菜单入口；菜单支持 Escape 关闭和 Tab 导航。
-
-## API
-
-| 方法 | 路径 | 语义 |
+| kind | Default inputs / outputs | Allowed range |
 | --- | --- | --- |
-| GET | `/api/v1/topology/draft` | 返回唯一的工作空间草稿与不透明强 ETag |
-| PUT | `/api/v1/topology/draft` | 原子替换完整草稿，返回新表示与新 ETag |
+| `GATEWAY` | 0 / 1 | 0 / 1–16 |
+| `HOST` | 1 / 1 | 1–16 / 1–16 |
+| `SERVICE` | 1 / 0 | 1–16 / 0 |
+| `SWITCH` | 4 / 4 | 2–16 / 2–16 |
+| `MERGE` | 3 / 1 | 2–16 / 1 |
+| `SPLIT` | 1 / 3 | 1 / 2–16 |
+| `FORWARDER` | 3 / 3 | 2–16 / 2–16 |
 
-首期只有一个管理员共享工作空间，不引入多租户或多拓扑列表。读取不触发扫描。
+These are desired logical nodes, not deployed devices. Their names do not imply MAC learning, traffic replication, load balancing, port mapping or route selection. Providers must declare the capabilities and execution semantics they support.
 
-两个接口均要求有效 ACTIVE 管理员会话且已完成强制改密，沿用 [Web 平台认证](web-platform.md)。PUT 还要求 CSRF 和原样保留的 `If-Match`，不接受通配符或多个 ETag，不要求最近五分钟重新认证；前后端均必须校验图结构，UI 限制不替代后端校验。缺少版本返回 428、版本过期返回 412、无效图返回 422 `INVALID_TOPOLOGY`（统一 Problem），401/403 沿用认证与权限语义。错误不修改草稿或 ETag。
+## Endpoints
 
-PUT 请求只包含 `nodes` 与 `links`；响应还包含 `updatedAt`、`updatedBy`。每次成功保存轮换 ETag，变更与审计必须在同一事务中持久化后再报告成功；审计动作 `TOPOLOGY_DRAFT_UPDATED`，摘要仅含节点与连接数量。该接口不使用服务重启的 Idempotency-Key；传输错误后不自动重放，重新读取后人工确认，旧 ETag 不得覆盖其他人的更新。
+| Method | Path | Meaning |
+| --- | --- | --- |
+| `GET` | `/api/v1/topology/draft` | Read the current Revision and its strong ETag. |
+| `PUT` | `/api/v1/topology/draft` | Validate and create a new immutable Revision using `If-Match`. |
+| `GET` | `/api/v1/topology/revisions?limit=50` | List up to 100 recent Revisions. |
+| `GET` | `/api/v1/topology/revisions/{revisionId}` | Read an immutable historical graph. |
 
-节点 ID 与连接 ID 是客户端创建的 UUID；端口通过节点 ID + 方向编号标识。布局位置是编辑器坐标，x/y 必须为 -10000 到 10000 内的有限数值；坐标不代表网络配置。名称去空白后非空，最多 100 个 Unicode 字符；所有节点形状和端口约束遵循上表。
+All endpoints require an active administrator session with the initial password change completed. PUT also requires CSRF and the exact `If-Match` returned by GET. Missing ETag returns 428, stale ETag returns 412, and invalid topology returns 422 `INVALID_TOPOLOGY`. Wildcards and multiple ETags are rejected. Errors do not change the current graph or history.
+
+The current ETag is the strong value `"topology-<generation>"`. A successful PUT writes the immutable Revision, updates the current pointer and records `TOPOLOGY_DRAFT_UPDATED` in one database transaction. The response includes `revisionId`, `generation`, `updatedAt`, `updatedBy` and per-link state. PUT replaces the complete desired graph and does not use `Idempotency-Key`; after a transport failure, clients must read again and confirm before retrying.
+
+Submitted link `status` is always `UNVERIFIED`. Response `state` values are `PENDING`, `VERIFIED`, `ERROR` or `UNSUPPORTED`; the state describes runtime evidence and cannot be set by a draft write. New or changed links begin as `PENDING`. Saving the graph never marks a link healthy.
+
+## Example
 
 ```json
 {
   "nodes": [
-    {"id":"8b395d24-5d5d-4f27-b70b-000000000001","kind":"GATEWAY","name":"公网入口","position":{"x":0,"y":100},"inputCount":0,"outputCount":1},
-    {"id":"8b395d24-5d5d-4f27-b70b-000000000002","kind":"MERGE","name":"汇聚转发器","position":{"x":350,"y":100},"inputCount":3,"outputCount":1}
+    {
+      "id": "8b395d24-5d5d-4f27-b70b-000000000001",
+      "kind": "GATEWAY",
+      "name": "公网入口",
+      "position": { "x": 0, "y": 100 },
+      "inputCount": 0,
+      "outputCount": 1,
+      "ports": [
+        { "id": "out-1", "direction": "OUTPUT", "layer": "L4", "protocols": ["TCP", "UDP"] }
+      ]
+    },
+    {
+      "id": "8b395d24-5d5d-4f27-b70b-000000000002",
+      "kind": "SERVICE",
+      "name": "示例服务",
+      "position": { "x": 350, "y": 100 },
+      "inputCount": 1,
+      "outputCount": 0,
+      "ports": [
+        { "id": "in-1", "direction": "INPUT", "layer": "L4", "protocols": ["TCP"] }
+      ]
+    }
   ],
   "links": [
-    {"id":"8b395d24-5d5d-4f27-b70b-000000000003","sourceNodeId":"8b395d24-5d5d-4f27-b70b-000000000001","sourcePort":"out-1","targetNodeId":"8b395d24-5d5d-4f27-b70b-000000000002","targetPort":"in-1","status":"UNVERIFIED"}
+    {
+      "id": "8b395d24-5d5d-4f27-b70b-000000000003",
+      "sourceNodeId": "8b395d24-5d5d-4f27-b70b-000000000001",
+      "sourcePort": "out-1",
+      "targetNodeId": "8b395d24-5d5d-4f27-b70b-000000000002",
+      "targetPort": "in-1",
+      "layer": "L4",
+      "protocol": "TCP",
+      "status": "UNVERIFIED"
+    }
   ]
 }
 ```
 
-## Mock
-
-Mock 默认提供 Gateway → NAT Host → Service 三个未连接节点。新增节点、拖动与连线先修改本地画布；点击“保存草稿”才调用 PUT。导航离开后重新进入会 GET 已保存草稿；未保存编辑会丢失。重新读取按钮明确丢弃未保存修改。刷新整个页面重置内存 Mock，需要重新登录。
-
-Mock 在请求入口执行身份/CSRF、ETag 与图结构校验，成功更新草稿并写入内存审计。它不具备后端持久化、真实 Provider 或实际交换转发能力。
+The browser Mock models identity, CSRF, ETag and graph validation in memory. It resets on page reload and does not provide durable Revision history or real Provider operations.

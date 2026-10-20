@@ -395,9 +395,58 @@ class SystemResourceTest {
         .then()
         .statusCode(200);
     given().get("/api/v1/network-providers").then().statusCode(401);
+    given().get("/api/v1/plugins").then().statusCode(401);
+    given().get("/api/v1/config-translators").then().statusCode(401);
     given().cookie("nanpanel_session", restoredCookie)
         .get("/api/v1/network-providers")
         .then().statusCode(200).body("size()", equalTo(0));
+    given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/plugins")
+        .then().statusCode(200).body("size()", equalTo(0));
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .contentType("application/json").body(Map.of("enabled", false))
+        .put("/api/v1/plugins/not-installed/enabled")
+        .then().statusCode(404).body("code", equalTo("PLUGIN_UNAVAILABLE"));
+    var topology = given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/topology/draft")
+        .then().statusCode(200).extract();
+    String topologyEtag = topology.header("ETag");
+    assertEquals(0L, ((Number)topology.path("generation")).longValue());
+    assertEquals("00000000-0000-0000-0000-000000000001", topology.path("revisionId"));
+    String topologyWrite = """
+        {"nodes":[
+          {"id":"10000000-0000-0000-0000-000000000001","kind":"GATEWAY","name":"入口","position":{"x":0,"y":0},"inputCount":0,"outputCount":1,"ports":[{"id":"out-1","direction":"OUTPUT","layer":"L4","protocols":["TCP","UDP"]}]},
+          {"id":"10000000-0000-0000-0000-000000000002","kind":"SERVICE","name":"服务","position":{"x":300,"y":0},"inputCount":1,"outputCount":0,"ports":[{"id":"in-1","direction":"INPUT","layer":"L4","protocols":["TCP"]}]}
+        ],"links":[{"id":"10000000-0000-0000-0000-000000000003","sourceNodeId":"10000000-0000-0000-0000-000000000001","sourcePort":"out-1","targetNodeId":"10000000-0000-0000-0000-000000000002","targetPort":"in-1","layer":"L4","protocol":"TCP","status":"UNVERIFIED"}]}
+        """;
+    var topologySaved = given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("If-Match", topologyEtag).contentType("application/json").body(topologyWrite)
+        .put("/api/v1/topology/draft").then().statusCode(200).extract();
+    String topologyRevisionId = topologySaved.path("revisionId");
+    assertEquals(1L, ((Number)topologySaved.path("generation")).longValue());
+    assertNotEquals(topologyEtag, topologySaved.header("ETag"));
+    assertEquals("PENDING", topologySaved.path("links[0].state"));
+    assertEquals("UNVERIFIED", topologySaved.path("links[0].status"));
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("If-Match", topologyEtag).contentType("application/json").body(topologyWrite)
+        .put("/api/v1/topology/draft").then().statusCode(412);
+    given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/topology/revisions?limit=10")
+        .then().statusCode(200).body("items.size()", equalTo(2));
+    given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/topology/revisions/" + topologyRevisionId)
+        .then().statusCode(200).body("generation", equalTo(1))
+        .body("links[0].protocol", equalTo("TCP"));
+    String incompatible = topologyWrite.replace("\"protocol\":\"TCP\"", "\"protocol\":\"UDP\"");
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("If-Match", topologySaved.header("ETag"))
+        .contentType("application/json").body(incompatible)
+        .put("/api/v1/topology/draft").then().statusCode(422)
+        .body("code", equalTo("INVALID_TOPOLOGY"));
     given().cookie("nanpanel_session", restoredCookie)
         .header("X-CSRF-Token", restored.path("csrfToken"))
         .contentType("application/json")
