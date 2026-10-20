@@ -6,6 +6,7 @@ import static io.nanpanel.core.AuthStore.update;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.fabric8.kubernetes.client.KubernetesClientBuilder;
 import io.nanpanel.cluster.KubernetesServiceDiscovery;
+import io.nanpanel.cluster.KubernetesTopologyDiscovery;
 import io.nanpanel.cluster.KubernetesServiceDiscovery.EndpointObservation;
 import io.nanpanel.cluster.KubernetesServiceDiscovery.EndpointPortObservation;
 import io.nanpanel.cluster.KubernetesServiceDiscovery.Snapshot;
@@ -38,6 +39,7 @@ public class KubernetesServiceInventoryService {
   @Inject ObjectMapper mapper;
 
   private final KubernetesServiceDiscovery discovery = new KubernetesServiceDiscovery();
+  private final KubernetesTopologyDiscovery topologyDiscovery = new KubernetesTopologyDiscovery();
   private final AtomicInteger probeOffset = new AtomicInteger();
 
   @Inject
@@ -61,10 +63,28 @@ public class KubernetesServiceInventoryService {
   }
 
   public boolean isConfigured() {
-    return !clusterId.isBlank() && !namespace.isBlank()
-        && !"disabled".equals(clusterId) && !"disabled".equals(namespace)
-        && clusterId.matches("[A-Za-z0-9][A-Za-z0-9_.-]{0,63}")
+    return isClusterConfigured() && !namespace.isBlank()
+        && !"disabled".equals(namespace)
         && namespace.matches("[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?");
+  }
+
+  public boolean isClusterConfigured() {
+    return clusterId != null && !"disabled".equals(clusterId)
+        && clusterId.matches("[A-Za-z0-9][A-Za-z0-9_.-]{0,63}");
+  }
+
+  public KubernetesTopologyDiscovery.NamespaceSnapshot topologyNamespaces() {
+    ensureClusterConfigured();
+    try (var client = new KubernetesClientBuilder().build()) {
+      return topologyDiscovery.namespaces(client, clusterId);
+    }
+  }
+
+  public KubernetesTopologyDiscovery.NamespaceDetailSnapshot topologyNamespace(String name) {
+    ensureClusterConfigured();
+    try (var client = new KubernetesClientBuilder().build()) {
+      return topologyDiscovery.namespace(client, clusterId, name);
+    }
   }
 
   public Snapshot latest() {
@@ -315,6 +335,12 @@ public class KubernetesServiceInventoryService {
     }
     if (!isConfigured()) {
       throw new IllegalStateException("Kubernetes service discovery is misconfigured");
+    }
+  }
+
+  private void ensureClusterConfigured() {
+    if (!enabled || !isClusterConfigured()) {
+      throw new IllegalStateException("Kubernetes cluster discovery is not configured");
     }
   }
 

@@ -666,6 +666,79 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+  /api/v1/kubernetes/topology/namespaces:
+    get:
+      tags: [ServiceNetwork]
+      operationId: listKubernetesTopologyNamespaces
+      summary: 列出集群 Namespace 供拓扑层级浏览
+      description: 使用 Core 配置的 Kubernetes 身份只读列出 Namespace。只返回名称与 phase，不读取 Secret，也不接受客户端指定集群或 selector；结果受 256 个 Namespace 上限约束。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 集群 Namespace 快照。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KubernetesTopologyNamespaceSnapshot'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '502':
+          description: Kubernetes API 不可用或资源数超过上限。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          description: 集群服务发现未启用或集群身份未配置。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /api/v1/kubernetes/topology/namespaces/{namespace}:
+    parameters:
+    - name: namespace
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$
+    get:
+      tags: [ServiceNetwork]
+      operationId: getKubernetesTopologyNamespace
+      summary: 浏览 Namespace 内的 Ingress、Service 与 Pod
+      description: 对指定 Namespace 执行有界只读查询；只返回路由后端、Service 端口和 Pod 状态，不读取 Secret。Pod、Service、Ingress 上限分别为 2048、512、512。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: Namespace 资源快照。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KubernetesTopologyNamespaceDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Namespace 不存在或名称无效。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '502':
+          description: Kubernetes API 不可用或资源数超过上限。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          description: 集群服务发现未启用或集群身份未配置。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
   /api/v1/agents/{agentId}:
     parameters:
     - $ref: '#/components/parameters/AgentId'
@@ -3331,6 +3404,7 @@ components:
       - MERGE
       - SPLIT
       - FORWARDER
+      - FOLDER
     TopologyPosition:
       type: object
       additionalProperties: false
@@ -3407,6 +3481,14 @@ components:
           maxItems: 32
           items:
             $ref: '#/components/schemas/TopologyPort'
+        parentId:
+          type: [string, 'null']
+          format: uuid
+          description: Parent folder ID; null means the outermost topology.
+        assetId:
+          type: [string, 'null']
+          format: uuid
+          description: Registered host ID for HOST nodes linked to a host asset.
     TopologyLink:
       type: object
       additionalProperties: false
@@ -3811,6 +3893,212 @@ components:
           maxItems: 512
           items:
             $ref: '#/components/schemas/KubernetesServiceObservation'
+    KubernetesTopologyNamespaceSnapshot:
+      type: object
+      additionalProperties: false
+      required: [sourceId, observedAt, namespaces]
+      properties:
+        sourceId:
+          type: string
+          maxLength: 80
+        observedAt:
+          type: string
+          format: date-time
+        namespaces:
+          type: array
+          maxItems: 256
+          items:
+            $ref: '#/components/schemas/KubernetesTopologyNamespace'
+    KubernetesTopologyNamespace:
+      type: object
+      additionalProperties: false
+      required: [name, phase]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 63
+        phase:
+          type: string
+          maxLength: 32
+    KubernetesTopologyNamespaceDetail:
+      type: object
+      additionalProperties: false
+      required: [sourceId, namespace, observedAt, services, ingresses, pods]
+      properties:
+        sourceId:
+          type: string
+          maxLength: 80
+        namespace:
+          type: string
+          maxLength: 63
+        observedAt:
+          type: string
+          format: date-time
+        services:
+          type: array
+          maxItems: 512
+          items:
+            $ref: '#/components/schemas/KubernetesTopologyService'
+        ingresses:
+          type: array
+          maxItems: 512
+          items:
+            $ref: '#/components/schemas/KubernetesTopologyIngress'
+        pods:
+          type: array
+          maxItems: 2048
+          items:
+            $ref: '#/components/schemas/KubernetesTopologyPod'
+    KubernetesTopologyService:
+      type: object
+      additionalProperties: false
+      required: [name, type, clusterIps, externalName, ports]
+      properties:
+        name:
+          type: string
+          maxLength: 63
+        type:
+          type: string
+          maxLength: 32
+        clusterIps:
+          type: array
+          maxItems: 16
+          items: { type: string, maxLength: 45 }
+        externalName:
+          type: [string, 'null']
+          maxLength: 253
+        ports:
+          type: array
+          maxItems: 128
+          items:
+            $ref: '#/components/schemas/KubernetesTopologyServicePort'
+    KubernetesTopologyServicePort:
+      type: object
+      additionalProperties: false
+      required: [name, port, protocol, targetPort]
+      properties:
+        name:
+          type: [string, 'null']
+          maxLength: 15
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        protocol:
+          type: string
+          enum: [TCP, UDP, SCTP]
+        targetPort:
+          type: [string, 'null']
+          maxLength: 15
+    KubernetesTopologyIngress:
+      type: object
+      additionalProperties: false
+      required: [name, ingressClassName, loadBalancerAddresses, routes]
+      properties:
+        name:
+          type: string
+          maxLength: 253
+        ingressClassName:
+          type: [string, 'null']
+          maxLength: 253
+        loadBalancerAddresses:
+          type: array
+          maxItems: 64
+          items: { type: string, maxLength: 253 }
+        routes:
+          type: array
+          maxItems: 1024
+          items:
+            $ref: '#/components/schemas/KubernetesTopologyIngressRoute'
+    KubernetesTopologyIngressRoute:
+      type: object
+      additionalProperties: false
+      required: [host, path, pathType, serviceName, servicePort, servicePortName]
+      properties:
+        host:
+          type: [string, 'null']
+          maxLength: 253
+        path:
+          type: [string, 'null']
+          maxLength: 2048
+        pathType:
+          type: [string, 'null']
+          maxLength: 32
+        serviceName:
+          type: string
+          maxLength: 63
+        servicePort:
+          type: [integer, 'null']
+          minimum: 1
+          maximum: 65535
+        servicePortName:
+          type: [string, 'null']
+          maxLength: 15
+    KubernetesTopologyPod:
+      type: object
+      additionalProperties: false
+      required: [name, phase, ready, podIp, nodeName, createdAt, containers]
+      properties:
+        name:
+          type: string
+          maxLength: 253
+        phase:
+          type: string
+          maxLength: 32
+        ready:
+          type: boolean
+        podIp:
+          type: [string, 'null']
+          maxLength: 45
+        nodeName:
+          type: [string, 'null']
+          maxLength: 253
+        createdAt:
+          type: [string, 'null']
+          format: date-time
+        containers:
+          type: array
+          maxItems: 128
+          items:
+            $ref: '#/components/schemas/KubernetesTopologyContainer'
+    KubernetesTopologyContainer:
+      type: object
+      additionalProperties: false
+      required: [name, image, ready, restartCount, ports]
+      properties:
+        name:
+          type: string
+          maxLength: 253
+        image:
+          type: [string, 'null']
+          maxLength: 1024
+        ready:
+          type: boolean
+        restartCount:
+          type: integer
+          minimum: 0
+          maximum: 2147483647
+        ports:
+          type: array
+          maxItems: 128
+          items:
+            $ref: '#/components/schemas/KubernetesTopologyContainerPort'
+    KubernetesTopologyContainerPort:
+      type: object
+      additionalProperties: false
+      required: [name, containerPort, protocol]
+      properties:
+        name:
+          type: [string, 'null']
+          maxLength: 15
+        containerPort:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        protocol:
+          type: string
+          enum: [TCP, UDP, SCTP]
     KubernetesServiceProbeSnapshot:
       type: object
       additionalProperties: false

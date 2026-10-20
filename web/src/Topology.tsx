@@ -9,15 +9,16 @@ import { createUuid } from './lib/uuid.ts';
 import NetbirdProviderPanel from './NetbirdProviderPanel';
 import { connectionError, createTopologyNode, draftError, nodePresets, validNodeShape } from './lib/topology-model';
 import './topology-status.css';
-import type { KubernetesServiceInventorySnapshot, KubernetesServiceProbeSnapshot, TopologyDraft, TopologyDraftWrite, TopologyLink, TopologyNode, TopologyNodeKind } from './lib/types';
+import './topology-hierarchy.css';
+import type { Host, HostNetworkInventory, HostPage, KubernetesServiceInventorySnapshot, KubernetesServiceProbeSnapshot, KubernetesTopologyNamespaceDetail, KubernetesTopologyNamespaceSnapshot, TopologyDraft, TopologyDraftWrite, TopologyLink, TopologyNode, TopologyNodeKind } from './lib/types';
 
-type DeviceNode = Node<{ model: TopologyNode }, 'device'>;
+type DeviceNode = Node<{ model: TopologyNode; asset?: Host }, 'device'>;
 type P0RouteEvidence = { status: 'VERIFIED'; route: string; httpStatus: number; responseBody: string; configSha256: string; diff: string; verifiedAt: string };
 const virtualKinds: TopologyNodeKind[] = ['SWITCH', 'MERGE', 'SPLIT', 'FORWARDER'];
-const asNode = (model: TopologyNode): DeviceNode => ({ id: model.id, type: 'device', position: model.position, data: { model } });
+const asNode = (model: TopologyNode, asset?: Host): DeviceNode => ({ id: model.id, type: 'device', position: model.position, data: { model: { ...model, parentId: model.parentId ?? null, assetId: model.assetId ?? null }, asset } });
 const asEdge = (link: TopologyLink): Edge => ({ id: link.id, source: link.sourceNodeId, sourceHandle: link.sourcePort, target: link.targetNodeId, targetHandle: link.targetPort, type: 'directed', markerEnd: { type: MarkerType.ArrowClosed, color: '#4a86ed' }, data: { status: 'UNVERIFIED', state: link.state ?? 'PENDING', layer: link.layer, protocol: link.protocol }, ariaLabel: `期望连接，${link.state ?? 'PENDING'} · ${link.layer}/${link.protocol}` });
-const asLink = (edge: Edge): TopologyLink => ({ id: edge.id, sourceNodeId: edge.source, sourcePort: edge.sourceHandle ?? '', targetNodeId: edge.target, targetPort: edge.targetHandle ?? '', layer: 'L4', protocol: 'TCP', status: 'UNVERIFIED' });
-const linkStateLabels = { PENDING: '待部署', VERIFIED: '已验证', ERROR: '异常', UNSUPPORTED: '不可支持' } as const;
+const asLink = (edge: Edge): TopologyLink => ({ id: edge.id, sourceNodeId: edge.source, sourcePort: edge.sourceHandle ?? '', targetNodeId: edge.target, targetPort: edge.targetHandle ?? '', layer: (edge.data?.layer as TopologyLink['layer']) ?? 'L4', protocol: (edge.data?.protocol as TopologyLink['protocol']) ?? 'TCP', status: 'UNVERIFIED' });
+const linkStateLabels = { PENDING: '待部署', VERIFIED: '已验证', ERROR: '异常', UNSUPPORTED: '不可支持', OBSERVED: 'Agent 路由观测' } as const;
 
 function p0RouteError(graph: TopologyDraftWrite): string | null {
   if (graph.nodes.length !== 3 || graph.links.length !== 2) return 'P0 实验要求一条 Gateway → NAT Host → Service 路径';
@@ -33,19 +34,19 @@ function Device({ data, selected }: NodeProps<DeviceNode>) {
   const updateNodeInternals = useUpdateNodeInternals();
   useEffect(() => { updateNodeInternals(node.id); }, [node.id, node.inputCount, node.outputCount, updateNodeInternals]);
   const height = Math.max(node.inputCount, node.outputCount, 1) * 26 + 16;
-  return <div className={`topology-device ${selected ? 'is-selected' : ''}`}>
-    <div className="device-title"><span className="device-symbol">{node.kind === 'SWITCH' ? '▦' : virtualKinds.includes(node.kind) ? '⇄' : '▤'}</span><div><strong>{node.name}</strong><small>{nodePresets[node.kind].description}</small></div></div>
+  return <div className={`topology-device ${node.kind === 'FOLDER' ? 'is-folder' : ''} ${selected ? 'is-selected' : ''}`}>
+    <div className="device-title"><span className="device-symbol">{node.kind === 'FOLDER' ? '▰' : node.kind === 'SWITCH' ? '▦' : virtualKinds.includes(node.kind) ? '⇄' : '▤'}</span><div><strong>{node.name}</strong><small>{node.assetId ? `主机资产 · ${data.asset?.status ?? '读取中'}` : nodePresets[node.kind].description}</small></div></div>
     <div className="device-ports" style={{ height }}>
-      {Array.from({ length: node.inputCount }, (_, i) => <div className="device-port port-in" key={`in-${i + 1}`} style={{ top: 12 + i * 26 }}><Handle id={`in-${i + 1}`} type="target" position={Position.Left} aria-label={`${node.name} 入口 ${i + 1}`} /><span>入口 {i + 1} · L4</span></div>)}
-      {Array.from({ length: node.outputCount }, (_, i) => <div className="device-port port-out" key={`out-${i + 1}`} style={{ top: 12 + i * 26 }}><span>出口 {i + 1} · L4</span><Handle id={`out-${i + 1}`} type="source" position={Position.Right} aria-label={`${node.name} 出口 ${i + 1}`} /></div>)}
-    </div><div className="device-status">期望节点 · 未部署</div>
+      {Array.from({ length: node.inputCount }, (_, i) => <div className="device-port port-in" key={`in-${i + 1}`} style={{ top: 12 + i * 26 }}><Handle id={`in-${i + 1}`} type="target" position={Position.Left} aria-label={`${node.name} 入口 ${i + 1}`} /><span>{node.kind === 'FOLDER' && i === 0 ? 'Ingress 接入' : `入口 ${i + 1}`} · L4</span></div>)}
+      {Array.from({ length: node.outputCount }, (_, i) => <div className="device-port port-out" key={`out-${i + 1}`} style={{ top: 12 + i * 26 }}><span>{node.kind === 'FOLDER' && i === 0 ? '集群服务' : `出口 ${i + 1}`} · L4</span><Handle id={`out-${i + 1}`} type="source" position={Position.Right} aria-label={`${node.name} 出口 ${i + 1}`} /></div>)}
+    </div><div className="device-status">{node.kind === 'FOLDER' ? '双击打开层级视图' : node.assetId ? `资产 ${data.asset?.hostname ?? node.assetId}` : '期望节点 · 未部署'}</div>
   </div>;
 }
 function DirectedEdge(props: EdgeProps) {
   const [path] = getBezierPath(props); const gradient = `link-${props.id}`;
   const state = (props.data?.state ?? 'PENDING') as keyof typeof linkStateLabels;
-  const colors = { PENDING: '#8897ab', VERIFIED: '#2eaf83', ERROR: '#d46c68', UNSUPPORTED: '#aa8ec2' };
-  return <g className={`link-state-${state.toLowerCase()}`} aria-label={linkStateLabels[state]}><BaseEdge id={props.id} path={path} markerEnd={props.markerEnd} style={{ stroke: colors[state], strokeWidth: props.selected ? 3 : 2, strokeDasharray: state === 'VERIFIED' || state === 'ERROR' ? undefined : '6 4' }} /></g>;
+  const colors = { PENDING: '#8897ab', VERIFIED: '#2eaf83', ERROR: '#d46c68', UNSUPPORTED: '#aa8ec2', OBSERVED: '#527eaf' };
+  return <g className={`link-state-${state.toLowerCase()}`} aria-label={props.data?.observedRoute ? `Agent 路由观测 · L3/IP · ${props.data.routeCount} 条路由` : linkStateLabels[state]}><BaseEdge id={props.id} path={path} markerEnd={props.markerEnd} style={{ stroke: colors[state], strokeWidth: props.selected ? 3 : 2, strokeDasharray: state === 'VERIFIED' || state === 'ERROR' ? undefined : '6 4' }} /></g>;
 }
 const nodeTypes = { device: Device };
 const edgeTypes = { directed: DirectedEdge };
@@ -60,13 +61,19 @@ function Editor() {
   const [serviceInventory, setServiceInventory] = useState<KubernetesServiceInventorySnapshot>();
   const [serviceProbes, setServiceProbes] = useState<KubernetesServiceProbeSnapshot>();
   const [serviceInventoryError, setServiceInventoryError] = useState(''); const [inventoryBusy, setInventoryBusy] = useState(false);
+  const [folderId, setFolderId] = useState<string | null>(null);
+  const [hostAssets, setHostAssets] = useState<Record<string, { host: Host; inventory: HostNetworkInventory }>>({});
+  const [assetChoices, setAssetChoices] = useState<Host[]>([]); const [assetNextCursor, setAssetNextCursor] = useState<string | null>(null); const [assetPickerOpen, setAssetPickerOpen] = useState(false); const [assetPickerBusy, setAssetPickerBusy] = useState(false);
+  const [kubernetesNamespaces, setKubernetesNamespaces] = useState<KubernetesTopologyNamespaceSnapshot>();
+  const [namespaceDetails, setNamespaceDetails] = useState<Record<string, KubernetesTopologyNamespaceDetail>>({});
+  const [expandedNamespace, setExpandedNamespace] = useState<string>(); const [expandedPod, setExpandedPod] = useState<string>(); const [kubernetesError, setKubernetesError] = useState(''); const [kubernetesBusy, setKubernetesBusy] = useState(false);
   const [routeEvidence, setRouteEvidence] = useState<P0RouteEvidence>();
   const [menu, setMenu] = useState<Menu>(); const menuRef = useRef<HTMLDivElement>(null); const canvasRef = useRef<HTMLElement>(null);
   const { screenToFlowPosition, fitView } = useReactFlow<DeviceNode>();
-  const draft = (): TopologyDraftWrite => ({ nodes: nodes.map(n => ({ ...n.data.model, position: n.position })), links: edges.map(asLink) });
+  const draft = (): TopologyDraftWrite => ({ nodes: nodes.map(n => ({ ...n.data.model, parentId: n.data.model.parentId ?? null, assetId: n.data.model.assetId ?? null, position: n.position })), links: edges.map(asLink) });
   async function load() {
     setBusy(true); setError(''); setMenu(undefined);
-    try { const r = await api<TopologyDraft>('/topology/draft'); const payload = { nodes: r.data.nodes, links: r.data.links.map(({ state: _state, ...link }) => link) }; const invalid = draftError(payload); if (invalid) throw new Error(invalid); setNodes(payload.nodes.map(asNode)); setEdges(r.data.links.map(asEdge)); setEtag(r.etag ?? ''); setDirty(false); setLoaded(true); setMessage(`已读取 Revision ${r.data.generation}；链路状态来自运行观测`); requestAnimationFrame(() => { void fitView({ padding: .2 }); }); }
+    try { const r = await api<TopologyDraft>('/topology/draft'); const payload = { nodes: r.data.nodes.map(node => ({ ...node, parentId: node.parentId ?? null, assetId: node.assetId ?? null })), links: r.data.links.map(({ state: _state, ...link }) => link) }; const invalid = draftError(payload); if (invalid) throw new Error(invalid); setNodes(payload.nodes.map(node => asNode(node))); setEdges(r.data.links.map(asEdge)); setFolderId(null); setEtag(r.etag ?? ''); setDirty(false); setLoaded(true); setMessage(`已读取 Revision ${r.data.generation}；链路状态来自运行观测`); requestAnimationFrame(() => { void fitView({ padding: .2 }); }); }
     catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   }
   async function loadServiceInventory(refresh = false) {
@@ -79,8 +86,62 @@ function Editor() {
     catch (e) { setServiceInventoryError((e as Error).message); }
     finally { setInventoryBusy(false); }
   }
+  async function loadHostAssets() {
+    setAssetPickerBusy(true); setError('');
+    try {
+      const result = await api<HostPage>('/hosts?limit=100');
+      setAssetChoices(result.data.items); setAssetNextCursor(result.data.nextCursor); setAssetPickerOpen(true);
+    } catch (e) { setError((e as Error).message); }
+    finally { setAssetPickerBusy(false); }
+  }
+  async function loadMoreHostAssets() {
+    if (!assetNextCursor) return;
+    setAssetPickerBusy(true);
+    try {
+      const result = await api<HostPage>(`/hosts?limit=100&cursor=${encodeURIComponent(assetNextCursor)}`);
+      setAssetChoices(current => [...current, ...result.data.items]); setAssetNextCursor(result.data.nextCursor);
+    } catch (e) { setError((e as Error).message); }
+    finally { setAssetPickerBusy(false); }
+  }
+  async function loadNamespace(namespace: string) {
+    setExpandedNamespace(namespace); setKubernetesBusy(true); setKubernetesError('');
+    try {
+      const result = await api<KubernetesTopologyNamespaceDetail>(`/kubernetes/topology/namespaces/${encodeURIComponent(namespace)}`);
+      setNamespaceDetails(current => ({ ...current, [`${folderId}:${namespace}`]: result.data }));
+    } catch (e) { setKubernetesError((e as Error).message); }
+    finally { setKubernetesBusy(false); }
+  }
   useEffect(() => { void load(); }, []);
   useEffect(() => { void loadServiceInventory(); }, []);
+  useEffect(() => {
+    const known = new Set(Object.keys(hostAssets));
+    const missing = [...new Set(nodes.map(node => node.data.model.assetId).filter((value): value is string => !!value))].filter(id => !known.has(id));
+    if (!missing.length) return;
+    let cancelled = false;
+    void Promise.all(missing.map(async id => {
+      try {
+        const [host, inventory] = await Promise.all([api<Host>(`/hosts/${id}`), api<HostNetworkInventory>(`/hosts/${id}/network-inventory`)]);
+        return [id, { host: host.data, inventory: inventory.data }] as const;
+      } catch { return null; }
+    })).then(results => {
+      if (cancelled) return;
+      const ready = Object.fromEntries(results.filter((entry): entry is NonNullable<typeof entry> => !!entry));
+      if (Object.keys(ready).length) {
+        setHostAssets(current => ({ ...current, ...ready }));
+        setNodes(current => current.map(node => ready[node.data.model.assetId ?? ''] ? { ...node, data: { ...node.data, asset: ready[node.data.model.assetId!].host } } : node));
+      }
+    });
+    return () => { cancelled = true; };
+  }, [nodes, hostAssets]);
+  useEffect(() => {
+    if (!folderId) { setKubernetesNamespaces(undefined); setExpandedNamespace(undefined); return; }
+    let cancelled = false; setKubernetesBusy(true); setKubernetesError('');
+    void api<KubernetesTopologyNamespaceSnapshot>('/kubernetes/topology/namespaces')
+      .then(result => { if (!cancelled) setKubernetesNamespaces(result.data); })
+      .catch(e => { if (!cancelled) setKubernetesError((e as Error).message); })
+      .finally(() => { if (!cancelled) setKubernetesBusy(false); });
+    return () => { cancelled = true; };
+  }, [folderId]);
   useEffect(() => {
     if (!menu) return;
     const dismiss = (e: globalThis.MouseEvent) => { if (!menuRef.current?.contains(e.target as globalThis.Node)) setMenu(undefined); };
@@ -119,14 +180,78 @@ function Editor() {
         for (let dy = -ring; dy <= ring; dy++) {
           if (ring && Math.abs(dx) !== ring && Math.abs(dy) !== ring) continue;
           const candidate = { x: Math.max(-10000, Math.min(10000, point.x + dx * 300)), y: Math.max(-10000, Math.min(10000, point.y + dy * (height + 40))) };
-          if (!nodes.some(n => candidate.x < n.position.x + 270 && candidate.x + 270 > n.position.x && candidate.y < n.position.y + 150 + Math.max(n.data.model.inputCount, n.data.model.outputCount) * 26 && candidate.y + height + 40 > n.position.y)) { position = candidate; break; }
+          if (!nodes.filter(n => (n.data.model.parentId ?? null) === folderId).some(n => candidate.x < n.position.x + 270 && candidate.x + 270 > n.position.x && candidate.y < n.position.y + 150 + Math.max(n.data.model.inputCount, n.data.model.outputCount) * 26 && candidate.y + height + 40 > n.position.y)) { position = candidate; break; }
         }
       }
     }
     if (!position) { setError('附近没有可用位置，请平移画布后重试'); return; }
-    const model = createTopologyNode(kind, position);
+    const model = { ...createTopologyNode(kind, position), parentId: folderId, assetId: null };
     setNodes(current => [...current, asNode(model)]); setDirty(true); setRouteEvidence(undefined); setMenu(undefined); setError(''); setMessage(`已添加${model.name}：${model.inputCount} 入 / ${model.outputCount} 出`); requestAnimationFrame(() => { void fitView({ padding: .2 }); });
   }
+  function addHostAsset(host: Host) {
+    if (nodes.some(node => node.data.model.assetId === host.id)) { setError('该主机资产已添加到主拓扑'); return; }
+    if (nodes.length >= 100) { setError('最多添加 100 个节点'); return; }
+    const canvas = canvasRef.current?.getBoundingClientRect();
+    const point = screenToFlowPosition({ x: canvas ? canvas.left + canvas.width / 2 : window.innerWidth / 2, y: canvas ? canvas.top + canvas.height / 2 : window.innerHeight / 2 });
+    const base = createTopologyNode('HOST', point);
+    const model = { ...base, name: host.hostname, assetId: host.id, parentId: null };
+    setNodes(current => [...current, asNode(model, host)]); setDirty(true); setRouteEvidence(undefined); setAssetPickerOpen(false); setError(''); setMessage(`已将主机资产 ${host.hostname} 添加到最外层拓扑`); requestAnimationFrame(() => { void fitView({ padding: .2 }); });
+  }
+  function enterFolder(id: string) {
+    const folder = nodes.find(node => node.id === id)?.data.model;
+    if (!folder || folder.kind !== 'FOLDER') return;
+    setFolderId(id); setMenu(undefined); setMessage(`正在编辑 ${folder.name} 的层级拓扑`); requestAnimationFrame(() => { void fitView({ padding: .2 }); });
+  }
+  function folderPath(): TopologyNode[] {
+    const path: TopologyNode[] = [];
+    let current = nodes.find(node => node.id === folderId)?.data.model;
+    while (current) {
+      path.unshift(current);
+      const parentId = current.parentId;
+      current = parentId ? nodes.find(node => node.id === parentId)?.data.model : undefined;
+    }
+    return path;
+  }
+  const activeNodes = nodes.filter(node => (node.data.model.parentId ?? null) === folderId);
+  const activeEdges = edges.filter(edge => {
+    const source = nodes.find(node => node.id === edge.source)?.data.model;
+    return source && (source.parentId ?? null) === folderId;
+  });
+  const folder = nodes.find(node => node.id === folderId)?.data.model;
+  const rootAssetNodes = nodes.filter(node => !node.data.model.parentId && node.data.model.assetId);
+  const hostByAddress = new Map<string, Host[]>();
+  for (const node of rootAssetNodes) {
+    const asset = hostAssets[node.data.model.assetId!];
+    for (const networkInterface of asset?.inventory.interfaces ?? []) {
+      for (const address of networkInterface.addresses) {
+        const owners = hostByAddress.get(address.address.toLowerCase()) ?? [];
+        if (!owners.some(owner => owner.id === asset.host.id)) owners.push(asset.host);
+        hostByAddress.set(address.address.toLowerCase(), owners);
+      }
+    }
+  }
+  const rootNodeByAssetId = new Map(rootAssetNodes.map(node => [node.data.model.assetId!, node]));
+  const observedRouteCounts = new Map<string, { source: DeviceNode; target: DeviceNode; count: number }>();
+  for (const source of rootAssetNodes) {
+    const sourceAsset = hostAssets[source.data.model.assetId!];
+    if (!sourceAsset) continue;
+    for (const route of sourceAsset.inventory.routes) {
+      const owners = route.gateway ? hostByAddress.get(route.gateway.toLowerCase()) ?? [] : [];
+      if (owners.length !== 1 || owners[0].id === sourceAsset.host.id) continue;
+      const target = rootNodeByAssetId.get(owners[0].id);
+      if (!target) continue;
+      const key = `${source.id}:${target.id}`;
+      const observed = observedRouteCounts.get(key);
+      if (observed) observed.count++;
+      else observedRouteCounts.set(key, { source, target, count: 1 });
+    }
+  }
+  const observedRouteEdges: Edge[] = [...observedRouteCounts.entries()].map(([key, observed]) => ({
+    id: `observed-${key}`, source: observed.source.id, sourceHandle: 'out-1',
+    target: observed.target.id, targetHandle: 'in-1', type: 'directed', selectable: false,
+    deletable: false, focusable: false, markerEnd: { type: MarkerType.ArrowClosed, color: '#527eaf' },
+    data: { state: 'OBSERVED', observedRoute: true, routeCount: observed.count, layer: 'L3', protocol: 'IP' },
+  }));
   const candidate = (connection: Connection | Edge): TopologyLink => ({ id: createUuid(), sourceNodeId: connection.source, sourcePort: connection.sourceHandle ?? '', targetNodeId: connection.target, targetPort: connection.targetHandle ?? '', layer: 'L4', protocol: 'TCP', status: 'UNVERIFIED' });
   const validConnection: IsValidConnection = connection => loaded && !busy && edges.length < 800 && !connectionError(draft().nodes, edges.map(asLink), candidate(connection));
   function connect(connection: Connection) {
@@ -135,7 +260,15 @@ function Editor() {
     if (invalid) { setError(invalid); return; }
     setEdges(current => [...current, asEdge(link)]); setDirty(true); setRouteEvidence(undefined); setError(''); setMessage('已添加绿色出口 → 蓝色入口的期望连接');
   }
-  function removeNode(id: string) { setNodes(current => current.filter(n => n.id !== id)); setEdges(current => current.filter(e => e.source !== id && e.target !== id)); setDirty(true); setRouteEvidence(undefined); setMenu(undefined); setMessage('节点及关联连接已删除'); }
+  function removeNode(id: string) {
+    const removeIds = new Set([id]);
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const node of nodes) if (node.data.model.parentId && removeIds.has(node.data.model.parentId) && !removeIds.has(node.id)) { removeIds.add(node.id); changed = true; }
+    }
+    setNodes(current => current.filter(node => !removeIds.has(node.id))); setEdges(current => current.filter(edge => !removeIds.has(edge.source) && !removeIds.has(edge.target))); setDirty(true); setRouteEvidence(undefined); setMenu(undefined); setMessage(removeIds.size > 1 ? '文件夹及全部子级节点和连接已删除' : '节点及关联连接已删除');
+  }
   function portChangeCandidate(node: TopologyNode, direction: 'inputCount' | 'outputCount', delta: number): TopologyNode | null {
     const input = direction === 'inputCount';
     const portId = `${input ? 'in' : 'out'}-${input ? node.inputCount : node.outputCount}`;
@@ -166,26 +299,67 @@ function Editor() {
   const contextNode = nodes.find(n => n.id === menu?.nodeId)?.data.model;
   const contextEdge = edges.find(edge => edge.id === menu?.edgeId);
   return <>
-    <div className="page-heading"><div><h1>{isP0Lab ? '拓扑到实际路由 P0 实验' : '网络拓扑实验室'}</h1><p>绿色出口 → 蓝色入口，用多端口节点组织期望转发路径。</p></div><div className="topology-actions"><button className="secondary" disabled={busy} onClick={load}>{dirty ? '重新读取（丢弃未保存）' : '↻ 重新读取'}</button><button className="primary" disabled={!loaded || busy || !dirty || !etag} onClick={save}>{busy ? '处理中…' : '保存草稿'}</button>{isP0Lab && <button className="primary" disabled={!loaded || busy || !!draftError(draft()) || !!p0RouteError(draft())} onClick={applyP0Route}>{busy ? '处理中…' : '应用到 FRP 实际路由'}</button>}</div></div>
-    <div className="alert">右键画布添加交换机与转发器，右键节点调整端口，右键连线删除。每个端口仅连接一条线；同色连接、自连接与环路均不允许。{isP0Lab ? 'P0 实验仅接受 Gateway → NAT Host → Service，并把配置部署到隔离 FRP 容器。' : '草稿不执行真实转发。'}</div>
+    {folderId && <nav className="topology-breadcrumb" aria-label="拓扑层级"><button className="secondary" onClick={() => { setFolderId(null); requestAnimationFrame(() => { void fitView({ padding: .2 }); }); }}>主拓扑</button>{folderPath().map((item, index) => <span key={item.id}><span className="muted">/</span>{index === folderPath().length - 1 ? <strong>{item.name}</strong> : <button className="secondary" onClick={() => enterFolder(item.id)}>{item.name}</button>}</span>)}</nav>}
+    <div className="page-heading"><div><h1>{isP0Lab ? '拓扑到实际路由 P0 实验' : folder?.name ?? '网络拓扑实验室'}</h1><p>{folderId ? '编辑此文件夹内的期望网络拓扑；下方可逐级浏览 Namespace、Ingress、Service 和 Pod。' : '双击文件夹进入子拓扑。绿色出口 → 蓝色入口，用多端口节点组织期望转发路径。'}</p></div><div className="topology-actions"><button className="secondary" disabled={busy} onClick={load}>{dirty ? '重新读取（丢弃未保存）' : '↻ 重新读取'}</button>{!folderId && <button className="secondary" disabled={!loaded || busy || assetPickerBusy} onClick={() => void loadHostAssets()}>{assetPickerBusy ? '读取主机…' : '＋ 添加主机资产'}</button>}<button className="primary" disabled={!loaded || busy || !dirty || !etag} onClick={save}>{busy ? '处理中…' : '保存草稿'}</button>{isP0Lab && <button className="primary" disabled={!loaded || busy || !!draftError(draft()) || !!p0RouteError(draft())} onClick={applyP0Route}>{busy ? '处理中…' : '应用到 FRP 实际路由'}</button>}</div></div>
+    <div className="alert">右键画布添加交换机、转发器或 K3s 文件夹；右键节点调整端口，右键连线删除。每个端口仅连接一条线；同色连接、自连接、跨层级连接与环路均不允许。{isP0Lab ? 'P0 实验仅接受 Gateway → NAT Host → Service，并把配置部署到隔离 FRP 容器。' : '拓扑及内部编辑保存为期望草稿，不直接修改主机路由表或 Kubernetes 资源。'}</div>
     {error && <div className="alert error" role="alert">{error}</div>}
     {routeEvidence && <div className="alert" role="status"><strong>实际路由已验证</strong> · {routeEvidence.route} · HTTP {routeEvidence.httpStatus} · 响应 {routeEvidence.responseBody} · SHA-256 {routeEvidence.configSha256}<pre className="p0-route-diff">{routeEvidence.diff}</pre></div>}
-    <div className="topology-tools"><div className="port-legend"><span><i className="input-dot" />蓝色：入口</span><span><i className="output-dot" />绿色：出口</span>{Object.entries(linkStateLabels).map(([state, label]) => <span key={state}><i className={`state-dot ${state.toLowerCase()}`} />{label}</span>)}</div><div className="topology-actions"><button className="secondary" disabled={!loaded || busy} onClick={e => { const rect = e.currentTarget.getBoundingClientRect(); const canvas = canvasRef.current?.getBoundingClientRect(); openMenu({ preventDefault() {}, clientX: rect.left, clientY: rect.bottom + 8 }, undefined, undefined, canvas ? { x: canvas.left + canvas.width / 2, y: canvas.top + canvas.height / 2 } : undefined); }}>＋ 添加节点</button><button className="secondary" disabled={busy || !edges.length} onClick={() => { setEdges([]); setDirty(true); setRouteEvidence(undefined); }}>清空连接</button></div></div>
+    <div className="topology-tools"><div className="port-legend"><span><i className="input-dot" />蓝色：入口</span><span><i className="output-dot" />绿色：出口</span>{Object.entries(linkStateLabels).map(([state, label]) => <span key={state}><i className={`state-dot ${state.toLowerCase()}`} />{label}</span>)}</div><div className="topology-actions"><button className="secondary" disabled={!loaded || busy} onClick={e => { const rect = e.currentTarget.getBoundingClientRect(); const canvas = canvasRef.current?.getBoundingClientRect(); openMenu({ preventDefault() {}, clientX: rect.left, clientY: rect.bottom + 8 }, undefined, undefined, canvas ? { x: canvas.left + canvas.width / 2, y: canvas.top + canvas.height / 2 } : undefined); }}>＋ 添加节点</button><button className="secondary" disabled={busy || !activeEdges.length} onClick={() => { setEdges(current => current.filter(edge => !activeEdges.some(active => active.id === edge.id))); setDirty(true); setRouteEvidence(undefined); }}>清空本层连接</button></div></div>
     <section className="topology card" aria-label="拓扑编辑器" ref={canvasRef}>
-      <ReactFlow<DeviceNode> nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
+      <ReactFlow<DeviceNode> nodes={activeNodes} edges={folderId ? activeEdges : [...activeEdges, ...observedRouteEdges]} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
         onNodesChange={changes => { onNodesChange(changes); if (changes.some(c => c.type === 'position' && c.position || c.type === 'remove')) { setDirty(true); setRouteEvidence(undefined); } }}
         onEdgesChange={changes => { onEdgesChange(changes); if (changes.some(c => c.type === 'remove')) { setDirty(true); setRouteEvidence(undefined); } }}
         onConnect={connect} isValidConnection={validConnection} connectionMode={ConnectionMode.Strict}
         onConnectEnd={(_, state) => { if (state.toHandle && !state.isValid) setError('连接无效：仅允许未占用的绿色出口 → 蓝色入口，且不能形成自连接或环路'); }}
-        onPaneContextMenu={e => openMenu(e)} onNodeContextMenu={(e, node) => openMenu(e, node.id)} onEdgeContextMenu={(e, edge) => openMenu(e, undefined, edge.id)}
+        onPaneContextMenu={e => openMenu(e)} onNodeContextMenu={(e, node) => openMenu(e, node.id)} onNodeDoubleClick={(_, node) => { if (node.data.model.kind === 'FOLDER') enterFolder(node.id); }} onEdgeContextMenu={(e, edge) => { if (!edge.data?.observedRoute) openMenu(e, undefined, edge.id); }}
         onPaneClick={() => setMenu(undefined)} onMoveStart={() => setMenu(undefined)}
-        onNodesDelete={deleted => { setEdges(current => current.filter(e => !deleted.some(n => n.id === e.source || n.id === e.target))); setRouteEvidence(undefined); }}
+        onNodesDelete={deleted => { deleted.forEach(node => removeNode(node.id)); }}
         nodesDraggable={!busy} nodesConnectable={loaded && !busy} elementsSelectable={!busy} deleteKeyCode={busy ? null : ['Backspace', 'Delete']}
         fitView minZoom={.2} maxZoom={1.7} translateExtent={[[-11000, -11000], [11000, 11000]]} nodeExtent={[[-10000, -10000], [10000, 10000]]}>
         <Background color="#dbe3ee" gap={24} /><Controls />
       </ReactFlow>
     </section>
-    <section className="service-network card" aria-labelledby="service-network-title">
+    {!folderId && <section className="service-network card" aria-labelledby="host-routes-title">
+      <div className="card-title"><div><h2 id="host-routes-title">主机路由观测与自动下一跳匹配</h2><p>从已绑定主机的 Agent 路由快照读取，并按网卡地址自动关联已加入主拓扑的下一跳主机</p></div></div>
+      {rootAssetNodes.length ? <div className="service-network-list">{rootAssetNodes.map(node => {
+        const asset = hostAssets[node.data.model.assetId!];
+        if (!asset) return <article className="service-network-item" key={node.id}><strong>{node.data.model.name}</strong><p>正在读取主机和路由快照，或当前会话无权读取。</p></article>;
+        return <article className="service-network-item" key={node.id}>
+          <div className="service-network-title"><div><strong>{asset.host.hostname}</strong><small>{asset.inventory.observedAt ? `路由观测于 ${new Date(asset.inventory.observedAt).toLocaleString()}` : 'Agent 尚未上报网络快照'}</small></div><span className={`badge ${asset.host.status === 'ONLINE' ? 'online' : asset.host.status === 'OFFLINE' ? 'offline' : 'unknown'}`}>{asset.host.status}</span></div>
+          {asset.inventory.routes.length ? <div className="host-route-list">{asset.inventory.routes.map((route, index) => {
+            const owners = route.gateway ? hostByAddress.get(route.gateway.toLowerCase()) ?? [] : [];
+            const nextHop = owners.length === 1 && owners[0].id !== asset.host.id ? owners[0] : undefined;
+            const unresolved = route.gateway && owners.length > 1 ? '（地址匹配到多个拓扑主机）' : '（未匹配拓扑主机）';
+            return <div className="host-route-row" key={`${route.destination}-${route.table}-${route.metric}-${index}`}><code>{route.destination}</code><span>{nextHop ? `${asset.host.hostname} → ${nextHop.hostname}` : route.gateway ? `via ${route.gateway}${unresolved}` : '直连路由'}</span><small>{route.interfaceName || '—'} · table {route.table} · metric {route.metric} · {route.routeType}</small></div>;
+          })}</div> : <div className="empty">暂无路由记录</div>}
+        </article>;
+      })}</div> : <div className="empty">先在主拓扑添加已登记的主机资产，系统会自动读取并匹配其路由表。</div>}
+      <p className="service-network-empty">匹配结果是只读观测关联；当前 Provider 尚未实现通用主机路由下发。</p>
+    </section>}
+    {folderId && <section className="service-network card" aria-labelledby="kubernetes-hierarchy-title">
+      <div className="card-title"><div><h2 id="kubernetes-hierarchy-title">{folder?.name ?? 'K3s'} · Namespace 资源视图</h2><p>点击 Namespace 展开 Ingress、Service 与 Pod，再打开 Pod 查看容器、端口和重启计数。</p></div><button className="secondary" disabled={kubernetesBusy} onClick={() => { setKubernetesNamespaces(undefined); setKubernetesError(''); void api<KubernetesTopologyNamespaceSnapshot>('/kubernetes/topology/namespaces').then(result => setKubernetesNamespaces(result.data)).catch(e => setKubernetesError((e as Error).message)).finally(() => setKubernetesBusy(false)); setKubernetesBusy(true); }}>↻ 刷新 Namespace</button></div>
+      {kubernetesError && <div className="alert error" role="alert">{kubernetesError}{!isMock && ' · 请启用 Kubernetes 服务发现并为 Core 身份授予 Namespace、Pod、Service、Ingress 的 get/list 权限。'}</div>}
+      {kubernetesNamespaces && <div className="service-network-meta"><span><b>{kubernetesNamespaces.sourceId}</b></span><span>观测于 {new Date(kubernetesNamespaces.observedAt).toLocaleString()}</span>{mockBusiness && <span className="badge pending">Mock 示例</span>}</div>}
+      {kubernetesBusy && !kubernetesNamespaces ? <div className="empty">读取集群 Namespace…</div> : kubernetesNamespaces?.namespaces.length ? <div className="kubernetes-namespace-list">{kubernetesNamespaces.namespaces.map(namespace => {
+        const detail = namespaceDetails[`${folderId}:${namespace.name}`];
+        const expanded = expandedNamespace === namespace.name;
+        return <article className="kubernetes-namespace" key={namespace.name}>
+          <button className="kubernetes-namespace-heading" aria-expanded={expanded} onClick={() => { if (expanded) setExpandedNamespace(undefined); else if (detail) setExpandedNamespace(namespace.name); else void loadNamespace(namespace.name); }}><span><strong>▰ {namespace.name}</strong><small>Namespace · {namespace.phase}</small></span><span>{expanded ? '收起 ↑' : '展开资源 ↓'}</span></button>
+          {expanded && detail && <div className="kubernetes-resource-view">
+            <div className="service-network-meta"><span>刷新于 {new Date(detail.observedAt).toLocaleString()}</span><span>{detail.ingresses.length} Ingress · {detail.services.length} Service · {detail.pods.length} Pod</span></div>
+            <h3>Ingress 路由</h3>{detail.ingresses.length ? detail.ingresses.map(ingress => <div className="kubernetes-resource-row" key={ingress.name}><strong>{ingress.name}</strong><small>{ingress.ingressClassName ?? '未指定 IngressClass'} · {ingress.loadBalancerAddresses.join(', ') || '无 LoadBalancer 地址'}</small>{ingress.routes.map((route, index) => <code key={`${route.host}-${route.path}-${index}`}>{route.host ?? '*'}{route.path ?? '/'} → {route.serviceName}:{route.servicePortName ?? route.servicePort ?? '?'}</code>)}</div>) : <p className="service-network-empty">此 Namespace 没有 Ingress。</p>}
+            <h3>Service</h3>{detail.services.length ? detail.services.map(service => <div className="kubernetes-resource-row" key={service.name}><strong>{service.name}</strong><small>{service.type} · {service.clusterIps.join(', ') || service.externalName || '无 ClusterIP'}</small>{service.ports.map((port, index) => <code key={`${port.name}-${index}`}>{port.name ? `${port.name} · ` : ''}{port.port}/{port.protocol} → {port.targetPort ?? port.port}</code>)}</div>) : <p className="service-network-empty">此 Namespace 没有 Service。</p>}
+            <h3>Pods</h3>{detail.pods.length ? detail.pods.map(pod => {
+              const podKey = `${namespace.name}/${pod.name}`;
+              const open = expandedPod === podKey;
+              return <div className="kubernetes-resource-row pod-row" key={pod.name}><button className="pod-open" aria-expanded={open} onClick={() => setExpandedPod(open ? undefined : podKey)}><strong>▣ {pod.name}</strong><span className={`badge ${pod.ready ? 'online' : 'offline'}`}>{pod.phase} · {pod.ready ? 'Ready' : 'NotReady'}</span><small>{pod.podIp ?? '无 Pod IP'} · {pod.nodeName ?? '未调度'}</small></button>{open && <div className="pod-detail-view"><strong>Pod 内视图</strong><small>创建于 {pod.createdAt ? new Date(pod.createdAt).toLocaleString() : '未知'}</small>{pod.containers.length ? pod.containers.map(container => <div className="pod-container" key={container.name}><span><b>{container.name}</b> · {container.image ?? '镜像未知'}</span><small>{container.ready ? 'Ready' : 'NotReady'} · 重启 {container.restartCount} 次 · {container.ports.map(port => `${port.name ? `${port.name}:` : ''}${port.containerPort}/${port.protocol}`).join(', ') || '无端口'}</small></div>) : <p className="service-network-empty">Pod 没有容器清单。</p>}</div>}</div>;
+            }) : <p className="service-network-empty">此 Namespace 没有 Pod。</p>}
+          </div>}
+          {expanded && !detail && kubernetesBusy && <div className="empty">读取 Namespace 资源…</div>}
+        </article>;
+      })}</div> : <div className="empty">{kubernetesNamespaces ? '此集群没有 Namespace。' : '尚未读取集群清单。'}</div>}
+    </section>}
+    {!folderId && <section className="service-network card" aria-labelledby="service-network-title">
       <div className="card-title"><div><h2 id="service-network-title">Kubernetes 服务网络</h2><p>Service 与 EndpointSlice 持久化快照；TCP 探测需单独显式启用</p></div><button className="secondary" disabled={inventoryBusy} onClick={() => void loadServiceInventory(true)}>{inventoryBusy ? '读取中…' : '↻ 刷新清单'}</button></div>
         {serviceInventoryError && <div className="alert error" role="alert">{serviceInventoryError}{!isMock && ' · 请在 Core 配置集群身份、namespace 并显式启用 Kubernetes 服务发现。'}</div>}
       {serviceInventory && <>
@@ -199,13 +373,14 @@ function Editor() {
           })}</div> : <p className="service-network-empty">当前没有 EndpointSlice 地址</p>}
         </article>)}</div> : <div className="empty">{serviceInventory.observedAt ? '该 namespace 当前没有 Service。' : '等待首次采集；可手动刷新清单。'}</div>}
       </>}
-    </section>
+    </section>}
     <NetbirdProviderPanel />
-    <div className="topology-caption"><span>{nodes.length} 个节点 · {edges.length} 条未验证连接 · {dirty ? '有未保存的修改' : '草稿未修改'}</span><span role="status">{message || (busy ? '正在读取草稿…' : '')}</span></div>
+    <div className="topology-caption"><span>全拓扑 {nodes.length} 个节点 · {edges.length} 条连接；当前层 {activeNodes.length} 个节点 · {activeEdges.length} 条连接 · {dirty ? '有未保存的修改' : '草稿未修改'}</span><span role="status">{message || (busy ? '正在读取草稿…' : '')}</span></div>
     {menu && <div className="topology-menu" role="menu" aria-label="拓扑右键菜单" ref={menuRef} style={{ left: menu.x, top: menu.y } as CSSProperties}>
-      {contextNode ? <><strong>{contextNode.name} · {contextNode.inputCount} 入 / {contextNode.outputCount} 出</strong>{(['inputCount', 'outputCount'] as const).map(direction => <div key={direction} className="menu-port-actions">{[1, -1].map(delta => <button role="menuitem" key={delta} disabled={!portChangeCandidate(contextNode, direction, delta)} onClick={() => changePorts(contextNode, direction, delta)}>{delta > 0 ? '增加' : '减少'}{direction === 'inputCount' ? '入口' : '出口'}</button>)}</div>)}<button role="menuitem" className="danger" onClick={() => removeNode(contextNode.id)}>删除节点及关联连接</button></> : menu.edgeId ? <><strong>期望连接 · {linkStateLabels[(contextEdge?.data?.state ?? 'PENDING') as keyof typeof linkStateLabels]} · L4/{(contextEdge?.data?.protocol ?? 'TCP') as string}</strong><button role="menuitem" className="danger" onClick={() => { setEdges(current => current.filter(e => e.id !== menu.edgeId)); setDirty(true); setRouteEvidence(undefined); setMenu(undefined); }}>删除连接</button></> : <><strong>添加虚拟节点</strong>{(Object.keys(nodePresets) as TopologyNodeKind[]).map(kind => <button role="menuitem" key={kind} onClick={() => addNode(kind)}><span>{nodePresets[kind].name}</span><small>{nodePresets[kind].inputs} 入 / {nodePresets[kind].outputs} 出</small></button>)}</>}
+      {contextNode ? <><strong>{contextNode.name} · {contextNode.inputCount} 入 / {contextNode.outputCount} 出</strong>{contextNode.kind === 'FOLDER' && <button role="menuitem" onClick={() => enterFolder(contextNode.id)}>打开层级视图</button>}{(['inputCount', 'outputCount'] as const).map(direction => <div key={direction} className="menu-port-actions">{[1, -1].map(delta => <button role="menuitem" key={delta} disabled={!portChangeCandidate(contextNode, direction, delta)} onClick={() => changePorts(contextNode, direction, delta)}>{delta > 0 ? '增加' : '减少'}{direction === 'inputCount' ? '入口' : '出口'}</button>)}</div>)}<button role="menuitem" className="danger" onClick={() => removeNode(contextNode.id)}>删除节点及关联连接</button></> : menu.edgeId ? <><strong>期望连接 · {linkStateLabels[(contextEdge?.data?.state ?? 'PENDING') as keyof typeof linkStateLabels]} · L4/{(contextEdge?.data?.protocol ?? 'TCP') as string}</strong><button role="menuitem" className="danger" onClick={() => { setEdges(current => current.filter(e => e.id !== menu.edgeId)); setDirty(true); setRouteEvidence(undefined); setMenu(undefined); }}>删除连接</button></> : <><strong>添加节点</strong>{(Object.keys(nodePresets) as TopologyNodeKind[]).map(kind => <button role="menuitem" key={kind} onClick={() => addNode(kind)}><span>{nodePresets[kind].name}</span><small>{nodePresets[kind].inputs} 入 / {nodePresets[kind].outputs} 出</small></button>)}</>}
       <button role="menuitem" className="menu-cancel" onClick={() => setMenu(undefined)}>关闭菜单 · Esc</button>
     </div>}
+    {assetPickerOpen && <div className="modal-backdrop"><section className="modal topology-asset-picker" role="dialog" aria-modal="true" aria-labelledby="topology-asset-picker-title"><div className="card-title"><div><span className="eyebrow">REGISTERED HOSTS</span><h2 id="topology-asset-picker-title">添加主机资产到主拓扑</h2></div><button className="icon-button" aria-label="关闭添加主机资产" onClick={() => setAssetPickerOpen(false)}>×</button></div><p>选择已登记主机后，拓扑会绑定该资产并自动读取 Agent 上报的路由表。</p><div className="topology-asset-list">{assetChoices.map(host => { const bound = nodes.some(node => node.data.model.assetId === host.id); return <button className="topology-asset-option" key={host.id} disabled={bound} onClick={() => addHostAsset(host)}><span><strong>{host.hostname}</strong><small>{host.os ?? 'OS 未知'} · {host.arch ?? '架构未知'} · {host.agentId ? 'Agent 已绑定' : '等待 Agent'}</small></span><span className={`badge ${host.status === 'ONLINE' ? 'online' : host.status === 'OFFLINE' ? 'offline' : 'unknown'}`}>{bound ? '已添加' : host.status}</span></button>; })}</div>{assetNextCursor && <button className="secondary" disabled={assetPickerBusy} onClick={() => void loadMoreHostAssets()}>{assetPickerBusy ? '读取中…' : '加载更多主机'}</button>}{!assetChoices.length && <div className="empty">还没有已登记主机。</div>}</section></div>}
   </>;
 }
 export default function Topology() { return <ReactFlowProvider><Editor /></ReactFlowProvider>; }

@@ -135,6 +135,29 @@ export async function mockRequest(path: string, options: RequestInit, authentica
   return ok(topology, 200, { ETag: etag('topology'), 'Cache-Control': 'no-store' });
  }
  if (p === '/system') return ok({ name: 'NaNPanel', version: '0.1.0-mock', stage: 'mock' });
+ if (p === '/kubernetes/topology/namespaces') return ok({ sourceId: 'kubernetes:demo-cluster', observedAt: now(), namespaces: [
+  { name: 'default', phase: 'Active' }, { name: 'kube-system', phase: 'Active' },
+  { name: 'nanpanel-mesh', phase: 'Active' },
+ ] });
+ const topologyNamespaceMatch = p.match(/^\/kubernetes\/topology\/namespaces\/([^/]+)$/);
+ if (topologyNamespaceMatch) {
+  const namespace = decodeURIComponent(topologyNamespaceMatch[1]);
+  if (!['default', 'kube-system', 'nanpanel-mesh'].includes(namespace)) return fail(404, 'KUBERNETES_NAMESPACE_NOT_FOUND', 'Namespace 不存在或名称无效');
+  const services = namespace === 'nanpanel-mesh' ? [
+   { name: 'catalog-api', type: 'ClusterIP', clusterIps: ['10.43.120.17'], externalName: null, ports: [{ name: 'http', port: 80, protocol: 'TCP', targetPort: '8080' }] },
+  ] : [];
+  const pods = namespace === 'nanpanel-mesh' ? [
+   { name: 'catalog-api-6c847d7d4b-kd2sh', phase: 'Running', ready: true, podIp: '10.42.1.23', nodeName: 'k3s-worker-1', createdAt: now(), containers: [{ name: 'api', image: 'ghcr.io/example/catalog-api:1.4.2', ready: true, restartCount: 0, ports: [{ name: 'http', containerPort: 8080, protocol: 'TCP' }] }] },
+   { name: 'catalog-api-6c847d7d4b-qv9mc', phase: 'Running', ready: true, podIp: '10.42.2.31', nodeName: 'k3s-worker-2', createdAt: now(), containers: [{ name: 'api', image: 'ghcr.io/example/catalog-api:1.4.2', ready: true, restartCount: 1, ports: [{ name: 'http', containerPort: 8080, protocol: 'TCP' }] }] },
+  ] : namespace === 'kube-system' ? [
+   { name: 'traefik-6f5d7c8b9d-4n2kq', phase: 'Running', ready: true, podIp: '10.42.0.8', nodeName: 'k3s-server-1', createdAt: now(), containers: [{ name: 'traefik', image: 'rancher/mirrored-library-traefik:3.3.6', ready: true, restartCount: 0, ports: [{ name: 'web', containerPort: 8000, protocol: 'TCP' }, { name: 'websecure', containerPort: 8443, protocol: 'TCP' }] }] },
+  ] : [];
+  return ok({ sourceId: 'kubernetes:demo-cluster', namespace, observedAt: now(), services, ingresses: namespace === 'nanpanel-mesh' ? [
+   { name: 'catalog', ingressClassName: 'traefik', loadBalancerAddresses: ['192.0.2.50'], routes: [
+    { host: 'catalog.example.test', path: '/', pathType: 'Prefix', serviceName: 'catalog-api', servicePort: 80, servicePortName: null },
+   ] },
+  ] : [], pods });
+ }
  if (p === '/kubernetes/service-inventory' || p === '/kubernetes/service-inventory/refresh') return ok({
   sourceId: 'kubernetes:demo-cluster', namespace: 'nanpanel-mesh', observedAt: now(), services: [
    { serviceName: 'catalog-api', type: 'ClusterIP', clusterIps: ['10.43.120.17'], externalName: null, ports: [{ name: 'http', protocol: 'TCP', port: 80, targetPort: '8080', appProtocol: 'http' }], endpoints: [
@@ -163,9 +186,11 @@ export async function mockRequest(path: string, options: RequestInit, authentica
  }
  const host = hosts.find(h => h.id === p.split('/')[2]);
  if (p.startsWith('/hosts/') && !host) return fail(404, 'NOT_FOUND', '主机不存在');
- if (/^\/hosts\/[^/]+\/network-inventory$/.test(p)) return ok({
-  interfaces: [{ name: 'eth0', macAddress: '02:00:00:00:00:01', mtu: 1500, state: 'UP', addresses: [{ family: 'inet', address: '192.0.2.20', prefixLength: 24, scope: 'global' }, { family: 'inet6', address: '2001:db8::20', prefixLength: 64, scope: 'global' }] }],
-  routes: [{ destination: 'default', gateway: '192.0.2.1', interfaceName: 'eth0', protocol: 'static', scope: 'global', routeType: 'unicast', table: 'main', metric: 100 }],
+ if (/^\/hosts\/[^/]+\/network-inventory$/.test(p)) {
+  const hostIndex = Math.max(0, hosts.indexOf(host!));
+  return ok({
+  interfaces: [{ name: 'eth0', macAddress: '02:00:00:00:00:01', mtu: 1500, state: 'UP', addresses: [{ family: 'inet', address: `192.0.2.${20 + hostIndex}`, prefixLength: 24, scope: 'global' }, { family: 'inet6', address: `2001:db8::${20 + hostIndex}`, prefixLength: 64, scope: 'global' }] }],
+  routes: [{ destination: 'default', gateway: hostIndex === 0 ? '192.0.2.21' : '192.0.2.1', interfaceName: 'eth0', protocol: 'static', scope: 'global', routeType: 'unicast', table: 'main', metric: 100 }],
   observedAt: host!.lastSeenAt,
   overlay: host!.status === 'ONLINE' ? { peerCount: 12, connectedPeerCount: 9, p2pPeerCount: 6, relayedPeerCount: 3, observedAt: now() } : null,
   overlayPeers: host!.status === 'ONLINE' ? [
@@ -174,7 +199,8 @@ export async function mockRequest(path: string, options: RequestInit, authentica
    { peerName: 'worker-c.example.test', status: 'DISCONNECTED', connectionType: 'UNKNOWN' },
   ] : [],
   overlayPeersObservedAt: host!.status === 'ONLINE' ? now() : null,
- });
+  });
+ }
  if (/^\/hosts\/[^/]+$/.test(p)) return ok(host);
  if (/^\/hosts\/[^/]+\/ssh\/probe$/.test(p) && method === 'POST') { if (!b.reason?.trim() || b.reason.length > 500) return fail(422, 'VALIDATION_FAILED', 'SSH 操作原因无效'); log('SSH_ACCESS_PROBED', 'host', host!.id, `Mock SSH direct connection probe: ${b.reason}`); return ok({ hostId: host!.id, address: host!.hostname, port: 22, status: 'SUCCEEDED', verifiedAt: now(), evidence: 'Mock: confirmed host key and fixed true command succeeded' }); }
  if (/^\/hosts\/[^/]+\/ssh\/systemd\/restart$/.test(p) && method === 'POST') {

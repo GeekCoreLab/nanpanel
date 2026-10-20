@@ -3,9 +3,11 @@ package io.nanpanel.core;
 import static io.nanpanel.core.AuthResource.fail;
 
 import jakarta.inject.Inject;
+import io.nanpanel.cluster.KubernetesTopologyDiscovery;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.MediaType;
@@ -63,6 +65,43 @@ public class KubernetesServiceInventoryResource {
     }
   }
 
+  @GET
+  @Path("topology/namespaces")
+  public Response topologyNamespaces() {
+    authenticated();
+    requireClusterAvailable();
+    try {
+      return Response.ok(inventory.topologyNamespaces())
+          .header("Cache-Control", "no-store")
+          .build();
+    } catch (RuntimeException failure) {
+      throw fail(502, "KUBERNETES_TOPOLOGY_DISCOVERY_FAILED",
+          "暂时无法读取 Kubernetes Namespace 清单");
+    }
+  }
+
+  @GET
+  @Path("topology/namespaces/{namespace}")
+  public Response topologyNamespace(@PathParam("namespace") String namespace) {
+    authenticated();
+    requireClusterAvailable();
+    if (namespace == null || !namespace.matches("[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")) {
+      throw fail(404, "KUBERNETES_NAMESPACE_NOT_FOUND",
+          "Namespace 不存在或名称无效");
+    }
+    try {
+      return Response.ok(inventory.topologyNamespace(namespace))
+          .header("Cache-Control", "no-store")
+          .build();
+    } catch (KubernetesTopologyDiscovery.NamespaceNotFoundException failure) {
+      throw fail(404, "KUBERNETES_NAMESPACE_NOT_FOUND",
+          "Namespace 不存在或名称无效");
+    } catch (RuntimeException failure) {
+      throw fail(502, "KUBERNETES_TOPOLOGY_DISCOVERY_FAILED",
+          "暂时无法读取该 Namespace 的资源清单");
+    }
+  }
+
   private void requireAvailable() {
     if (!inventory.isEnabled()) {
       throw fail(503, "KUBERNETES_DISCOVERY_DISABLED",
@@ -71,6 +110,17 @@ public class KubernetesServiceInventoryResource {
     if (!inventory.isConfigured()) {
       throw fail(503, "KUBERNETES_DISCOVERY_MISCONFIGURED",
           "Kubernetes 服务发现缺少集群或 namespace 配置");
+    }
+  }
+
+  private void requireClusterAvailable() {
+    if (!inventory.isEnabled()) {
+      throw fail(503, "KUBERNETES_DISCOVERY_DISABLED",
+          "Kubernetes 服务发现尚未启用");
+    }
+    if (!inventory.isClusterConfigured()) {
+      throw fail(503, "KUBERNETES_DISCOVERY_MISCONFIGURED",
+          "Kubernetes 服务发现缺少集群身份配置");
     }
   }
 

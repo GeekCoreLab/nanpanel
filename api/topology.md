@@ -8,6 +8,8 @@ Nodes keep editor coordinates and explicit typed ports. A port has an ID, direct
 
 The editor currently creates `L4` ports that support TCP and UDP, and creates TCP links by default. A link always points from an output port to an input port. Each port can be used once. Missing references, self-links, duplicate IDs, invalid node shapes, incompatible port types, excess ports, cycles and unknown fields are rejected. Empty graphs are allowed; the limits are 100 nodes and 800 links.
 
+`FOLDER` nodes create nested editing scopes. Nodes may set `parentId` to a folder UUID; omitted or null means the outermost topology. Folders can nest at most eight levels, and a link may only connect nodes in the same scope. The complete hierarchy is saved in the same revision and shares its ETag. Deleting a folder removes all descendants. A `HOST` node may set `assetId` to a registered host UUID; the Core verifies that the host exists and that the same host is not bound more than once in a draft.
+
 | kind | Default inputs / outputs | Allowed range |
 | --- | --- | --- |
 | `GATEWAY` | 0 / 1 | 0 / 1–16 |
@@ -17,8 +19,13 @@ The editor currently creates `L4` ports that support TCP and UDP, and creates TC
 | `MERGE` | 3 / 1 | 2–16 / 1 |
 | `SPLIT` | 1 / 3 | 1 / 2–16 |
 | `FORWARDER` | 3 / 3 | 2–16 / 2–16 |
+| `FOLDER` | 1 / 1 | 1–16 / 1–16 |
 
 These are desired logical nodes, not deployed devices. Their names do not imply MAC learning, traffic replication, load balancing, port mapping or route selection. Providers must declare the capabilities and execution semantics they support.
+
+The outer topology can include registered Host assets. Their read-only Agent network snapshots are matched against other selected assets by interface address to display known route next hops. The route table is not changed by saving the topology; general host route deployment still needs a capable Provider and an explicit operation.
+
+Opening a folder allows editing its child topology and browsing the server-configured Kubernetes cluster. `GET /api/v1/kubernetes/topology/namespaces` returns bounded Namespace names; `GET /api/v1/kubernetes/topology/namespaces/{namespace}` fetches bounded Ingress, Service, Pod and container metadata on demand. These APIs use the Core's configured cluster identity, require corresponding Kubernetes `get/list` RBAC permissions, do not read Secrets, and do not accept a client-selected cluster. The resource view is read-only; K3s resource mutation and topology-to-provider reconciliation remain unimplemented.
 
 ## Endpoints
 
@@ -28,6 +35,8 @@ These are desired logical nodes, not deployed devices. Their names do not imply 
 | `PUT` | `/api/v1/topology/draft` | Validate and create a new immutable Revision using `If-Match`. |
 | `GET` | `/api/v1/topology/revisions?limit=50` | List up to 100 recent Revisions. |
 | `GET` | `/api/v1/topology/revisions/{revisionId}` | Read an immutable historical graph. |
+| `GET` | `/api/v1/kubernetes/topology/namespaces` | Read bounded namespace inventory for the configured cluster. |
+| `GET` | `/api/v1/kubernetes/topology/namespaces/{namespace}` | Read bounded Ingress, Service, Pod and container observations for a namespace. |
 
 All endpoints require an active administrator session with the initial password change completed. PUT also requires CSRF and the exact `If-Match` returned by GET. Missing ETag returns 428, stale ETag returns 412, and invalid topology returns 422 `INVALID_TOPOLOGY`. Wildcards and multiple ETags are rejected. Errors do not change the current graph or history.
 

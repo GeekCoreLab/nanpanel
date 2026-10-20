@@ -126,6 +126,9 @@ public final class NetworkGraphValidator {
         long outputs = node.ports().stream().filter(port -> port != null && port.direction() == Direction.OUTPUT).count();
         boolean valid = switch (node.kind()) {
             case "GATEWAY" -> inputs == 0 && outputs >= 1 && outputs <= 16;
+            // A folder is a navigable boundary in the editor. Its ports describe
+            // external connections; the child graph is validated separately.
+            case "FOLDER" -> inputs >= 1 && inputs <= 16 && outputs >= 1 && outputs <= 16;
             case "SERVICE" -> inputs >= 1 && inputs <= 16 && outputs == 0;
             case "HOST" -> inputs >= 1 && inputs <= 16 && outputs >= 1 && outputs <= 16;
             case "MERGE" -> inputs >= 2 && inputs <= 16 && outputs == 1;

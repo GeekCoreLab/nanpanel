@@ -48,6 +48,15 @@ is run again. The deploy script rotates a legacy serving certificate if it is
 marked as a CA or lacks the TLS server-auth usage required by Rustls. It restarts
 Core and Web after rotation and refreshes the local Agent's trust certificate if
 `nanpanel-agent.service` is installed.
+
+The deployment also binds the Core ServiceAccount to the read-only
+`nanpanel-topology-inventory` ClusterRole. It grants `get/list` for Namespace,
+Pod, Service, and Ingress metadata across the cluster so the topology editor can
+drill into each namespace and Pod. It grants no Secret access and no write
+verbs. The hierarchical topology discovery is enabled for this test cluster;
+the periodic service inventory remains limited to the configured
+`nanpanel-mesh` namespace. The separate Istio fixture Role remains
+namespace-scoped for its isolated tests.
 The first-run administrator password is printed once; sign in as `admin`,
 change it, then remove the one-time bootstrap secret:
 

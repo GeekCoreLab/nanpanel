@@ -80,6 +80,42 @@ try {
   if (bounds.x < 0 || bounds.x + bounds.width > 390 || bounds.y < 0 || bounds.y + bounds.height > 844) throw new Error('Mobile context menu escaped viewport');
   await page.keyboard.press('Escape');
   if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw new Error('Mobile overflow');
+  await page.setViewportSize({ width: 1600, height: 1200 });
+  for (const hostname of ['gateway-sg-01', 'homelab-node-01']) {
+    await page.getByRole('button', { name: '＋ 添加主机资产' }).click();
+    await page.locator('.topology-asset-option').filter({ hasText: hostname }).click();
+    await expect(device(hostname)).toBeVisible();
+  }
+  await expect(page.locator('.host-route-row').filter({ hasText: 'gateway-sg-01 → homelab-node-01' })).toBeVisible();
+  await expect(page.locator('.react-flow__edge')).toHaveCount(3);
+  await expect(page.locator('.link-state-observed')).toHaveCount(1);
+  await page.getByRole('button', { name: '＋ 添加节点' }).click();
+  await page.getByRole('menuitem', { name: 'K3s 集群文件夹 1 入 / 1 出' }).click();
+  const cluster = device('K3s 集群文件夹');
+  await cluster.dblclick();
+  await expect(page.getByRole('heading', { name: 'K3s 集群文件夹', exact: true })).toBeVisible();
+  const namespace = page.locator('.kubernetes-namespace-heading').filter({ hasText: 'nanpanel-mesh' });
+  await namespace.click();
+  await expect(page.getByText('catalog.example.test/ → catalog-api:80')).toBeVisible();
+  const pod = page.locator('.pod-open').filter({ hasText: 'catalog-api-6c847d7d4b-kd2sh' });
+  await pod.click();
+  await expect(page.getByText('Pod 内视图')).toBeVisible();
+  await expect(page.getByText('ghcr.io/example/catalog-api:1.4.2')).toBeVisible();
+  await page.getByRole('button', { name: '＋ 添加节点' }).click();
+  await page.getByRole('menuitem', { name: 'K3s Service 1 入 / 0 出' }).click();
+  await page.getByRole('button', { name: '＋ 添加节点' }).click();
+  await page.getByRole('menuitem', { name: '公网 Gateway 0 入 / 1 出' }).click();
+  await page.getByRole('button', { name: 'fit view' }).click();
+  await page.waitForTimeout(300);
+  await drag(device('公网 Gateway').locator('[data-handleid="out-1"]'), device('K3s Service').locator('[data-handleid="in-1"]'));
+  await expect(page.locator('.react-flow__edge')).toHaveCount(1);
+  await page.getByRole('button', { name: '保存草稿', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('草稿已保存');
+  await page.getByRole('button', { name: '↻ 重新读取' }).click();
+  await cluster.dblclick();
+  await expect(device('公网 Gateway')).toBeVisible();
+  await expect(device('K3s Service')).toBeVisible();
+  await expect(page.locator('.react-flow__edge')).toHaveCount(1);
   if (errors.length) throw new Error(errors.join('\n'));
-  console.log('PASS: port colors, strict connection directions, occupied-port rejection, context-menu presets, port adjustment, draft round-trip, edge/node deletion, mobile menu; no page errors');
+  console.log('PASS: base topology editing, root host asset binding, automatic route next-hop matching, nested folder editing and persistence, Namespace/Ingress/Service/Pod/container drill-down, mobile menu; no page errors');
 } finally { await browser.close(); }

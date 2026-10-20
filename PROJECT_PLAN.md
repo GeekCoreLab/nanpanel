@@ -481,6 +481,7 @@ hybrid-infrastructure-platform/
 
 ### P4｜K3s / KubeEdge
 
+- [x] 拓扑文件夹支持多层编辑；K3s 视图可按需只读浏览 Namespace、Ingress、Service、Pod 和容器端口/状态，并从已登记主机路由快照匹配已知下一跳。
 - [ ] K3s 多集群导入、节点映射、基础资源管理。
 - [ ] K3s 安装、升级前校验、健康监测、失败处理。
 - [ ] KubeEdge Provider 的 CloudCore/EdgeCore 状态与注册管理。

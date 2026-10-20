@@ -57,7 +57,8 @@ public class TopologyResource {
   public record Position(double x, double y) {}
   public record PortView(String id, String direction, String layer, List<String> protocols) {}
   public record NodeView(String id, String kind, String name, Position position,
-                         int inputCount, int outputCount, List<PortView> ports) {}
+                         int inputCount, int outputCount, List<PortView> ports,
+                         String parentId, String assetId) {}
   public record LinkView(String id, String sourceNodeId, String sourcePort, String targetNodeId,
                          String targetPort, String layer, String protocol, String status,
                          String state) {}
@@ -97,6 +98,10 @@ public class TopologyResource {
     Map<String, Object> actor = session();
     long expected = expectedGeneration(ifMatch);
     DraftWrite payload = parse(body);
+    String hierarchyError = hierarchyError(payload);
+    if (hierarchyError != null) {
+      throw fail(422, "INVALID_TOPOLOGY", hierarchyError);
+    }
     NetworkGraph graph = graph(payload);
     String invalid = NetworkGraphValidator.error(graph);
     if (invalid != null) {
@@ -106,6 +111,19 @@ public class TopologyResource {
     UUID revisionId = UUID.randomUUID();
     long now = System.currentTimeMillis();
     Map<String, Object> row = store.transaction(c -> {
+      Set<String> linkedAssets = new HashSet<>();
+      for (NodeView node : payload.nodes()) {
+        if (node.assetId() == null) {
+          continue;
+        }
+        UUID assetId = uuid(node.assetId());
+        if (!"HOST".equals(node.kind()) || !linkedAssets.add(assetId.toString())) {
+          throw fail(422, "INVALID_TOPOLOGY", "主机资产只能由唯一主机节点绑定");
+        }
+        if (query(c, "SELECT id FROM host WHERE id=?", assetId.toString()).isEmpty()) {
+          throw fail(422, "INVALID_TOPOLOGY", "拓扑引用的主机资产不存在");
+        }
+      }
       Map<String, Object> head = query(c, "SELECT * FROM topology_head WHERE id=1").getFirst();
       long generation = number(head, "generation");
       if (generation != expected) {
@@ -186,8 +204,7 @@ public class TopologyResource {
       throw fail(422, "INVALID_TOPOLOGY", "拓扑最多包含 100 个节点与 800 条连接");
     }
     for (JsonNode node : body.path("nodes")) {
-      if (!objectWithKeys(node, Set.of("id", "kind", "name", "position", "inputCount",
-          "outputCount", "ports"))) {
+      if (!objectWithNodeKeys(node)) {
         throw fail(422, "INVALID_TOPOLOGY", "节点包含缺失字段或未定义字段");
       }
       if (!objectWithKeys(node.path("position"), Set.of("x", "y"))
@@ -246,7 +263,8 @@ public class TopologyResource {
         return new PortView(port.id(), port.direction(), port.layer(), List.copyOf(port.protocols()));
       }).toList();
       return new NodeView(node.id(), node.kind(), node.name() == null ? null : node.name().strip(),
-          node.position(), node.inputCount(), node.outputCount(), ports);
+          node.position(), node.inputCount(), node.outputCount(), ports, node.parentId(),
+          node.assetId());
     }).toList();
     List<LinkInput> links = input.links().stream().map(link -> {
       if (link == null) {
@@ -255,6 +273,64 @@ public class TopologyResource {
       return link;
     }).toList();
     return new DraftWrite(nodes, links);
+  }
+
+  private String hierarchyError(DraftWrite value) {
+    Map<String, NodeView> byId = new LinkedHashMap<>();
+    for (NodeView node : value.nodes()) {
+      UUID id;
+      try {
+        id = uuid(node.id());
+      } catch (RuntimeException failure) {
+        return "节点 ID 必须是 UUID";
+      }
+      byId.put(id.toString(), node);
+      if (node.parentId() != null) {
+        try {
+          uuid(node.parentId());
+        } catch (RuntimeException failure) {
+          return "父文件夹 ID 无效";
+        }
+      }
+      if (node.assetId() != null) {
+        try {
+          uuid(node.assetId());
+        } catch (RuntimeException failure) {
+          return "主机资产 ID 无效";
+        }
+        if (!"HOST".equals(node.kind())) {
+          return "只有主机节点可以绑定主机资产";
+        }
+      }
+    }
+    for (NodeView node : value.nodes()) {
+      String parentId = node.parentId();
+      Set<String> seen = new HashSet<>();
+      seen.add(node.id());
+      int depth = 0;
+      while (parentId != null) {
+        NodeView parent = byId.get(parentId);
+        if (parent == null || !"FOLDER".equals(parent.kind())) {
+          return "父节点必须是存在的文件夹";
+        }
+        if (!seen.add(parentId)) {
+          return "文件夹层级不能形成循环";
+        }
+        parentId = parent.parentId();
+        if (++depth > 8) {
+          return "文件夹最多嵌套 8 层";
+        }
+      }
+    }
+    for (LinkInput link : value.links()) {
+      NodeView source = byId.get(link.sourceNodeId());
+      NodeView target = byId.get(link.targetNodeId());
+      if (source != null && target != null
+          && !java.util.Objects.equals(source.parentId(), target.parentId())) {
+        return "不同拓扑层级之间不能直接连接";
+      }
+    }
+    return null;
   }
 
   private NetworkGraph graph(DraftWrite value) {
@@ -344,6 +420,27 @@ public class TopologyResource {
       }
     }
     return true;
+  }
+
+  private boolean objectWithNodeKeys(JsonNode value) {
+    Set<String> allowed = Set.of("id", "kind", "name", "position", "inputCount",
+        "outputCount", "ports", "parentId", "assetId");
+    Set<String> required = Set.of("id", "kind", "name", "position", "inputCount",
+        "outputCount", "ports");
+    if (value == null || !value.isObject() || value.size() < required.size()
+        || value.size() > allowed.size()) {
+      return false;
+    }
+    var names = value.fieldNames();
+    Set<String> found = new HashSet<>();
+    while (names.hasNext()) {
+      String name = names.next();
+      if (!allowed.contains(name)) {
+        return false;
+      }
+      found.add(name);
+    }
+    return found.containsAll(required);
   }
 
   private UUID uuid(String value) {

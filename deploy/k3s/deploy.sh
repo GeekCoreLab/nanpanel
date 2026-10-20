@@ -42,6 +42,7 @@ apply_file() {
 
 apply_file "$script_dir/namespace.yaml"
 apply_file "$script_dir/config.yaml"
+apply_file "$script_dir/topology-inventory-rbac.yaml"
 
 docker_config=$(printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$ghcr_auth" | base64 | tr -d '\n')
 cat <<EOF | ssh "$ssh_target" kubectl apply -f -

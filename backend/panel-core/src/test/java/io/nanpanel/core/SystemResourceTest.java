@@ -418,6 +418,8 @@ class SystemResourceTest {
         {"nodes":[
           {"id":"10000000-0000-0000-0000-000000000001","kind":"GATEWAY","name":"入口","position":{"x":0,"y":0},"inputCount":0,"outputCount":1,"ports":[{"id":"out-1","direction":"OUTPUT","layer":"L4","protocols":["TCP","UDP"]}]},
           {"id":"10000000-0000-0000-0000-000000000002","kind":"SERVICE","name":"服务","position":{"x":300,"y":0},"inputCount":1,"outputCount":0,"ports":[{"id":"in-1","direction":"INPUT","layer":"L4","protocols":["TCP"]}]}
+        ,{"id":"10000000-0000-0000-0000-000000000003","kind":"FOLDER","name":"K3s","position":{"x":600,"y":0},"inputCount":1,"outputCount":1,"ports":[{"id":"in-1","direction":"INPUT","layer":"L4","protocols":["TCP"]},{"id":"out-1","direction":"OUTPUT","layer":"L4","protocols":["TCP"]}],"parentId":null,"assetId":null}
+        ,{"id":"10000000-0000-0000-0000-000000000004","kind":"SERVICE","name":"Pod Service","position":{"x":0,"y":0},"inputCount":1,"outputCount":0,"ports":[{"id":"in-1","direction":"INPUT","layer":"L4","protocols":["TCP"]}],"parentId":"10000000-0000-0000-0000-000000000003","assetId":null}
         ],"links":[{"id":"10000000-0000-0000-0000-000000000003","sourceNodeId":"10000000-0000-0000-0000-000000000001","sourcePort":"out-1","targetNodeId":"10000000-0000-0000-0000-000000000002","targetPort":"in-1","layer":"L4","protocol":"TCP","status":"UNVERIFIED"}]}
         """;
     var topologySaved = given().cookie("nanpanel_session", restoredCookie)
@@ -429,10 +431,21 @@ class SystemResourceTest {
     assertNotEquals(topologyEtag, topologySaved.header("ETag"));
     assertEquals("PENDING", topologySaved.path("links[0].state"));
     assertEquals("UNVERIFIED", topologySaved.path("links[0].status"));
+    assertEquals("10000000-0000-0000-0000-000000000003",
+        topologySaved.path("nodes[3].parentId"));
     given().cookie("nanpanel_session", restoredCookie)
         .header("X-CSRF-Token", restored.path("csrfToken"))
         .header("If-Match", topologyEtag).contentType("application/json").body(topologyWrite)
         .put("/api/v1/topology/draft").then().statusCode(412);
+    String crossScope = topologyWrite.replace(
+        "\"targetNodeId\":\"10000000-0000-0000-0000-000000000002\"",
+        "\"targetNodeId\":\"10000000-0000-0000-0000-000000000004\"");
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("If-Match", topologySaved.header("ETag"))
+        .contentType("application/json").body(crossScope)
+        .put("/api/v1/topology/draft").then().statusCode(422)
+        .body("code", equalTo("INVALID_TOPOLOGY"));
     given().cookie("nanpanel_session", restoredCookie)
         .get("/api/v1/topology/revisions?limit=10")
         .then().statusCode(200).body("items.size()", equalTo(2));
