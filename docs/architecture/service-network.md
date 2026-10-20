@@ -99,7 +99,10 @@ last verified route.
 
 The NetBird managed-group Provider and Core operation lifecycle have local
 HTTP-fixture coverage, and the Provider has passed live disposable-tenant
-membership reconciliation. P2 remains incomplete until the authenticated Core inventory and probe API
-responses are accepted against the target cluster. Production gateway reconciliation
-and Istio policy reconciliation remain later Provider work; the P2 public
-ingress and gateway recovery evidence is recorded in `tests/p2/README.md`.
+membership reconciliation. P2 remains incomplete until the authenticated Core
+inventory and probe API responses are accepted against the target cluster. A
+scoped, revocable API key flow is deployed for that read-only acceptance;
+verification is pending key issuance by a current administrator. Production
+gateway reconciliation and Istio policy reconciliation remain later Provider
+work; the P2 public ingress and gateway recovery evidence is recorded in
+`tests/p2/README.md`.

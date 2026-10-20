@@ -168,8 +168,9 @@ by default. The live test cluster now has that ServiceAccount and the
 and EndpointSlice list access in the fixture namespace. Its live authorization
 results are `yes`, `yes`, `no`, `no` for Service list, EndpointSlice list, Pod
 list, and Secret get. See the [live RBAC and mesh record](runs/2026-10-20-istio-live-inventory-rbac.md).
-The current test Core runs `sha-f0d804ba3bac19a0e501317865d38129068c72e7` under
-the dedicated ServiceAccount with discovery and probes enabled. Core has
+The current test Core runs `sha-8aa531ef17edf58d0836625d04597ccee46908ba` under
+the dedicated ServiceAccount with discovery and probes enabled; the Web
+console runs the matching immutable image. Core has
 persisted a `SUCCEEDED` TCP/8080 probe matching the Ready fixture endpoint and
 its inventory observation time. The authenticated API run is still pending an
 API key created by a current administrator session; see the [Core probe run record](runs/2026-10-20-core-service-probe-live.md).
@@ -183,11 +184,11 @@ The Role/Binding has already been applied to the test cluster; repeat the four
 `kubectl auth can-i` checks in `deploy/istio/README.md` before a live run. The
 current deployment and persisted `SUCCEEDED` result are evidence of Core-to-
 endpoint connectivity, but final acceptance also requires the authenticated
-inventory and probe API responses with timestamps. Use the valid current Core
-administrator password in the ignored `.env`; do not substitute the bootstrap
-password after the administrator has changed it. Retain a mesh HTTP allow/deny
-result separately. Do not use the strict-mTLS injected fixture as the raw-TCP
-success target while Core is outside the mesh.
+inventory and probe API responses with timestamps. Create a
+`kubernetes:inventory:read` key in the live console's account page and store it
+as `NANPANEL_P2_API_KEY` in ignored `.env`; do not send it in chat. Retain a
+mesh HTTP allow/deny result separately. Do not use the strict-mTLS injected
+fixture as the raw-TCP success target while Core is outside the mesh.
 
 P2 remains incomplete until authenticated Core inventory and probe API
 acceptance has current evidence. The Core-side discovery, TCP connection, and
