@@ -43,6 +43,7 @@ test('Agent reinstall repairs its systemd unit without replacing enrollment iden
   assert.match(command, /EnvironmentFile=\/etc\/nanpanel-agent\/agent\.env/);
   assert.match(command, /StateDirectory=nanpanel-agent/);
   assert.match(command, /StateDirectoryMode=0750/);
+  assert.match(command, /install -d -o root -g root -m 0700 \/etc\/nanpanel\/managed\/files/);
   assert.match(command, /Requires=nanpanel-helper\.service/);
   assert.match(bashBody(command), /cat > \/etc\/systemd\/system\/nanpanel-helper\.service <<UNIT/);
   assert.match(bashBody(command), /cat > \/etc\/systemd\/system\/nanpanel-agent\.service <<'UNIT'/);
@@ -54,15 +55,34 @@ test('Agent reinstall repairs its systemd unit without replacing enrollment iden
   assertValidBash(command);
 });
 
-test('Agent installer grants its journal directory writable inside the strict sandbox', async () => {
+test('Agent installer and maintenance units use the host environment without systemd sandboxing', async () => {
   const installer = await readFile(new URL('../public/agent-install.sh', import.meta.url), 'utf8');
   const agentUnit = installer
     .split("cat > /etc/systemd/system/nanpanel-agent.service <<'UNIT'\n")[1]
     ?.split('\nUNIT\n')[0];
+  const helperUnit = installer
+    .split('cat > /etc/systemd/system/nanpanel-helper.service <<UNIT\n')[1]
+    ?.split('\nUNIT\n')[0];
   assert.ok(agentUnit, 'installer should write the Agent systemd unit');
-  assert.match(agentUnit, /^ProtectSystem=strict$/m);
+  assert.ok(helperUnit, 'installer should write the Helper systemd unit');
   assert.match(agentUnit, /^StateDirectory=nanpanel-agent$/m);
   assert.match(agentUnit, /^StateDirectoryMode=0750$/m);
+  assert.match(agentUnit, /^User=nanpanel-agent$/m);
+
+  const maintenance = bashBody(agentMaintenanceCommand('reinstall', origin, fingerprint, downloadPath, helperDownloadPath));
+  const maintenanceAgentUnit = maintenance
+    .split("cat > /etc/systemd/system/nanpanel-agent.service <<'UNIT'\n")[1]
+    ?.split('\nUNIT\n')[0];
+  const maintenanceHelperUnit = maintenance
+    .split('cat > /etc/systemd/system/nanpanel-helper.service <<UNIT\n')[1]
+    ?.split('\nUNIT\n')[0];
+  assert.ok(maintenanceAgentUnit, 'maintenance command should write the Agent systemd unit');
+  assert.ok(maintenanceHelperUnit, 'maintenance command should write the Helper systemd unit');
+
+  const systemdSandboxDirective = /^(?:NoNewPrivileges|PrivateTmp|ProtectSystem|ReadWritePaths|ProtectHome|ProtectKernelTunables|ProtectKernelModules|ProtectControlGroups|RestrictSUIDSGID|LockPersonality|CapabilityBoundingSet|AmbientCapabilities|ReadOnlyPaths)=/m;
+  for (const unit of [agentUnit, helperUnit, maintenanceAgentUnit, maintenanceHelperUnit]) {
+    assert.doesNotMatch(unit, systemdSandboxDirective);
+  }
 });
 
 test('Agent maintenance command rejects insecure origins, foreign downloads and malformed pins', () => {

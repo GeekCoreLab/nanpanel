@@ -271,18 +271,6 @@ EnvironmentFile=/etc/nanpanel-agent/agent.env
 ExecStart=/usr/local/bin/nanpanel-agent
 Restart=always
 RestartSec=3
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-RestrictSUIDSGID=true
-LockPersonality=true
-CapabilityBoundingSet=
-AmbientCapabilities=
-ReadOnlyPaths=/etc/nanpanel-agent
 UMask=0077
 
 [Install]
@@ -303,19 +291,6 @@ RuntimeDirectoryMode=0750
 ExecStart=/usr/local/bin/nanpanel-helper /run/nanpanel/helper.sock $agent_uid $agent_gid /etc/nanpanel/managed $controller /etc/nanpanel-agent/controller.pem /usr/local/bin/nanpanel-agent
 Restart=on-failure
 RestartSec=3
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ReadWritePaths=/usr/local/bin /run/nanpanel
-ReadWritePaths=/etc/nanpanel/managed/files
-ReadWritePaths=/usr /etc /var
-ProtectHome=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-RestrictSUIDSGID=true
-LockPersonality=true
-CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_FOWNER CAP_CHOWN
 UMask=0077
 
 [Install]

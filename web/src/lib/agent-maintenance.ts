@@ -40,6 +40,7 @@ export function agentMaintenanceCommand(
     'test -s /etc/nanpanel-agent/agent.env && test -s /etc/nanpanel-agent/agent.key && test -s /etc/nanpanel-agent/agent.crt || { printf "现有 Agent 身份配置不完整；请从主机资产重新生成接入命令。\\n" >&2; exit 2; }',
     'getent passwd nanpanel-agent >/dev/null || useradd --system --user-group --home-dir /var/lib/nanpanel-agent --create-home --shell /usr/sbin/nologin nanpanel-agent',
     'install -d -o root -g root -m 0755 /etc/nanpanel-agent /etc/nanpanel/managed',
+    'install -d -o root -g root -m 0700 /etc/nanpanel/managed/files',
     'install -d -o nanpanel-agent -g nanpanel-agent -m 0750 /var/lib/nanpanel-agent',
     'work=$(mktemp -d /tmp/nanpanel-agent-maintenance.XXXXXX)',
     `trap 'rm -rf -- "$work"; rm -f -- /usr/local/bin/.nanpanel-agent.new /usr/local/bin/.nanpanel-helper.new' EXIT`,
@@ -71,17 +72,6 @@ RuntimeDirectoryMode=0750
 ExecStart=/usr/local/bin/nanpanel-helper /run/nanpanel/helper.sock $agent_uid $agent_gid /etc/nanpanel/managed ${controller.origin} /etc/nanpanel-agent/controller.pem /usr/local/bin/nanpanel-agent
 Restart=on-failure
 RestartSec=3
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ReadWritePaths=/usr/local/bin /run/nanpanel
-ProtectHome=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-RestrictSUIDSGID=true
-LockPersonality=true
-CapabilityBoundingSet=CAP_DAC_OVERRIDE CAP_FOWNER CAP_CHOWN
 UMask=0077
 
 [Install]
@@ -105,18 +95,6 @@ EnvironmentFile=/etc/nanpanel-agent/agent.env
 ExecStart=/usr/local/bin/nanpanel-agent
 Restart=always
 RestartSec=3
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-RestrictSUIDSGID=true
-LockPersonality=true
-CapabilityBoundingSet=
-AmbientCapabilities=
-ReadOnlyPaths=/etc/nanpanel-agent
 UMask=0077
 
 [Install]
