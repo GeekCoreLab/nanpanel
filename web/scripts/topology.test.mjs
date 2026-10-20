@@ -42,12 +42,13 @@ test('folder hierarchy, host asset binding and same-scope connections are valida
   const ingress = { ...node('GATEWAY'), parentId: folder.id };
   const service = { ...node('SERVICE'), parentId: folder.id };
   const host = { ...node('HOST'), assetId: crypto.randomUUID() };
-  assert.equal(draftError({ nodes: [folder, ingress, service, host], links: [link(ingress, service)] }), null);
+  const gatewayAsset = { ...node('GATEWAY'), assetId: crypto.randomUUID() };
+  assert.equal(draftError({ nodes: [folder, ingress, service, host, gatewayAsset], links: [link(ingress, service)] }), null);
   assert.match(connectionError([folder, ingress], [], link(folder, ingress)), /不同拓扑层级/);
   assert.match(draftError({ nodes: [folder, { ...service, parentId: crypto.randomUUID() }], links: [] }), /父节点/);
   assert.match(draftError({ nodes: [{ ...folder, parentId: service.id }, service], links: [] }), /文件夹/);
   assert.match(draftError({ nodes: [host, { ...host, id: crypto.randomUUID() }], links: [] }), /只能添加一次/);
-  assert.match(draftError({ nodes: [{ ...service, assetId: crypto.randomUUID() }], links: [] }), /只有主机节点/);
+  assert.match(draftError({ nodes: [{ ...service, assetId: crypto.randomUUID() }], links: [] }), /只有主机或 Gateway 节点/);
 });
 
 test('Mock cluster hierarchy exposes namespaces, ingress routes, pods and container details', async () => {

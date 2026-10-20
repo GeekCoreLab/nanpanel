@@ -10,9 +10,24 @@ import NetbirdProviderPanel from './NetbirdProviderPanel';
 import { connectionError, createTopologyNode, draftError, nodePresets, validNodeShape } from './lib/topology-model';
 import './topology-status.css';
 import './topology-hierarchy.css';
+import './gateway-asset-picker.css';
 import type { Host, HostNetworkInventory, HostPage, KubernetesServiceInventorySnapshot, KubernetesServiceProbeSnapshot, KubernetesTopologyNamespaceDetail, KubernetesTopologyNamespaceSnapshot, TopologyDraft, TopologyDraftWrite, TopologyLink, TopologyNode, TopologyNodeKind } from './lib/types';
 
-type DeviceNode = Node<{ model: TopologyNode; asset?: Host }, 'device'>;
+type DeviceNode = Node<{
+  model: TopologyNode;
+  asset?: Host;
+  gatewayAssetChoices?: Host[];
+  gatewayAssetSearch?: string;
+  gatewayAssetOpen?: boolean;
+  gatewayAssetLoading?: boolean;
+  gatewayAssetNextCursor?: string | null;
+  gatewayBoundAssetIds?: string[];
+  onGatewayAssetFocus?: (nodeId: string) => void;
+  onGatewayAssetSearch?: (nodeId: string, value: string) => void;
+  onGatewayAssetClose?: (nodeId: string) => void;
+  onGatewayAssetSelect?: (nodeId: string, host: Host | null) => void;
+  onGatewayAssetLoadMore?: () => void;
+}, 'device'>;
 type P0RouteEvidence = { status: 'VERIFIED'; route: string; httpStatus: number; responseBody: string; configSha256: string; diff: string; verifiedAt: string };
 const virtualKinds: TopologyNodeKind[] = ['SWITCH', 'MERGE', 'SPLIT', 'FORWARDER'];
 const asNode = (model: TopologyNode, asset?: Host): DeviceNode => ({ id: model.id, type: 'device', position: model.position, data: { model: { ...model, parentId: model.parentId ?? null, assetId: model.assetId ?? null }, asset } });
@@ -34,8 +49,26 @@ function Device({ data, selected }: NodeProps<DeviceNode>) {
   const updateNodeInternals = useUpdateNodeInternals();
   useEffect(() => { updateNodeInternals(node.id); }, [node.id, node.inputCount, node.outputCount, updateNodeInternals]);
   const height = Math.max(node.inputCount, node.outputCount, 1) * 26 + 16;
+  const gatewayChoices = [...(data.gatewayAssetChoices ?? [])];
+  if (data.asset && !gatewayChoices.some(host => host.id === data.asset!.id)) gatewayChoices.unshift(data.asset);
+  const search = data.gatewayAssetSearch?.trim().toLocaleLowerCase() ?? '';
+  const filteredGatewayChoices = gatewayChoices.filter(host => !search || `${host.hostname} ${host.os ?? ''} ${host.arch ?? ''} ${host.id}`.toLocaleLowerCase().includes(search));
+  const gatewayListId = `gateway-asset-options-${node.id}`;
   return <div className={`topology-device ${node.kind === 'FOLDER' ? 'is-folder' : ''} ${selected ? 'is-selected' : ''}`}>
     <div className="device-title"><span className="device-symbol">{node.kind === 'FOLDER' ? '▰' : node.kind === 'SWITCH' ? '▦' : virtualKinds.includes(node.kind) ? '⇄' : '▤'}</span><div><strong>{node.name}</strong><small>{node.assetId ? `主机资产 · ${data.asset?.status ?? '读取中'}` : nodePresets[node.kind].description}</small></div></div>
+    {node.kind === 'GATEWAY' && <div className="gateway-asset-control nodrag">
+      <label htmlFor={`gateway-asset-search-${node.id}`}>绑定主机资产</label>
+      <input id={`gateway-asset-search-${node.id}`} className="nodrag" role="combobox" aria-label="搜索 Gateway 主机资产" aria-autocomplete="list" aria-expanded={!!data.gatewayAssetOpen} aria-controls={gatewayListId} placeholder={data.asset?.hostname ?? '输入主机名搜索…'} value={data.gatewayAssetSearch ?? ''} onFocus={() => data.onGatewayAssetFocus?.(node.id)} onBlur={() => data.onGatewayAssetClose?.(node.id)} onChange={event => data.onGatewayAssetSearch?.(node.id, event.target.value)} onKeyDown={event => { if (event.key === 'Escape') data.onGatewayAssetClose?.(node.id); }} />
+      {data.gatewayAssetOpen && <div className="gateway-asset-dropdown" id={gatewayListId} role="listbox" aria-label="可绑定的主机资产">
+        {filteredGatewayChoices.map(host => {
+          const boundElsewhere = (data.gatewayBoundAssetIds ?? []).includes(host.id) && host.id !== node.assetId;
+          return <button type="button" className="gateway-asset-option nodrag" role="option" aria-selected={node.assetId === host.id} disabled={boundElsewhere} key={host.id} onMouseDown={event => event.preventDefault()} onClick={() => data.onGatewayAssetSelect?.(node.id, host)}><span><strong>{host.hostname}</strong><small>{host.os ?? 'OS 未知'} · {host.arch ?? '架构未知'}</small></span><span className={`badge ${boundElsewhere ? '' : host.status === 'ONLINE' ? 'online' : host.status === 'OFFLINE' ? 'offline' : 'unknown'}`}>{boundElsewhere ? '已绑定' : host.status}</span></button>;
+        })}
+        {!filteredGatewayChoices.length && <div className="gateway-asset-empty">{data.gatewayAssetLoading ? '读取主机资产…' : '没有匹配的主机资产'}</div>}
+        {data.gatewayAssetNextCursor && <button type="button" className="gateway-asset-more nodrag" disabled={data.gatewayAssetLoading} onMouseDown={event => event.preventDefault()} onClick={() => data.onGatewayAssetLoadMore?.()}>{data.gatewayAssetLoading ? '读取中…' : '加载更多主机'}</button>}
+      </div>}
+      {node.assetId && <button type="button" className="gateway-asset-clear nodrag" onClick={() => data.onGatewayAssetSelect?.(node.id, null)}>取消主机绑定</button>}
+    </div>}
     <div className="device-ports" style={{ height }}>
       {Array.from({ length: node.inputCount }, (_, i) => <div className="device-port port-in" key={`in-${i + 1}`} style={{ top: 12 + i * 26 }}><Handle id={`in-${i + 1}`} type="target" position={Position.Left} aria-label={`${node.name} 入口 ${i + 1}`} /><span>{node.kind === 'FOLDER' && i === 0 ? 'Ingress 接入' : `入口 ${i + 1}`} · L4</span></div>)}
       {Array.from({ length: node.outputCount }, (_, i) => <div className="device-port port-out" key={`out-${i + 1}`} style={{ top: 12 + i * 26 }}><span>{node.kind === 'FOLDER' && i === 0 ? '集群服务' : `出口 ${i + 1}`} · L4</span><Handle id={`out-${i + 1}`} type="source" position={Position.Right} aria-label={`${node.name} 出口 ${i + 1}`} /></div>)}
@@ -64,6 +97,7 @@ function Editor() {
   const [folderId, setFolderId] = useState<string | null>(null);
   const [hostAssets, setHostAssets] = useState<Record<string, { host: Host; inventory: HostNetworkInventory }>>({});
   const [assetChoices, setAssetChoices] = useState<Host[]>([]); const [assetNextCursor, setAssetNextCursor] = useState<string | null>(null); const [assetPickerOpen, setAssetPickerOpen] = useState(false); const [assetPickerBusy, setAssetPickerBusy] = useState(false);
+  const [gatewayAssetChoices, setGatewayAssetChoices] = useState<Host[]>([]); const [gatewayAssetNextCursor, setGatewayAssetNextCursor] = useState<string | null>(null); const [gatewayAssetsLoaded, setGatewayAssetsLoaded] = useState(false); const [gatewayAssetLoading, setGatewayAssetLoading] = useState(false); const [gatewayAssetSearch, setGatewayAssetSearch] = useState<Record<string, string>>({}); const [gatewayAssetOpen, setGatewayAssetOpen] = useState<Record<string, boolean>>({});
   const [kubernetesNamespaces, setKubernetesNamespaces] = useState<KubernetesTopologyNamespaceSnapshot>();
   const [namespaceDetails, setNamespaceDetails] = useState<Record<string, KubernetesTopologyNamespaceDetail>>({});
   const [expandedNamespace, setExpandedNamespace] = useState<string>(); const [expandedPod, setExpandedPod] = useState<string>(); const [kubernetesError, setKubernetesError] = useState(''); const [kubernetesBusy, setKubernetesBusy] = useState(false);
@@ -102,6 +136,36 @@ function Editor() {
       setAssetChoices(current => [...current, ...result.data.items]); setAssetNextCursor(result.data.nextCursor);
     } catch (e) { setError((e as Error).message); }
     finally { setAssetPickerBusy(false); }
+  }
+  async function loadGatewayHostAssets(cursor?: string) {
+    setGatewayAssetLoading(true);
+    try {
+      const query = cursor ? `?limit=100&cursor=${encodeURIComponent(cursor)}` : '?limit=100';
+      const result = await api<HostPage>(`/hosts${query}`);
+      setGatewayAssetChoices(current => cursor ? [...current, ...result.data.items] : result.data.items);
+      setGatewayAssetNextCursor(result.data.nextCursor);
+      setGatewayAssetsLoaded(true);
+    } catch (e) { setError((e as Error).message); }
+    finally { setGatewayAssetLoading(false); }
+  }
+  function openGatewayAssetPicker(nodeId: string) {
+    setGatewayAssetOpen(current => ({ ...current, [nodeId]: true }));
+    if (!gatewayAssetsLoaded && !gatewayAssetLoading) void loadGatewayHostAssets();
+  }
+  function changeGatewayAssetSearch(nodeId: string, value: string) {
+    setGatewayAssetSearch(current => ({ ...current, [nodeId]: value }));
+    setGatewayAssetOpen(current => ({ ...current, [nodeId]: true }));
+  }
+  function selectGatewayAsset(nodeId: string, host: Host | null) {
+    if (host && nodes.some(node => node.id !== nodeId && node.data.model.assetId === host.id)) { setError('该主机资产已绑定到其他拓扑节点'); return; }
+    setNodes(current => current.map(node => node.id === nodeId ? { ...node, data: { ...node.data, model: { ...node.data.model, assetId: host?.id ?? null }, asset: host ?? undefined } } : node));
+    setGatewayAssetSearch(current => ({ ...current, [nodeId]: '' }));
+    setGatewayAssetOpen(current => ({ ...current, [nodeId]: false }));
+    setDirty(true); setRouteEvidence(undefined); setError('');
+    setMessage(host ? `公网 Gateway 已绑定主机资产 ${host.hostname}，将读取其网络接口和路由表` : '已取消公网 Gateway 的主机资产绑定');
+  }
+  function loadMoreGatewayHostAssets() {
+    if (gatewayAssetNextCursor && !gatewayAssetLoading) void loadGatewayHostAssets(gatewayAssetNextCursor);
   }
   async function loadNamespace(namespace: string) {
     setExpandedNamespace(namespace); setKubernetesBusy(true); setKubernetesError('');
@@ -213,6 +277,23 @@ function Editor() {
     return path;
   }
   const activeNodes = nodes.filter(node => (node.data.model.parentId ?? null) === folderId);
+  const activeDisplayNodes = activeNodes.map(node => node.data.model.kind === 'GATEWAY' ? {
+    ...node,
+    data: {
+      ...node.data,
+      gatewayAssetChoices,
+      gatewayAssetSearch: gatewayAssetSearch[node.id] ?? '',
+      gatewayAssetOpen: gatewayAssetOpen[node.id] ?? false,
+      gatewayAssetLoading,
+      gatewayAssetNextCursor,
+      gatewayBoundAssetIds: nodes.map(item => item.data.model.assetId).filter((id): id is string => !!id),
+      onGatewayAssetFocus: openGatewayAssetPicker,
+      onGatewayAssetSearch: changeGatewayAssetSearch,
+      onGatewayAssetClose: (id: string) => setGatewayAssetOpen(current => ({ ...current, [id]: false })),
+      onGatewayAssetSelect: selectGatewayAsset,
+      onGatewayAssetLoadMore: loadMoreGatewayHostAssets,
+    },
+  } : node);
   const activeEdges = edges.filter(edge => {
     const source = nodes.find(node => node.id === edge.source)?.data.model;
     return source && (source.parentId ?? null) === folderId;
@@ -239,7 +320,7 @@ function Editor() {
       const owners = route.gateway ? hostByAddress.get(route.gateway.toLowerCase()) ?? [] : [];
       if (owners.length !== 1 || owners[0].id === sourceAsset.host.id) continue;
       const target = rootNodeByAssetId.get(owners[0].id);
-      if (!target) continue;
+      if (!target || target.data.model.inputCount < 1 || source.data.model.outputCount < 1) continue;
       const key = `${source.id}:${target.id}`;
       const observed = observedRouteCounts.get(key);
       if (observed) observed.count++;
@@ -306,7 +387,7 @@ function Editor() {
     {routeEvidence && <div className="alert" role="status"><strong>实际路由已验证</strong> · {routeEvidence.route} · HTTP {routeEvidence.httpStatus} · 响应 {routeEvidence.responseBody} · SHA-256 {routeEvidence.configSha256}<pre className="p0-route-diff">{routeEvidence.diff}</pre></div>}
     <div className="topology-tools"><div className="port-legend"><span><i className="input-dot" />蓝色：入口</span><span><i className="output-dot" />绿色：出口</span>{Object.entries(linkStateLabels).map(([state, label]) => <span key={state}><i className={`state-dot ${state.toLowerCase()}`} />{label}</span>)}</div><div className="topology-actions"><button className="secondary" disabled={!loaded || busy} onClick={e => { const rect = e.currentTarget.getBoundingClientRect(); const canvas = canvasRef.current?.getBoundingClientRect(); openMenu({ preventDefault() {}, clientX: rect.left, clientY: rect.bottom + 8 }, undefined, undefined, canvas ? { x: canvas.left + canvas.width / 2, y: canvas.top + canvas.height / 2 } : undefined); }}>＋ 添加节点</button><button className="secondary" disabled={busy || !activeEdges.length} onClick={() => { setEdges(current => current.filter(edge => !activeEdges.some(active => active.id === edge.id))); setDirty(true); setRouteEvidence(undefined); }}>清空本层连接</button></div></div>
     <section className="topology card" aria-label="拓扑编辑器" ref={canvasRef}>
-      <ReactFlow<DeviceNode> nodes={activeNodes} edges={folderId ? activeEdges : [...activeEdges, ...observedRouteEdges]} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
+      <ReactFlow<DeviceNode> nodes={activeDisplayNodes} edges={folderId ? activeEdges : [...activeEdges, ...observedRouteEdges]} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
         onNodesChange={changes => { onNodesChange(changes); if (changes.some(c => c.type === 'position' && c.position || c.type === 'remove')) { setDirty(true); setRouteEvidence(undefined); } }}
         onEdgesChange={changes => { onEdgesChange(changes); if (changes.some(c => c.type === 'remove')) { setDirty(true); setRouteEvidence(undefined); } }}
         onConnect={connect} isValidConnection={validConnection} connectionMode={ConnectionMode.Strict}

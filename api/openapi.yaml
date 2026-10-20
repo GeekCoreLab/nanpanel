@@ -3488,7 +3488,7 @@ components:
         assetId:
           type: [string, 'null']
           format: uuid
-          description: Registered host ID for HOST nodes linked to a host asset.
+          description: Registered host ID for HOST or GATEWAY nodes linked to a host asset.
     TopologyLink:
       type: object
       additionalProperties: false

@@ -117,8 +117,9 @@ public class TopologyResource {
           continue;
         }
         UUID assetId = uuid(node.assetId());
-        if (!"HOST".equals(node.kind()) || !linkedAssets.add(assetId.toString())) {
-          throw fail(422, "INVALID_TOPOLOGY", "主机资产只能由唯一主机节点绑定");
+        if (!("HOST".equals(node.kind()) || "GATEWAY".equals(node.kind()))
+            || !linkedAssets.add(assetId.toString())) {
+          throw fail(422, "INVALID_TOPOLOGY", "主机资产只能由唯一主机或 Gateway 节点绑定");
         }
         if (query(c, "SELECT id FROM host WHERE id=?", assetId.toString()).isEmpty()) {
           throw fail(422, "INVALID_TOPOLOGY", "拓扑引用的主机资产不存在");
@@ -298,8 +299,8 @@ public class TopologyResource {
         } catch (RuntimeException failure) {
           return "主机资产 ID 无效";
         }
-        if (!"HOST".equals(node.kind())) {
-          return "只有主机节点可以绑定主机资产";
+        if (!("HOST".equals(node.kind()) || "GATEWAY".equals(node.kind()))) {
+          return "只有主机或 Gateway 节点可以绑定主机资产";
         }
       }
     }

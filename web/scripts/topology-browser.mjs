@@ -81,11 +81,12 @@ try {
   await page.keyboard.press('Escape');
   if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw new Error('Mobile overflow');
   await page.setViewportSize({ width: 1600, height: 1200 });
-  for (const hostname of ['gateway-sg-01', 'homelab-node-01']) {
-    await page.getByRole('button', { name: '＋ 添加主机资产' }).click();
-    await page.locator('.topology-asset-option').filter({ hasText: hostname }).click();
-    await expect(device(hostname)).toBeVisible();
-  }
+  await gateway.getByRole('combobox', { name: '搜索 Gateway 主机资产' }).fill('gateway-sg');
+  await gateway.getByRole('option', { name: /gateway-sg-01/ }).click();
+  await expect(gateway.locator('.device-status')).toContainText('gateway-sg-01');
+  await page.getByRole('button', { name: '＋ 添加主机资产' }).click();
+  await page.locator('.topology-asset-option').filter({ hasText: 'homelab-node-01' }).click();
+  await expect(device('homelab-node-01')).toBeVisible();
   await expect(page.locator('.host-route-row').filter({ hasText: 'gateway-sg-01 → homelab-node-01' })).toBeVisible();
   await expect(page.locator('.react-flow__edge')).toHaveCount(3);
   await expect(page.locator('.link-state-observed')).toHaveCount(1);
@@ -117,5 +118,5 @@ try {
   await expect(device('K3s Service')).toBeVisible();
   await expect(page.locator('.react-flow__edge')).toHaveCount(1);
   if (errors.length) throw new Error(errors.join('\n'));
-  console.log('PASS: base topology editing, root host asset binding, automatic route next-hop matching, nested folder editing and persistence, Namespace/Ingress/Service/Pod/container drill-down, mobile menu; no page errors');
+  console.log('PASS: base topology editing, searchable Gateway host asset binding, automatic route next-hop matching, nested folder editing and persistence, Namespace/Ingress/Service/Pod/container drill-down, mobile menu; no page errors');
 } finally { await browser.close(); }

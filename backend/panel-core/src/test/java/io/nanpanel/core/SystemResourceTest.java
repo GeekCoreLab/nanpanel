@@ -502,6 +502,15 @@ class SystemResourceTest {
     String hostId = enrollment.path("hostId");
     String agentId = enrollment.path("agentId");
     String enrollmentToken = enrollment.path("token");
+    String gatewayAssetTopology = topologyWrite.replace(
+        "\"kind\":\"GATEWAY\",\"name\":\"入口\"",
+        "\"kind\":\"GATEWAY\",\"name\":\"入口\",\"assetId\":\"" + hostId + "\"");
+    var gatewayAssetSaved = given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("If-Match", topologySaved.header("ETag"))
+        .contentType("application/json").body(gatewayAssetTopology)
+        .put("/api/v1/topology/draft").then().statusCode(200).extract();
+    assertEquals(hostId, gatewayAssetSaved.path("nodes[0].assetId"));
     verifyBastionTerminal(hostId, restoredCookie, restored.path("csrfToken"));
     assertEquals(controllerFingerprint, enrollment.path("controllerFingerprint"));
     assertEquals(30444, (int)enrollment.path("gatewayPort"));

@@ -80,7 +80,7 @@ export function draftError(value: unknown): string | null {
     const parentId = typeof n.parentId === 'string' ? n.parentId : null;
     if (n.parentId !== undefined && n.parentId !== null && (typeof n.parentId !== 'string' || !uuid.test(n.parentId))) return '父文件夹 ID 无效';
     if (n.assetId !== undefined && n.assetId !== null && (typeof n.assetId !== 'string' || !uuid.test(n.assetId))) return '主机资产 ID 无效';
-    if (n.assetId != null && n.kind !== 'HOST') return '只有主机节点可以绑定主机资产';
+    if (n.assetId != null && n.kind !== 'HOST' && n.kind !== 'GATEWAY') return '只有主机或 Gateway 节点可以绑定主机资产';
     if (parentId === n.id) return '文件夹不能包含自身';
   }
   const nodesById = new Map((value.nodes as TopologyNode[]).map(n => [n.id, n]));
@@ -97,7 +97,7 @@ export function draftError(value: unknown): string | null {
       if (++depth > 8) return '文件夹最多嵌套 8 层';
     }
     if (n.assetId) {
-      if (n.kind !== 'HOST') return '只有主机节点可以绑定主机资产';
+      if (n.kind !== 'HOST' && n.kind !== 'GATEWAY') return '只有主机或 Gateway 节点可以绑定主机资产';
       if (linkedAssets.has(n.assetId)) return '同一主机资产只能添加一次';
       linkedAssets.add(n.assetId);
     }
