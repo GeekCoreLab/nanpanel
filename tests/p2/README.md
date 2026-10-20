@@ -125,7 +125,7 @@ open.
 | Overlay peer/path discovery | Per-peer records, host source identity, observed time, and direct/relay state | Agent → Core persistence → `/network-inventory` → console is implemented; the PF4J managed-group Provider has local HTTP-fixture coverage, durable Core operation stages, and live disposable-tenant membership reconciliation |
 | Public TLS ingress and access policy | Public certificate chain, unauthorized/authorized HTTP results, active gateway config, and recovery after changing gateway/backend | Passed on the test public Nginx/FRPS path: certificate validation, 401/authorized access, backend A→B→A, and active config hashes; Core-managed production reconciliation remains open |
 | Service and Endpoint mapping | Discovered Service/Endpoint source, host or workload identity, ports, and freshness | Istio fixture verifies `mesh-http` Service TCP/80 against a ready EndpointSlice Pod on TCP/8080; Core persists the latest bounded, namespace-scoped Service/EndpointSlice snapshot and shows it in the topology page; historical retention remains open |
-| Service connectivity probes | Probe origin, target endpoint, protocol result, probe time, and source inventory observation time | Core implements an opt-in TCP probe for at most 32 Ready private IP EndpointSlice ports per refresh and stores latest results for seven days; live Core persisted a matching `SUCCEEDED` result for the non-injected fixture, while authenticated inventory/probe API acceptance remains open |
+| Service connectivity probes | Probe origin, target endpoint, protocol result, probe time, and source inventory observation time | Passed against the live Core using a scoped read-only API key: `mesh-probe-target` was Ready on private TCP/8080, and the persisted `SUCCEEDED` probe matched the inventory observation time; latest evidence is in the [Core probe run record](runs/2026-10-20-core-service-probe-live.md) |
 | At least two NAT conditions | Two independent NAT topologies, including restricted UDP, with captured path status | Accepted across distinct public egress identities: public-host and private-interface `rwt-dev` both passed P2P/Relay/P2P, HTTP at every state, and control/relay restart recovery |
 | Direct/Relay switching | P2P → Relay → P2P, with a successful application-level request at every stage | Passed on both the public-host and private-interface `rwt-dev` Docker-to-K3s topologies |
 | Gateway change recovery | Apply a gateway/backend change, prove the new endpoint, then prove recovery/compensation | Public FRP/Nginx test changed backend A→B and compensated B→A with TLS and access policy enforced; Core-managed production cutover remains open |
@@ -168,32 +168,33 @@ by default. The live test cluster now has that ServiceAccount and the
 and EndpointSlice list access in the fixture namespace. Its live authorization
 results are `yes`, `yes`, `no`, `no` for Service list, EndpointSlice list, Pod
 list, and Secret get. See the [live RBAC and mesh record](runs/2026-10-20-istio-live-inventory-rbac.md).
-The current test Core runs `sha-8aa531ef17edf58d0836625d04597ccee46908ba` under
+The current test Core runs `sha-2ccc15845f956e61f6356871f3750bbdf383afb9` under
 the dedicated ServiceAccount with discovery and probes enabled; the Web
-console runs the matching immutable image. Core has
+console remains on `sha-8aa531ef17edf58d0836625d04597ccee46908ba`, which
+contains the API-key management UI. Core has
 persisted a `SUCCEEDED` TCP/8080 probe matching the Ready fixture endpoint and
-its inventory observation time. The authenticated API run is still pending an
-API key created by a current administrator session; see the [Core probe run record](runs/2026-10-20-core-service-probe-live.md).
+its inventory observation time. Authenticated inventory and probe API
+acceptance passed on 2026-10-20 at 13:42 UTC; see the [Core probe run record](runs/2026-10-20-core-service-probe-live.md).
 The fixture's
 `mesh-probe-target` workload opts out of sidecar injection and provides a Ready
 private TCP/8080 EndpointSlice for Core's raw TCP probe. The Core namespace remains
 outside the mesh so existing health, gateway, and certificate paths are not
 changed by injection.
 
-The Role/Binding has already been applied to the test cluster; repeat the four
-`kubectl auth can-i` checks in `deploy/istio/README.md` before a live run. The
-current deployment and persisted `SUCCEEDED` result are evidence of Core-to-
-endpoint connectivity, but final acceptance also requires the authenticated
-inventory and probe API responses with timestamps. Create a
-`kubernetes:inventory:read` key in the live console's account page and store it
-as `NANPANEL_P2_API_KEY` in ignored `.env`; do not send it in chat. Retain a
+The Role/Binding has already been applied to the test cluster; before a repeat
+live run, verify its four `kubectl auth can-i` results in
+`deploy/istio/README.md`. Authenticated inventory and probe API acceptance
+passed on 2026-10-20; the [live record](runs/2026-10-20-core-service-probe-live.md)
+has the response timestamps. To repeat the run, use a current
+`kubernetes:inventory:read` key from the live console's account page and store
+it as `NANPANEL_P2_API_KEY` in ignored `.env`; do not send it in chat. Retain a
 mesh HTTP allow/deny result separately. Do not use the strict-mTLS injected
 fixture as the raw-TCP success target while Core is outside the mesh.
 
-P2 remains incomplete until authenticated Core inventory and probe API
-acceptance has current evidence. The Core-side discovery, TCP connection, and
-database persistence have passed on the live test cluster; API acceptance is
-pending a scoped API key created by a current administrator session. The live NetBird Provider run
-validates a disposable tenant and does not exercise the Core operation API.
-The public gateway test proves the live test route but does not provide
-Core-managed production reconciliation.
+Authenticated Core inventory and probe API acceptance passed on the live test
+cluster using the scoped read-only key. Core-side discovery, TCP connectivity,
+database persistence, and the API result are all recorded in the live run. The
+live NetBird Provider run validates a disposable tenant and does not exercise
+the Core operation API. The public gateway test proves the live test route but
+does not provide Core-managed production reconciliation; historical inventory
+retention and production gateway reconciliation remain future work.

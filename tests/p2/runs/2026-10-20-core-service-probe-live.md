@@ -83,3 +83,37 @@ documented in `tests/p2/README.md`; never send the key in chat.
   `NANPANEL_P2_CORE_URL` nor `NANPANEL_P2_API_KEY`, so the authenticated API
   acceptance script could not yet run. No endpoint address or API key was
   printed or stored in this record.
+
+## Authenticated acceptance after timestamp precision fix
+
+- Verified: 2026-10-20 13:42 UTC
+- Fix commit: `2ccc15845f956e61f6356871f3750bbdf383afb9`
+- CI: [Publish NaNPanel containers](https://github.com/GeekCoreLab/nanpanel/actions/runs/39430818133) passed Rust format/check/clippy/tests, Maven verify, Web build, and published both images.
+- Core GHCR tag: `ghcr.io/geekcorelab/nanpanel-core:sha-2ccc15845f956e61f6356871f3750bbdf383afb9`; registry manifest digest `sha256:489d5816466e708773ef6341dd2e3486dcfc325915bf2710f108a016cff18038`.
+- Core runtime image digest: `sha256:424fa7c54e3a70a063293add6e79828f5a44aaf2b0c2b70bd3c4c822a205be19`.
+- `k3s-1` Core Deployment: 1/1 Ready and available, zero container restarts. Web and PostgreSQL were not updated.
+- Core readiness returned HTTP 200.
+
+The first authenticated API attempt exposed a precision mismatch: the JSON
+inventory kept nanoseconds while PostgreSQL stored `TIMESTAMPTZ` at microsecond
+precision, so the probe's `inventoryObservedAt` differed by 131 ns. The fix
+normalizes new snapshots to microseconds and returns the persisted timestamp
+column for stored snapshots, including records created before this fix.
+`./mvnw -pl backend/panel-core -am test` passed, including the new timestamp
+precision test.
+
+`tests/p2/core-service-probe-live.sh` then passed with the local read-only API
+key. Core returned source `kubernetes:k3s-1`, namespace `nanpanel-mesh`, and a
+Ready `mesh-probe-target` Pod on private TCP/8080; its persisted probe outcome
+was `SUCCEEDED`, and the inventory and probe timestamps matched exactly:
+
+```text
+inventoryObservedAt=2026-10-20T13:42:57.108897Z
+probeObservedAt=2026-10-20T13:42:57.184868Z
+```
+
+The endpoint address and API key were omitted from command output and this
+record. `deploy/istio/verify-test-mesh.sh` also passed after the Core rollout:
+the allowed strict-mTLS request returned the fixture body, the denied identity
+received HTTP 403, three of four workloads had sidecars, and the private raw-
+TCP probe target remained Ready without a sidecar.
