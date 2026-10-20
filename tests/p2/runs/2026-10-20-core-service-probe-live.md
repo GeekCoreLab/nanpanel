@@ -79,6 +79,7 @@ documented in `tests/p2/README.md`; never send the key in chat.
   target remains Ready without a sidecar.
 - With the cluster TLS certificate, Core readiness and the Web root returned
   HTTP 200. An unauthenticated service-inventory request returned HTTP 401.
-- The ignored local `.env` still has no non-empty `NANPANEL_P2_API_KEY`, so the
-  authenticated API acceptance script cannot yet run. No endpoint address or
-  API key was printed or stored in this record.
+- At 13:17 UTC, the ignored local `.env` had neither a non-empty
+  `NANPANEL_P2_CORE_URL` nor `NANPANEL_P2_API_KEY`, so the authenticated API
+  acceptance script could not yet run. No endpoint address or API key was
+  printed or stored in this record.
