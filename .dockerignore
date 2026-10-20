@@ -13,6 +13,8 @@ agent/**/*.md
 plugins/*
 !plugins/provider-netbird
 !plugins/provider-netbird/**
+!plugins/provider-frp
+!plugins/provider-frp/**
 docs
 tests
 deploy/k3s
