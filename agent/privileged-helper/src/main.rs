@@ -2,6 +2,58 @@ use nanpanel_privileged_helper::{
     HelperConfig, apply_network_firewall_rule, rollback_network_firewall_rule, serve,
 };
 
+#[derive(Debug, PartialEq, Eq)]
+struct ServiceArgs {
+    socket: String,
+    allowed_agent_uid: u32,
+    socket_gid: u32,
+    allowed_read_root: String,
+    controller_url: String,
+    controller_cert: String,
+    agent_binary: String,
+}
+
+fn parse_service_args(
+    first: Option<String>,
+    mut args: impl Iterator<Item = String>,
+) -> anyhow::Result<ServiceArgs> {
+    let socket = first.unwrap_or_else(|| "/run/nanpanel/helper.sock".to_owned());
+    let allowed_agent_uid = args
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing allowed Agent UID"))?
+        .parse::<u32>()?;
+    let socket_gid = args
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("missing socket group ID"))?
+        .parse::<u32>()?;
+    let allowed_read_root = args
+        .next()
+        .unwrap_or_else(|| "/etc/nanpanel/managed".to_owned());
+    let controller_url = args.next().unwrap_or_default();
+    let controller_cert = args.next().unwrap_or_default();
+    let agent_binary = args.next().unwrap_or_default();
+    if allowed_agent_uid == 0
+        || socket_gid == 0
+        || controller_url.is_empty()
+        || controller_cert.is_empty()
+        || agent_binary.is_empty()
+        || args.next().is_some()
+    {
+        anyhow::bail!(
+            "usage: nanpanel-helper <socket> <allowed-agent-uid> <socket-gid> <allowed-read-root> <controller-https-origin> <controller-cert> <agent-binary>"
+        );
+    }
+    Ok(ServiceArgs {
+        socket,
+        allowed_agent_uid,
+        socket_gid,
+        allowed_read_root,
+        controller_url,
+        controller_cert,
+        agent_binary,
+    })
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -50,36 +102,48 @@ async fn main() -> anyhow::Result<()> {
         }
         _ => {}
     }
-    let socket = args
-        .next()
-        .unwrap_or_else(|| "/run/nanpanel/helper.sock".to_owned());
-    let allowed_agent_uid: u32 = args.next().unwrap_or_default().parse()?;
-    let socket_gid: u32 = args.next().unwrap_or_default().parse()?;
-    let allowed_read_root = args
-        .next()
-        .unwrap_or_else(|| "/etc/nanpanel/managed".to_owned());
-    let controller_url = args.next().unwrap_or_default();
-    let controller_cert = args.next().unwrap_or_default();
-    let agent_binary = args.next().unwrap_or_default();
-    if allowed_agent_uid == 0
-        || socket_gid == 0
-        || controller_url.is_empty()
-        || controller_cert.is_empty()
-        || agent_binary.is_empty()
-        || args.next().is_some()
-    {
-        anyhow::bail!(
-            "usage: nanpanel-helper <socket> <allowed-agent-uid> <socket-gid> <allowed-read-root> <controller-https-origin> <controller-cert> <agent-binary>"
-        );
-    }
+    let service = parse_service_args(first, args)?;
     serve(HelperConfig::new(
-        socket,
-        allowed_agent_uid,
-        socket_gid,
-        allowed_read_root,
-        &controller_url,
-        controller_cert,
-        agent_binary,
+        service.socket,
+        service.allowed_agent_uid,
+        service.socket_gid,
+        service.allowed_read_root,
+        &service.controller_url,
+        service.controller_cert,
+        service.agent_binary,
     )?)
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ServiceArgs, parse_service_args};
+
+    #[test]
+    fn parses_service_arguments_after_socket_path() -> anyhow::Result<()> {
+        let arguments = [
+            "999",
+            "988",
+            "/etc/nanpanel/managed",
+            "https://panel.example.test",
+            "/etc/nanpanel-agent/controller.pem",
+            "/usr/local/bin/nanpanel-agent",
+        ]
+        .into_iter()
+        .map(str::to_owned);
+
+        let service = parse_service_args(Some("/run/nanpanel/helper.sock".to_owned()), arguments)?;
+
+        let expected = ServiceArgs {
+            socket: "/run/nanpanel/helper.sock".to_owned(),
+            allowed_agent_uid: 999,
+            socket_gid: 988,
+            allowed_read_root: "/etc/nanpanel/managed".to_owned(),
+            controller_url: "https://panel.example.test".to_owned(),
+            controller_cert: "/etc/nanpanel-agent/controller.pem".to_owned(),
+            agent_binary: "/usr/local/bin/nanpanel-agent".to_owned(),
+        };
+        assert_eq!(service, expected);
+        Ok(())
+    }
 }
