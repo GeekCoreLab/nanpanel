@@ -44,8 +44,10 @@ refreshes it every 60 seconds. An independent, disabled-by-default probe switch
 can check at most 32 Ready EndpointSlice private IP/TCP ports per refresh; it
 stores the latest result per service/endpoint/port and prunes records after seven
 days. It skips FQDN, public, loopback, link-local, UDP, and non-Ready endpoints.
-Live Core-to-cluster probe acceptance and Istio policy reconciliation remain
-pending.
+A live Core run on the test cluster persisted a successful probe matching
+the current Service and EndpointSlice inventory. Authenticated API-level
+acceptance still requires a valid administrator login; Istio policy
+reconciliation remains pending.
 
 Path display must be based on provider evidence. A NetBird management API peer
 record can establish discovery and control-plane connectivity, but does not by
@@ -97,7 +99,7 @@ last verified route.
 
 The NetBird managed-group Provider and Core operation lifecycle have local
 HTTP-fixture coverage, and the Provider has passed live disposable-tenant
-membership reconciliation. P2 remains incomplete until Core-to-cluster probes
-are accepted against the target cluster. Production gateway reconciliation
+membership reconciliation. P2 remains incomplete until the authenticated Core inventory and probe API
+responses are accepted against the target cluster. Production gateway reconciliation
 and Istio policy reconciliation remain later Provider work; the P2 public
 ingress and gateway recovery evidence is recorded in `tests/p2/README.md`.

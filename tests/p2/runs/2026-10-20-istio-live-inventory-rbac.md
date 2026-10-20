@@ -51,10 +51,12 @@ PASS: mesh-http maps to 1 ready TCP/8080 endpoint(s); 3/4 workloads have Istio s
 
 ## Core runtime boundary
 
-The running `nanpanel-core` Deployment remains 1/1 on the existing
-`ghcr.io/geekcorelab/nanpanel-core:sha-c1320f5ef460e2fff94db5cb0e685e80d0524bab`
-image and still uses the `default` ServiceAccount. The newly created account and
-RoleBinding are not yet attached to that Deployment. Discovery and TCP probes
-remain disabled; no live Core inventory or probe API acceptance is claimed.
-NetBird Provider live tenant acceptance is recorded separately in
+At 12:25 UTC, `nanpanel-core` had rolled out to 1/1 on
+`ghcr.io/geekcorelab/nanpanel-core:sha-f0d804ba3bac19a0e501317865d38129068c72e7`
+using the dedicated `nanpanel-core` ServiceAccount. Discovery and TCP probes
+were enabled for `k3s-1` / `nanpanel-mesh`; the Core persisted a successful
+probe matching the Ready fixture endpoint and inventory snapshot. The
+authenticated API acceptance is tracked separately in the [Core probe run](2026-10-20-core-service-probe-live.md)
+and remains open pending a valid current administrator credential. NetBird
+Provider live tenant acceptance is recorded separately in
 [the disposable-tenant run](2026-10-20-netbird-provider-live.md).
