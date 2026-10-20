@@ -35,6 +35,23 @@ message Heartbeat {
   repeated NetworkInterface network_interfaces = 9;
   repeated NetworkRoute network_routes = 10;
   int64 network_observed_at_epoch_ms = 11;
+  NetbirdOverlaySummary netbird_overlay = 12;
+  int64 netbird_overlay_observed_at_epoch_ms = 13;
+  repeated NetbirdPeerPath netbird_peer_paths = 14;
+  int64 netbird_peer_paths_observed_at_epoch_ms = 15;
+}
+
+message NetbirdOverlaySummary {
+  uint32 peer_count = 1;
+  uint32 connected_peer_count = 2;
+  uint32 p2p_peer_count = 3;
+  uint32 relayed_peer_count = 4;
+}
+
+message NetbirdPeerPath {
+  string peer_name = 1;
+  string status = 2;
+  string connection_type = 3;
 }
 
 message SystemdService {

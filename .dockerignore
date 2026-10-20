@@ -10,7 +10,9 @@ web/artifacts
 agent/p0-lab
 agent/*.md
 agent/**/*.md
-plugins
+plugins/*
+!plugins/provider-netbird
+!plugins/provider-netbird/**
 docs
 tests
 deploy/k3s

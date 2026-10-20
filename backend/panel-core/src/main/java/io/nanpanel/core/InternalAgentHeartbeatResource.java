@@ -18,6 +18,7 @@ import java.security.MessageDigest;
 import java.time.Instant;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -60,16 +61,19 @@ public class InternalAgentHeartbeatResource {
             (report.systemdObservedAtEpochMs() > Instant.now().plusSeconds(60).toEpochMilli() ||
              report.systemdObservedAtEpochMs() < Instant.now().minusSeconds(300).toEpochMilli())) ||
         !validNetworkInventory(report) ||
+        !validOverlayNetwork(report) ||
+        !validNetbirdPeerPaths(report) ||
         report.version().isBlank() || report.version().length() > 64 ||
         report.hostname().isBlank() || report.hostname().length() > 255 ||
         report.hostname().chars().anyMatch(Character::isISOControl) ||
         report.os().length() > 255 || report.arch().length() > 64 ||
-        report.capabilities().size() > 24 || report.capabilities().stream().anyMatch(
+        report.capabilities().size() > 25 || report.capabilities().stream().anyMatch(
             capability -> !Set.of("host.inventory", "agent.heartbeat", "agent.self_update",
                 "systemd.read", "systemd.restart", "systemd.journal.read", "package.install",
                 "file.write.protected", "container.list", "container.logs", "container.start",
                 "container.stop", "container.deploy", "network.firewall.expose",
-                "network.inventory", "file.list", "file.read", "file.write", "file.delete")
+                "network.inventory", "network.overlay.observe", "network.overlay.peer_paths.observe",
+                "file.list", "file.read", "file.write", "file.delete")
                 .contains(capability)) ||
         (report.systemdServices() != null &&
             (report.systemdServices().size() > 512 ||
@@ -168,8 +172,122 @@ public class InternalAgentHeartbeatResource {
               hostId);
         }
       }
+      if (report.netbirdOverlay() != null) {
+        var overlay = report.netbirdOverlay();
+        Instant observedAt = Instant.ofEpochMilli(report.netbirdOverlayObservedAtEpochMs());
+        var existingOverlay = query(c,
+            "SELECT host_id FROM host_overlay_inventory WHERE host_id=?", hostId);
+        if (existingOverlay.isEmpty()) {
+          update(c,
+              "INSERT INTO host_overlay_inventory " +
+                  "(host_id,peer_count,connected_peer_count,p2p_peer_count,relayed_peer_count,observed_at) " +
+                  "VALUES (?,?,?,?,?,?)",
+              hostId, overlay.peerCount(), overlay.connectedPeerCount(),
+              overlay.p2pPeerCount(), overlay.relayedPeerCount(),
+              java.sql.Timestamp.from(observedAt));
+        } else {
+          update(c,
+              "UPDATE host_overlay_inventory SET peer_count=?,connected_peer_count=?," +
+                  "p2p_peer_count=?,relayed_peer_count=?,observed_at=? WHERE host_id=?",
+              overlay.peerCount(), overlay.connectedPeerCount(), overlay.p2pPeerCount(),
+              overlay.relayedPeerCount(), java.sql.Timestamp.from(observedAt), hostId);
+        }
+      }
+      persistNetbirdPeerPaths(c, hostId, report);
       return Response.noContent().build();
     });
+  }
+
+  private boolean validOverlayNetwork(AgentEnrollmentResource.HeartbeatReport report) {
+    var overlay = report.netbirdOverlay();
+    Long observedAt = report.netbirdOverlayObservedAtEpochMs();
+    boolean capability = report.capabilities().contains("network.overlay.observe");
+    if (overlay == null || observedAt == null || observedAt <= 0)
+      return overlay == null && (observedAt == null || observedAt == 0) && !capability;
+    long now = Instant.now().toEpochMilli();
+    if (!capability || observedAt > now + 60_000 || observedAt < now - 300_000 ||
+        overlay.peerCount() == null || overlay.connectedPeerCount() == null ||
+        overlay.p2pPeerCount() == null || overlay.relayedPeerCount() == null)
+      return false;
+    long peers = overlay.peerCount();
+    long connected = overlay.connectedPeerCount();
+    long p2p = overlay.p2pPeerCount();
+    long relayed = overlay.relayedPeerCount();
+    return peers <= 100_000 && connected <= peers && p2p <= peers && relayed <= peers &&
+        p2p + relayed == connected;
+  }
+
+  private boolean validNetbirdPeerPaths(AgentEnrollmentResource.HeartbeatReport report) {
+    var paths = report.netbirdPeerPaths();
+    Long observedAt = report.netbirdPeerPathsObservedAtEpochMs();
+    boolean capability = report.capabilities().contains("network.overlay.peer_paths.observe");
+    if (observedAt == null || observedAt <= 0)
+      return (paths == null || paths.isEmpty()) && !capability;
+    if (!capability || observedAt > Instant.now().plusSeconds(60).toEpochMilli() ||
+        observedAt < Instant.now().minusSeconds(300).toEpochMilli() ||
+        paths == null || paths.size() > 256)
+      return false;
+    var names = new HashSet<String>();
+    for (var path : paths) {
+      if (path == null || path.peerName() == null || path.peerName().isBlank() ||
+          path.peerName().length() > 253 ||
+          !path.peerName().matches("[A-Za-z0-9_.-]{1,253}") ||
+          path.peerName().matches("[0-9]+(\\.[0-9]+){3}") ||
+          !names.add(path.peerName().toLowerCase(Locale.ROOT)) ||
+          path.status() == null || path.connectionType() == null ||
+          !Set.of("CONNECTED", "DISCONNECTED", "CONNECTING", "UNKNOWN")
+              .contains(path.status()) ||
+          !Set.of("P2P", "RELAY", "UNKNOWN").contains(path.connectionType()) ||
+          !"CONNECTED".equals(path.status()) && !"UNKNOWN".equals(path.connectionType()))
+        return false;
+    }
+    return true;
+  }
+
+  private void persistNetbirdPeerPaths(java.sql.Connection connection, UUID hostId,
+                                       AgentEnrollmentResource.HeartbeatReport report)
+      throws Exception {
+    Long observedAtMillis = report.netbirdPeerPathsObservedAtEpochMs();
+    if (observedAtMillis == null || observedAtMillis <= 0)
+      return;
+    Instant observedAt = Instant.ofEpochMilli(observedAtMillis);
+    var snapshots = query(connection,
+        "SELECT observed_at FROM host_overlay_peer_snapshot WHERE host_id=?", hostId);
+    boolean replace = snapshots.isEmpty();
+    if (replace) {
+      update(connection,
+          "INSERT INTO host_overlay_peer_snapshot (host_id,observed_at) VALUES (?,?)",
+          hostId, java.sql.Timestamp.from(observedAt));
+    } else {
+      Instant current = timestampInstant(snapshots.getFirst().get("observed_at"));
+      if (current.isBefore(observedAt)) {
+        update(connection,
+            "UPDATE host_overlay_peer_snapshot SET observed_at=? WHERE host_id=?",
+            java.sql.Timestamp.from(observedAt), hostId);
+        replace = true;
+      }
+    }
+    if (!replace)
+      return;
+    update(connection, "DELETE FROM host_overlay_peer_inventory WHERE host_id=?", hostId);
+    for (var peer : report.netbirdPeerPaths()) {
+      update(connection,
+          "INSERT INTO host_overlay_peer_inventory " +
+              "(host_id,peer_name,connection_status,connection_type) VALUES (?,?,?,?)",
+          hostId, peer.peerName(), peer.status(), peer.connectionType());
+    }
+  }
+
+  private Instant timestampInstant(Object value) {
+    if (value instanceof java.sql.Timestamp timestamp)
+      return timestamp.toInstant();
+    if (value instanceof java.time.OffsetDateTime timestamp)
+      return timestamp.toInstant();
+    if (value instanceof Instant timestamp)
+      return timestamp;
+    if (value instanceof java.util.Date timestamp)
+      return timestamp.toInstant();
+    throw new IllegalStateException("Unsupported NetBird peer snapshot timestamp value");
   }
 
   private boolean validNetworkInventory(AgentEnrollmentResource.HeartbeatReport report) {

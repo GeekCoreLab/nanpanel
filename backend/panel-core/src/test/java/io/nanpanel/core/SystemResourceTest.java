@@ -320,6 +320,34 @@ class SystemResourceTest {
         .get("/api/v1/system")
         .then()
         .statusCode(200);
+    given().get("/api/v1/network-providers").then().statusCode(401);
+    given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/network-providers")
+        .then().statusCode(200).body("size()", equalTo(0));
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .contentType("application/json")
+        .body(Map.of("desiredSnapshot",
+            "{\"groupName\":\"nanpanel-managed-app\",\"generation\":1,\"peerIds\":[]}"))
+        .post("/api/v1/network-providers/netbird-groups/plans")
+        .then().statusCode(404).body("code", equalTo("PROVIDER_UNAVAILABLE"));
+    given().get("/api/v1/kubernetes/service-inventory")
+        .then().statusCode(401);
+    given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/kubernetes/service-inventory")
+        .then().statusCode(503)
+        .body("code", equalTo("KUBERNETES_DISCOVERY_DISABLED"));
+    given().get("/api/v1/kubernetes/service-probes")
+        .then().statusCode(401);
+    given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/kubernetes/service-probes")
+        .then().statusCode(503)
+        .body("code", equalTo("KUBERNETES_DISCOVERY_DISABLED"));
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .post("/api/v1/kubernetes/service-inventory/refresh")
+        .then().statusCode(503)
+        .body("code", equalTo("KUBERNETES_DISCOVERY_DISABLED"));
     given().get("/api/v1/hosts/00000000-0000-0000-0000-000000000001/services")
         .then().statusCode(401);
     var installation = given().get("/api/v1/agent-installation")
@@ -382,10 +410,21 @@ class SystemResourceTest {
         "host.inventory", "agent.heartbeat", "agent.self_update", "systemd.read",
         "systemd.restart", "systemd.journal.read", "package.install", "file.write.protected",
         "container.list", "container.logs", "container.start", "container.stop",
-        "container.deploy", "network.firewall.expose", "network.inventory"));
+        "container.deploy", "network.firewall.expose", "network.inventory",
+        "network.overlay.observe", "network.overlay.peer_paths.observe"));
     heartbeat.put("helperStatus", "AVAILABLE");
     heartbeat.put("systemdObservedAtEpochMs", System.currentTimeMillis());
     heartbeat.put("networkObservedAtEpochMs", System.currentTimeMillis());
+    heartbeat.put("netbirdOverlayObservedAtEpochMs", System.currentTimeMillis());
+    heartbeat.put("netbirdOverlay", Map.of(
+        "peerCount", 3, "connectedPeerCount", 2, "p2pPeerCount", 1,
+        "relayedPeerCount", 1));
+    heartbeat.put("netbirdPeerPathsObservedAtEpochMs", System.currentTimeMillis());
+    heartbeat.put("netbirdPeerPaths", java.util.List.of(
+        Map.of("peerName", "api-a.example.test", "status", "CONNECTED",
+            "connectionType", "P2P"),
+        Map.of("peerName", "db-b.example.test", "status", "CONNECTED",
+            "connectionType", "RELAY")));
     heartbeat.put("networkInterfaces", java.util.List.of(Map.of(
         "name", "ens18", "macAddress", "02:00:00:00:00:18", "mtu", 1500,
         "state", "UP", "addresses", java.util.List.of(Map.of(
@@ -406,6 +445,35 @@ class SystemResourceTest {
         .body(forgedHeartbeat)
         .post("/internal/agent-heartbeats")
         .then().statusCode(403);
+    var inconsistentOverlayHeartbeat = new java.util.HashMap<>(heartbeat);
+    inconsistentOverlayHeartbeat.put("netbirdOverlay", Map.of(
+        "peerCount", 3, "connectedPeerCount", 2, "p2pPeerCount", 2,
+        "relayedPeerCount", 1));
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json")
+        .body(inconsistentOverlayHeartbeat)
+        .post("/internal/agent-heartbeats")
+        .then().statusCode(400).body("code", equalTo("INVALID_HEARTBEAT"));
+    var unadvertisedOverlayHeartbeat = new java.util.HashMap<>(heartbeat);
+    unadvertisedOverlayHeartbeat.put("capabilities", java.util.List.of(
+        "host.inventory", "agent.heartbeat", "agent.self_update", "systemd.read",
+        "systemd.restart", "systemd.journal.read", "package.install", "file.write.protected",
+        "container.list", "container.logs", "container.start", "container.stop",
+        "container.deploy", "network.firewall.expose", "network.inventory"));
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json")
+        .body(unadvertisedOverlayHeartbeat)
+        .post("/internal/agent-heartbeats")
+        .then().statusCode(400).body("code", equalTo("INVALID_HEARTBEAT"));
+    var invalidPeerPathHeartbeat = new java.util.HashMap<>(heartbeat);
+    invalidPeerPathHeartbeat.put("netbirdPeerPaths", java.util.List.of(
+        Map.of("peerName", "100.64.0.1", "status", "CONNECTED",
+            "connectionType", "P2P")));
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json")
+        .body(invalidPeerPathHeartbeat)
+        .post("/internal/agent-heartbeats")
+        .then().statusCode(400).body("code", equalTo("INVALID_HEARTBEAT"));
     given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
         .contentType("application/json")
         .body(heartbeat)
@@ -424,7 +492,15 @@ class SystemResourceTest {
         .body("interfaces[0].name", equalTo("ens18"))
         .body("interfaces[0].addresses[0].address", equalTo("192.0.2.10"))
         .body("routes[0].destination", equalTo("default"))
-        .body("routes[0].gateway", equalTo("192.0.2.1"));
+        .body("routes[0].gateway", equalTo("192.0.2.1"))
+        .body("overlay.peerCount", equalTo(3))
+        .body("overlay.connectedPeerCount", equalTo(2))
+        .body("overlay.p2pPeerCount", equalTo(1))
+        .body("overlay.relayedPeerCount", equalTo(1))
+        .body("overlayPeers[0].peerName", equalTo("api-a.example.test"))
+        .body("overlayPeers[0].connectionType", equalTo("P2P"))
+        .body("overlayPeers[1].connectionType", equalTo("RELAY"))
+        .body("overlayPeersObservedAt", notNullValue());
     given().cookie("nanpanel_session", restoredCookie)
         .header("X-CSRF-Token", restored.path("csrfToken"))
         .contentType("application/json")
@@ -703,7 +779,8 @@ class SystemResourceTest {
     var journalUnsupportedHeartbeat = new java.util.HashMap<>(heartbeat);
     journalUnsupportedHeartbeat.put("capabilities", java.util.List.of(
         "host.inventory", "agent.heartbeat", "agent.self_update", "systemd.read",
-        "systemd.restart", "network.inventory"));
+        "systemd.restart", "network.inventory", "network.overlay.observe",
+        "network.overlay.peer_paths.observe"));
     journalUnsupportedHeartbeat.put("systemdServices", java.util.List.of(Map.of(
         "unitName", "ssh.service", "displayName", "OpenSSH server",
         "activeState", "ACTIVE", "subState", "running")));

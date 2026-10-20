@@ -62,7 +62,11 @@ public class AgentEnrollmentResource {
       List<SystemdServiceReport> systemdServices,
       Long networkObservedAtEpochMs,
       List<NetworkInterfaceReport> networkInterfaces,
-      List<NetworkRouteReport> networkRoutes) {}
+      List<NetworkRouteReport> networkRoutes,
+      Long netbirdOverlayObservedAtEpochMs,
+      OverlayNetworkReport netbirdOverlay,
+      Long netbirdPeerPathsObservedAtEpochMs,
+      List<NetbirdPeerPathReport> netbirdPeerPaths) {}
   @JsonIgnoreProperties(ignoreUnknown = true)
   public record SystemdServiceReport(String unitName, String displayName,
                                      String activeState, String subState) {}
@@ -73,6 +77,10 @@ public class AgentEnrollmentResource {
   public record NetworkRouteReport(String destination, String gateway, String interfaceName,
                                    String protocol, String scope, String routeType,
                                    String table, long metric) {}
+  public record OverlayNetworkReport(Long peerCount, Long connectedPeerCount,
+                                     Long p2pPeerCount, Long relayedPeerCount) {}
+  public record NetbirdPeerPathReport(String peerName, String status,
+                                      String connectionType) {}
 
   private String actor() {
     @SuppressWarnings("unchecked")

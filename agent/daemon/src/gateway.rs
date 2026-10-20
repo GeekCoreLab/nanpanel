@@ -350,7 +350,7 @@ impl Gateway {
     ) -> anyhow::Result<()> {
         let agent_id = relayed.agent_id;
         let fingerprint = relayed.certificate_fingerprint;
-        let message = relayed
+        let message = *relayed
             .message
             .ok_or_else(|| anyhow::anyhow!("Relay sent an empty Agent message"))?;
         if agent_id.is_empty()
@@ -406,6 +406,27 @@ impl Gateway {
                             route_type: route.route_type,
                             table: route.table,
                             metric: route.metric,
+                        })
+                        .collect(),
+                    netbird_overlay_observed_at_epoch_ms: heartbeat
+                        .netbird_overlay_observed_at_epoch_ms,
+                    netbird_overlay: heartbeat.netbird_overlay.map(|overlay| {
+                        NetbirdOverlayReport {
+                            peer_count: overlay.peer_count,
+                            connected_peer_count: overlay.connected_peer_count,
+                            p2p_peer_count: overlay.p2p_peer_count,
+                            relayed_peer_count: overlay.relayed_peer_count,
+                        }
+                    }),
+                    netbird_peer_paths_observed_at_epoch_ms: heartbeat
+                        .netbird_peer_paths_observed_at_epoch_ms,
+                    netbird_peer_paths: heartbeat
+                        .netbird_peer_paths
+                        .into_iter()
+                        .map(|peer| NetbirdPeerPathReport {
+                            peer_name: peer.peer_name,
+                            status: peer.status,
+                            connection_type: peer.connection_type,
                         })
                         .collect(),
                     systemd_services: heartbeat
@@ -517,6 +538,27 @@ struct HeartbeatReport {
     network_observed_at_epoch_ms: i64,
     network_interfaces: Vec<NetworkInterfaceReport>,
     network_routes: Vec<NetworkRouteReport>,
+    netbird_overlay_observed_at_epoch_ms: i64,
+    netbird_overlay: Option<NetbirdOverlayReport>,
+    netbird_peer_paths_observed_at_epoch_ms: i64,
+    netbird_peer_paths: Vec<NetbirdPeerPathReport>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NetbirdOverlayReport {
+    peer_count: u32,
+    connected_peer_count: u32,
+    p2p_peer_count: u32,
+    relayed_peer_count: u32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NetbirdPeerPathReport {
+    peer_name: String,
+    status: String,
+    connection_type: String,
 }
 
 #[derive(Serialize)]
@@ -906,6 +948,27 @@ impl AgentGateway for Gateway {
                                             route_type: route.route_type,
                                             table: route.table,
                                             metric: route.metric,
+                                        })
+                                        .collect(),
+                                    netbird_overlay_observed_at_epoch_ms: heartbeat
+                                        .netbird_overlay_observed_at_epoch_ms,
+                                    netbird_overlay: heartbeat.netbird_overlay.map(|overlay| {
+                                        NetbirdOverlayReport {
+                                            peer_count: overlay.peer_count,
+                                            connected_peer_count: overlay.connected_peer_count,
+                                            p2p_peer_count: overlay.p2p_peer_count,
+                                            relayed_peer_count: overlay.relayed_peer_count,
+                                        }
+                                    }),
+                                    netbird_peer_paths_observed_at_epoch_ms: heartbeat
+                                        .netbird_peer_paths_observed_at_epoch_ms,
+                                    netbird_peer_paths: heartbeat
+                                        .netbird_peer_paths
+                                        .into_iter()
+                                        .map(|peer| NetbirdPeerPathReport {
+                                            peer_name: peer.peer_name,
+                                            status: peer.status,
+                                            connection_type: peer.connection_type,
                                         })
                                         .collect(),
                                     systemd_services: heartbeat

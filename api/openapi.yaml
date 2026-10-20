@@ -38,7 +38,238 @@ tags:
   description: 只读脱敏审计
 - name: Topology
   description: 拓扑期望草稿，不部署网络
+- name: ServiceNetwork
+  description: Kubernetes Service 与 EndpointSlice 只读清单
+- name: NetworkProviders
+  description: 管理端网络 Provider 计划、变更、验证与补偿
 paths:
+  /api/v1/network-providers:
+    get:
+      tags: [NetworkProviders]
+      operationId: listNetworkProviders
+      summary: 查询已装载的网络 Provider
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: Provider 标识和能力，不返回任何外部凭据。
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/NetworkProvider'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/network-providers/{providerId}/observations:
+    parameters:
+    - name: providerId
+      in: path
+      required: true
+      schema: {type: string, maxLength: 80}
+    post:
+      tags: [NetworkProviders]
+      operationId: observeNetworkProviderResource
+      summary: 读取 Provider 管理范围内的资源状态
+      x-implementation-status: implemented
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NetworkProviderObservationRequest'
+      responses:
+        '200':
+          description: 当前观察快照，可作为后续计划的 observedSnapshot。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkProviderObservation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/network-providers/{providerId}/plans:
+    parameters:
+    - name: providerId
+      in: path
+      required: true
+      schema:
+        type: string
+        maxLength: 80
+    post:
+      tags: [NetworkProviders]
+      operationId: createNetworkProviderPlan
+      summary: 创建并持久化网络 Provider 计划
+      description: NetBird Provider 只管理配置前缀内的专属分组。外部 API 凭据只来自 Core 服务端环境；desiredSnapshot 包含 groupName、generation 和 peerIds。observedSnapshot 可省略，或传入 Provider observe 返回的 drift precondition token。
+      x-implementation-status: implemented
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NetworkProviderPlanRequest'
+      responses:
+        '201':
+          description: 已持久化计划；此时尚未修改外部网络。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkProviderOperation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/network-providers/{providerId}/operations/{operationId}:
+    parameters:
+    - name: providerId
+      in: path
+      required: true
+      schema:
+        type: string
+        maxLength: 80
+    - name: operationId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    get:
+      tags: [NetworkProviders]
+      operationId: getNetworkProviderOperation
+      summary: 查询持久化 Provider 操作状态
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 当前阶段；不会返回持久化计划内容或外部凭据。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkProviderOperation'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/network-providers/{providerId}/operations/{operationId}/validate:
+    parameters:
+    - name: providerId
+      in: path
+      required: true
+      schema: {type: string, maxLength: 80}
+    - name: operationId
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    post:
+      tags: [NetworkProviders]
+      operationId: validateNetworkProviderOperation
+      summary: 重新读取外部状态并检查计划前提
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 校验状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkProviderOperation'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/network-providers/{providerId}/operations/{operationId}/apply:
+    parameters:
+    - name: providerId
+      in: path
+      required: true
+      schema: {type: string, maxLength: 80}
+    - name: operationId
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    post:
+      tags: [NetworkProviders]
+      operationId: applyNetworkProviderOperation
+      summary: 应用已校验的 Provider 计划
+      description: 操作阶段先写入数据库并审计。超时或连接中断时状态为 UNKNOWN，需先 verify 或 compensate，不能盲目重试。
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 当前应用状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkProviderOperation'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/network-providers/{providerId}/operations/{operationId}/verify:
+    parameters:
+    - name: providerId
+      in: path
+      required: true
+      schema: {type: string, maxLength: 80}
+    - name: operationId
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    post:
+      tags: [NetworkProviders]
+      operationId: verifyNetworkProviderOperation
+      summary: 从持久化计划恢复 Provider 上下文并验证外部结果
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 验证状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkProviderOperation'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /api/v1/network-providers/{providerId}/operations/{operationId}/compensate:
+    parameters:
+    - name: providerId
+      in: path
+      required: true
+      schema: {type: string, maxLength: 80}
+    - name: operationId
+      in: path
+      required: true
+      schema: {type: string, format: uuid}
+    post:
+      tags: [NetworkProviders]
+      operationId: compensateNetworkProviderOperation
+      summary: 漂移检测通过时恢复计划前的外部状态
+      x-implementation-status: implemented
+      responses:
+        '200':
+          description: 补偿状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NetworkProviderOperation'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
   /api/v1/system:
     get:
       tags:
@@ -203,6 +434,94 @@ paths:
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalError'
+  /api/v1/kubernetes/service-inventory:
+    get:
+      tags: [ServiceNetwork]
+      operationId: getKubernetesServiceInventory
+      summary: 查询限定 namespace 的 Kubernetes 服务清单
+      description: 读取 Core 按固定集群身份与 namespace 持久化的最近 Service/EndpointSlice 快照，不接受客户端传入集群、namespace 或 selector。需显式启用 NANPANEL_KUBERNETES_DISCOVERY_ENABLED 并配置身份与 namespace；后台每 60 秒刷新。历史保留和主动服务探测仍未实现。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 当前 namespace 内 Service 和 EndpointSlice 的受限快照。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KubernetesServiceInventorySnapshot'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          description: 数据库暂时无法读取持久化快照。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          description: 服务发现未启用或服务端配置不完整。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /api/v1/kubernetes/service-inventory/refresh:
+    post:
+      tags: [ServiceNetwork]
+      operationId: refreshKubernetesServiceInventory
+      summary: 手动刷新 Kubernetes 服务清单
+      description: 使用 Core 的 Kubernetes 身份，对服务端固定的集群和 namespace 执行只读列表查询并持久化最新快照。写请求需要 Cookie 会话和 CSRF Token。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 已采集并持久化的 Service/EndpointSlice 快照。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KubernetesServiceInventorySnapshot'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '502':
+          description: Kubernetes API 不可用或快照无法持久化。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          description: 服务发现未启用或服务端配置不完整。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /api/v1/kubernetes/service-probes:
+    get:
+      tags: [ServiceNetwork]
+      operationId: getKubernetesServiceProbes
+      summary: 查询持久化 Kubernetes 服务 TCP 探测结果
+      description: 返回最近七天内的有界 TCP 探测记录。仅在显式启用 NANPANEL_KUBERNETES_SERVICE_PROBES_ENABLED 后，后台刷新才会连接 EndpointSlice 标记 Ready 的私有 IP/TCP 端口；FQDN、非私有地址和未 Ready 端点不会被连接。普通 GET 只读取数据库。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 探测开关、最新探测时间和有界目标结果。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KubernetesServiceProbeSnapshot'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          description: Kubernetes 服务发现未启用或服务端配置不完整。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
   /api/v1/agents/{agentId}:
     parameters:
     - $ref: '#/components/parameters/AgentId'
@@ -2912,7 +3231,7 @@ components:
     HostNetworkInventory:
       type: object
       additionalProperties: false
-      required: [interfaces, routes, observedAt]
+      required: [interfaces, routes, observedAt, overlay, overlayPeers, overlayPeersObservedAt]
       properties:
         interfaces:
           type: array
@@ -2924,6 +3243,303 @@ components:
             $ref: '#/components/schemas/HostNetworkRoute'
         observedAt:
           type: [string, 'null']
+          format: date-time
+        overlay:
+          oneOf:
+            - $ref: '#/components/schemas/HostOverlayInventory'
+            - type: 'null'
+        overlayPeers:
+          type: array
+          items:
+            $ref: '#/components/schemas/HostOverlayPeerPath'
+        overlayPeersObservedAt:
+          type: [string, 'null']
+          format: date-time
+    NetworkProvider:
+      type: object
+      additionalProperties: false
+      required: [id, capabilities]
+      properties:
+        id:
+          type: string
+          maxLength: 80
+        capabilities:
+          type: array
+          items:
+            type: string
+            maxLength: 80
+    NetworkProviderPlanRequest:
+      type: object
+      additionalProperties: false
+      required: [desiredSnapshot]
+      properties:
+        desiredSnapshot:
+          type: string
+          maxLength: 65536
+          description: JSON string containing groupName, generation, and peerIds for the NetBird group provider.
+        observedSnapshot:
+          type: [string, 'null']
+          maxLength: 65536
+          description: Optional JSON observation token returned by the NetBird Provider observe operation.
+    NetworkProviderObservationRequest:
+      type: object
+      additionalProperties: false
+      required: [resourceKey]
+      properties:
+        resourceKey:
+          type: string
+          minLength: 1
+          maxLength: 63
+          description: NetBird managed group name.
+    NetworkProviderObservation:
+      type: object
+      additionalProperties: false
+      required: [providerId, resourceKey, snapshot]
+      properties:
+        providerId:
+          type: string
+        resourceKey:
+          type: string
+        snapshot:
+          type: string
+          maxLength: 65536
+    NetworkProviderOperation:
+      type: object
+      additionalProperties: false
+      required: [id, providerId, generation, state, detail, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        providerId:
+          type: string
+          maxLength: 80
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+        state:
+          type: string
+          enum: [PLANNED, VALIDATED, APPLYING, APPLIED, VERIFIED, DRIFTED, COMPENSATING, COMPENSATED, UNKNOWN, FAILED]
+        detail:
+          type: string
+          maxLength: 512
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    KubernetesServiceInventorySnapshot:
+      type: object
+      additionalProperties: false
+      required: [sourceId, namespace, observedAt, services]
+      properties:
+        sourceId:
+          type: string
+          minLength: 1
+          maxLength: 80
+        namespace:
+          type: string
+          minLength: 1
+          maxLength: 63
+        observedAt:
+          type: [string, 'null']
+          format: date-time
+        services:
+          type: array
+          maxItems: 512
+          items:
+            $ref: '#/components/schemas/KubernetesServiceObservation'
+    KubernetesServiceProbeSnapshot:
+      type: object
+      additionalProperties: false
+      required: [sourceId, enabled, observedAt, probes]
+      properties:
+        sourceId:
+          type: string
+          maxLength: 80
+        enabled:
+          type: boolean
+        observedAt:
+          type: [string, 'null']
+          format: date-time
+        probes:
+          type: array
+          maxItems: 4096
+          items:
+            $ref: '#/components/schemas/KubernetesServiceProbeObservation'
+    KubernetesServiceProbeObservation:
+      type: object
+      additionalProperties: false
+      required: [serviceName, address, port, protocol, outcome, inventoryObservedAt, observedAt]
+      properties:
+        serviceName:
+          type: string
+          maxLength: 63
+        address:
+          type: string
+          maxLength: 253
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        protocol:
+          type: string
+          enum: [TCP]
+        outcome:
+          type: string
+          enum: [SUCCEEDED, FAILED, TIMED_OUT, SKIPPED]
+        inventoryObservedAt:
+          type: string
+          format: date-time
+        observedAt:
+          type: string
+          format: date-time
+    KubernetesServiceObservation:
+      type: object
+      additionalProperties: false
+      required: [serviceName, type, clusterIps, externalName, ports, endpoints]
+      properties:
+        serviceName:
+          type: string
+          maxLength: 63
+        type:
+          type: string
+          enum: [ClusterIP, NodePort, LoadBalancer, ExternalName]
+        clusterIps:
+          type: array
+          maxItems: 2
+          items:
+            type: string
+            maxLength: 45
+        externalName:
+          type: [string, 'null']
+          maxLength: 253
+        ports:
+          type: array
+          maxItems: 128
+          items:
+            $ref: '#/components/schemas/KubernetesServicePortObservation'
+        endpoints:
+          type: array
+          maxItems: 4096
+          items:
+            $ref: '#/components/schemas/KubernetesEndpointObservation'
+    KubernetesServicePortObservation:
+      type: object
+      additionalProperties: false
+      required: [name, protocol, port, targetPort, appProtocol]
+      properties:
+        name:
+          type: [string, 'null']
+          maxLength: 15
+        protocol:
+          type: string
+          enum: [TCP, UDP, SCTP]
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        targetPort:
+          type: string
+          maxLength: 15
+        appProtocol:
+          type: [string, 'null']
+          maxLength: 255
+    KubernetesEndpointObservation:
+      type: object
+      additionalProperties: false
+      required: [addressType, address, ready, serving, terminating, targetKind, targetName, targetNamespace, nodeName, zone, ports]
+      properties:
+        addressType:
+          type: string
+          enum: [IPv4, IPv6, FQDN]
+        address:
+          type: string
+          maxLength: 253
+        ready:
+          type: [boolean, 'null']
+        serving:
+          type: [boolean, 'null']
+        terminating:
+          type: [boolean, 'null']
+        targetKind:
+          type: [string, 'null']
+          maxLength: 63
+        targetName:
+          type: [string, 'null']
+          maxLength: 253
+        targetNamespace:
+          type: [string, 'null']
+          maxLength: 63
+        nodeName:
+          type: [string, 'null']
+          maxLength: 253
+        zone:
+          type: [string, 'null']
+          maxLength: 253
+        ports:
+          type: array
+          maxItems: 128
+          items:
+            $ref: '#/components/schemas/KubernetesEndpointPortObservation'
+    KubernetesEndpointPortObservation:
+      type: object
+      additionalProperties: false
+      required: [name, protocol, port, appProtocol]
+      properties:
+        name:
+          type: [string, 'null']
+          maxLength: 15
+        protocol:
+          type: string
+          enum: [TCP, UDP, SCTP]
+        port:
+          type: [integer, 'null']
+          minimum: 1
+          maximum: 65535
+        appProtocol:
+          type: [string, 'null']
+          maxLength: 255
+    HostOverlayPeerPath:
+      type: object
+      additionalProperties: false
+      required: [peerName, status, connectionType]
+      properties:
+        peerName:
+          type: string
+          minLength: 1
+          maxLength: 253
+        status:
+          type: string
+          enum: [CONNECTED, DISCONNECTED, CONNECTING, UNKNOWN]
+        connectionType:
+          type: string
+          enum: [P2P, RELAY, UNKNOWN]
+    HostOverlayInventory:
+      type: object
+      additionalProperties: false
+      required: [peerCount, connectedPeerCount, p2pPeerCount, relayedPeerCount, observedAt]
+      properties:
+        peerCount:
+          type: integer
+          minimum: 0
+          maximum: 100000
+        connectedPeerCount:
+          type: integer
+          minimum: 0
+          maximum: 100000
+        p2pPeerCount:
+          type: integer
+          minimum: 0
+          maximum: 100000
+        relayedPeerCount:
+          type: integer
+          minimum: 0
+          maximum: 100000
+        observedAt:
+          type: string
           format: date-time
     HostNetworkInterface:
       type: object

@@ -224,20 +224,56 @@ public class InventoryResource {
           "SELECT " + interfaces + " AS interfaces," + routes + " AS routes,observed_at " +
               "FROM host_network_inventory WHERE host_id=?", id);
       var result = new LinkedHashMap<String, Object>();
+      result.put("interfaces", mapper.createArrayNode());
+      result.put("routes", mapper.createArrayNode());
+      result.put("observedAt", null);
+      result.put("overlayPeers", List.of());
+      result.put("overlayPeersObservedAt", null);
       if (rows.isEmpty()) {
-        result.put("interfaces", mapper.createArrayNode());
-        result.put("routes", mapper.createArrayNode());
-        result.put("observedAt", null);
-        return result;
+        // Overlay state is stored separately and may exist before an iproute2 snapshot.
+      } else {
+        var row = rows.getFirst();
+        try {
+          result.put("interfaces", mapper.readTree(jsonText(row.get("interfaces"))));
+          result.put("routes", mapper.readTree(jsonText(row.get("routes"))));
+        } catch (java.io.IOException e) {
+          throw new IllegalStateException("Stored host network inventory is invalid", e);
+        }
+        result.put("observedAt", timestamp(row.get("observed_at")));
       }
-      var row = rows.getFirst();
-      try {
-        result.put("interfaces", mapper.readTree(jsonText(row.get("interfaces"))));
-        result.put("routes", mapper.readTree(jsonText(row.get("routes"))));
-      } catch (java.io.IOException e) {
-        throw new IllegalStateException("Stored host network inventory is invalid", e);
+      var overlayRows = query(c,
+          "SELECT peer_count,connected_peer_count,p2p_peer_count,relayed_peer_count,observed_at " +
+              "FROM host_overlay_inventory WHERE host_id=?", id);
+      if (overlayRows.isEmpty()) {
+        result.put("overlay", null);
+      } else {
+        var row = overlayRows.getFirst();
+        var overlay = new LinkedHashMap<String, Object>();
+        overlay.put("peerCount", ((Number)row.get("peer_count")).longValue());
+        overlay.put("connectedPeerCount", ((Number)row.get("connected_peer_count")).longValue());
+        overlay.put("p2pPeerCount", ((Number)row.get("p2p_peer_count")).longValue());
+        overlay.put("relayedPeerCount", ((Number)row.get("relayed_peer_count")).longValue());
+        overlay.put("observedAt", timestamp(row.get("observed_at")));
+        result.put("overlay", overlay);
       }
-      result.put("observedAt", timestamp(row.get("observed_at")));
+      var peerSnapshots = query(c,
+          "SELECT observed_at FROM host_overlay_peer_snapshot WHERE host_id=?", id);
+      if (!peerSnapshots.isEmpty()) {
+        result.put("overlayPeersObservedAt",
+            timestamp(peerSnapshots.getFirst().get("observed_at")));
+        var peerRows = query(c,
+            "SELECT peer_name,connection_status,connection_type " +
+                "FROM host_overlay_peer_inventory WHERE host_id=? ORDER BY peer_name", id);
+        var peers = new ArrayList<Map<String, Object>>(peerRows.size());
+        for (var row : peerRows) {
+          var peer = new LinkedHashMap<String, Object>();
+          peer.put("peerName", row.get("peer_name"));
+          peer.put("status", row.get("connection_status"));
+          peer.put("connectionType", row.get("connection_type"));
+          peers.add(peer);
+        }
+        result.put("overlayPeers", peers);
+      }
       return result;
     });
   }

@@ -1,0 +1,26 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: nanpanel-service-inventory-reader
+  namespace: nanpanel-mesh
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["list"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: nanpanel-core-service-inventory
+  namespace: nanpanel-mesh
+subjects:
+  - kind: ServiceAccount
+    name: nanpanel-core
+    namespace: nanpanel
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: nanpanel-service-inventory-reader

@@ -4,3 +4,4 @@
 
 - [ADR-011：双向建连、主控代理与 DNS 故障切换](ADR-011-control-relay-dns-failover.md)（接受，部分实现，待验收）。
 - [ADR-012：资产级 SSH 连接与堡垒终端审计](ADR-012-host-ssh-bastion.md)（接受，代码已实现，真实主机验收待完成）。
+- [ADR-013：Kubernetes 工作负载的可选 Istio 服务网络](ADR-013-istio-service-network.md)（接受，隔离 K3s 实验已部署，平台 Provider 待实现）。

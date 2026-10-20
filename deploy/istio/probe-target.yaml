@@ -1,0 +1,71 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mesh-probe-target
+  namespace: nanpanel-mesh
+  labels:
+    app: mesh-probe-target
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mesh-probe-target
+  template:
+    metadata:
+      labels:
+        app: mesh-probe-target
+      annotations:
+        sidecar.istio.io/inject: "false"
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: http
+          image: docker.1ms.run/library/busybox:1.37.0
+          imagePullPolicy: IfNotPresent
+          command: ["httpd", "-f", "-p", "8080", "-h", "/www"]
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 10m
+              memory: 8Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: content
+              mountPath: /www
+              readOnly: true
+      volumes:
+        - name: content
+          configMap:
+            name: mesh-http-content
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mesh-probe-target
+  namespace: nanpanel-mesh
+spec:
+  selector:
+    app: mesh-probe-target
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

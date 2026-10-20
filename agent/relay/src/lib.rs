@@ -178,7 +178,7 @@ impl ControlRelay for Relay {
                     payload: Some(RelayPayload::AgentMessage(v1::RelayedAgentMessage {
                         agent_id: agent_id.clone(),
                         certificate_fingerprint: fingerprint.clone(),
-                        message: Some(message),
+                        message: Some(Box::new(message)),
                     })),
                 };
                 if relayed.encoded_len() > MAX_FRAME_BYTES {

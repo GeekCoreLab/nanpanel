@@ -8,6 +8,7 @@ use std::{
         unix::fs::{FileTypeExt, PermissionsExt},
     },
     path::{Component, Path},
+    process::Stdio,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -16,6 +17,7 @@ use anyhow::{Context, Result, bail};
 use futures_util::{SinkExt, StreamExt};
 use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncReadExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio_util::codec::{Framed, LinesCodec};
 
@@ -27,6 +29,9 @@ const MAX_COMMAND_OUTPUT_BYTES: usize = 32 * 1024;
 const MAX_PAYLOAD_BYTES: usize = 128 * 1024;
 const MAX_AGENT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_JOURNAL_CAPTURE_BYTES: usize = 64 * 1024;
+const MAX_NETBIRD_STATUS_BYTES: usize = 2 * 1024 * 1024;
+const MAX_NETBIRD_PEERS: usize = 256;
+const MAX_NETBIRD_PEER_RESPONSE_BYTES: usize = 120 * 1024;
 const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 const RESOLVE_BENEATH: u64 = 0x08;
@@ -69,6 +74,7 @@ pub struct HelperConfig {
     pub agent_binary: std::path::PathBuf,
     pub container_runtime: Option<std::path::PathBuf>,
     network_operations_available: bool,
+    netbird_binary: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -118,6 +124,7 @@ struct HelperRuntime {
     agent_binary: std::path::PathBuf,
     container_runtime: Option<Arc<std::path::PathBuf>>,
     network_operations_available: bool,
+    netbird_binary: Option<Arc<std::path::PathBuf>>,
     network_lock: tokio::sync::Mutex<()>,
 }
 
@@ -175,6 +182,8 @@ impl HelperConfig {
         let network_operations_available =
             trusted_executable(&["/usr/bin/systemd-run", "/bin/systemd-run"]).is_ok()
                 && trusted_executable(&["/usr/sbin/nft", "/usr/bin/nft"]).is_ok();
+        let netbird_binary =
+            trusted_executable(&["/usr/bin/netbird", "/usr/local/bin/netbird"]).ok();
         let controller_url =
             reqwest::Url::parse(controller_url).context("parse configured controller URL")?;
         if controller_url.scheme() != "https"
@@ -214,6 +223,7 @@ impl HelperConfig {
             agent_binary,
             container_runtime,
             network_operations_available,
+            netbird_binary,
         })
     }
 }
@@ -239,6 +249,7 @@ pub async fn serve(config: HelperConfig) -> Result<()> {
         agent_binary: config.agent_binary,
         container_runtime: config.container_runtime.map(Arc::new),
         network_operations_available: config.network_operations_available,
+        netbird_binary: config.netbird_binary.map(Arc::new),
         network_lock: tokio::sync::Mutex::new(()),
     });
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -329,6 +340,7 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                     &request.target,
                                     runtime.container_runtime.is_some(),
                                     runtime.network_operations_available,
+                                    runtime.netbird_binary.is_some(),
                                 )
                             }) {
                                 Err(error) => Err(error),
@@ -338,6 +350,7 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                         Ok(serde_json::json!(available_capabilities(
                                             runtime.container_runtime.is_some(),
                                             runtime.network_operations_available,
+                                            runtime.netbird_binary.is_some(),
                                         ))
                                         .to_string())
                                     }
@@ -394,6 +407,15 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                     "network.firewall.expose" => {
                                         let _guard = runtime.network_lock.lock().await;
                                         expose_network_port(&request).await
+                                    }
+                                    "network.overlay.peer_paths.read" => {
+                                        collect_netbird_peer_paths(
+                                            runtime
+                                                .netbird_binary
+                                                .as_ref()
+                                                .map(|binary| binary.as_path()),
+                                        )
+                                        .await
                                     }
                                     _ => Err("unsupported capability".to_owned()),
                                 },
@@ -493,9 +515,13 @@ fn validate_capability_target(
     target: &str,
     has_container_runtime: bool,
     network_operations_available: bool,
+    netbird_status_available: bool,
 ) -> std::result::Result<(), String> {
     match capability {
         "helper.status" | "helper.capabilities" | "agent.update" if target.is_empty() => Ok(()),
+        "network.overlay.peer_paths.read" if target.is_empty() && netbird_status_available => {
+            Ok(())
+        }
         "systemd.restart" | "systemd.journal.read" if valid_systemd_unit(target) => Ok(()),
         "file.read.managed" if !target.is_empty() => Ok(()),
         "package.install" if target.is_empty() => Ok(()),
@@ -518,6 +544,7 @@ fn validate_capability_target(
         "helper.status"
         | "helper.capabilities"
         | "agent.update"
+        | "network.overlay.peer_paths.read"
         | "systemd.restart"
         | "systemd.journal.read"
         | "package.install"
@@ -560,6 +587,7 @@ fn audit_target(request: &Request) -> String {
 fn available_capabilities(
     has_container_runtime: bool,
     network_operations_available: bool,
+    netbird_status_available: bool,
 ) -> Vec<&'static str> {
     let mut capabilities = vec![
         "systemd.restart",
@@ -584,7 +612,145 @@ fn available_capabilities(
     if network_operations_available {
         capabilities.push("network.firewall.expose");
     }
+    if netbird_status_available {
+        capabilities.push("network.overlay.peer_paths.read");
+    }
     capabilities
+}
+
+#[derive(Debug, Deserialize)]
+struct NetbirdCliStatus {
+    peers: NetbirdCliPeers,
+}
+
+#[derive(Debug, Deserialize)]
+struct NetbirdCliPeers {
+    details: Vec<NetbirdCliPeer>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NetbirdCliPeer {
+    fqdn: String,
+    status: String,
+    connection_type: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NetbirdPeerPath {
+    peer_name: String,
+    status: String,
+    connection_type: String,
+}
+
+async fn collect_netbird_peer_paths(
+    netbird_binary: Option<&Path>,
+) -> std::result::Result<String, String> {
+    let binary = netbird_binary
+        .ok_or_else(|| "UNAVAILABLE: trusted NetBird client binary is not installed".to_owned())?;
+    let mut child = tokio::process::Command::new(binary)
+        .env_clear()
+        .args(["status", "--json"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|_| "FAILED: unable to query NetBird client status".to_owned())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "FAILED: NetBird status output is unavailable".to_owned())?;
+    let mut output = Vec::new();
+    let read_result = tokio::time::timeout(
+        Duration::from_secs(5),
+        stdout
+            .take((MAX_NETBIRD_STATUS_BYTES + 1) as u64)
+            .read_to_end(&mut output),
+    )
+    .await
+    .map_err(|_| "FAILED: NetBird status query timed out".to_owned())?
+    .map_err(|_| "FAILED: unable to read NetBird status output".to_owned());
+    if let Err(error) = read_result {
+        let _ = child.kill().await;
+        return Err(error);
+    }
+    if output.len() > MAX_NETBIRD_STATUS_BYTES {
+        let _ = child.kill().await;
+        return Err("FAILED: NetBird status output exceeds the size limit".to_owned());
+    }
+    let exit = tokio::time::timeout(Duration::from_secs(2), child.wait())
+        .await
+        .map_err(|_| "FAILED: NetBird status process did not exit".to_owned())?
+        .map_err(|_| "FAILED: unable to read NetBird status process result".to_owned())?;
+    if !exit.success() {
+        return Err("UNAVAILABLE: NetBird client status could not be read".to_owned());
+    }
+    let peers = parse_netbird_peer_paths(&output)?;
+    let response = serde_json::to_string(&peers)
+        .map_err(|_| "FAILED: unable to encode NetBird peer paths".to_owned())?;
+    if response.len() > MAX_NETBIRD_PEER_RESPONSE_BYTES {
+        return Err("FAILED: NetBird peer path response exceeds the size limit".to_owned());
+    }
+    Ok(response)
+}
+
+fn parse_netbird_peer_paths(input: &[u8]) -> std::result::Result<Vec<NetbirdPeerPath>, String> {
+    if input.is_empty() || input.len() > MAX_NETBIRD_STATUS_BYTES {
+        return Err("FAILED: NetBird status output is empty or exceeds the size limit".to_owned());
+    }
+    let status = serde_json::from_slice::<NetbirdCliStatus>(input)
+        .map_err(|_| "FAILED: NetBird status output is invalid".to_owned())?;
+    if status.peers.details.len() > MAX_NETBIRD_PEERS {
+        return Err("FAILED: NetBird peer count exceeds the reporting limit".to_owned());
+    }
+    let mut names = HashSet::with_capacity(status.peers.details.len());
+    let mut peers = Vec::with_capacity(status.peers.details.len());
+    for peer in status.peers.details {
+        if !valid_netbird_peer_name(&peer.fqdn) {
+            return Err("FAILED: NetBird peer identity is invalid".to_owned());
+        }
+        if !names.insert(peer.fqdn.to_ascii_lowercase()) {
+            return Err("FAILED: NetBird peer identities are not unique".to_owned());
+        }
+        let peer_status = match peer.status.to_ascii_lowercase().as_str() {
+            "connected" => "CONNECTED",
+            "disconnected" => "DISCONNECTED",
+            "connecting" => "CONNECTING",
+            _ => "UNKNOWN",
+        };
+        let connection_type = if peer_status != "CONNECTED" {
+            "UNKNOWN"
+        } else {
+            match peer
+                .connection_type
+                .as_deref()
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "p2p" => "P2P",
+                "relay" | "relayed" => "RELAY",
+                _ => "UNKNOWN",
+            }
+        };
+        peers.push(NetbirdPeerPath {
+            peer_name: peer.fqdn,
+            status: peer_status.to_owned(),
+            connection_type: connection_type.to_owned(),
+        });
+    }
+    Ok(peers)
+}
+
+fn valid_netbird_peer_name(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 253
+        && value.parse::<std::net::IpAddr>().is_err()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 #[derive(Deserialize)]
@@ -2098,7 +2264,7 @@ mod tests {
             .context("system clock is before Unix epoch")?
             .as_millis() as i64;
         let validate = |capability, target, containers, firewall| {
-            validate_capability_target(capability, target, containers, firewall)
+            validate_capability_target(capability, target, containers, firewall, false)
         };
         assert!(validate("agent.update", "", false, false).is_ok());
         assert!(validate("systemd.restart", "ssh.service", false, false).is_ok());
@@ -2126,7 +2292,7 @@ mod tests {
         assert!(!valid_container_image("./nginx"));
         assert!(valid_network_interface("br-0"));
         assert!(!valid_network_interface("-eth0"));
-        let capabilities = available_capabilities(true, true);
+        let capabilities = available_capabilities(true, true, true);
         for capability in [
             "systemd.restart",
             "systemd.journal.read",
@@ -2138,23 +2304,69 @@ mod tests {
             "file.delete",
             "container.deploy",
             "network.firewall.expose",
+            "network.overlay.peer_paths.read",
         ] {
             assert!(capabilities.contains(&capability));
         }
+        assert!(
+            validate_capability_target("network.overlay.peer_paths.read", "", false, false, true,)
+                .is_ok()
+        );
+        assert!(
+            validate_capability_target("network.overlay.peer_paths.read", "", false, false, false,)
+                .is_err()
+        );
         Ok(())
     }
 
     #[test]
     fn firewall_capability_depends_on_system_tools_not_rule_configuration() {
         assert!(
-            validate_capability_target("network.firewall.expose", "ssh-temp", false, false)
+            validate_capability_target("network.firewall.expose", "ssh-temp", false, false, false)
                 .is_err()
         );
         assert!(
-            validate_capability_target("network.firewall.expose", "ssh-temp", false, true).is_ok()
+            validate_capability_target("network.firewall.expose", "ssh-temp", false, true, false)
+                .is_ok()
         );
-        assert!(!available_capabilities(false, false).contains(&"network.firewall.expose"));
-        assert!(available_capabilities(false, true).contains(&"network.firewall.expose"));
+        assert!(!available_capabilities(false, false, false).contains(&"network.firewall.expose"));
+        assert!(available_capabilities(false, true, false).contains(&"network.firewall.expose"));
+        assert!(
+            !available_capabilities(false, false, false)
+                .contains(&"network.overlay.peer_paths.read")
+        );
+    }
+
+    #[test]
+    fn netbird_peer_path_parser_returns_only_bounded_identity_and_path_fields() -> Result<()> {
+        let input = br#"{
+          "peers": {"total": 2, "connected": 2, "details": [
+            {"fqdn":"api-a.example.test","netbirdIp":"100.64.0.1","publicKey":"public-key-a","status":"Connected","connectionType":"P2P","relayAddress":"rel://relay.example.test:443"},
+            {"fqdn":"db-b.example.test","netbirdIp":"100.64.0.2","publicKey":"public-key-b","status":"Connected","connectionType":"Relayed"}
+          ]}
+        }"#;
+        let peers = parse_netbird_peer_paths(input).map_err(anyhow::Error::msg)?;
+        assert_eq!(peers.len(), 2);
+        assert_eq!(peers[0].peer_name, "api-a.example.test");
+        assert_eq!(peers[0].status, "CONNECTED");
+        assert_eq!(peers[0].connection_type, "P2P");
+        assert_eq!(peers[1].connection_type, "RELAY");
+        let reduced = serde_json::to_string(&peers)?;
+        assert!(!reduced.contains("100.64.0."));
+        assert!(!reduced.contains("publicKey"));
+        assert!(!reduced.contains("relayAddress"));
+        Ok(())
+    }
+
+    #[test]
+    fn netbird_peer_path_parser_rejects_ambiguous_or_oversized_snapshots() {
+        assert!(parse_netbird_peer_paths(br#"{"peers":{"details":[]}}"#).is_ok());
+        assert!(parse_netbird_peer_paths(b"not-json").is_err());
+        let ip_identity = br#"{"peers":{"details":[{"fqdn":"100.64.0.1","status":"Connected","connectionType":"P2P"}]}}"#;
+        assert!(parse_netbird_peer_paths(ip_identity).is_err());
+        let duplicate = br#"{"peers":{"details":[{"fqdn":"peer.example.test","status":"Connected","connectionType":"P2P"},{"fqdn":"PEER.example.test","status":"Disconnected","connectionType":"-"}]}}"#;
+        assert!(parse_netbird_peer_paths(duplicate).is_err());
+        assert!(parse_netbird_peer_paths(&vec![b'x'; MAX_NETBIRD_STATUS_BYTES + 1]).is_err());
     }
 
     #[test]

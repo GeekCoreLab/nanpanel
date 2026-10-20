@@ -4,10 +4,11 @@ import {
   BaseEdge, getBezierPath, MarkerType, useNodesState, useEdgesState, useReactFlow, useUpdateNodeInternals,
   type Node, type NodeProps, type Edge, type EdgeProps, type Connection, type IsValidConnection,
 } from '@xyflow/react';
-import { api, isMock, isP0Lab } from './lib/api';
+import { api, isMock, isP0Lab, mockBusiness } from './lib/api';
 import { createUuid } from './lib/uuid.ts';
+import NetbirdProviderPanel from './NetbirdProviderPanel';
 import { connectionError, createTopologyNode, draftError, nodePresets, validNodeShape } from './lib/topology-model';
-import type { TopologyDraft, TopologyDraftWrite, TopologyLink, TopologyNode, TopologyNodeKind } from './lib/types';
+import type { KubernetesServiceInventorySnapshot, KubernetesServiceProbeSnapshot, TopologyDraft, TopologyDraftWrite, TopologyLink, TopologyNode, TopologyNodeKind } from './lib/types';
 
 type DeviceNode = Node<{ model: TopologyNode }, 'device'>;
 type P0RouteEvidence = { status: 'VERIFIED'; route: string; httpStatus: number; responseBody: string; configSha256: string; diff: string; verifiedAt: string };
@@ -52,6 +53,9 @@ function Editor() {
   const [etag, setEtag] = useState(''); const [busy, setBusy] = useState(false);
   const [loaded, setLoaded] = useState(false); const [dirty, setDirty] = useState(false);
   const [message, setMessage] = useState(''); const [error, setError] = useState('');
+  const [serviceInventory, setServiceInventory] = useState<KubernetesServiceInventorySnapshot>();
+  const [serviceProbes, setServiceProbes] = useState<KubernetesServiceProbeSnapshot>();
+  const [serviceInventoryError, setServiceInventoryError] = useState(''); const [inventoryBusy, setInventoryBusy] = useState(false);
   const [routeEvidence, setRouteEvidence] = useState<P0RouteEvidence>();
   const [menu, setMenu] = useState<Menu>(); const menuRef = useRef<HTMLDivElement>(null); const canvasRef = useRef<HTMLElement>(null);
   const { screenToFlowPosition, fitView } = useReactFlow<DeviceNode>();
@@ -61,7 +65,18 @@ function Editor() {
     try { const r = await api<TopologyDraft>('/topology/draft'); const payload = { nodes: r.data.nodes, links: r.data.links }; const invalid = draftError(payload); if (invalid) throw new Error(invalid); setNodes(payload.nodes.map(asNode)); setEdges(payload.links.map(asEdge)); setEtag(r.etag ?? ''); setDirty(false); setLoaded(true); setMessage('已读取期望草稿，所有连接尚未验证'); requestAnimationFrame(() => { void fitView({ padding: .2 }); }); }
     catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   }
+  async function loadServiceInventory(refresh = false) {
+    setInventoryBusy(true); setServiceInventoryError('');
+    try {
+      const result = await api<KubernetesServiceInventorySnapshot>(refresh ? '/kubernetes/service-inventory/refresh' : '/kubernetes/service-inventory', refresh ? 'POST' : 'GET');
+      setServiceInventory(result.data);
+      const probes = await api<KubernetesServiceProbeSnapshot>('/kubernetes/service-probes'); setServiceProbes(probes.data);
+    }
+    catch (e) { setServiceInventoryError((e as Error).message); }
+    finally { setInventoryBusy(false); }
+  }
   useEffect(() => { void load(); }, []);
+  useEffect(() => { void loadServiceInventory(); }, []);
   useEffect(() => {
     if (!menu) return;
     const dismiss = (e: globalThis.MouseEvent) => { if (!menuRef.current?.contains(e.target as globalThis.Node)) setMenu(undefined); };
@@ -143,6 +158,22 @@ function Editor() {
         <Background color="#dbe3ee" gap={24} /><Controls />
       </ReactFlow>
     </section>
+    <section className="service-network card" aria-labelledby="service-network-title">
+      <div className="card-title"><div><h2 id="service-network-title">Kubernetes 服务网络</h2><p>Service 与 EndpointSlice 持久化快照；TCP 探测需单独显式启用</p></div><button className="secondary" disabled={inventoryBusy} onClick={() => void loadServiceInventory(true)}>{inventoryBusy ? '读取中…' : '↻ 刷新清单'}</button></div>
+        {serviceInventoryError && <div className="alert error" role="alert">{serviceInventoryError}{!isMock && ' · 请在 Core 配置集群身份、namespace 并显式启用 Kubernetes 服务发现。'}</div>}
+      {serviceInventory && <>
+        <div className="service-network-meta"><span><b>{serviceInventory.sourceId}</b> · namespace <b>{serviceInventory.namespace}</b></span><span>{serviceInventory.observedAt ? `观测于 ${new Date(serviceInventory.observedAt).toLocaleString()}` : '尚无持久化快照'}</span>{serviceProbes && <span className={`badge ${serviceProbes.enabled ? 'available' : 'pending'}`}>TCP 探测{serviceProbes.enabled ? '已启用' : '已关闭'}</span>}{mockBusiness && <span className="badge pending">Mock 示例</span>}</div>
+        {serviceInventory.services.length ? <div className="service-network-list">{serviceInventory.services.map(service => <article className="service-network-item" key={service.serviceName}>
+          <div className="service-network-title"><div><strong>{service.serviceName}</strong><small>{service.type} · {service.clusterIps.length ? service.clusterIps.join(', ') : service.externalName ?? '无 ClusterIP'}</small></div><span className="badge">{service.endpoints.filter(endpoint => endpoint.ready === true).length}/{service.endpoints.length} ready</span></div>
+          <div className="service-network-ports">{service.ports.map((port, index) => <span className="chip" key={`${port.name ?? 'port'}-${index}`}>{port.name ? `${port.name} · ` : ''}{port.port}/{port.protocol} → {port.targetPort}</span>)}</div>
+          {service.endpoints.length ? <div className="service-network-endpoints">{service.endpoints.map((endpoint, index) => {
+            const endpointProbes = serviceProbes?.probes.filter(probe => probe.serviceName === service.serviceName && probe.address === endpoint.address) ?? [];
+            return <div key={`${endpoint.address}-${index}`}><span className={`badge ${endpoint.ready === true ? 'online' : endpoint.ready === false ? 'offline' : 'unknown'}`}>{endpoint.ready === true ? 'Ready' : endpoint.ready === false ? 'Not ready' : 'Unknown'}</span><code>{endpoint.address}</code><span>{endpoint.targetKind && endpoint.targetName ? `${endpoint.targetKind}/${endpoint.targetName}` : '无 Pod 身份'}</span><small>{endpoint.nodeName ?? endpoint.addressType}{endpoint.terminating ? ' · 正在终止' : ''}</small>{serviceProbes?.enabled && <span className="service-network-probe">{endpointProbes.length ? endpointProbes.map(probe => <span className={`badge ${probe.outcome === 'SUCCEEDED' ? 'succeeded' : probe.outcome === 'FAILED' ? 'failed' : 'unknown'}`} key={`${probe.port}/${probe.protocol}`} title={`清单观测 ${probe.inventoryObservedAt} · 探测 ${probe.observedAt}`}>{probe.protocol}/{probe.port} {probe.outcome}</span>) : <span className="badge pending">尚无 TCP 结果</span>}</span>}</div>;
+          })}</div> : <p className="service-network-empty">当前没有 EndpointSlice 地址</p>}
+        </article>)}</div> : <div className="empty">{serviceInventory.observedAt ? '该 namespace 当前没有 Service。' : '等待首次采集；可手动刷新清单。'}</div>}
+      </>}
+    </section>
+    <NetbirdProviderPanel />
     <div className="topology-caption"><span>{nodes.length} 个节点 · {edges.length} 条未验证连接 · {dirty ? '有未保存的修改' : '草稿未修改'}</span><span role="status">{message || (busy ? '正在读取草稿…' : '')}</span></div>
     {menu && <div className="topology-menu" role="menu" aria-label="拓扑右键菜单" ref={menuRef} style={{ left: menu.x, top: menu.y } as CSSProperties}>
       {contextNode ? <><strong>{contextNode.name} · {contextNode.inputCount} 入 / {contextNode.outputCount} 出</strong>{(['inputCount', 'outputCount'] as const).map(direction => <div key={direction} className="menu-port-actions">{[1, -1].map(delta => <button role="menuitem" key={delta} disabled={!validNodeShape({ ...contextNode, [direction]: contextNode[direction] + delta })} onClick={() => changePorts(contextNode, direction, delta)}>{delta > 0 ? '增加' : '减少'}{direction === 'inputCount' ? '入口' : '出口'}</button>)}</div>)}<button role="menuitem" className="danger" onClick={() => removeNode(contextNode.id)}>删除节点及关联连接</button></> : menu.edgeId ? <><strong>期望连接 · 未验证</strong><button role="menuitem" className="danger" onClick={() => { setEdges(current => current.filter(e => e.id !== menu.edgeId)); setDirty(true); setRouteEvidence(undefined); setMenu(undefined); }}>删除连接</button></> : <><strong>添加虚拟节点</strong>{(Object.keys(nodePresets) as TopologyNodeKind[]).map(kind => <button role="menuitem" key={kind} onClick={() => addNode(kind)}><span>{nodePresets[kind].name}</span><small>{nodePresets[kind].inputs} 入 / {nodePresets[kind].outputs} 出</small></button>)}</>}

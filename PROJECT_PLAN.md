@@ -76,7 +76,7 @@ flowchart TB
     H2[NAT Linux Host + Agent]
     K3[K3s Cluster]
     KE[KubeEdge\nCloudCore + EdgeCore]
-    DP[Data Plane\nNetBird / Envoy / FRP / OVS]
+    DP[Data Plane\nNetBird / Istio / Envoy / FRP / OVS]
     UI <--> CORE
     CORE <--> PG
     CORE <--> PLUG
@@ -454,11 +454,21 @@ hybrid-infrastructure-platform/
 
 ### P2｜组网与公网入口
 
-- [ ] Overlay Provider、节点发现、Relay/P2P 路径展示。
-- [ ] Envoy 或 FRP 公网入口，TLS 和访问策略。
-- [ ] 服务发现、Endpoint 映射和联通探测。
+- [x] Agent 可选读取 NetBird 本机状态，持久化并展示逐 peer 的 Relay/P2P 路径。
+- [x] NetBird managed-group Overlay Provider：PF4J 装载、带前缀所有权的 peer membership observe/plan/validate/apply/verify/compensate、Core 操作状态持久化和审计；真实 disposable tenant 的成员协调、重启恢复与补偿已通过[验收](tests/p2/runs/2026-10-20-netbird-provider-live.md)。
+- [x] 测试环境 FRP 公网入口：HTTPS/TLS、Basic Auth、后端切换与补偿；Core 管理的生产 Gateway Provider 仍未实现，见 [P2 入口验收记录](tests/p2/runs/2026-10-20-frp-public-ingress.md)。
+- [x] `panel-cluster` 提供 namespace 限定、只读、带界限的 Kubernetes Service/EndpointSlice 发现适配器。
+- [x] Core 暴露默认关闭、服务器端固定 cluster/namespace 的服务清单 API，并在拓扑页展示 Live/Mock 来源及 EndpointSlice 就绪信息。
+- [x] Core 服务库存 API、最新快照持久化、业务 Endpoint 映射和 EndpointSlice 就绪状态。
+- [x] 可选启用的有界 Ready EndpointSlice 私网 TCP 探测及结果持久化。
+- [ ] Core 到测试/目标集群的服务探测验收；Istio HTTP allow/deny 仍是独立 fixture 证据。
+- [x] 为后续 Kubernetes workload Provider 接入 Istio 建立隔离测试网格并写入 ADR；见 [Istio 服务网络架构](docs/architecture/service-network.md)。
 
-**验收**：至少两种 NAT 条件、直连/中继切换、Gateway 变更恢复经测试。
+**验收**：至少两种 NAT 条件、直连/中继切换、Gateway 变更恢复经测试；其中 FRP 公网测试入口的 Gateway 后端切换与补偿已通过。公有主机路径已通过 P2P→Relay→P2P；私网接口 rwt-dev 已通过 P2P→Relay→P2P、每阶段 HTTP 及临时控制/Relay 重启恢复；同一公网 IP 反射服务确认其公网出口与测试主机不同。Core 管理的生产 Gateway Provider 协调仍开放。
+
+**当前实现**：Agent 可选读取仅监听 loopback 的 NetBird metrics，把已知、连接、P2P 和 Relay 数量作为有时效的主机汇总显示；若 root Helper 检测到可信 NetBird CLI，还会读取并脱敏 `netbird status --json`，将逐 peer 名称、状态、P2P/Relay 类型和观测时间经 Core 展示在控制台。另有首个 PF4J NetBird Provider，只协调 `nanpanel-managed-` 前缀专属分组的 peer membership；Core 将计划和阶段持久化至数据库并审计，Provider 在应用、恢复与补偿时校验漂移，保留既有 group resources。该功能有本地 HTTP fixture 覆盖，并已在 disposable tenant 中通过真实 peer 成员协调、Provider 重启恢复及补偿；它不管理 peer enrollment、NetBird policies 或路由。`panel-cluster` 的 namespace 限定 Service/EndpointSlice 适配器已接入 Core：后台每 60 秒采集并持久化最新快照，拓扑页展示服务端口、EndpointSlice 地址、就绪状态、Pod 身份和观测时间；独立的默认关闭探测开关支持每轮最多 32 个 Ready 私网 TCP 端口探测，持久化最新结果并保留七天，但 Core 到实际目标集群的探测验收仍开放。K3s 清单为 Core 配置独立 ServiceAccount；Istio fixture 的限域 RBAC 已在测试集群应用，实时权限检查为 Service/EndpointSlice list yes、Pod list/Secret get no；但当前 Core 仍是旧镜像并使用 default ServiceAccount，发现和探测未启用。Istio HTTP allow/deny 是独立 fixture 证据，strict-mTLS fixture 旁另有独立的 non-injected TCP 探测目标；当前测试集群已验证其 Ready 私网 EndpointSlice，Istio policy Provider 仍未实现。`tests/p2/frp-public-ingress.sh` 已在真实测试公网 Nginx/FRPS 路径验收系统信任的 TLS 证书、未授权 401、授权 Basic Auth、后端 A→B→A 补偿及活动配置哈希；报告见[入口验收记录](tests/p2/runs/2026-10-20-frp-public-ingress.md)。`tests/p2/netbird-path-switch.sh` 在 2026-10-20 已于一个公有主机 Docker→K3s 拓扑通过 P2P→Relay→P2P，每个阶段均有 HTTP 探测，并验证一次性 NetBird 控制/Relay 服务重启后的连接和 HTTP 恢复；同一路径在 10:46 UTC 复验通过，报告见 [成功路径切换记录](tests/p2/runs/2026-10-20-netbird-successful-path-switch.md)和[复验记录](tests/p2/runs/2026-10-20-netbird-successful-path-switch-rerun.md)。另一次尝试从 `hk-81x` NAT 候选连接控制面时 TCP/443 超时，未进入路径和 HTTP 验收；报告见[诊断记录](tests/p2/runs/2026-10-20-netbird-hk-nat-control-timeout.md)。rwt-dev 私网接口主机在 11:20 UTC 通过 P2P→Relay→P2P、每阶段 HTTP 和临时控制/Relay 重启恢复，出口与测试主机不同；报告见[第二网络路径切换记录](tests/p2/runs/2026-10-20-netbird-rwt-path-switch.md)；Core 管理的生产 Gateway Provider 仍未实现。
+
+**边界**：Istio 只负责 Kubernetes 工作负载间身份、mTLS 与流量策略，不替代普通主机/跨 NAT 的 NetBird Overlay。`nanpanel` 控制面暂不自动注入 Istio。Kubernetes 最新快照和 TCP 探测结果已持久化；inventory 历史与 Core-to-cluster 探测验收仍未完成。Core 管理的生产 Gateway Provider 保持开放，属于后续协调能力；公共 FRP 测试入口只验证测试路由，不提供生产配置协调。逐 peer Agent 观测属于只读库存，不是 Provider reconciliation。隔离网格和单一网络路径切换实验都不能单独代表 P2 阶段完成。具体证据矩阵见 [P2 验收手册](tests/p2/README.md)。
 
 ### P3｜拓扑与插件协议
 

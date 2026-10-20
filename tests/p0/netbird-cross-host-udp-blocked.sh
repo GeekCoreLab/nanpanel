@@ -9,9 +9,70 @@ docker_ssh_alias="${NANPANEL_P0_DOCKER_SSH_ALIAS:-bt-main}"
 k3s_ssh_alias="${NANPANEL_P0_K3S_SSH_ALIAS:-k3s-1}"
 public_ip="${NANPANEL_P0_PUBLIC_IP:-39.106.185.211}"
 netbird_version="${NANPANEL_P0_NETBIRD_VERSION:-0.75.1}"
-server_image="${NANPANEL_P0_NETBIRD_SERVER_IMAGE:-netbirdio/netbird-server:${netbird_version}}"
-peer_image="${NANPANEL_P0_NETBIRD_PEER_IMAGE:-netbirdio/netbird:${netbird_version}}"
+server_image="${NANPANEL_P0_NETBIRD_SERVER_IMAGE:-docker.io/netbirdio/netbird-server:${netbird_version}}"
+peer_image="${NANPANEL_P0_NETBIRD_PEER_IMAGE:-docker.io/netbirdio/netbird:${netbird_version}}"
 web_image="${NANPANEL_P0_K3S_HTTP_IMAGE:-docker.1ms.run/nginx:latest}"
+p2_path_switch="${NANPANEL_P2_PATH_SWITCH:-0}"
+p2_netbird_provider_live="${NANPANEL_P2_NETBIRD_PROVIDER_LIVE:-0}"
+p2_netbird_provider_only="${NANPANEL_P2_NETBIRD_PROVIDER_ONLY:-0}"
+[[ "$p2_path_switch" == 0 || "$p2_path_switch" == 1 ]] || {
+  echo 'NANPANEL_P2_PATH_SWITCH must be 0 or 1.' >&2
+  exit 2
+}
+[[ "$p2_netbird_provider_live" == 0 || "$p2_netbird_provider_live" == 1 ]] || {
+  echo 'NANPANEL_P2_NETBIRD_PROVIDER_LIVE must be 0 or 1.' >&2
+  exit 2
+}
+[[ "$p2_netbird_provider_only" == 0 || "$p2_netbird_provider_only" == 1 ]] || {
+  echo 'NANPANEL_P2_NETBIRD_PROVIDER_ONLY must be 0 or 1.' >&2
+  exit 2
+}
+if [[ "$p2_netbird_provider_live" == 1 && "$p2_path_switch" != 1 ]]; then
+  echo 'Live NetBird Provider acceptance is available only in P2 path-switch mode.' >&2
+  exit 2
+fi
+if [[ "$p2_netbird_provider_only" == 1 && "$p2_netbird_provider_live" != 1 ]]; then
+  echo 'Provider-only mode requires NANPANEL_P2_NETBIRD_PROVIDER_LIVE=1.' >&2
+  exit 2
+fi
+peer_wg_port="${NANPANEL_P2_WIREGUARD_PORT:-${NANPANEL_P2_STUN_PORT:-3479}}"
+embedded_stun_port="${NANPANEL_P2_EMBEDDED_STUN_PORT:-3478}"
+p2_path_wait_seconds="${NANPANEL_P2_PATH_WAIT_SECONDS:-120}"
+p2_peer_ssh_alias="${NANPANEL_P2_PEER_SSH_ALIAS:-}"
+stun_config_yaml=''
+peer_publish_arg=''
+server_stun_publish_arg=''
+peer_firewall_opened=0
+embedded_stun_firewall_opened=0
+peer_ssh_alias="$docker_ssh_alias"
+if [[ "$p2_path_switch" == 1 ]]; then
+  [[ "$peer_wg_port" =~ ^[0-9]{1,5}$ ]] && ((peer_wg_port >= 1024 && peer_wg_port <= 65535)) || {
+    echo 'NANPANEL_P2_WIREGUARD_PORT must be a port from 1024 to 65535.' >&2
+    exit 2
+  }
+  [[ "$embedded_stun_port" =~ ^[0-9]{1,5}$ ]] && ((embedded_stun_port >= 1024 && embedded_stun_port <= 65535)) || {
+    echo 'NANPANEL_P2_EMBEDDED_STUN_PORT must be a port from 1024 to 65535.' >&2
+    exit 2
+  }
+  ((peer_wg_port != embedded_stun_port)) || {
+    echo 'The public peer WireGuard and embedded STUN ports must differ.' >&2
+    exit 2
+  }
+  [[ "$p2_path_wait_seconds" =~ ^[0-9]{1,3}$ ]] && ((p2_path_wait_seconds >= 30 && p2_path_wait_seconds <= 300)) || {
+    echo 'NANPANEL_P2_PATH_WAIT_SECONDS must be between 30 and 300.' >&2
+    exit 2
+  }
+  printf -v stun_config_yaml '  stunPorts:\n    - %s' "$embedded_stun_port"
+  peer_publish_arg="--publish 0.0.0.0:${peer_wg_port}:${peer_wg_port}/udp"
+  server_stun_publish_arg="--publish 0.0.0.0:${embedded_stun_port}:${embedded_stun_port}/udp"
+  peer_ssh_alias="${p2_peer_ssh_alias:-$public_ssh_alias}"
+fi
+peer_bootstrap='iptables -I INPUT -i eth0 -p udp -j REJECT; iptables -I OUTPUT -o eth0 -p udp -j REJECT; exec /usr/local/bin/netbird-entrypoint.sh'
+peer_debug_env=''
+if [[ "$p2_path_switch" == 1 ]]; then
+  peer_bootstrap='exec /usr/local/bin/netbird-entrypoint.sh'
+  peer_debug_env='NB_LOG_LEVEL=debug'
+fi
 run_id="$(date -u +%Y%m%d%H%M%S)-$$"
 domain="nanpanel-nb-${run_id}.geekcorelab.cn"
 namespace="nanpanel-p0-nb-${run_id}"
@@ -49,13 +110,23 @@ cleanup() {
       >/dev/null 2>&1 || cleanup_failed=1
   fi
   if ((docker_peer_created || remote_peer_dir_created)); then
-    ssh -o BatchMode=yes "$docker_ssh_alias" \
-      "docker rm -f '$docker_peer' >/dev/null 2>&1 || true; rm -rf -- '$remote_peer_dir'" \
+    ssh -o BatchMode=yes "$peer_ssh_alias" \
+      "$peer_engine rm -f '$docker_peer' >/dev/null 2>&1 || true; rm -rf -- '$remote_peer_dir'" \
       >/dev/null 2>&1 || cleanup_failed=1
   fi
   if ((server_created || nginx_vhost_created || remote_server_dir_created)); then
     ssh -o BatchMode=yes "$public_ssh_alias" \
-      "docker rm -f '$server_container' >/dev/null 2>&1 || true; sudo -n rm -f '$nginx_file'; sudo -n nginx -t >/dev/null && sudo -n systemctl reload nginx; rm -rf -- '$remote_server_dir'" \
+      "$public_engine rm -f '$server_container' >/dev/null 2>&1 || true; sudo -n rm -f '$nginx_file'; sudo -n nginx -t >/dev/null && sudo -n systemctl reload nginx; rm -rf -- '$remote_server_dir'" \
+      >/dev/null 2>&1 || cleanup_failed=1
+  fi
+  if ((peer_firewall_opened)); then
+    ssh -o BatchMode=yes "$peer_ssh_alias" \
+      "if sudo -n firewall-cmd --query-port='${peer_wg_port}/udp' >/dev/null 2>&1; then sudo -n firewall-cmd --remove-port='${peer_wg_port}/udp' >/dev/null; fi" \
+      >/dev/null 2>&1 || cleanup_failed=1
+  fi
+  if ((embedded_stun_firewall_opened)); then
+    ssh -o BatchMode=yes "$public_ssh_alias" \
+      "if sudo -n firewall-cmd --query-port='${embedded_stun_port}/udp' >/dev/null 2>&1; then sudo -n firewall-cmd --remove-port='${embedded_stun_port}/udp' >/dev/null; fi" \
       >/dev/null 2>&1 || cleanup_failed=1
   fi
   for alias in "$public_ssh_alias" "$docker_ssh_alias" "$k3s_ssh_alias"; do
@@ -80,6 +151,17 @@ scp() {
   command scp -o ConnectionAttempts=3 -o ConnectTimeout=10 \
     -o ControlMaster=auto -o ControlPersist=90 -o ControlPath="$work/ssh-%C" "$@"
 }
+container_engine_for() {
+  local alias="$1"
+  local engine
+  engine="$(ssh -o BatchMode=yes "$alias" \
+    'if command -v docker >/dev/null 2>&1; then printf docker; elif command -v podman >/dev/null 2>&1; then printf podman; else exit 127; fi')"
+  [[ "$engine" == docker || "$engine" == podman ]] || {
+    echo "No supported Docker or Podman executable found on $alias." >&2
+    return 1
+  }
+  printf '%s' "$engine"
+}
 
 for tool in ssh scp curl openssl jq python3 sha256sum tar awk grep sed tr; do
   command -v "$tool" >/dev/null 2>&1 || { echo "Missing required command: $tool" >&2; exit 1; }
@@ -88,6 +170,12 @@ for alias in "$public_ssh_alias" "$docker_ssh_alias" "$k3s_ssh_alias"; do
   [[ "$alias" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "Invalid SSH alias: $alias" >&2; exit 1; }
   ssh -o BatchMode=yes -o ConnectTimeout=10 "$alias" true
 done
+[[ "$peer_ssh_alias" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo 'Invalid P2 peer SSH alias.' >&2; exit 2; }
+ssh -o BatchMode=yes -o ConnectTimeout=10 "$peer_ssh_alias" true
+public_engine="$(container_engine_for "$public_ssh_alias")"
+peer_engine="$(container_engine_for "$peer_ssh_alias")"
+docker_host_engine="$(container_engine_for "$docker_ssh_alias")"
+printf 'Container engines: public=%s, peer=%s.\n' "$public_engine" "$peer_engine"
 printf 'Phase: validate hosts, K3s, and pinned images.\n'
 [[ "$public_ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || { echo "Invalid public IPv4: $public_ip" >&2; exit 1; }
 [[ "$netbird_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Invalid NetBird version.' >&2; exit 1; }
@@ -101,16 +189,23 @@ if ssh -o BatchMode=yes "$k3s_ssh_alias" \
   exit 1
 fi
 
-if ! ssh -o BatchMode=yes "$public_ssh_alias" "docker image inspect '$server_image' >/dev/null 2>&1"; then
-  ssh -o BatchMode=yes "$public_ssh_alias" "docker pull '$server_image'"
+if ! ssh -o BatchMode=yes "$public_ssh_alias" "$public_engine image inspect '$server_image' >/dev/null 2>&1"; then
+  ssh -o BatchMode=yes "$public_ssh_alias" "$public_engine pull '$server_image'"
 fi
-if ! ssh -o BatchMode=yes "$docker_ssh_alias" "docker image inspect '$peer_image' >/dev/null 2>&1"; then
-  ssh -o BatchMode=yes "$docker_ssh_alias" "docker pull '$peer_image'"
+if ! ssh -o BatchMode=yes "$peer_ssh_alias" "$peer_engine image inspect '$peer_image' >/dev/null 2>&1"; then
+  if [[ "$p2_path_switch" == 1 ]] && ssh -o BatchMode=yes "$docker_ssh_alias" \
+    "$docker_host_engine image inspect '$peer_image' >/dev/null 2>&1"; then
+    printf 'Streaming the pinned NetBird peer image from the lab container host to the selected peer host.\n'
+    ssh -o BatchMode=yes "$docker_ssh_alias" "$docker_host_engine save '$peer_image'" \
+      | ssh -o BatchMode=yes "$peer_ssh_alias" "$peer_engine load"
+  else
+    ssh -o BatchMode=yes "$peer_ssh_alias" "$peer_engine pull '$peer_image'"
+  fi
 fi
 if ! ssh -o BatchMode=yes "$k3s_ssh_alias" \
-  "sudo -n k3s ctr -n k8s.io images list | grep -Fq 'docker.io/$peer_image'"; then
+  "sudo -n k3s ctr -n k8s.io images list | grep -Fq '$peer_image'"; then
   printf 'Importing the pinned NetBird peer image into K3s containerd.\n'
-  ssh -o BatchMode=yes "$docker_ssh_alias" "docker save '$peer_image'" \
+  ssh -o BatchMode=yes "$peer_ssh_alias" "$peer_engine save '$peer_image'" \
     | ssh -o BatchMode=yes "$k3s_ssh_alias" 'sudo -n k3s ctr -n k8s.io images import -'
 fi
 printf 'Phase: seed the temporary control plane with the checksum-verified GeoLite database.\n'
@@ -187,6 +282,7 @@ cat >"$work/config.yaml" <<EOF
 server:
   listenAddress: ":80"
   exposedAddress: "https://${domain}:443"
+${stun_config_yaml}
   authSecret: "$auth_secret"
   dataDir: "/var/lib/netbird"
   auth:
@@ -268,9 +364,38 @@ ssh -o BatchMode=yes "$public_ssh_alias" "sudo -n tee '$nginx_file' >/dev/null" 
 ssh -o BatchMode=yes "$public_ssh_alias" \
   "sudo -n chmod 600 '$nginx_file' && sudo -n nginx -t && sudo -n systemctl reload nginx"
 printf 'Phase: start temporary NetBird control plane behind public HTTPS.\n'
+if [[ "$p2_path_switch" == 1 ]]; then
+  if ssh -o BatchMode=yes "$peer_ssh_alias" \
+    "sudo -n ss -H -lun 'sport = :${peer_wg_port}' | grep -q ."; then
+    echo "Temporary peer WireGuard UDP port ${peer_wg_port} is already in use on ${peer_ssh_alias}." >&2
+    exit 1
+  fi
+  if ssh -o BatchMode=yes "$public_ssh_alias" \
+    "sudo -n ss -H -lun 'sport = :${embedded_stun_port}' | grep -q ."; then
+    echo "Temporary embedded STUN UDP port ${embedded_stun_port} is already in use on the public host." >&2
+    exit 1
+  fi
+  if ! ssh -o BatchMode=yes "$peer_ssh_alias" \
+    "sudo -n firewall-cmd --state >/dev/null 2>&1"; then
+    echo "P2 path switching requires active firewalld on the selected peer host (${peer_ssh_alias})." >&2
+    exit 1
+  fi
+  if ! ssh -o BatchMode=yes "$peer_ssh_alias" \
+    "sudo -n firewall-cmd --query-port='${peer_wg_port}/udp' >/dev/null 2>&1"; then
+    ssh -o BatchMode=yes "$peer_ssh_alias" \
+      "sudo -n firewall-cmd --add-port='${peer_wg_port}/udp' --timeout=900 >/dev/null"
+    peer_firewall_opened=1
+  fi
+  if ! ssh -o BatchMode=yes "$public_ssh_alias" \
+    "sudo -n firewall-cmd --query-port='${embedded_stun_port}/udp' >/dev/null 2>&1"; then
+    ssh -o BatchMode=yes "$public_ssh_alias" \
+      "sudo -n firewall-cmd --add-port='${embedded_stun_port}/udp' --timeout=900 >/dev/null"
+    embedded_stun_firewall_opened=1
+  fi
+fi
 server_created=1
 ssh -o BatchMode=yes "$public_ssh_alias" \
-  "docker run -d --name '$server_container' --restart=no --publish 127.0.0.1:$remote_server_port:80 --volume '$remote_server_dir:/lab:ro' --volume '$remote_server_dir/state:/var/lib/netbird' --env NB_SETUP_PAT_ENABLED=true '$server_image' --config /lab/config.yaml" \
+  "$public_engine run -d --name '$server_container' --restart=no --publish 127.0.0.1:$remote_server_port:80 $server_stun_publish_arg --volume '$remote_server_dir:/lab:ro' --volume '$remote_server_dir/state:/var/lib/netbird' --env NB_SETUP_PAT_ENABLED=true '$server_image' --config /lab/config.yaml" \
   >/dev/null
 
 api_ready=0
@@ -284,14 +409,18 @@ for _ in $(seq 1 120); do
 done
 if ((api_ready == 0)); then
   echo 'Temporary NetBird management API did not become ready.' >&2
-  ssh -o BatchMode=yes "$public_ssh_alias" "docker logs --tail=100 '$server_container'" >&2 || true
+  ssh -o BatchMode=yes "$public_ssh_alias" "$public_engine logs --tail=100 '$server_container'" >&2 || true
   exit 1
 fi
 if [[ "$(jq -r '.setup_required' "$work/instance.json")" != true ]]; then
   echo 'Fresh NetBird instance unexpectedly reports setup complete.' >&2
   exit 1
 fi
-printf 'Phase: create ephemeral setup key and start the UDP-blocked NAT Docker peer.\n'
+if [[ "$p2_path_switch" == 1 ]]; then
+  printf 'Phase: create ephemeral setup key and start the P2P peer on %s with UDP available.\n' "$peer_ssh_alias"
+else
+  printf 'Phase: create ephemeral setup key and start the UDP-blocked NAT container peer.\n'
+fi
 
 admin_password="$(openssl rand -hex 24)"
 jq -n --arg email "p0-${run_id}@example.test" --arg password "$admin_password" \
@@ -322,6 +451,11 @@ cat >"$work/docker-peer.env" <<EOF
 NB_MANAGEMENT_URL=https://${domain}:443
 NB_SETUP_KEY=$(<"$work/setup-key")
 NB_LAZY_CONN=off
+EOF
+if [[ "$p2_path_switch" == 1 ]]; then
+  printf 'NB_WIREGUARD_PORT=%s\n' "$peer_wg_port" >>"$work/docker-peer.env"
+fi
+cat >>"$work/docker-peer.env" <<EOF
 HTTP_PROXY=
 HTTPS_PROXY=
 ALL_PROXY=
@@ -329,23 +463,31 @@ http_proxy=
 https_proxy=
 all_proxy=
 EOF
+if [[ -n "$peer_debug_env" ]]; then
+  printf '%s\n' "$peer_debug_env" >>"$work/docker-peer.env"
+fi
 chmod 600 "$work/docker-peer.env"
-ssh -o BatchMode=yes "$docker_ssh_alias" "test ! -e '$remote_peer_dir' && umask 077 && mkdir -m 700 '$remote_peer_dir'"
+ssh -o BatchMode=yes "$peer_ssh_alias" "test ! -e '$remote_peer_dir' && umask 077 && mkdir -m 700 '$remote_peer_dir'"
 remote_peer_dir_created=1
-scp -q "$work/docker-peer.env" "$docker_ssh_alias:$remote_peer_dir/peer.env"
-ssh -o BatchMode=yes "$docker_ssh_alias" \
-  "chmod 600 '$remote_peer_dir/peer.env' && mkdir -m 700 '$remote_peer_dir/state' && test -c /dev/net/tun && ! docker container inspect '$docker_peer' >/dev/null 2>&1"
+scp -q "$work/docker-peer.env" "$peer_ssh_alias:$remote_peer_dir/peer.env"
+ssh -o BatchMode=yes "$peer_ssh_alias" \
+  "chmod 600 '$remote_peer_dir/peer.env' && mkdir -m 700 '$remote_peer_dir/state' && test -c /dev/net/tun && ! $peer_engine container inspect '$docker_peer' >/dev/null 2>&1"
 docker_peer_created=1
-ssh -o BatchMode=yes "$docker_ssh_alias" \
-  "docker run -d --name '$docker_peer' --restart=no --device /dev/net/tun --cap-add NET_ADMIN --cap-add NET_RAW --add-host '$domain:$public_ip' --volume '$remote_peer_dir/state:/var/lib/netbird' --env-file '$remote_peer_dir/peer.env' --entrypoint /bin/sh '$peer_image' -ec 'iptables -I INPUT -i eth0 -p udp -j REJECT; iptables -I OUTPUT -o eth0 -p udp -j REJECT; exec /usr/local/bin/netbird-entrypoint.sh'" \
+ssh -o BatchMode=yes "$peer_ssh_alias" \
+  "$peer_engine run -d --name '$docker_peer' --restart=no --device /dev/net/tun --cap-add NET_ADMIN --cap-add NET_RAW $peer_publish_arg --add-host '$domain:$public_ip' --volume '$remote_peer_dir/state:/var/lib/netbird' --env-file '$remote_peer_dir/peer.env' --entrypoint /bin/sh '$peer_image' -ec '$peer_bootstrap'" \
   >/dev/null
 
-printf 'Phase: create the K3s workload and its UDP-blocked NetBird sidecar.\n'
-python3 - "$work/deployment.yaml" "$namespace" "$domain" "$public_ip" "$peer_image" "$web_image" "$run_id" <<'PY'
+if [[ "$p2_path_switch" == 1 ]]; then
+  printf 'Phase: create the K3s workload and its NetBird peer with UDP available.\n'
+else
+  printf 'Phase: create the K3s workload and its UDP-blocked NetBird sidecar.\n'
+fi
+python3 - "$work/deployment.yaml" "$namespace" "$domain" "$public_ip" "$peer_image" "$web_image" "$run_id" "$peer_bootstrap" "$p2_path_switch" <<'PY'
 import sys
 
-path, namespace, domain, public_ip, peer_image, web_image, run_id = sys.argv[1:]
+path, namespace, domain, public_ip, peer_image, web_image, run_id, peer_bootstrap, p2_path_switch = sys.argv[1:]
 body = f"NANPANEL_P0_NETBIRD_CROSS_HOST_{run_id}"
+peer_debug_env = "            - name: NB_LOG_LEVEL\n              value: debug\n" if p2_path_switch == "1" else ""
 yaml = f'''apiVersion: v1
 kind: Namespace
 metadata:
@@ -389,7 +531,7 @@ spec:
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "-ec"]
           args:
-            - iptables -I INPUT -i eth0 -p udp -j REJECT; iptables -I OUTPUT -o eth0 -p udp -j REJECT; exec /usr/local/bin/netbird-entrypoint.sh
+            - {peer_bootstrap!r}
           env:
             - name: NB_MANAGEMENT_URL
               value: https://{domain}:443
@@ -406,7 +548,7 @@ spec:
               value: ""
             - name: ALL_PROXY
               value: ""
-          securityContext:
+{peer_debug_env}          securityContext:
             allowPrivilegeEscalation: false
             capabilities:
               add: [NET_ADMIN, NET_RAW]
@@ -509,9 +651,9 @@ pod_name="$(ssh -o BatchMode=yes "$k3s_ssh_alias" \
   "sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n '$namespace' get pods -l app=netbird-k3s-service -o jsonpath='{.items[0].metadata.name}'")"
 [[ -n "$pod_name" ]] || { echo 'K3s NetBird peer pod was not created.' >&2; exit 1; }
 
-docker_peer_status_cmd="for attempt in \$(seq 1 120); do status=\$(docker exec '$docker_peer' netbird status 2>/dev/null || true); if printf '%s\\n' \"\$status\" | grep -q 'Management: Connected' && printf '%s\\n' \"\$status\" | grep -q 'Signal: Connected'; then printf '%s\\n' \"\$status\"; exit 0; fi; sleep 1; done; docker logs --tail=100 '$docker_peer'; exit 1"
-if ! docker_peer_status="$(ssh -o BatchMode=yes "$docker_ssh_alias" "$docker_peer_status_cmd")"; then
-  echo 'NetBird peer on the NAT Docker host did not connect to management and signal.' >&2
+docker_peer_status_cmd="for attempt in \$(seq 1 120); do status=\$($peer_engine exec '$docker_peer' netbird status 2>/dev/null || true); if printf '%s\\n' \"\$status\" | grep -q 'Management: Connected' && printf '%s\\n' \"\$status\" | grep -q 'Signal: Connected'; then printf '%s\\n' \"\$status\"; exit 0; fi; sleep 1; done; $peer_engine logs --tail=100 '$docker_peer'; exit 1"
+if ! docker_peer_status="$(ssh -o BatchMode=yes "$peer_ssh_alias" "$docker_peer_status_cmd")"; then
+  echo 'NetBird peer on the selected container host did not connect to management and signal.' >&2
   exit 1
 fi
 k3s_peer_status_cmd="for attempt in \$(seq 1 120); do status=\$(sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n '$namespace' exec '$pod_name' -c netbird -- netbird status 2>/dev/null || true); if printf '%s\\n' \"\$status\" | grep -q 'Management: Connected' && printf '%s\\n' \"\$status\" | grep -q 'Signal: Connected'; then printf '%s\\n' \"\$status\"; exit 0; fi; sleep 1; done; sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n '$namespace' logs '$pod_name' -c netbird --tail=100; exit 1"
@@ -520,13 +662,38 @@ if ! k3s_peer_status="$(ssh -o BatchMode=yes "$k3s_ssh_alias" "$k3s_peer_status_
   exit 1
 fi
 
-ssh -o BatchMode=yes "$docker_ssh_alias" \
-  "docker exec '$docker_peer' iptables -C INPUT -i eth0 -p udp -j REJECT && docker exec '$docker_peer' iptables -C OUTPUT -o eth0 -p udp -j REJECT"
-ssh -o BatchMode=yes "$k3s_ssh_alias" \
-  "sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n '$namespace' exec '$pod_name' -c netbird -- iptables -C INPUT -i eth0 -p udp -j REJECT && sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n '$namespace' exec '$pod_name' -c netbird -- iptables -C OUTPUT -o eth0 -p udp -j REJECT"
+if [[ "$p2_netbird_provider_live" == 1 ]]; then
+  printf 'Phase: reconcile one connected peer through the PF4J NetBird Provider (run %s).\n' "$run_id"
+  printf 'Authorization: Token %s\n' "$(<"$work/admin.pat")" >"$work/api-auth.header"
+  chmod 600 "$work/api-auth.header"
+  curl --noproxy '*' --silent --show-error --fail --max-time 15 \
+    --resolve "$domain:443:$public_ip" --header "@$work/api-auth.header" \
+    "https://$domain/api/peers" -o "$work/peers.json"
+  live_peer_id="$(jq -er 'if type == "array" and length > 0 and (.[0].id | type) == "string" then .[0].id else error("no peer IDs returned") end' "$work/peers.json")"
+  printf '%s %s\n' "$public_ip" "$domain" >"$work/provider-hosts"
+  chmod 600 "$work/provider-hosts"
+  export NETBIRD_API_URL="https://${domain}"
+  export NETBIRD_API_TOKEN="$(<"$work/admin.pat")"
+  export NETBIRD_API_TOKEN_SCHEME=Token
+  export NETBIRD_MANAGED_GROUP_PREFIX=nanpanel-managed-p2-
+  export NANPANEL_P2_NETBIRD_LIVE_TEST=true
+  export NANPANEL_P2_NETBIRD_LIVE_GROUP_NAME="nanpanel-managed-p2-${run_id}"
+  export NANPANEL_P2_NETBIRD_LIVE_PEER_ID="$live_peer_id"
+  ./mvnw -pl plugins/provider-netbird -am \
+    "-DargLine=-Djdk.net.hosts.file=$work/provider-hosts" \
+    -Dtest=NetbirdGroupProviderLiveTest \
+    -Dsurefire.failIfNoSpecifiedTests=false test
+  unset NETBIRD_API_TOKEN NETBIRD_API_TOKEN_SCHEME NETBIRD_API_URL
+  unset NETBIRD_MANAGED_GROUP_PREFIX NANPANEL_P2_NETBIRD_LIVE_TEST
+  unset NANPANEL_P2_NETBIRD_LIVE_GROUP_NAME NANPANEL_P2_NETBIRD_LIVE_PEER_ID
+  if [[ "$p2_netbird_provider_only" == 1 ]]; then
+    printf 'PASS: live NetBird peer membership observe, plan, apply, restart recovery, verify, and compensation completed.\n'
+    exit 0
+  fi
+fi
 
-docker_overlay_ip="$(ssh -o BatchMode=yes "$docker_ssh_alias" \
-  "docker exec '$docker_peer' ip -4 -o addr show dev wt0" | awk '{split($4,address,"/"); print address[1]}')"
+docker_overlay_ip="$(ssh -o BatchMode=yes "$peer_ssh_alias" \
+  "$peer_engine exec '$docker_peer' ip -4 -o addr show dev wt0" | awk '{split($4,address,"/"); print address[1]}')"
 k3s_overlay_ip="$(ssh -o BatchMode=yes "$k3s_ssh_alias" \
   "sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n '$namespace' exec '$pod_name' -c netbird -- ip -4 -o addr show dev wt0" \
   | awk '{split($4,address,"/"); print address[1]}')"
@@ -536,32 +703,128 @@ k3s_overlay_ip="$(ssh -o BatchMode=yes "$k3s_ssh_alias" \
 }
 
 expected_body="NANPANEL_P0_NETBIRD_CROSS_HOST_${run_id}"
-path_verified=0
-response_body=''
-for _ in $(seq 1 45); do
-  response_body="$(ssh -o BatchMode=yes "$docker_ssh_alias" \
-    "docker exec '$docker_peer' wget -T 3 -qO- 'http://$k3s_overlay_ip/probe' 2>/dev/null || true")"
-  if [[ "$response_body" == "$expected_body" ]]; then
-    docker_peer_status="$(ssh -o BatchMode=yes "$docker_ssh_alias" \
-      "docker exec '$docker_peer' netbird status -d 2>/dev/null || true")"
-    k3s_peer_status="$(ssh -o BatchMode=yes "$k3s_ssh_alias" \
-      "sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n '$namespace' exec '$pod_name' -c netbird -- netbird status -d 2>/dev/null || true")"
-    if grep -Eiq 'Connection type:.*relay' <<<"$docker_peer_status" \
-      && grep -Eiq 'Connection type:.*relay' <<<"$k3s_peer_status"; then
-      path_verified=1
+probe_service() {
+  ssh -o BatchMode=yes "$peer_ssh_alias" \
+    "$peer_engine exec '$docker_peer' wget -T 3 -qO- 'http://$k3s_overlay_ip/probe' 2>/dev/null || true"
+}
+get_docker_status() {
+  ssh -o BatchMode=yes "$peer_ssh_alias" \
+    "$peer_engine exec '$docker_peer' netbird status -d 2>/dev/null || true"
+}
+get_k3s_status() {
+  ssh -o BatchMode=yes "$k3s_ssh_alias" \
+    "sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n '$namespace' exec '$pod_name' -c netbird -- netbird status -d 2>/dev/null || true"
+}
+sanitize_status() {
+  awk '
+    /^Management:/ { print "Management: " ($2 == "Connected" ? "Connected" : "not connected"); next }
+    /^Signal:/ { print "Signal: " ($2 == "Connected" ? "Connected" : "not connected"); next }
+    /Connection type:/ { sub(/^.*Connection type: /, ""); print "Connection type: " $0; next }
+    /ICE candidate \(Local\/Remote\):/ { sub(/^.*: /, ""); print "ICE candidate pair: " ($0 == "-/-" ? "none" : "present"); next }
+    /ICE candidate endpoints \(Local\/Remote\):/ { sub(/^.*: /, ""); print "ICE candidate endpoints: " ($0 == "-/-" ? "none" : "present"); next }
+    /stun:[^]]+\] is (Available|Unavailable)/ { print "STUN: " ($0 ~ /is Available/ ? "Available" : "Unavailable"); next }
+    /rels?:\/\// && / is Available/ { print "Relay endpoint: Available"; next }
+    /Last WireGuard handshake:/ { sub(/^.*Last WireGuard handshake: /, ""); print "Last WireGuard handshake: " $0; next }
+    /Relay server address:/ { print "Relay server: configured"; next }
+  '
+}
+wait_for_path() {
+  local expected="$1"
+  local docker_peer_status=''
+  local k3s_peer_status=''
+  local response_body=''
+  local attempts=90
+  if [[ "$p2_path_switch" == 1 ]]; then
+    attempts="$p2_path_wait_seconds"
+  fi
+  for _ in $(seq 1 "$attempts"); do
+    docker_peer_status="$(get_docker_status)"
+    k3s_peer_status="$(get_k3s_status)"
+    if grep -Eiq "Connection type:.*$expected" <<<"$docker_peer_status" \
+      && grep -Eiq "Connection type:.*$expected" <<<"$k3s_peer_status"; then
+      response_body="$(probe_service)"
+      if [[ "$response_body" == "$expected_body" ]]; then
+        return 0
+      fi
+    fi
+    sleep 1
+  done
+  response_body="$(probe_service)"
+  printf 'Expected cross-host %s path was not observed. HTTP body: %s\nContainer peer status:\n%s\nK3s peer status:\n%s\n' \
+    "$expected" "$response_body" "$(sanitize_status <<<"$docker_peer_status")" \
+    "$(sanitize_status <<<"$k3s_peer_status")" >&2
+  if [[ "$p2_path_switch" == 1 && "$expected" == P2P ]]; then
+    printf 'Recent ICE diagnostics from temporary peers:\n' >&2
+    ssh -o BatchMode=yes "$peer_ssh_alias" \
+      "$peer_engine logs --since 5m '$docker_peer' 2>&1 | grep -Ei 'discovered local candidate|ICE ConnectionState|ICE retries exhausted|ICE Agent is not initialized' | tail -30" \
+      | sed -E 's/\[peer: [^]]+\]/[peer: <peer>]/g; s/([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+/<endpoint>/g; s/\[[0-9a-fA-F:]+\]:[0-9]+/<endpoint>/g; s/(candidate (udp[46] )?(host|srflx|prflx|relay)) [^ ]+/\1 <endpoint>/Ig' >&2 || true
+    ssh -o BatchMode=yes "$k3s_ssh_alias" \
+      "sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n '$namespace' logs '$pod_name' -c netbird --since=5m | grep -Ei 'discovered local candidate|ICE ConnectionState|ICE retries exhausted|ICE Agent is not initialized' | tail -30" \
+      | sed -E 's/\[peer: [^]]+\]/[peer: <peer>]/g; s/([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+/<endpoint>/g; s/\[[0-9a-fA-F:]+\]:[0-9]+/<endpoint>/g; s/(candidate (udp[46] )?(host|srflx|prflx|relay)) [^ ]+/\1 <endpoint>/Ig' >&2 || true
+  fi
+  return 1
+}
+
+if [[ "$p2_path_switch" == 1 ]]; then
+  printf 'Phase: verify direct P2P traffic through the normal NAT paths.\n'
+  wait_for_path 'P2P'
+  printf 'PASS: both peers reported P2P and the HTTP fixture responded before UDP restrictions.\n'
+
+  printf 'Phase: reject UDP at both peers and wait for Relay fallback.\n'
+  ssh -o BatchMode=yes "$peer_ssh_alias" \
+    "$peer_engine exec '$docker_peer' iptables -I INPUT -i eth0 -p udp -j REJECT && $peer_engine exec '$docker_peer' iptables -I OUTPUT -o eth0 -p udp -j REJECT"
+  ssh -o BatchMode=yes "$k3s_ssh_alias" \
+    "sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n '$namespace' exec '$pod_name' -c netbird -- iptables -I INPUT -i eth0 -p udp -j REJECT && sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n '$namespace' exec '$pod_name' -c netbird -- iptables -I OUTPUT -o eth0 -p udp -j REJECT"
+  wait_for_path 'relay'
+  printf 'PASS: both peers switched to Relay and the HTTP fixture remained reachable with UDP rejected.\n'
+
+  printf 'Phase: remove UDP restrictions and verify recovery to direct P2P.\n'
+  ssh -o BatchMode=yes "$peer_ssh_alias" \
+    "$peer_engine exec '$docker_peer' iptables -D INPUT -i eth0 -p udp -j REJECT && $peer_engine exec '$docker_peer' iptables -D OUTPUT -o eth0 -p udp -j REJECT"
+  ssh -o BatchMode=yes "$k3s_ssh_alias" \
+    "sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n '$namespace' exec '$pod_name' -c netbird -- iptables -D INPUT -i eth0 -p udp -j REJECT && sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n '$namespace' exec '$pod_name' -c netbird -- iptables -D OUTPUT -o eth0 -p udp -j REJECT"
+  wait_for_path 'P2P'
+  printf 'PASS: removing UDP restrictions restored P2P and application HTTP traffic.\n'
+
+  printf 'Phase: restart the temporary NetBird control/relay gateway and verify reconnection.\n'
+  ssh -o BatchMode=yes "$public_ssh_alias" "$public_engine restart '$server_container' >/dev/null"
+  recovery_verified=0
+  for _ in $(seq 1 120); do
+    docker_status="$(ssh -o BatchMode=yes "$peer_ssh_alias" \
+      "$peer_engine exec '$docker_peer' netbird status 2>/dev/null || true")"
+    k3s_status="$(ssh -o BatchMode=yes "$k3s_ssh_alias" \
+      "sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n '$namespace' exec '$pod_name' -c netbird -- netbird status 2>/dev/null || true")"
+    response_body="$(probe_service)"
+    if grep -q 'Management: Connected' <<<"$docker_status" \
+      && grep -q 'Signal: Connected' <<<"$docker_status" \
+      && grep -q 'Management: Connected' <<<"$k3s_status" \
+      && grep -q 'Signal: Connected' <<<"$k3s_status" \
+      && [[ "$response_body" == "$expected_body" ]]; then
+      recovery_verified=1
       break
     fi
+    sleep 1
+  done
+  if ((recovery_verified == 0)); then
+    printf 'Control/relay gateway restart did not recover. Container peer status:\n%s\nK3s status:\n%s\nHTTP body: %s\n' \
+      "$docker_status" "$k3s_status" "$response_body" >&2
+    exit 1
   fi
-  sleep 1
-done
-if ((path_verified == 0)); then
-  printf 'Cross-host relay path failed. HTTP body: %s\nDocker peer status:\n%s\nK3s peer status:\n%s\n' \
-    "${response_body:-}" "${docker_peer_status:-not collected}" "${k3s_peer_status:-not collected}" >&2
-  exit 1
+  printf 'PASS: both peers reconnected to management/signal after the isolated gateway restart and the HTTP fixture responded.\n'
+else
+  ssh -o BatchMode=yes "$peer_ssh_alias" \
+    "$peer_engine exec '$docker_peer' iptables -C INPUT -i eth0 -p udp -j REJECT && $peer_engine exec '$docker_peer' iptables -C OUTPUT -o eth0 -p udp -j REJECT"
+  ssh -o BatchMode=yes "$k3s_ssh_alias" \
+    "sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n '$namespace' exec '$pod_name' -c netbird -- iptables -C INPUT -i eth0 -p udp -j REJECT && sudo -n env KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl -n '$namespace' exec '$pod_name' -c netbird -- iptables -C OUTPUT -o eth0 -p udp -j REJECT"
+  wait_for_path 'relay'
+  printf 'PASS: both peer eth0 paths reject UDP; detailed status reports Relay and the HTTP fixture responds.\n'
 fi
 
-printf 'PASS: NetBird %s peers on the NAT Docker host and K3s connected to public control/relay over TCP/443.\n' "$netbird_version"
-printf 'PASS: UDP ingress/egress is rejected on eth0 at both peers; both detailed statuses report Relay.\n'
-printf 'PASS: HTTP over the relayed overlay reached the K3s workload: body=%s, Docker peer=%s, K3s peer=%s.\n' \
-  "$response_body" "$docker_overlay_ip" "$k3s_overlay_ip"
+if [[ "$p2_path_switch" == 1 ]]; then
+  printf 'PASS: NetBird %s peers on %s and K3s reached the temporary control/relay over TCP/443.\n' "$netbird_version" "$peer_ssh_alias"
+  printf 'Overlay HTTP fixture: body=%s; overlay addresses omitted.\n' "$expected_body"
+else
+  printf 'PASS: NetBird %s peers on the selected NAT container host and K3s reached the temporary public control/relay over TCP/443.\n' "$netbird_version"
+  printf 'Overlay HTTP fixture: body=%s; overlay addresses omitted.\n' "$expected_body"
+fi
 printf 'Test endpoint: https://%s:443 via --resolve to %s; all temporary resources are removed on exit.\n' "$domain" "$public_ip"

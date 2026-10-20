@@ -40,6 +40,13 @@
     <changeSet id="host-network-inventory-test" author="nanpanel">
         <sql>CREATE TABLE host_network_inventory (host_id UUID PRIMARY KEY REFERENCES host(id) ON DELETE CASCADE, interfaces CLOB NOT NULL, routes CLOB NOT NULL, observed_at TIMESTAMP WITH TIME ZONE NOT NULL);</sql>
     </changeSet>
+    <changeSet id="host-overlay-inventory-test" author="nanpanel">
+        <sql>CREATE TABLE host_overlay_inventory (host_id UUID PRIMARY KEY REFERENCES host(id) ON DELETE CASCADE, peer_count INTEGER NOT NULL CHECK (peer_count BETWEEN 0 AND 100000), connected_peer_count INTEGER NOT NULL CHECK (connected_peer_count BETWEEN 0 AND peer_count), p2p_peer_count INTEGER NOT NULL CHECK (p2p_peer_count BETWEEN 0 AND connected_peer_count), relayed_peer_count INTEGER NOT NULL CHECK (relayed_peer_count BETWEEN 0 AND connected_peer_count), observed_at TIMESTAMP WITH TIME ZONE NOT NULL, CHECK (p2p_peer_count + relayed_peer_count = connected_peer_count));</sql>
+    </changeSet>
+    <changeSet id="host-overlay-peer-paths-test" author="nanpanel">
+        <sql>CREATE TABLE host_overlay_peer_snapshot (host_id UUID PRIMARY KEY REFERENCES host(id) ON DELETE CASCADE, observed_at TIMESTAMP WITH TIME ZONE NOT NULL);</sql>
+        <sql>CREATE TABLE host_overlay_peer_inventory (host_id UUID NOT NULL REFERENCES host_overlay_peer_snapshot(host_id) ON DELETE CASCADE, peer_name VARCHAR(253) NOT NULL, connection_status VARCHAR(16) NOT NULL CHECK (connection_status IN ('CONNECTED','DISCONNECTED','CONNECTING','UNKNOWN')), connection_type VARCHAR(16) NOT NULL CHECK (connection_type IN ('P2P','RELAY','UNKNOWN')), PRIMARY KEY (host_id,peer_name), CHECK (connection_status='CONNECTED' OR connection_type='UNKNOWN'));</sql>
+    </changeSet>
     <changeSet id="agent-gateway-fencing-test" author="nanpanel">
         <sqlFile path="db/changelog/014-agent-gateway-fencing.sql"/>
     </changeSet>
@@ -62,5 +69,17 @@
     <changeSet id="systemd-operation-capabilities-test" author="nanpanel">
         <sql>ALTER TABLE system_service_observation DROP COLUMN restart_allowed;</sql>
         <sql>ALTER TABLE system_service_observation DROP COLUMN journal_read_allowed;</sql>
+    </changeSet>
+    <changeSet id="kubernetes-service-inventory-test" author="nanpanel">
+        <sql>CREATE TABLE kubernetes_service_inventory (source_id VARCHAR(80) PRIMARY KEY, namespace VARCHAR(63) NOT NULL, observed_at TIMESTAMP WITH TIME ZONE NOT NULL, inventory_json VARCHAR(16777216) NOT NULL);</sql>
+    </changeSet>
+    <changeSet id="kubernetes-service-probes-test" author="nanpanel">
+        <sql>CREATE TABLE kubernetes_service_probe (probe_key CHAR(64) PRIMARY KEY, source_id VARCHAR(80) NOT NULL, service_name VARCHAR(63) NOT NULL, endpoint_address VARCHAR(253) NOT NULL, port INTEGER NOT NULL CHECK (port BETWEEN 1 AND 65535), protocol VARCHAR(8) NOT NULL CHECK (protocol = 'TCP'), outcome VARCHAR(16) NOT NULL CHECK (outcome IN ('SUCCEEDED', 'FAILED', 'TIMED_OUT', 'SKIPPED')), inventory_observed_at TIMESTAMP WITH TIME ZONE NOT NULL, observed_at TIMESTAMP WITH TIME ZONE NOT NULL);</sql>
+        <sql>CREATE INDEX kubernetes_service_probe_source_time_idx ON kubernetes_service_probe(source_id, observed_at DESC);</sql>
+        <sql>CREATE INDEX kubernetes_service_probe_observed_idx ON kubernetes_service_probe(observed_at);</sql>
+    </changeSet>
+    <changeSet id="network-provider-operations-test" author="nanpanel">
+        <sql>CREATE TABLE network_provider_operation (id VARCHAR(36) PRIMARY KEY, provider_id VARCHAR(80) NOT NULL, idempotency_key CHAR(64) NOT NULL, generation BIGINT NOT NULL CHECK (generation &gt; 0), state VARCHAR(16) NOT NULL CHECK (state IN ('PLANNED','VALIDATED','APPLYING','APPLIED','VERIFIED','DRIFTED','COMPENSATING','COMPENSATED','UNKNOWN','FAILED')), plan_configuration CLOB NOT NULL, operation_id VARCHAR(36), detail VARCHAR(512) NOT NULL, requested_by VARCHAR(36) NOT NULL, created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL, UNIQUE(provider_id,idempotency_key));</sql>
+        <sql>CREATE INDEX network_provider_operation_state_idx ON network_provider_operation(state, updated_at);</sql>
     </changeSet>
 </databaseChangeLog>

@@ -13,6 +13,7 @@
         <maven.compiler.release>21</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <quarkus.version>3.40.1</quarkus.version>
+        <fabric8.version>7.9.0</fabric8.version>
         <pf4j.version>3.15.0</pf4j.version>
         <postgresql.jdbc.version>42.7.14</postgresql.jdbc.version>
         <vertx.version>4.5.35</vertx.version>
@@ -29,6 +30,7 @@
         <module>backend/panel-cluster</module>
         <module>backend/panel-persistence</module>
         <module>backend/panel-core</module>
+        <module>plugins/provider-netbird</module>
     </modules>
     
 

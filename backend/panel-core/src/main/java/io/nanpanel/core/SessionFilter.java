@@ -92,7 +92,7 @@ public class SessionFilter
       limit("ip:" + http.remoteAddress().host());
     if (csrf)
       limit("csrf:" + http.remoteAddress().host());
-    if (path.startsWith("api/v1/admin/") && write &&
+    if ((path.startsWith("api/v1/admin/") || path.startsWith("api/v1/network-providers/")) && write &&
         r.getCookies().get(COOKIE) != null)
       limit("admin:" + digest(r.getCookies().get(COOKIE).getValue()));
     var cookie = r.getCookies().get(COOKIE);

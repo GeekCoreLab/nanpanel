@@ -250,12 +250,31 @@ function HostNetworkDialog({ host, close }: { host: Host; close: () => void }) {
  const addresses = interfaces.flatMap(networkInterface => networkInterface.addresses.map(address => ({ ...address, interfaceName: networkInterface.name })));
  const routes: HostNetworkRoute[] = inventory.data?.routes ?? [];
  return <SecondaryDrawer title={`${host.hostname} · 网络信息`} description="Agent 每 30 秒通过 iproute2 采集一次；离线时显示最近一次快照。" close={close}>
-  <DrawerTabs label="网络信息分类" value={tab} onChange={setTab} tabs={[["interfaces", "网卡接口"], ["addresses", "IP 地址"], ["routes", "路由表"]]} />
+  <DrawerTabs label="网络信息分类" value={tab} onChange={setTab} tabs={[["interfaces", "网卡接口"], ["addresses", "IP 地址"], ["routes", "路由表"], ["overlay", "Overlay 路径"]]} />
   <div className="form-actions"><span className="muted">最近采集：{time(inventory.data?.observedAt)}</span><button type="button" className="secondary" onClick={inventory.refresh} disabled={inventory.loading}>↻ 刷新</button></div>
   <ResourceState {...inventory} />
   {tab === 'interfaces' && <div className="table-wrap"><table><thead><tr><th>接口</th><th>状态</th><th>MAC</th><th>MTU</th></tr></thead><tbody>{interfaces.map(networkInterface => <tr key={networkInterface.name}><td className="mono">{networkInterface.name}</td><td>{networkInterface.state || '—'}</td><td className="mono">{networkInterface.macAddress || '—'}</td><td>{networkInterface.mtu || '—'}</td></tr>)}</tbody></table>{interfaces.length === 0 && !inventory.loading && <Empty>暂无网卡快照；Agent 可能尚未安装 iproute2 或尚未发送首次心跳。</Empty>}</div>}
   {tab === 'addresses' && <div className="table-wrap"><table><thead><tr><th>接口</th><th>地址</th><th>族</th><th>前缀</th><th>Scope</th></tr></thead><tbody>{addresses.map((address, index) => <tr key={`${address.interfaceName}-${address.address}-${index}`}><td className="mono">{address.interfaceName}</td><td className="mono">{address.address}</td><td>{address.family === 'inet' ? 'IPv4' : 'IPv6'}</td><td>/{address.prefixLength}</td><td>{address.scope || '—'}</td></tr>)}</tbody></table>{addresses.length === 0 && !inventory.loading && <Empty>没有已观测到的 IP 地址</Empty>}</div>}
   {tab === 'routes' && <div className="table-wrap"><table><thead><tr><th>目标</th><th>网关</th><th>接口</th><th>表 / 协议</th><th>Metric</th></tr></thead><tbody>{routes.map((route, index) => <tr key={`${route.destination}-${route.interfaceName}-${index}`}><td className="mono">{route.destination}</td><td className="mono">{route.gateway || '直连'}</td><td className="mono">{route.interfaceName || '—'}</td><td>{route.table || '—'} / {route.protocol || '—'}</td><td>{route.metric}</td></tr>)}</tbody></table>{routes.length === 0 && !inventory.loading && <Empty>没有已观测到的路由</Empty>}</div>}
+  {tab === 'overlay' && <>
+   <div className="alert">Overlay 路径来自本机 NetBird 客户端状态；只展示 Peer 名称、连接状态和 P2P / Relay 类型，不包含外部地址、公钥或业务服务探测结果。</div>
+   {inventory.data?.overlay ? <>
+    <div className="form-actions"><span className="muted">Overlay 采集：{time(inventory.data.overlay.observedAt)}</span></div>
+    <div className="table-wrap"><table><thead><tr><th>本机观察项</th><th>数量</th></tr></thead><tbody>
+     <tr><td>已知 Peer</td><td>{inventory.data.overlay.peerCount}</td></tr>
+     <tr><td>已连接 Peer</td><td>{inventory.data.overlay.connectedPeerCount}</td></tr>
+     <tr><td>P2P 直连</td><td>{inventory.data.overlay.p2pPeerCount}</td></tr>
+     <tr><td>Relay 中继</td><td>{inventory.data.overlay.relayedPeerCount}</td></tr>
+    </tbody></table></div>
+   </> : !inventory.loading && <Empty>没有 NetBird Overlay 汇总指标；逐 Peer 状态仍会单独显示。</Empty>}
+   <h3>逐 Peer 路径</h3>
+   {inventory.data?.overlayPeersObservedAt ? <>
+    <div className="form-actions"><span className="muted">Peer 状态采集：{time(inventory.data.overlayPeersObservedAt)}</span></div>
+    <div className="table-wrap"><table><thead><tr><th>Peer</th><th>连接状态</th><th>路径</th></tr></thead><tbody>
+     {inventory.data.overlayPeers.map(peer => <tr key={peer.peerName}><td className="mono">{peer.peerName}</td><td>{peer.status === 'CONNECTED' ? '已连接' : peer.status === 'DISCONNECTED' ? '已断开' : peer.status === 'CONNECTING' ? '连接中' : '未知'}</td><td>{peer.connectionType === 'P2P' ? 'P2P 直连' : peer.connectionType === 'RELAY' ? 'Relay 中继' : '未知'}</td></tr>)}
+    </tbody></table>{inventory.data.overlayPeers.length === 0 && <Empty>这次采集没有已知 Peer</Empty>}</div>
+   </> : !inventory.loading && <Empty>没有逐 Peer 路径快照；需要安装带权限边界的 NetBird 客户端及 NaNPanel Helper。</Empty>}
+  </>}
  </SecondaryDrawer>;
 }
 

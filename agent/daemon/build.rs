@@ -10,6 +10,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rustc-env=NANPANEL_AGENT_VERSION={agent_version}");
 
     tonic_prost_build::configure()
+        .boxed(".nanpanel.agent.v1.RelayedAgentMessage.message")
         .build_server(true)
         .build_client(true)
         .compile_protos(&["../protocol/agent.proto"], &["../protocol"])?;

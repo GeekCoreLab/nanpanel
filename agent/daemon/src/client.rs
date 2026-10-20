@@ -10,6 +10,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use hyper_util::rt::TokioIo;
+use reqwest::Url;
 use serde::Deserialize;
 use tokio::{
     sync::{Mutex, mpsc},
@@ -21,7 +22,8 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity
 use tracing::{info, warn};
 
 use crate::v1::{
-    AgentMessage, ControlMessage, Heartbeat, NetworkAddress, NetworkInterface, NetworkRoute,
+    AgentMessage, ControlMessage, Heartbeat, NetbirdOverlaySummary,
+    NetbirdPeerPath as NetbirdPeerPathMessage, NetworkAddress, NetworkInterface, NetworkRoute,
     OperationResult, RelayMessage, SystemdService, agent_gateway_client::AgentGatewayClient,
     agent_message::Payload, control_relay_client::ControlRelayClient,
     relay_message::Payload as RelayPayload,
@@ -76,6 +78,21 @@ struct NetworkInventory {
     observed_at_epoch_ms: i64,
 }
 
+#[derive(Clone, Debug)]
+struct NetbirdOverlayObservation {
+    peer_count: u32,
+    connected_peer_count: u32,
+    p2p_peer_count: u32,
+    relayed_peer_count: u32,
+    observed_at_epoch_ms: i64,
+}
+
+#[derive(Clone, Debug)]
+struct NetbirdPeerPathObservation {
+    peers: Vec<helper::NetbirdPeerPath>,
+    observed_at_epoch_ms: i64,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct NetworkFirewallPayload {
@@ -107,6 +124,7 @@ pub struct AgentConfig {
     pub heartbeat_interval: Duration,
     pub reconnect_min: Duration,
     pub reconnect_max: Duration,
+    pub netbird_metrics_url: Option<Url>,
 }
 
 impl AgentConfig {
@@ -143,6 +161,11 @@ impl AgentConfig {
         let tls_domain =
             std::env::var("NANPANEL_AGENT_TLS_DOMAIN").unwrap_or_else(|_| "localhost".to_owned());
         let agent_id = required("NANPANEL_AGENT_ID")?;
+        let netbird_metrics_url = match std::env::var("NANPANEL_AGENT_NETBIRD_METRICS_URL") {
+            Ok(value) => Some(parse_netbird_metrics_url(&value)?),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(error) => return Err(error.into()),
+        };
         Ok(Self {
             endpoints,
             relay_endpoints,
@@ -160,8 +183,28 @@ impl AgentConfig {
             heartbeat_interval: duration_env("NANPANEL_AGENT_HEARTBEAT_SECS", 5),
             reconnect_min: duration_env("NANPANEL_AGENT_RECONNECT_MIN_MS", 500),
             reconnect_max: duration_env("NANPANEL_AGENT_RECONNECT_MAX_MS", 30_000),
+            netbird_metrics_url,
         })
     }
+}
+
+fn parse_netbird_metrics_url(value: &str) -> Result<Url> {
+    let url = Url::parse(value).context("parse NetBird local metrics URL")?;
+    if url.scheme() != "http"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/metrics"
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url
+            .host_str()
+            .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+            .is_none_or(|address| !address.is_loopback())
+        || url.port_or_known_default().is_none_or(|port| port == 0)
+    {
+        anyhow::bail!("NetBird local metrics URL must be http://<loopback>:<port>/metrics")
+    }
+    Ok(url)
 }
 
 fn verify_relay_fallback_manifest(
@@ -446,6 +489,21 @@ async fn connect_once(
     let helper_available = Arc::new(AtomicBool::new(
         helper::status(&config.helper_socket).await?,
     ));
+    let initial_helper_capabilities = if helper_available.load(Ordering::Relaxed) {
+        helper::capabilities(&config.helper_socket)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let initial_netbird_peer_paths = if initial_helper_capabilities
+        .iter()
+        .any(|capability| capability == "network.overlay.peer_paths.read")
+    {
+        collect_netbird_peer_paths(&config.helper_socket).await
+    } else {
+        None
+    };
     info!(
         agent_id = %config.agent_id,
         helper_status = if helper_available.load(Ordering::Relaxed) { "AVAILABLE" } else { "UNAVAILABLE" },
@@ -457,15 +515,34 @@ async fn connect_once(
     let heartbeat_sequence = Arc::clone(&sequence);
     let heartbeat_helper_available = Arc::clone(&helper_available);
     let heartbeat_helper_socket = config.helper_socket.clone();
+    let heartbeat_initial_peer_paths = initial_netbird_peer_paths;
+    let netbird_metrics_url = config.netbird_metrics_url.clone();
+    let netbird_metrics_client = if netbird_metrics_url.is_some() {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(2))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .ok()
+    } else {
+        None
+    };
     let heartbeat_sender = sender.clone();
     let heartbeat_task = tokio::spawn(async move {
         let mut ticker = time::interval(interval);
         ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+        let mut netbird_peer_paths = heartbeat_initial_peer_paths;
+        let mut peer_paths_refresh_at = time::Instant::now();
         let mut systemd_services = collect_systemd_services().await;
         let mut systemd_observed_at = systemd_services.as_ref().and_then(|_| epoch_ms().ok());
         let mut systemd_refresh_at = time::Instant::now();
         let mut network_inventory = collect_network_inventory().await;
         let mut network_refresh_at = time::Instant::now();
+        let mut netbird_overlay = collect_netbird_overlay(
+            netbird_metrics_client.as_ref(),
+            netbird_metrics_url.as_ref(),
+        )
+        .await;
+        let mut overlay_refresh_at = time::Instant::now();
         loop {
             ticker.tick().await;
             if systemd_refresh_at.elapsed() >= Duration::from_secs(30) {
@@ -481,38 +558,60 @@ async fn connect_once(
                 network_inventory = collect_network_inventory().await;
                 network_refresh_at = time::Instant::now();
             }
+            if overlay_refresh_at.elapsed() >= Duration::from_secs(30) {
+                netbird_overlay = collect_netbird_overlay(
+                    netbird_metrics_client.as_ref(),
+                    netbird_metrics_url.as_ref(),
+                )
+                .await;
+                overlay_refresh_at = time::Instant::now();
+            }
             let helper_is_available = helper::status(&heartbeat_helper_socket)
                 .await
                 .unwrap_or(false);
             heartbeat_helper_available.store(helper_is_available, Ordering::Relaxed);
+            let helper_capabilities = if helper_is_available {
+                helper::capabilities(&heartbeat_helper_socket)
+                    .await
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            if peer_paths_refresh_at.elapsed() >= Duration::from_secs(30) {
+                if helper_capabilities
+                    .iter()
+                    .any(|capability| capability == "network.overlay.peer_paths.read")
+                {
+                    netbird_peer_paths = collect_netbird_peer_paths(&heartbeat_helper_socket).await;
+                } else {
+                    netbird_peer_paths = None;
+                }
+                peer_paths_refresh_at = time::Instant::now();
+            }
             let mut capabilities = vec!["host.inventory".to_owned(), "agent.heartbeat".to_owned()];
             if helper_is_available {
                 capabilities.push("agent.self_update".to_owned());
-                if let Ok(helper_capabilities) =
-                    helper::capabilities(&heartbeat_helper_socket).await
-                {
-                    for capability in helper_capabilities {
-                        if !capabilities.contains(&capability)
-                            && matches!(
-                                capability.as_str(),
-                                "systemd.restart"
-                                    | "systemd.journal.read"
-                                    | "package.install"
-                                    | "file.write.protected"
-                                    | "file.list"
-                                    | "file.read"
-                                    | "file.write"
-                                    | "file.delete"
-                                    | "container.list"
-                                    | "container.logs"
-                                    | "container.start"
-                                    | "container.stop"
-                                    | "container.deploy"
-                                    | "network.firewall.expose"
-                            )
-                        {
-                            capabilities.push(capability);
-                        }
+                for capability in helper_capabilities {
+                    if !capabilities.contains(&capability)
+                        && matches!(
+                            capability.as_str(),
+                            "systemd.restart"
+                                | "systemd.journal.read"
+                                | "package.install"
+                                | "file.write.protected"
+                                | "file.list"
+                                | "file.read"
+                                | "file.write"
+                                | "file.delete"
+                                | "container.list"
+                                | "container.logs"
+                                | "container.start"
+                                | "container.stop"
+                                | "container.deploy"
+                                | "network.firewall.expose"
+                        )
+                    {
+                        capabilities.push(capability);
                     }
                 }
             }
@@ -521,6 +620,12 @@ async fn connect_once(
             }
             if network_inventory.is_some() {
                 capabilities.push("network.inventory".to_owned());
+            }
+            if netbird_overlay.is_some() {
+                capabilities.push("network.overlay.observe".to_owned());
+            }
+            if netbird_peer_paths.is_some() {
+                capabilities.push("network.overlay.peer_paths.observe".to_owned());
             }
             let mut sequence_guard = heartbeat_sequence.lock().await;
             *sequence_guard = sequence_guard.saturating_add(1);
@@ -573,6 +678,36 @@ async fn connect_once(
                     network_observed_at_epoch_ms: network_inventory
                         .as_ref()
                         .map(|inventory| inventory.observed_at_epoch_ms)
+                        .unwrap_or_default(),
+                    netbird_overlay: netbird_overlay.as_ref().map(|overlay| {
+                        NetbirdOverlaySummary {
+                            peer_count: overlay.peer_count,
+                            connected_peer_count: overlay.connected_peer_count,
+                            p2p_peer_count: overlay.p2p_peer_count,
+                            relayed_peer_count: overlay.relayed_peer_count,
+                        }
+                    }),
+                    netbird_overlay_observed_at_epoch_ms: netbird_overlay
+                        .as_ref()
+                        .map(|overlay| overlay.observed_at_epoch_ms)
+                        .unwrap_or_default(),
+                    netbird_peer_paths: netbird_peer_paths
+                        .as_ref()
+                        .map(|snapshot| {
+                            snapshot
+                                .peers
+                                .iter()
+                                .map(|peer| NetbirdPeerPathMessage {
+                                    peer_name: peer.peer_name.clone(),
+                                    status: peer.status.clone(),
+                                    connection_type: peer.connection_type.clone(),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    netbird_peer_paths_observed_at_epoch_ms: netbird_peer_paths
+                        .as_ref()
+                        .map(|snapshot| snapshot.observed_at_epoch_ms)
                         .unwrap_or_default(),
                 })),
             };
@@ -969,6 +1104,132 @@ async fn collect_network_inventory() -> Option<NetworkInventory> {
         routes: routes.into_iter().take(2048).collect(),
         observed_at_epoch_ms: epoch_ms().ok()?,
     })
+}
+
+async fn collect_netbird_overlay(
+    client: Option<&reqwest::Client>,
+    url: Option<&Url>,
+) -> Option<NetbirdOverlayObservation> {
+    const MAX_METRICS_BYTES: usize = 256 * 1024;
+    let client = client?;
+    let url = url?;
+    let mut response = client.get(url.clone()).send().await.ok()?;
+    if !response.status().is_success()
+        || response
+            .content_length()
+            .is_some_and(|length| length > MAX_METRICS_BYTES as u64)
+    {
+        return None;
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if body.len().saturating_add(chunk.len()) > MAX_METRICS_BYTES {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let metrics = std::str::from_utf8(&body).ok()?;
+    let (peer_count, p2p_peer_count, relayed_peer_count) = parse_netbird_overlay_metrics(metrics)?;
+    let connected_peer_count = p2p_peer_count.saturating_add(relayed_peer_count);
+    Some(NetbirdOverlayObservation {
+        peer_count,
+        connected_peer_count,
+        p2p_peer_count,
+        relayed_peer_count,
+        observed_at_epoch_ms: epoch_ms().ok()?,
+    })
+}
+
+async fn collect_netbird_peer_paths(
+    helper_socket: &std::path::Path,
+) -> Option<NetbirdPeerPathObservation> {
+    const MAX_PEERS: usize = 256;
+    let peers = helper::netbird_peer_paths(helper_socket).await.ok()?;
+    if peers.len() > MAX_PEERS {
+        return None;
+    }
+    let mut names = HashSet::with_capacity(peers.len());
+    if peers.iter().any(|peer| {
+        peer.peer_name.is_empty()
+            || peer.peer_name.len() > 253
+            || peer.peer_name.parse::<std::net::IpAddr>().is_ok()
+            || !peer
+                .peer_name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            || !names.insert(peer.peer_name.to_ascii_lowercase())
+            || !matches!(
+                peer.status.as_str(),
+                "CONNECTED" | "DISCONNECTED" | "CONNECTING" | "UNKNOWN"
+            )
+            || !matches!(peer.connection_type.as_str(), "P2P" | "RELAY" | "UNKNOWN")
+    }) {
+        return None;
+    }
+    Some(NetbirdPeerPathObservation {
+        peers,
+        observed_at_epoch_ms: epoch_ms().ok()?,
+    })
+}
+
+fn parse_netbird_overlay_metrics(metrics: &str) -> Option<(u32, u32, u32)> {
+    const MAX_PEERS: u32 = 100_000;
+    let mut peer_count = None;
+    let mut p2p_peer_count = None;
+    let mut relayed_peer_count = None;
+    for line in metrics.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut fields = line.split_whitespace();
+        let metric = fields.next()?;
+        let Some(raw_value) = fields.next() else {
+            continue;
+        };
+        if fields.next().is_some() {
+            continue;
+        }
+        let kind = if metric == "netbird_peers" {
+            Some("total")
+        } else if metric.starts_with("netbird_peers_connected{")
+            && metric.ends_with('}')
+            && metric.contains("connection_type=\"p2p\"")
+        {
+            Some("p2p")
+        } else if metric.starts_with("netbird_peers_connected{")
+            && metric.ends_with('}')
+            && metric.contains("connection_type=\"relay\"")
+        {
+            Some("relay")
+        } else if metric.starts_with("netbird_peers_connected{") && metric.ends_with('}') {
+            return None;
+        } else {
+            None
+        };
+        let Some(kind) = kind else {
+            continue;
+        };
+        let value = raw_value.parse::<u32>().ok()?;
+        if value > MAX_PEERS {
+            return None;
+        }
+        let slot = match kind {
+            "total" => &mut peer_count,
+            "p2p" => &mut p2p_peer_count,
+            "relay" => &mut relayed_peer_count,
+            _ => return None,
+        };
+        if slot.replace(value).is_some() {
+            return None;
+        }
+    }
+    let peer_count = peer_count?;
+    let p2p_peer_count = p2p_peer_count?;
+    let relayed_peer_count = relayed_peer_count?;
+    if p2p_peer_count.saturating_add(relayed_peer_count) > peer_count {
+        return None;
+    }
+    Some((peer_count, p2p_peer_count, relayed_peer_count))
 }
 
 async fn run_ip_json(arguments: &[&str]) -> Option<Vec<u8>> {
@@ -1375,6 +1636,47 @@ mod tests {
         assert!(parse_network_routes(b"not-json").is_none());
         assert!(!valid_route_destination("../../etc/passwd"));
         Ok(())
+    }
+
+    #[test]
+    fn accepts_only_loopback_netbird_metrics_urls() -> Result<()> {
+        assert_eq!(
+            parse_netbird_metrics_url("http://127.0.0.1:9191/metrics")?.as_str(),
+            "http://127.0.0.1:9191/metrics"
+        );
+        assert!(parse_netbird_metrics_url("https://127.0.0.1:9191/metrics").is_err());
+        assert!(parse_netbird_metrics_url("http://localhost:9191/metrics").is_err());
+        assert!(parse_netbird_metrics_url("http://192.0.2.1:9191/metrics").is_err());
+        assert!(parse_netbird_metrics_url("http://127.0.0.1:9191/other").is_err());
+        assert!(parse_netbird_metrics_url("http://127.0.0.1:9191/metrics?debug=1").is_err());
+        assert!(parse_netbird_metrics_url("http://user@127.0.0.1:9191/metrics").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn parses_bounded_netbird_overlay_connection_metrics() {
+        let metrics = "# HELP netbird_peers_known Known peers\nnetbird_peers 8\nnetbird_peers_connected{connection_type=\"p2p\"} 3\nnetbird_peers_connected{connection_type=\"relay\"} 2\nnetbird_peer_latency_seconds{peer=\"host.example\"} 0.012\n";
+        assert_eq!(parse_netbird_overlay_metrics(metrics), Some((8, 3, 2)));
+    }
+
+    #[test]
+    fn rejects_inconsistent_or_ambiguous_netbird_overlay_metrics() {
+        let missing_path = "netbird_peers 8\nnetbird_peers_connected{connection_type=\"p2p\"} 3\n";
+        let duplicate = "netbird_peers 8\nnetbird_peers 8\nnetbird_peers_connected{connection_type=\"p2p\"} 3\nnetbird_peers_connected{connection_type=\"relay\"} 2\n";
+        let unknown = "netbird_peers 8\nnetbird_peers_connected{connection_type=\"other\"} 1\nnetbird_peers_connected{connection_type=\"p2p\"} 3\nnetbird_peers_connected{connection_type=\"relay\"} 2\n";
+        let inconsistent = "netbird_peers 4\nnetbird_peers_connected{connection_type=\"p2p\"} 3\nnetbird_peers_connected{connection_type=\"relay\"} 2\n";
+        let fractional = "netbird_peers 4.5\nnetbird_peers_connected{connection_type=\"p2p\"} 1\nnetbird_peers_connected{connection_type=\"relay\"} 1\n";
+        let over_limit = "netbird_peers 100001\nnetbird_peers_connected{connection_type=\"p2p\"} 1\nnetbird_peers_connected{connection_type=\"relay\"} 1\n";
+        for metrics in [
+            missing_path,
+            duplicate,
+            unknown,
+            inconsistent,
+            fractional,
+            over_limit,
+        ] {
+            assert_eq!(parse_netbird_overlay_metrics(metrics), None);
+        }
     }
 
     #[test]

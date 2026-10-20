@@ -1,7 +1,7 @@
 import { createUuid } from './uuid.ts';
 import { initialTopology, draftError } from './topology-model.ts';
 import type { TopologyDraft } from './types';
-import type { Host, SystemService, AdminUser, PlatformSettings, Operation, AuditEvent, WebSession } from './types';
+import type { Host, SystemService, AdminUser, PlatformSettings, Operation, AuditEvent, WebSession, NetworkProviderOperation } from './types';
 const now = () => new Date().toISOString();
 const id = () => createUuid();
 const uuid = (n: number) => `8b395d24-5d5d-4f27-b70b-${String(n).padStart(12, '0')}`;
@@ -71,6 +71,9 @@ log('MOCK_INITIALIZED', 'system', null, '演示环境已初始化，所有操作
 function sessionContext() { return { user: users.find(u => u.id === currentUserId), session: sessions.find(s => s.current), permissions: users.find(u => u.id === currentUserId)?.mustChangePassword ? [] : ['hosts:read', 'services:restart', 'admin:manage'], csrfToken: csrf }; }
 function createSession(user: AdminUser) { const stamp = now(); currentUserId = user.id; csrf = id(); sessions = [{ id: id(), userId: user.id, current: true, createdAt: stamp, authenticatedAt: stamp, lastSeenAt: stamp, idleExpiresAt: new Date(Date.now() + 1800000).toISOString(), absoluteExpiresAt: new Date(Date.now() + 43200000).toISOString(), clientIp: '127.0.0.1', userAgent: navigator.userAgent }, ...sessions.filter(s => !s.current && s.userId === user.id)]; }
 const replay = new Map<string, { fingerprint: string; operation: Operation }>();
+let netbirdGroup: { groupName: string; peerIds: string[]; groupId: string; resourceCount: number } | undefined;
+const netbirdOperations = new Map<string, { operation: NetworkProviderOperation; desired: { groupName: string; generation: number; peerIds: string[] }; before?: typeof netbirdGroup; appliedFingerprint?: string }>();
+const netbirdFingerprint = () => JSON.stringify(netbirdGroup ?? null);
 export async function mockRequest(path: string, options: RequestInit, authenticatedBusiness = false): Promise<Response> {
  await new Promise(r => setTimeout(r, 120));
  const url = new URL(path, 'http://mock'); const p = url.pathname; const method = options.method ?? 'GET'; const headers = new Headers(options.headers); const b = options.body ? JSON.parse(String(options.body)) : {};
@@ -85,6 +88,37 @@ export async function mockRequest(path: string, options: RequestInit, authentica
  if (!current || current.status !== 'ACTIVE' || (!authenticatedBusiness && !sessions.some(s => s.current))) return fail(401, 'UNAUTHENTICATED', '请登录以继续');
  if (current.mustChangePassword && !p.startsWith('/auth/')) return fail(403, 'PASSWORD_CHANGE_REQUIRED', '请先修改初始密码');
  if (method !== 'GET' && p.startsWith('/admin/') && Date.now() - new Date(sessions[0]?.authenticatedAt ?? now()).getTime() > 300000) return fail(403, 'REAUTHENTICATION_REQUIRED', '需要重新验证密码；验证后请重新检查并提交');
+ if (p === '/network-providers' && method === 'GET') return ok([{ id: 'netbird-groups', capabilities: ['overlay.group-membership.reconcile'] }]);
+ if (p === '/network-providers/netbird-groups/observations' && method === 'POST') {
+  if (!String(b.resourceKey ?? '').startsWith('nanpanel-managed-')) return fail(400, 'VALIDATION_FAILED', '组名不在 Mock 受管前缀内');
+  const group = netbirdGroup?.groupName === b.resourceKey ? netbirdGroup : undefined;
+  const snapshot = { groupName: b.resourceKey, fingerprint: JSON.stringify(group ?? null), exists: !!group, ...(group ? { groupId: group.groupId, peerIds: group.peerIds, resourceCount: group.resourceCount } : {}) };
+  return ok({ providerId: 'netbird-groups', resourceKey: b.resourceKey, snapshot: JSON.stringify(snapshot) });
+ }
+ if (p === '/network-providers/netbird-groups/plans' && method === 'POST') {
+  let desired: { groupName: string; generation: number; peerIds: string[] };
+  try { desired = JSON.parse(String(b.desiredSnapshot)); } catch { return fail(400, 'VALIDATION_FAILED', 'Mock 期望状态无效'); }
+  if (!desired.groupName?.startsWith('nanpanel-managed-') || !Array.isArray(desired.peerIds) || desired.peerIds.length > 512) return fail(400, 'VALIDATION_FAILED', 'Mock 期望状态不符合边界');
+  if (b.observedSnapshot) {
+   try { const observed = JSON.parse(b.observedSnapshot); const current = netbirdGroup?.groupName === desired.groupName ? netbirdGroup : undefined; if (observed.groupName !== desired.groupName || observed.fingerprint !== JSON.stringify(current ?? null)) return fail(409, 'PROVIDER_PLAN_REJECTED', '观察状态已经变化，请重新读取'); }
+   catch { return fail(400, 'VALIDATION_FAILED', 'Mock 观察状态无效'); }
+  }
+  const operation: NetworkProviderOperation = { id: id(), providerId: 'netbird-groups', generation: desired.generation, state: 'PLANNED', detail: 'Mock 计划已持久化；尚未修改示例组', createdAt: now(), updatedAt: now() };
+  netbirdOperations.set(operation.id, { operation, desired: { ...desired, peerIds: [...desired.peerIds] }, before: netbirdGroup?.groupName === desired.groupName ? structuredClone(netbirdGroup) : undefined });
+  log('network.provider.plan', 'network-provider-operation', operation.id, 'Mock 创建 NetBird 受管组计划');
+  return ok(operation, 201);
+ }
+ const netbirdOperationMatch = p.match(/^\/network-providers\/netbird-groups\/operations\/([^/]+)(?:\/(validate|apply|verify|compensate))?$/);
+ if (netbirdOperationMatch) {
+  const item = netbirdOperations.get(netbirdOperationMatch[1]); if (!item) return fail(404, 'NOT_FOUND', 'Mock Provider 操作不存在');
+  const action = netbirdOperationMatch[2]; if (method === 'GET' && !action) return ok(item.operation);
+  if (method !== 'POST' || !action) return fail(405, 'METHOD_NOT_ALLOWED', 'Mock Provider 阶段仅支持 POST');
+  if (action === 'validate') { if (item.operation.state !== 'PLANNED') return fail(409, 'INVALID_OPERATION_STATE', 'Mock 操作阶段无效'); item.operation.state = 'VALIDATED'; item.operation.detail = 'Mock 受管组前提有效'; }
+  if (action === 'apply') { if (item.operation.state !== 'VALIDATED') return fail(409, 'INVALID_OPERATION_STATE', 'Mock 操作阶段无效'); netbirdGroup = { groupName: item.desired.groupName, peerIds: [...item.desired.peerIds], groupId: item.before?.groupId ?? id(), resourceCount: item.before?.resourceCount ?? 0 }; item.appliedFingerprint = netbirdFingerprint(); item.operation.state = 'APPLIED'; item.operation.detail = 'Mock 已更新示例组；真实 NetBird 未修改'; }
+  if (action === 'verify') { item.operation.state = item.appliedFingerprint === netbirdFingerprint() ? 'VERIFIED' : 'DRIFTED'; item.operation.detail = item.operation.state === 'VERIFIED' ? 'Mock 期望成员已验证' : 'Mock 发现组漂移'; }
+  if (action === 'compensate') { if (item.appliedFingerprint !== netbirdFingerprint()) { item.operation.state = 'DRIFTED'; item.operation.detail = 'Mock 组已漂移，拒绝覆盖'; } else { netbirdGroup = item.before ? structuredClone(item.before) : undefined; item.operation.state = 'COMPENSATED'; item.operation.detail = 'Mock 已恢复示例组的计划前状态'; } }
+  item.operation.updatedAt = now(); log(`network.provider.${action}`, 'network-provider-operation', item.operation.id, item.operation.detail); return ok(item.operation);
+ }
  if (p === '/auth/me') return ok(sessionContext());
  if (p === '/auth/logout') { currentUserId = null; sessions = []; return ok(null, 204); }
  if (p === '/auth/password') { if (passwords.get(current.id) !== b.currentPassword) return fail(400, 'INVALID_PASSWORD', '旧密码不正确'); if ([...String(b.newPassword)].length < 15 || [...String(b.newPassword)].length > 128 || b.newPassword === b.currentPassword) return fail(422, 'PASSWORD_REJECTED', '新密码须为 15–128 字符，且与旧密码不同'); passwords.set(current.id, b.newPassword); current.mustChangePassword = false; log('PASSWORD_CHANGED', 'user', current.id, '修改本人密码'); currentUserId = null; sessions = []; return ok(null, 204); }
@@ -101,6 +135,24 @@ export async function mockRequest(path: string, options: RequestInit, authentica
   return ok(topology, 200, { ETag: etag('topology'), 'Cache-Control': 'no-store' });
  }
  if (p === '/system') return ok({ name: 'NaNPanel', version: '0.1.0-mock', stage: 'mock' });
+ if (p === '/kubernetes/service-inventory' || p === '/kubernetes/service-inventory/refresh') return ok({
+  sourceId: 'kubernetes:demo-cluster', namespace: 'nanpanel-mesh', observedAt: now(), services: [
+   { serviceName: 'catalog-api', type: 'ClusterIP', clusterIps: ['10.43.120.17'], externalName: null, ports: [{ name: 'http', protocol: 'TCP', port: 80, targetPort: '8080', appProtocol: 'http' }], endpoints: [
+    { addressType: 'IPv4', address: '10.42.1.23', ready: true, serving: true, terminating: false, targetKind: 'Pod', targetName: 'catalog-api-6c847d7d4b-kd2sh', targetNamespace: 'nanpanel-mesh', nodeName: 'k3s-worker-1', zone: null, ports: [{ name: 'http', protocol: 'TCP', port: 8080, appProtocol: 'http' }] },
+    { addressType: 'IPv4', address: '10.42.2.31', ready: true, serving: true, terminating: false, targetKind: 'Pod', targetName: 'catalog-api-6c847d7d4b-qv9mc', targetNamespace: 'nanpanel-mesh', nodeName: 'k3s-worker-2', zone: null, ports: [{ name: 'http', protocol: 'TCP', port: 8080, appProtocol: 'http' }] },
+   ] },
+   { serviceName: 'catalog-canary', type: 'ClusterIP', clusterIps: ['10.43.121.8'], externalName: null, ports: [{ name: 'http', protocol: 'TCP', port: 80, targetPort: '8080', appProtocol: 'http' }], endpoints: [
+    { addressType: 'IPv4', address: '10.42.1.46', ready: false, serving: true, terminating: false, targetKind: 'Pod', targetName: 'catalog-canary-7b89c56899-m88zg', targetNamespace: 'nanpanel-mesh', nodeName: 'k3s-worker-1', zone: null, ports: [{ name: 'http', protocol: 'TCP', port: 8080, appProtocol: 'http' }] },
+   ] },
+  ],
+ });
+ if (p === '/kubernetes/service-probes') return ok({
+  sourceId: 'kubernetes:demo-cluster', enabled: true, observedAt: now(), probes: [
+   { serviceName: 'catalog-api', address: '10.42.1.23', port: 8080, protocol: 'TCP', outcome: 'SUCCEEDED', observedAt: now() },
+   { serviceName: 'catalog-api', address: '10.42.2.31', port: 8080, protocol: 'TCP', outcome: 'SUCCEEDED', observedAt: now() },
+   { serviceName: 'catalog-canary', address: '10.42.1.46', port: 8080, protocol: 'TCP', outcome: 'TIMED_OUT', observedAt: now() },
+  ],
+ });
  if (p === '/hosts') return ok(page(hosts.filter(h => !url.searchParams.get('status') || h.status === url.searchParams.get('status'))));
  if (p === '/agent-enrollments' && method === 'POST') {
   const name = String(b.hostname ?? '').trim(); if (!name || name.length > 255) return fail(422, 'VALIDATION_FAILED', '主机名称无效');
@@ -115,6 +167,13 @@ export async function mockRequest(path: string, options: RequestInit, authentica
   interfaces: [{ name: 'eth0', macAddress: '02:00:00:00:00:01', mtu: 1500, state: 'UP', addresses: [{ family: 'inet', address: '192.0.2.20', prefixLength: 24, scope: 'global' }, { family: 'inet6', address: '2001:db8::20', prefixLength: 64, scope: 'global' }] }],
   routes: [{ destination: 'default', gateway: '192.0.2.1', interfaceName: 'eth0', protocol: 'static', scope: 'global', routeType: 'unicast', table: 'main', metric: 100 }],
   observedAt: host!.lastSeenAt,
+  overlay: host!.status === 'ONLINE' ? { peerCount: 12, connectedPeerCount: 9, p2pPeerCount: 6, relayedPeerCount: 3, observedAt: now() } : null,
+  overlayPeers: host!.status === 'ONLINE' ? [
+   { peerName: 'api-a.example.test', status: 'CONNECTED', connectionType: 'P2P' },
+   { peerName: 'db-b.example.test', status: 'CONNECTED', connectionType: 'RELAY' },
+   { peerName: 'worker-c.example.test', status: 'DISCONNECTED', connectionType: 'UNKNOWN' },
+  ] : [],
+  overlayPeersObservedAt: host!.status === 'ONLINE' ? now() : null,
  });
  if (/^\/hosts\/[^/]+$/.test(p)) return ok(host);
  if (/^\/hosts\/[^/]+\/ssh\/probe$/.test(p) && method === 'POST') { if (!b.reason?.trim() || b.reason.length > 500) return fail(422, 'VALIDATION_FAILED', 'SSH 操作原因无效'); log('SSH_ACCESS_PROBED', 'host', host!.id, `Mock SSH direct connection probe: ${b.reason}`); return ok({ hostId: host!.id, address: host!.hostname, port: 22, status: 'SUCCEEDED', verifiedAt: now(), evidence: 'Mock: confirmed host key and fixed true command succeeded' }); }

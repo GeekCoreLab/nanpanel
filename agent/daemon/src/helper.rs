@@ -7,6 +7,14 @@ use tokio::net::UnixStream;
 use tokio_util::codec::{Framed, LinesCodec};
 use uuid::Uuid;
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct NetbirdPeerPath {
+    pub peer_name: String,
+    pub status: String,
+    pub connection_type: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct HelperRequest<'a> {
@@ -100,6 +108,21 @@ pub async fn capabilities(socket_path: &Path) -> Result<Vec<String>> {
     )
     .await?;
     serde_json::from_str(&response).context("parse Helper capability report")
+}
+
+pub async fn netbird_peer_paths(socket_path: &Path) -> Result<Vec<NetbirdPeerPath>> {
+    let now = epoch_ms()?;
+    let response = request(
+        socket_path,
+        &Uuid::new_v4().to_string(),
+        &Uuid::new_v4().to_string(),
+        "network.overlay.peer_paths.read",
+        "",
+        now + 10_000,
+        None,
+    )
+    .await?;
+    serde_json::from_str(&response).context("parse NetBird peer path report")
 }
 
 async fn request(
