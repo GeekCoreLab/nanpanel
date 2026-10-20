@@ -15,6 +15,7 @@ import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -401,6 +402,7 @@ public final class KubernetesServiceDiscovery {
   public record Snapshot(String sourceId, String namespace, Instant observedAt,
                          List<ServiceObservation> services) {
     public Snapshot {
+      observedAt = observedAt == null ? null : observedAt.truncatedTo(ChronoUnit.MICROS);
       services = List.copyOf(services);
     }
   }

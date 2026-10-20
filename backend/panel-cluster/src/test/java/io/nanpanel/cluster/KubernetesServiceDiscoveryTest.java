@@ -15,6 +15,7 @@ import io.fabric8.kubernetes.api.model.discovery.v1.EndpointSliceListBuilder;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.server.mock.KubernetesMockServer;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -108,6 +109,16 @@ class KubernetesServiceDiscoveryTest {
     assertThrows(IllegalArgumentException.class,
         () -> KubernetesServiceDiscovery.buildSnapshot("cluster-a", NAMESPACE,
             services, List.of(), Instant.now()));
+  }
+
+  @Test
+  void snapshotObservationTimeUsesDatabaseMicrosecondPrecision() {
+    Instant observedAt = Instant.parse("2026-10-20T13:25:49.039593869Z");
+
+    var snapshot = KubernetesServiceDiscovery.buildSnapshot("cluster-a", NAMESPACE,
+        List.of(), List.of(), observedAt);
+
+    assertEquals(observedAt.truncatedTo(ChronoUnit.MICROS), snapshot.observedAt());
   }
 
   private static Service service(String name, String namespace) {

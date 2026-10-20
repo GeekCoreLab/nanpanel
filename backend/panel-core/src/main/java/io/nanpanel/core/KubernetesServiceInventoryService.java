@@ -71,14 +71,22 @@ public class KubernetesServiceInventoryService {
     ensureConfigured();
     String sourceId = sourceId();
     var rows = store.transaction(c -> query(c,
-        "SELECT inventory_json FROM kubernetes_service_inventory WHERE source_id=?",
+        "SELECT inventory_json,observed_at FROM kubernetes_service_inventory WHERE source_id=?",
         sourceId));
     if (rows.isEmpty()) {
       return new Snapshot(sourceId, namespace, null, List.of());
     }
     try {
-      return mapper.readValue(String.valueOf(rows.getFirst().get("inventory_json")),
-          Snapshot.class);
+      Snapshot stored = mapper.readValue(
+          String.valueOf(rows.getFirst().get("inventory_json")), Snapshot.class);
+      Instant observedAt = instant(rows.getFirst().get("observed_at"));
+      if (observedAt == null) {
+        throw new IllegalStateException("Stored Kubernetes inventory timestamp is invalid");
+      }
+      // Keep the public inventory timestamp identical to PostgreSQL's persisted
+      // microsecond timestamp, which is also referenced by stored probe rows.
+      return new Snapshot(stored.sourceId(), stored.namespace(), observedAt,
+          stored.services());
     } catch (java.io.IOException failure) {
       throw new IllegalStateException("Unable to decode stored Kubernetes inventory", failure);
     }
