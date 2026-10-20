@@ -25,4 +25,5 @@
 <changeSet id="023-kubernetes-service-inventory" author="nanpanel"><sqlFile path="023-kubernetes-service-inventory.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE kubernetes_service_inventory;</sql></rollback></changeSet>
 <changeSet id="024-kubernetes-service-probes" author="nanpanel"><sqlFile path="024-kubernetes-service-probes.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE kubernetes_service_probe;</sql></rollback></changeSet>
 <changeSet id="025-network-provider-operations" author="nanpanel"><sqlFile path="025-network-provider-operations.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE network_provider_operation;</sql></rollback></changeSet>
+<changeSet id="026-api-keys" author="nanpanel"><sqlFile path="026-api-keys.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE api_key;</sql></rollback></changeSet>
 </databaseChangeLog>

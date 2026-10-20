@@ -44,7 +44,7 @@ Agent 接入码由数据库保存 SHA-256 哈希，明文仅在创建响应中�
 
 ## 认证、授权与读取
 
-Web 使用服务端不透明 Cookie 会话与 CSRF 校验，已替换脚手架 Basic 认证；详见 [Web 平台 API](web-platform.md)。管理员创建接入码需已完成首次改密；安装器兑换端点只接受无浏览器 Cookie 的 Bearer 接入码，不能访问 Web 管理资源。Agent 使用独立 mTLS 身份。
+Web 使用服务端不透明 Cookie 会话与 CSRF 校验，已替换脚手架 Basic 认证；详见 [Web 平台 API](web-platform.md)。管理员可在“账号与会话”创建短期、可撤销且带范围的 API 密钥；Bearer 密钥只开放明确授权的 Kubernetes 服务清单和探测读取端点。管理员创建接入码需已完成首次改密；安装器兑换端点只接受无浏览器 Cookie 的一次性 Bearer 接入码，不能访问 Web 管理资源。Agent 使用独立 mTLS 身份。
 
 Core 根据已认证主体执行管理员访问控制，Agent/root Helper 再验证 mTLS 身份、IPC 调用方和固定操作参数。网络操作要求先创建 30–300 秒定时回滚，再由仅获 `CAP_NET_ADMIN` 的瞬时 worker 应用并核验；不接受命令文本。SSH 固定操作必须使用主机资产的加密凭据及已确认 host key，unit 名称通过格式校验；日志查询最多 100 行、24 KiB，审计记录原因但不保存日志正文。`supportedActions` 根据 Agent 主机级能力与观测新鲜度生成，只用于界面提示；操作执行时再次校验 Agent、Helper 和所需主机级能力。操作记录的 `requestedBy` 由 Core 填充，不接受客户端提供。
 

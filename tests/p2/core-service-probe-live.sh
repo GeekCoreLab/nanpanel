@@ -7,6 +7,7 @@ cd "$repo_root"
 core_url="${NANPANEL_P2_CORE_URL:-}"
 username="${NANPANEL_P2_ADMIN_USERNAME:-admin}"
 password="${NANPANEL_P2_ADMIN_PASSWORD:-}"
+api_key="${NANPANEL_P2_API_KEY:-}"
 cluster_id="${NANPANEL_P2_CLUSTER_ID:-k3s-1}"
 namespace="${NANPANEL_P2_NAMESPACE:-nanpanel-mesh}"
 service_name="${NANPANEL_P2_PROBE_SERVICE:-mesh-probe-target}"
@@ -16,7 +17,14 @@ target_port="${NANPANEL_P2_PROBE_PORT:-8080}"
   echo 'Set NANPANEL_P2_CORE_URL to the HTTPS Core origin without a trailing slash.' >&2
   exit 2
 }
-[[ -n "$password" ]] || { echo 'Set NANPANEL_P2_ADMIN_PASSWORD.' >&2; exit 2; }
+[[ -n "$password" || -n "$api_key" ]] || {
+  echo 'Set NANPANEL_P2_API_KEY or NANPANEL_P2_ADMIN_PASSWORD.' >&2
+  exit 2
+}
+if [[ -n "$api_key" && ! "$api_key" =~ ^npk_[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}$ ]]; then
+  echo 'NANPANEL_P2_API_KEY has an invalid format.' >&2
+  exit 2
+fi
 [[ "$cluster_id" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]] || {
   echo 'NANPANEL_P2_CLUSTER_ID is invalid.' >&2
   exit 2
@@ -50,7 +58,12 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 umask 077
-python3 - "$work/login.json" <<'PY'
+if [[ -n "$api_key" ]]; then
+  printf 'header = "Authorization: Bearer %s"\n' "$api_key" >"$work/auth.conf"
+  chmod 600 "$work/auth.conf"
+  auth_args=(--config "$work/auth.conf")
+else
+  python3 - "$work/login.json" <<'PY'
 import json
 import os
 import sys
@@ -61,50 +74,52 @@ with open(sys.argv[1], "w", encoding="utf-8") as handle:
         "password": os.environ["NANPANEL_P2_ADMIN_PASSWORD"],
     }, handle)
 PY
-chmod 600 "$work/login.json"
+  chmod 600 "$work/login.json"
 
-curl --noproxy '*' --silent --show-error --fail --max-time 15 \
-  --cookie-jar "$work/cookies" \
-  "$core_url/api/v1/auth/csrf" -o "$work/csrf.json"
-csrf="$(jq -er '.csrfToken' "$work/csrf.json")"
-curl --noproxy '*' --silent --show-error --fail --max-time 15 \
-  --cookie "$work/cookies" --cookie-jar "$work/cookies" \
-  --header "X-CSRF-Token: $csrf" -H 'Content-Type: application/json' \
-  --data-binary "@$work/login.json" \
-  "$core_url/api/v1/auth/login" -o "$work/login-response.json"
-csrf="$(jq -er '.csrfToken' "$work/login-response.json")"
-chmod 600 "$work/cookies"
+  curl --noproxy '*' --silent --show-error --fail --max-time 15 \
+    --cookie-jar "$work/cookies" \
+    "$core_url/api/v1/auth/csrf" -o "$work/csrf.json"
+  csrf="$(jq -er '.csrfToken' "$work/csrf.json")"
+  curl --noproxy '*' --silent --show-error --fail --max-time 15 \
+    --cookie "$work/cookies" --cookie-jar "$work/cookies" \
+    --header "X-CSRF-Token: $csrf" -H 'Content-Type: application/json' \
+    --data-binary "@$work/login.json" \
+    "$core_url/api/v1/auth/login" -o "$work/login-response.json"
+  csrf="$(jq -er '.csrfToken' "$work/login-response.json")"
+  chmod 600 "$work/cookies"
+  auth_args=(--cookie "$work/cookies" --cookie-jar "$work/cookies"
+    --header "X-CSRF-Token: $csrf")
+fi
 
 inventory_path="$work/inventory.json"
 probes_path="$work/probes.json"
 target_path="$work/probe-target.json"
 expected_source="kubernetes:${cluster_id}"
 accepted=0
-for attempt in 1 2 3 4 5; do
+for ((attempt = 1; attempt <= 40; attempt++)); do
   curl --noproxy '*' --silent --show-error --fail --max-time 30 \
-    --cookie "$work/cookies" --cookie-jar "$work/cookies" \
-    --header "X-CSRF-Token: $csrf" -H 'Content-Length: 0' -X POST \
-    "$core_url/api/v1/kubernetes/service-inventory/refresh" -o "$inventory_path"
+    "${auth_args[@]}" \
+    "$core_url/api/v1/kubernetes/service-inventory" -o "$inventory_path"
   jq -e --arg source "$expected_source" --arg namespace "$namespace" \
     '.sourceId == $source and .namespace == $namespace and (.observedAt | type == "string")' \
     "$inventory_path" >/dev/null || {
       echo 'Core returned an unexpected inventory source or namespace.' >&2
       exit 1
     }
-  jq -ce --arg service "$service_name" --argjson port "$target_port" '
+  if ! jq -ce --arg service "$service_name" --argjson port "$target_port" '
     [.services[] | select(.serviceName == $service) | .endpoints[] |
       select(.ready == true and (.addressType == "IPv4" or .addressType == "IPv6")
         and .targetKind == "Pod" and (.targetName | type == "string")
         and any(.ports[]; .protocol == "TCP" and .port == $port))] | first
-  ' "$inventory_path" >"$target_path" || {
-    echo 'Core inventory has no Ready private TCP EndpointSlice target for the requested fixture.' >&2
-    exit 1
-  }
+  ' "$inventory_path" >"$target_path"; then
+    sleep 2
+    continue
+  fi
   endpoint_address="$(jq -er '.address' "$target_path")"
   inventory_observed="$(jq -er '.observedAt' "$inventory_path")"
 
   curl --noproxy '*' --silent --show-error --fail --max-time 15 \
-    --cookie "$work/cookies" --cookie-jar "$work/cookies" \
+    "${auth_args[@]}" \
     "$core_url/api/v1/kubernetes/service-probes" -o "$probes_path"
   if jq -e --arg source "$expected_source" --arg service "$service_name" \
     --arg address "$endpoint_address" --argjson port "$target_port" \

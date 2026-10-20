@@ -134,8 +134,9 @@ open.
 ## Core service inventory and probe wiring
 
 After the Core image with Kubernetes discovery is running and the probe switch
-is enabled, configure `NANPANEL_P2_CORE_URL` and
-`NANPANEL_P2_ADMIN_PASSWORD` in the ignored local `.env`, then run:
+is enabled, create a `kubernetes:inventory:read` API key from the live console's
+“账号与会话” page. Configure `NANPANEL_P2_CORE_URL` and
+`NANPANEL_P2_API_KEY` in the ignored local `.env`, then run:
 
 ```sh
 test_core_ca="$(mktemp)"
@@ -150,11 +151,15 @@ set +a
 ./tests/p2/core-service-probe-live.sh
 ```
 
-The script logs in over HTTPS, refreshes the server-pinned inventory, and
-requires a `SUCCEEDED` persisted TCP result matching the Ready non-injected
-`mesh-probe-target` EndpointSlice and inventory observation time. Credentials,
-cookies, and endpoint addresses stay in a mode-600 temporary directory and are
-removed on exit; output includes the target Pod and timestamps but omits its IP.
+The script reads the server-pinned inventory and persisted probe snapshot over
+HTTPS using the limited Bearer key, and requires a `SUCCEEDED` TCP result
+matching the Ready non-injected `mesh-probe-target` EndpointSlice and inventory
+observation time. The key file and endpoint addresses stay in a mode-600
+temporary directory and are removed on exit; output includes the target Pod
+and timestamps but omits its IP. The script also accepts
+`NANPANEL_P2_ADMIN_PASSWORD` for cookie-session compatibility. The read-only
+key needs no refresh permission because Core refreshes inventory in the
+background.
 
 The K3s manifests define a dedicated `nanpanel-core` ServiceAccount and pin the
 discovery target to `k3s-1` / `nanpanel-mesh`, with discovery and probes disabled
@@ -166,8 +171,8 @@ list, and Secret get. See the [live RBAC and mesh record](runs/2026-10-20-istio-
 The current test Core runs `sha-f0d804ba3bac19a0e501317865d38129068c72e7` under
 the dedicated ServiceAccount with discovery and probes enabled. Core has
 persisted a `SUCCEEDED` TCP/8080 probe matching the Ready fixture endpoint and
-its inventory observation time. The authenticated API run is still pending a
-valid current administrator credential; see the [Core probe run record](runs/2026-10-20-core-service-probe-live.md).
+its inventory observation time. The authenticated API run is still pending an
+API key created by a current administrator session; see the [Core probe run record](runs/2026-10-20-core-service-probe-live.md).
 The fixture's
 `mesh-probe-target` workload opts out of sidecar injection and provides a Ready
 private TCP/8080 EndpointSlice for Core's raw TCP probe. The Core namespace remains
@@ -187,7 +192,7 @@ success target while Core is outside the mesh.
 P2 remains incomplete until authenticated Core inventory and probe API
 acceptance has current evidence. The Core-side discovery, TCP connection, and
 database persistence have passed on the live test cluster; API acceptance is
-pending a valid current administrator login. The live NetBird Provider run
+pending a scoped API key created by a current administrator session. The live NetBird Provider run
 validates a disposable tenant and does not exercise the Core operation API.
 The public gateway test proves the live test route but does not provide
 Core-managed production reconciliation.

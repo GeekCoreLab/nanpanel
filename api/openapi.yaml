@@ -2,7 +2,7 @@ openapi: 3.1.1
 info:
   title: NaNPanel 管理 API
   version: 0.1.0-draft.2
-  description: 契约优先的 Web 平台 API。管理操作使用 HttpOnly Cookie 会话和写请求 CSRF；Agent 使用独立的一次性接入码、客户端证书和 mTLS/gRPC。主机资产保存 AES-GCM 加密的 SSH 密码或私钥，确认 host key 后可固定安装 Agent，并可开启经一次性 WebSocket 票据授权的交互式 SSH 堡垒 Shell；会话、命令行和有界终端录像独立持久化。Helper 暴露固定类型操作并校验输入参数、目标路径和运行条件；Core 使用用户权限、主机身份校验、审计及幂等任务管理控制操作。不接收任意 Helper 命令。Agent 安装时签名的故障切换端点清单已实现；真实 DNS/故障验收仍待完成。
+  description: 契约优先的 Web 平台 API。管理操作使用 HttpOnly Cookie 会话和写请求 CSRF；短期 API 密钥仅授权明确列出的 Kubernetes 服务网络接口。Agent 使用独立的一次性接入码、客户端证书和 mTLS/gRPC。主机资产保存 AES-GCM 加密的 SSH 密码或私钥，确认 host key 后可固定安装 Agent，并可开启经一次性 WebSocket 票据授权的交互式 SSH 堡垒 Shell；会话、命令行和有界终端录像独立持久化。Helper 暴露固定类型操作并校验输入参数、目标路径和运行条件；Core 使用用户权限、主机身份校验、审计及幂等任务管理控制操作。不接收任意 Helper 命令。Agent 安装时签名的故障切换端点清单已实现；真实 DNS/故障验收仍待完成。
   x-status: draft
 servers:
 - url: http://127.0.0.1:8080
@@ -25,7 +25,7 @@ tags:
 - name: Operations
   description: 持久化异步操作与结果
 - name: Auth
-  description: Web 登录、当前身份、密码与本人会话
+  description: Web 登录、当前身份、密码、本人会话与受限 API 密钥
 - name: AdminOverview
   description: 管理仪表盘
 - name: AdminUsers
@@ -439,10 +439,11 @@ paths:
       tags: [ServiceNetwork]
       operationId: getKubernetesServiceInventory
       summary: 查询限定 namespace 的 Kubernetes 服务清单
-      description: 读取 Core 按固定集群身份与 namespace 持久化的最近 Service/EndpointSlice 快照，不接受客户端传入集群、namespace 或 selector。需显式启用 NANPANEL_KUBERNETES_DISCOVERY_ENABLED 并配置身份与 namespace；后台每 60 秒刷新。历史保留和主动服务探测仍未实现。
+      description: 读取 Core 按固定集群身份与 namespace 持久化的最近 Service/EndpointSlice 快照，不接受客户端传入集群、namespace 或 selector。需显式启用 NANPANEL_KUBERNETES_DISCOVERY_ENABLED 并配置身份与 namespace；后台每 60 秒刷新。Bearer API 密钥必须带 kubernetes:inventory:read，且只可访问本组服务网络读取接口。
       x-implementation-status: implemented
       security:
       - cookieAuth: []
+      - apiKeyAuth: []
       responses:
         '200':
           description: 当前 namespace 内 Service 和 EndpointSlice 的受限快照。
@@ -469,10 +470,12 @@ paths:
       tags: [ServiceNetwork]
       operationId: refreshKubernetesServiceInventory
       summary: 手动刷新 Kubernetes 服务清单
-      description: 使用 Core 的 Kubernetes 身份，对服务端固定的集群和 namespace 执行只读列表查询并持久化最新快照。写请求需要 Cookie 会话和 CSRF Token。
+      description: 使用 Core 的 Kubernetes 身份，对服务端固定的集群和 namespace 执行只读列表查询并持久化最新快照。Cookie 会话写请求需要 CSRF Token；Bearer API 密钥须同时具有 kubernetes:inventory:read 和 kubernetes:inventory:refresh。
       x-implementation-status: implemented
       security:
       - cookieAuth: []
+        csrfToken: []
+      - apiKeyAuth: []
       responses:
         '200':
           description: 已采集并持久化的 Service/EndpointSlice 快照。
@@ -505,6 +508,7 @@ paths:
       x-implementation-status: implemented
       security:
       - cookieAuth: []
+      - apiKeyAuth: []
       responses:
         '200':
           description: 探测开关、最新探测时间和有界目标结果。
@@ -1743,6 +1747,87 @@ paths:
           $ref: '#/components/responses/InternalError'
         '404':
           $ref: '#/components/responses/NotFound'
+  /api/v1/auth/api-keys:
+    get:
+      tags: [Auth]
+      operationId: listOwnApiKeys
+      summary: 列出本人 API 密钥
+      description: 返回名称、范围和生命周期元数据，不返回密钥摘要或原始值。仅限已完成首次改密的管理员 Cookie 会话。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 本人 API 密钥列表。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Auth]
+      operationId: createApiKey
+      summary: 创建受限 API 密钥
+      description: 仅限已完成首次改密的管理员 Cookie 会话并校验 CSRF。有效期为 1–90 天，最多 20 个有效密钥；原始值仅在此响应显示一次，服务端只保存 SHA-256 摘要。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateApiKeyRequest'
+            example:
+              name: p2-inventory-read
+              scopes: [kubernetes:inventory:read]
+              expiresInDays: 30
+      responses:
+        '201':
+          description: 已创建。token 字段仅在本次响应中提供。
+          headers:
+            Cache-Control:
+              $ref: '#/components/headers/NoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreatedApiKey'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/BadRequest'
+  /api/v1/auth/api-keys/{keyId}:
+    parameters:
+    - name: keyId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    delete:
+      tags: [Auth]
+      operationId: revokeApiKey
+      summary: 撤销本人 API 密钥
+      description: 撤销后立即拒绝后续 Bearer 请求。只能撤销本人密钥；重复撤销成功返回 204。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      responses:
+        '204':
+          description: 密钥已撤销。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/CsrfRejected'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /api/v1/auth/csrf:
     get:
       tags:
@@ -2878,6 +2963,11 @@ components:
       in: cookie
       name: nanpanel_session
       description: 服务端保存的随机不透明会话；Secure、HttpOnly、SameSite=Lax、Path=/，不设置 Domain。生产仅 HTTPS；具体预认证/登录/续期语义见 API README。
+    apiKeyAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: NaNPanel API key
+      description: 管理员通过 /api/v1/auth/api-keys 创建的受限密钥。仅支持明确授权的 Kubernetes 服务网络接口；短期有效，可撤销，服务端只保存摘要。
     preAuthCookie:
       type: apiKey
       in: cookie
@@ -4860,6 +4950,75 @@ components:
         expiresAt:
           type: string
           format: date-time
+    CreateApiKeyRequest:
+      type: object
+      additionalProperties: false
+      required: [name, scopes, expiresInDays]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+        scopes:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            enum: [kubernetes:inventory:read, kubernetes:inventory:refresh]
+        expiresInDays:
+          type: integer
+          minimum: 1
+          maximum: 90
+    ApiKey:
+      type: object
+      additionalProperties: false
+      required: [id, name, scopes, createdAt, expiresAt, revokedAt, lastUsedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        scopes:
+          type: array
+          items:
+            type: string
+            enum: [kubernetes:inventory:read, kubernetes:inventory:refresh]
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        revokedAt:
+          type: [string, 'null']
+          format: date-time
+        lastUsedAt:
+          type: [string, 'null']
+          format: date-time
+    ApiKeyList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/ApiKey'
+    CreatedApiKey:
+      type: object
+      additionalProperties: false
+      required: [item, token]
+      properties:
+        item:
+          $ref: '#/components/schemas/ApiKey'
+        token:
+          type: string
+          pattern: '^npk_[0-9a-f-]{36}\.[A-Za-z0-9_-]{43}$'
+          writeOnly: true
+          description: 原始 API 密钥；仅在创建响应中返回一次。
     LoginRequest:
       type: object
       additionalProperties: false

@@ -258,6 +258,15 @@ class SystemResourceTest {
     String active = login.cookie("nanpanel_session"),
            token = login.path("csrfToken");
     assertTrue(login.header("Set-Cookie").contains("Max-Age=86400"));
+    given().cookie("nanpanel_session", active)
+        .header("X-CSRF-Token", token)
+        .contentType("application/json")
+        .body(Map.of("name", "blocked-before-password-change",
+            "scopes", java.util.List.of("kubernetes:inventory:read"),
+            "expiresInDays", 30))
+        .post("/api/v1/auth/api-keys")
+        .then().statusCode(403)
+        .body("code", equalTo("PASSWORD_CHANGE_REQUIRED"));
     var persistedSession = store.transaction(c -> AuthStore.query(
         c, "SELECT created_at,absolute_expires FROM web_session WHERE token_hash=?",
         AuthStore.digest(active)).getFirst());
@@ -315,6 +324,71 @@ class SystemResourceTest {
             .body("user.mustChangePassword", equalTo(false))
             .extract();
     String restoredCookie = restored.cookie("nanpanel_session");
+    var createdReadKey = given()
+        .cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .contentType("application/json")
+        .body(Map.of("name", "p2-inventory-read",
+            "scopes", java.util.List.of("kubernetes:inventory:read"),
+            "expiresInDays", 30))
+        .post("/api/v1/auth/api-keys")
+        .then().statusCode(201).extract();
+    String readKey = createdReadKey.path("token");
+    String readKeyId = createdReadKey.path("item.id");
+    assertTrue(readKey.matches("npk_[0-9a-f-]{36}\\.[A-Za-z0-9_-]{43}"));
+    assertNull(createdReadKey.path("item.token"));
+    var storedReadKey = store.transaction(c -> AuthStore.query(c,
+        "SELECT token_hash,scopes,last_used_at FROM api_key WHERE id=?", readKeyId)
+        .getFirst());
+    assertEquals(AuthStore.digest(readKey), storedReadKey.get("token_hash"));
+    assertEquals("kubernetes:inventory:read", storedReadKey.get("scopes"));
+    assertNull(storedReadKey.get("last_used_at"));
+    given().header("Authorization", "Bearer " + readKey)
+        .get("/api/v1/kubernetes/service-inventory")
+        .then().statusCode(503).body("code", equalTo("KUBERNETES_DISCOVERY_DISABLED"));
+    given().header("Authorization", "Bearer " + readKey)
+        .get("/api/v1/kubernetes/service-probes")
+        .then().statusCode(503).body("code", equalTo("KUBERNETES_DISCOVERY_DISABLED"));
+    given().header("Authorization", "Bearer " + readKey)
+        .get("/api/v1/system")
+        .then().statusCode(403).body("code", equalTo("API_KEY_SCOPE_REJECTED"));
+    given().header("Authorization", "Bearer " + readKey)
+        .post("/api/v1/kubernetes/service-inventory/refresh")
+        .then().statusCode(403).body("code", equalTo("API_KEY_SCOPE_REJECTED"));
+    var usedReadKey = store.transaction(c -> AuthStore.query(c,
+        "SELECT last_used_at FROM api_key WHERE id=?", readKeyId).getFirst());
+    assertNotNull(usedReadKey.get("last_used_at"));
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .delete("/api/v1/auth/api-keys/" + readKeyId)
+        .then().statusCode(204);
+    given().header("Authorization", "Bearer " + readKey)
+        .get("/api/v1/kubernetes/service-inventory")
+        .then().statusCode(401);
+
+    var createdRefreshKey = given()
+        .cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .contentType("application/json")
+        .body(Map.of("name", "p2-inventory-refresh",
+            "scopes", java.util.List.of("kubernetes:inventory:read",
+                "kubernetes:inventory:refresh"),
+            "expiresInDays", 30))
+        .post("/api/v1/auth/api-keys")
+        .then().statusCode(201).extract();
+    String refreshKey = createdRefreshKey.path("token");
+    String refreshKeyId = createdRefreshKey.path("item.id");
+    given().header("Authorization", "Bearer " + refreshKey)
+        .post("/api/v1/kubernetes/service-inventory/refresh")
+        .then().statusCode(503).body("code", equalTo("KUBERNETES_DISCOVERY_DISABLED"));
+    store.transaction(c -> {
+      AuthStore.update(c,
+          "UPDATE api_key SET expires_at=created_at+1 WHERE id=?", refreshKeyId);
+      return null;
+    });
+    given().header("Authorization", "Bearer " + refreshKey)
+        .get("/api/v1/kubernetes/service-probes")
+        .then().statusCode(401);
     given()
         .cookie("nanpanel_session", restoredCookie)
         .get("/api/v1/system")

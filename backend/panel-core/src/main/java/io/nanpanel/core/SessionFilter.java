@@ -17,6 +17,8 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 @Priority(1000)
 public class SessionFilter
     implements ContainerRequestFilter, ContainerResponseFilter {
+  private record ApiKeyPrincipal(Map<String, Object> row, Set<String> scopes) {}
+
   @Inject AuthStore store;
   @Inject io.vertx.core.http.HttpServerRequest http;
   @Inject
@@ -60,6 +62,73 @@ public class SessionFilter
     });
     return fail(403, code, detail);
   }
+  private ApiKeyPrincipal apiKey(String token) {
+    if (token == null || token.length() > 128 || !token.startsWith("npk_"))
+      return null;
+    int separator = token.indexOf('.', 4);
+    if (separator < 0 || separator == 4 || separator == token.length() - 1)
+      return null;
+    String id = token.substring(4, separator);
+    String secret = token.substring(separator + 1);
+    try {
+      if (!UUID.fromString(id).toString().equals(id) ||
+          !secret.matches("[A-Za-z0-9_-]{43}"))
+        return null;
+    } catch (IllegalArgumentException e) {
+      return null;
+    }
+    return store.transaction(c -> {
+      long now = System.currentTimeMillis();
+      var rows = query(c, "SELECT * FROM api_key WHERE id=?", id);
+      if (rows.isEmpty())
+        return null;
+      var row = rows.getFirst();
+      byte[] supplied = digest(token).getBytes(
+          java.nio.charset.StandardCharsets.US_ASCII);
+      byte[] stored = String.valueOf(row.get("token_hash")).getBytes(
+          java.nio.charset.StandardCharsets.US_ASCII);
+      if (!java.security.MessageDigest.isEqual(supplied, stored) ||
+          row.get("revoked_at") != null ||
+          AuthResource.number(row, "expires_at") <= now)
+        return null;
+      update(c, "UPDATE api_key SET last_used_at=? WHERE id=?", now, id);
+      Set<String> scopes = new HashSet<>(Arrays.asList(
+          String.valueOf(row.get("scopes")).split(",")));
+      return new ApiKeyPrincipal(row, Set.copyOf(scopes));
+    });
+  }
+  private Set<String> requiredApiKeyScopes(String path, String method) {
+    if (method.equals("GET") && Set.of(
+        "api/v1/kubernetes/service-inventory",
+        "api/v1/kubernetes/service-probes").contains(path))
+      return Set.of(ApiKeyResource.INVENTORY_READ);
+    if (method.equals("POST") && path.equals(
+        "api/v1/kubernetes/service-inventory/refresh"))
+      return Set.of(ApiKeyResource.INVENTORY_READ,
+                    ApiKeyResource.INVENTORY_REFRESH);
+    return null;
+  }
+  private WebApplicationException invalidApiKey() {
+    limit("security:" + Objects.toString(clientIp(), "unknown"));
+    store.transaction(c -> {
+      audit(c, null, "security.api_key.invalid", "api_key", null,
+            "DENIED", clientIp(), "API 密钥无效或已失效");
+      return null;
+    });
+    return fail(401, "UNAUTHENTICATED", "请登录以继续");
+  }
+  private WebApplicationException rejectApiKeyScope(
+      ApiKeyPrincipal principal) {
+    limit("security:" + Objects.toString(clientIp(), "unknown"));
+    String keyId = String.valueOf(principal.row().get("id"));
+    String actor = String.valueOf(principal.row().get("user_id"));
+    store.transaction(c -> {
+      audit(c, actor, "security.api_key.scope.reject", "api_key", keyId,
+            "DENIED", clientIp(), "API 密钥范围不允许此请求");
+      return null;
+    });
+    return fail(403, "API_KEY_SCOPE_REJECTED", "API 密钥无权访问此接口");
+  }
   @Override
   public void filter(ContainerRequestContext r) {
     String path = r.getUriInfo().getPath().replaceFirst("^/", "");
@@ -96,30 +165,51 @@ public class SessionFilter
         r.getCookies().get(COOKIE) != null)
       limit("admin:" + digest(r.getCookies().get(COOKIE).getValue()));
     var cookie = r.getCookies().get(COOKIE);
-    Map<String, Object> session = store.transaction(c -> {
-      long now = System.currentTimeMillis();
-      update(c,
-             "DELETE FROM web_session WHERE idle_expires<=? OR "
-                 + "absolute_expires<=?",
-             now, now);
-      if (cookie == null)
-        return null;
-      var rows = query(c, "SELECT * FROM web_session WHERE token_hash=?",
-                       digest(cookie.getValue()));
-      if (rows.isEmpty())
-        return null;
-      var s = rows.getFirst();
-      if (s.get("user_id") != null) {
-        long expiry = Math.min(now + 1800000, number(s, "absolute_expires"));
+    ApiKeyPrincipal principal = null;
+    Map<String, Object> session;
+    String authorization = r.getHeaderString("Authorization");
+    if (authorization != null && authorization.startsWith("Bearer ")) {
+      if (cookie != null)
+        throw reject(r, "AUTHENTICATION_CONFLICT",
+                     "请只使用一种认证方式", "security.auth.conflict",
+                     "请求同时携带 Cookie 和 Bearer 凭据");
+      principal = apiKey(authorization.substring("Bearer ".length()));
+      if (principal == null)
+        throw invalidApiKey();
+      Set<String> required = requiredApiKeyScopes(path, r.getMethod());
+      if (required == null || !principal.scopes().containsAll(required))
+        throw rejectApiKeyScope(principal);
+      session = new HashMap<>();
+      session.put("id", principal.row().get("id"));
+      session.put("user_id", principal.row().get("user_id"));
+      session.put("api_key_id", principal.row().get("id"));
+    } else {
+      session = store.transaction(c -> {
+        long now = System.currentTimeMillis();
         update(c,
-               "UPDATE web_session SET last_seen=?,idle_expires=? WHERE id=?",
-               now, expiry, s.get("id"));
-        s.put("last_seen", now);
-        s.put("idle_expires", expiry);
-      }
-      return s;
-    });
+               "DELETE FROM web_session WHERE idle_expires<=? OR "
+                   + "absolute_expires<=?",
+               now, now);
+        if (cookie == null)
+          return null;
+        var rows = query(c, "SELECT * FROM web_session WHERE token_hash=?",
+                         digest(cookie.getValue()));
+        if (rows.isEmpty())
+          return null;
+        var s = rows.getFirst();
+        if (s.get("user_id") != null) {
+          long expiry = Math.min(now + 1800000, number(s, "absolute_expires"));
+          update(c,
+                 "UPDATE web_session SET last_seen=?,idle_expires=? WHERE id=?",
+                 now, expiry, s.get("id"));
+          s.put("last_seen", now);
+          s.put("idle_expires", expiry);
+        }
+        return s;
+      });
+    }
     r.setProperty("session", session);
+    r.setProperty("apiKey", principal);
     if (csrf)
       return;
     if (session == null || (!login && session.get("user_id") == null)) {
@@ -131,7 +221,7 @@ public class SessionFilter
       });
       throw fail(401, "UNAUTHENTICATED", "请登录以继续");
     }
-    if (write && !java.security.MessageDigest.isEqual(
+    if (principal == null && write && !java.security.MessageDigest.isEqual(
                      String.valueOf(session.get("csrf")).getBytes(),
                      Optional.ofNullable(r.getHeaderString("X-CSRF-Token"))
                          .orElse("")

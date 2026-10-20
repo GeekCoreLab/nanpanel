@@ -1,12 +1,12 @@
 # Web 平台登录与管理 API
 
-版本：`0.1.0-draft.2`。接口和 DTO 统一定义在 [openapi.yaml](openapi.yaml)，本文件补充交互与安全语义。`/auth/*` 已实现持久化账号、Cookie 会话、CSRF、本人改密与会话撤销；管理员账号、内置角色、平台设置、认证/管理审计查询、主机和 Agent 只读查询、systemd unit 观测及仪表盘统计也已实现；Agent mTLS 接入、systemd 重启任务及有界 journal 查询已实现。主机资产可保存 AES-GCM 加密 SSH 凭据，并通过一次性 WebSocket 票据开启受审计的堡垒终端；证书吊销/续期仍待实现。密码采用随机盐 PBKDF2-HMAC-SHA256（600000 次）；常见密码当前使用本地基础拒绝列表，尚未接入完整泄露密码库。登录限流为单实例内存窗口，每来源地址及规范化账号每分钟 20 次。生产配置 `NANPANEL_ORIGIN` 为对外同源 HTTPS 地址；本地开发仅 dev profile 关闭 Secure。
+版本：`0.1.0-draft.2`。接口和 DTO 统一定义在 [openapi.yaml](openapi.yaml)，本文件补充交互与安全语义。`/auth/*` 已实现持久化账号、Cookie 会话、CSRF、本人改密、会话撤销和受限 API 密钥；管理员账号、内置角色、平台设置、认证/管理审计查询、主机和 Agent 只读查询、systemd unit 观测及仪表盘统计也已实现；Agent mTLS 接入、systemd 重启任务及有界 journal 查询已实现。主机资产可保存 AES-GCM 加密 SSH 凭据，并通过一次性 WebSocket 票据开启受审计的堡垒终端；证书吊销/续期仍待实现。密码采用随机盐 PBKDF2-HMAC-SHA256（600000 次）；常见密码当前使用本地基础拒绝列表，尚未接入完整泄露密码库。登录限流为单实例内存窗口，每来源地址及规范化账号每分钟 20 次。生产配置 `NANPANEL_ORIGIN` 为对外同源 HTTPS 地址；本地开发仅 dev profile 关闭 Secure。
 
 ## 范围
 
 “平台管理”包括管理员账号、本人会话、内置权限、仪表盘、非机密设置和审计；主机运维沿用已有 Hosts / Agents / SystemServices / Operations 接口。平台账号与 Linux 用户独立。
 
-本版仅内置 `ADMIN`，允许管理多个管理员账号；不开放公开注册、自定义角色、租户、忘记密码邮件、MFA、OIDC 或 API Token。首次管理员由部署侧显式 bootstrap，禁止默认密码和匿名安装接口；落地账号持久化后，部署密码不得在每次重启时覆盖已修改密码。需要另行设计部署侧恢复流程。
+本版仅内置 `ADMIN`，允许管理多个管理员账号；不开放公开注册、自定义角色、租户、忘记密码邮件、MFA 或 OIDC。首次管理员由部署侧显式 bootstrap，禁止默认密码和匿名安装接口；落地账号持久化后，部署密码不得在每次重启时覆盖已修改密码。需要另行设计部署侧恢复流程。
 
 ## 登录与会话
 
@@ -19,6 +19,10 @@
 | PUT | `/api/v1/auth/password` | 验证旧密码并修改本人密码 |
 | GET | `/api/v1/auth/sessions` | 列出本人有效会话 |
 | DELETE | `/api/v1/auth/sessions/{sessionId}` | 撤销本人指定会话 |
+| GET / POST | `/api/v1/auth/api-keys` | 列出本人密钥 / 创建新密钥 |
+| DELETE | `/api/v1/auth/api-keys/{keyId}` | 撤销本人密钥 |
+
+API 密钥创建需要 5 分钟内重新验证密码、Cookie 会话和 CSRF；每个管理员最多 20 个有效密钥，每个密钥必须设置 1–90 天有效期。`kubernetes:inventory:read` 只允许读取 Kubernetes 服务清单和探测记录；刷新需要同时授予 `kubernetes:inventory:refresh`。Bearer 密钥不能访问其他业务 API、登录/会话接口或密钥管理端点。创建响应只显示一次原始密钥，数据库只存 SHA-256 摘要；列表不会返回密钥值或摘要，撤销立即生效并保留撤销时间及最近使用时间。密钥操作会写入审计。
 
 浏览器首次登录流程：
 

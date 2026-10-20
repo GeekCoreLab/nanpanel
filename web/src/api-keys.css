@@ -1,0 +1,31 @@
+.check-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 14px 0;
+  color: #6b7b93;
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.check-row input[type="checkbox"] {
+  min-width: auto;
+  margin-top: 2px;
+  padding: 0;
+}
+
+.api-key-value {
+  display: block;
+  overflow-wrap: anywhere;
+  user-select: all;
+  margin: 10px 0 14px;
+  padding: 11px;
+  border: 1px solid #dfe6ef;
+  border-radius: 6px;
+  background: #fff;
+  color: #394c65;
+}
+
+.settings-card .api-key-value + button {
+  display: block;
+}
