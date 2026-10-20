@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { agentMaintenanceCommand } from '../src/lib/agent-maintenance.ts';
 
@@ -40,6 +41,8 @@ test('Agent update command pins the controller and updates Agent plus Helper', (
 test('Agent reinstall repairs its systemd unit without replacing enrollment identity', () => {
   const command = agentMaintenanceCommand('reinstall', origin, fingerprint, downloadPath, helperDownloadPath);
   assert.match(command, /EnvironmentFile=\/etc\/nanpanel-agent\/agent\.env/);
+  assert.match(command, /StateDirectory=nanpanel-agent/);
+  assert.match(command, /StateDirectoryMode=0750/);
   assert.match(command, /Requires=nanpanel-helper\.service/);
   assert.match(bashBody(command), /cat > \/etc\/systemd\/system\/nanpanel-helper\.service <<UNIT/);
   assert.match(bashBody(command), /cat > \/etc\/systemd\/system\/nanpanel-agent\.service <<'UNIT'/);
@@ -49,6 +52,17 @@ test('Agent reinstall repairs its systemd unit without replacing enrollment iden
   assert.ok(command.indexOf('/etc/nanpanel-agent/agent.env') < command.indexOf('/usr/local/bin/.nanpanel-agent.new'));
   assert.doesNotMatch(command, /agent-enrollments|Authorization: Bearer/);
   assertValidBash(command);
+});
+
+test('Agent installer grants its journal directory writable inside the strict sandbox', async () => {
+  const installer = await readFile(new URL('../public/agent-install.sh', import.meta.url), 'utf8');
+  const agentUnit = installer
+    .split("cat > /etc/systemd/system/nanpanel-agent.service <<'UNIT'\n")[1]
+    ?.split('\nUNIT\n')[0];
+  assert.ok(agentUnit, 'installer should write the Agent systemd unit');
+  assert.match(agentUnit, /^ProtectSystem=strict$/m);
+  assert.match(agentUnit, /^StateDirectory=nanpanel-agent$/m);
+  assert.match(agentUnit, /^StateDirectoryMode=0750$/m);
 });
 
 test('Agent maintenance command rejects insecure origins, foreign downloads and malformed pins', () => {
