@@ -826,6 +826,7 @@ class SystemResourceTest {
       String ticket = created.path("ticket");
       String marker = "nanpanel-bastion-e2e-" + UUID.randomUUID().toString().substring(0, 8);
       var frames = new java.util.concurrent.LinkedBlockingQueue<String>();
+      var socketClosed = new java.util.concurrent.atomic.AtomicBoolean();
       var listener = new java.net.http.WebSocket.Listener() {
         @Override
         public void onOpen(java.net.http.WebSocket webSocket) {
@@ -844,6 +845,13 @@ class SystemResourceTest {
         public void onError(java.net.http.WebSocket webSocket, Throwable error) {
           frames.offer("{\"type\":\"test-error\",\"message\":\"" +
               String.valueOf(error.getMessage()).replace("\"", "'") + "\"}");
+        }
+
+        @Override
+        public java.util.concurrent.CompletionStage<?> onClose(
+            java.net.http.WebSocket webSocket, int statusCode, String reason) {
+          socketClosed.set(true);
+          return null;
         }
       };
       java.net.URI terminalUri = java.net.URI.create(
@@ -883,8 +891,15 @@ class SystemResourceTest {
       }
       assertTrue(observedMarker, "Remote shell did not return the submitted command output: " +
           remoteOutput + "; frames=" + frames);
-      socket.sendClose(java.net.http.WebSocket.NORMAL_CLOSURE, "test complete")
-          .get(5, TimeUnit.SECONDS);
+      given().cookie("nanpanel_session", cookie).header("X-CSRF-Token", csrf)
+          .contentType("application/json")
+          .body(Map.of("reason", "Terminate the test shell after capturing output"))
+          .post("/api/v1/bastion-sessions/" + sessionId + "/terminate")
+          .then().statusCode(204);
+      long socketCloseDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+      while (!socketClosed.get() && System.nanoTime() < socketCloseDeadline)
+        Thread.sleep(50);
+      assertTrue(socketClosed.get(), "Force termination did not close the browser WebSocket");
 
       Map<String, Object> savedSession = Map.of();
       long closeDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
@@ -893,7 +908,8 @@ class SystemResourceTest {
             .get("/api/v1/bastion-sessions?hostId=" + hostId)
             .then().statusCode(200).extract();
         java.util.List<Map<String, Object>> sessions = listed.jsonPath().getList("items");
-        if (!sessions.isEmpty() && "CLOSED".equals(sessions.getFirst().get("status"))) {
+        if (!sessions.isEmpty() && "FAILED".equals(sessions.getFirst().get("status")) &&
+            "FORCE_TERMINATED".equals(sessions.getFirst().get("failureCode"))) {
           savedSession = sessions.getFirst();
           break;
         }
@@ -930,8 +946,9 @@ class SystemResourceTest {
           .contains("echo " + marker));
       var views = store.transaction(c -> AuthStore.query(c,
           "SELECT action FROM audit_event WHERE resource_id=? AND action IN " +
-              "('BASTION_COMMANDS_VIEWED','BASTION_RECORDING_VIEWED')", sessionId));
-      assertEquals(2, views.size());
+              "('BASTION_COMMANDS_VIEWED','BASTION_RECORDING_VIEWED'," +
+              "'BASTION_SESSION_FORCE_TERMINATED')", sessionId));
+      assertEquals(3, views.size());
     } finally {
       target.stop(true);
     }

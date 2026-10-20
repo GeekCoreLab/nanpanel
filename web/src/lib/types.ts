@@ -26,6 +26,7 @@ export type SshHostKeyProbeRequest = { reason: string };
 export type SshHostKeyProbe = { hostId: string; fingerprint: string; matchesTrustedFingerprint: boolean; requiresConfirmation: boolean; probedAt: string };
 export type SshHostKeyTrustRequest = { fingerprint: string; reason: string };
 export type CreateBastionSessionRequest = { reason: string; columns?: number; rows?: number };
+export type TerminateBastionSessionRequest = { reason: string };
 export type BastionSessionTicket = { sessionId: string; ticket: string; expiresAt: string; websocketPath: string };
 export type BastionSessionList = { items: (BastionSession)[] };
 export type BastionSession = { id: string; hostId: string; hostname: string; actorId: string; reason: string; targetAddress: string; targetPort: number; targetUsername: string; targetFingerprint: string; status: "PENDING" | "RUNNING" | "CLOSED" | "FAILED"; startedAt: string; finishedAt: string | null; durationMs: number | null; bytesIn: number; bytesOut: number; failureCode: string | null };

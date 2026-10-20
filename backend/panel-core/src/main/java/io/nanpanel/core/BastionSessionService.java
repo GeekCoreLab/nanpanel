@@ -222,6 +222,32 @@ public class BastionSessionService {
     });
   }
 
+  void forceTerminate(UUID sessionId, UUID operatorId, String reason, String clientIp) {
+    Instant now = Instant.now();
+    store.transaction(c -> {
+      var rows = query(c, "SELECT status,started_at FROM bastion_session WHERE id=? FOR UPDATE",
+          sessionId);
+      if (rows.isEmpty())
+        throw AuthResource.fail(404, "BASTION_SESSION_NOT_FOUND", "堡垒机会话不存在");
+      var row = rows.getFirst();
+      String status = String.valueOf(row.get("status"));
+      if (!List.of("PENDING", "RUNNING").contains(status))
+        throw AuthResource.fail(409, "BASTION_SESSION_NOT_ACTIVE", "堡垒会话已经结束");
+      Object started = row.get("started_at");
+      Instant startedAt = started instanceof Timestamp timestamp ? timestamp.toInstant()
+          : ((java.time.OffsetDateTime)started).toInstant();
+      long duration = "PENDING".equals(status) ? 0
+          : Math.max(0, now.toEpochMilli() - startedAt.toEpochMilli());
+      update(c, "UPDATE bastion_session SET status='FAILED',failure_code='FORCE_TERMINATED'," +
+              "finished_at=?,duration_ms=?,ticket_hash=NULL WHERE id=?",
+          Timestamp.from(now), duration, sessionId);
+      audit(c, operatorId.toString(), "BASTION_SESSION_FORCE_TERMINATED", "bastion_session",
+          sessionId.toString(), "SUCCEEDED", clientIp,
+          "管理员强制阻断 SSH 堡垒会话；原因：" + reason);
+      return null;
+    });
+  }
+
   List<Map<String, Object>> list(UUID hostId, int limit) {
     return store.transaction(c -> {
       String sql = "SELECT s.id,s.host_id,h.hostname,s.actor_id,s.reason,s.target_address," +

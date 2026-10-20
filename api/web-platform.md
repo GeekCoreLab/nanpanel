@@ -44,9 +44,9 @@ SSH 配置属于主机资产，不依赖本机 SSH alias。`PUT /api/v1/hosts/{h
 
 资产登记时可填写直连地址和凭据。完成指纹确认后，Agent 初始化端点可以省略 `alias`，Core 经固定安装脚本连接该资产、通过 SSH 标准输入传递一次性接入码，并等待 Agent 首次 mTLS 心跳；Controller Origin 仍必须由服务端配置为固定 HTTPS 地址。alias 方式保留兼容。未确认 host key 时不会尝试密码登录或私钥认证。
 
-管理员在主机详情里填写开启原因后调用 `POST /api/v1/hosts/{hostId}/ssh/sessions` 创建 60 秒有效、一次消费且绑定当前 Web 登录会话的票据。前端随后连接返回的 `websocketPath`，第一条文本帧提交 `{type:"auth",ticket,columns,rows}`；后续支持 `input`、`resize`、`keepalive` 和 `close`。Core 校验 WebSocket Origin，按已固定 host key 认证到目标并只打开 PTY shell，不提供 SFTP、端口转发或 SCP。撤销/到期的 Web 登录会话不能继续保持堡垒终端操作。
+管理员在主机详情里填写开启原因后调用 `POST /api/v1/hosts/{hostId}/ssh/sessions` 创建 60 秒有效、一次消费且绑定当前 Web 登录会话的票据。前端随后连接返回的 `websocketPath`，第一条文本帧提交 `{type:"auth",ticket,columns,rows}`；后续支持 `input`、`resize`、`keepalive` 和 `close`。Core 校验 WebSocket Origin，按已固定 host key 认证到目标并只打开 PTY shell，不提供 SFTP、端口转发或 SCP。部署反向代理必须透传 WebSocket `Upgrade` 和 `Connection` 头，并允许长连接；服务端响应 keepalive，避免空闲 Shell 被代理超时断开。撤销/到期的 Web 登录会话不能继续保持堡垒终端操作。
 
-堡垒会话数据单独保存于 `bastion_session`、`bastion_command`、`bastion_recording_chunk`：包括操作者、主机和目标快照、操作原因、开始/结束/退出状态、终端输入输出字节、已提交命令行及带毫秒偏移的 Base64 原始终端录像。命令行和录像块均使用 AES-GCM 加密，附加数据绑定会话、序号和方向；回放/查询时验证后解密。每会话录像上限 8 MiB、最多 100,000 块；已结束会话默认从开始时间起保留 30 天（未结束会话不清理，可用 `nanpanel.bastion.retention-days` 调整，范围 1–3650 天）。前端可查询会话、查看命令历史并回放终端输出。输入和输出可能含密码、令牌或业务数据；界面会提醒用户不要在此终端输入秘密，命令/录像只对管理员会话开放，不进入常规审计摘要。读取命令历史/录像本身会生成审计事件。命令历史从终端提交的输入行提取，不是 shell 进程的完整系统调用审计；需要更强的命令归因时应配合目标主机的 auditd/会话记录策略。
+堡垒会话数据单独保存于 `bastion_session`、`bastion_command`、`bastion_recording_chunk`：包括操作者、主机和目标快照、操作原因、开始/结束/退出状态、终端输入输出字节、已提交命令行及带毫秒偏移的 Base64 原始终端录像。命令行和录像块均使用 AES-GCM 加密，附加数据绑定会话、序号和方向；回放/查询时验证后解密。每会话录像上限 8 MiB、最多 100,000 块；已结束会话默认从开始时间起保留 30 天（未结束会话不清理，可用 `nanpanel.bastion.retention-days` 调整，范围 1–3650 天）。前端可查询会话、查看命令历史并回放终端输出。管理员可对 `PENDING` 或 `RUNNING` 会话调用 `POST /api/v1/bastion-sessions/{sessionId}/terminate` 强制阻断，必须填写原因；服务端撤销未消费票据或关闭目标 PTY，记录 `BASTION_SESSION_FORCE_TERMINATED` 审计事件，并以 `failureCode=FORCE_TERMINATED` 归档。输入和输出可能含密码、令牌或业务数据；界面会提醒用户不要在此终端输入秘密，命令/录像只对管理员会话开放，不进入常规审计摘要。读取命令历史/录像本身会生成审计事件。命令历史从终端提交的输入行提取，不是 shell 进程的完整系统调用审计；需要更强的命令归因时应配合目标主机的 auditd/会话记录策略。
 
 这些是拥有主机 SSH 登录身份的高权限操作。无论 alias 还是直连 SSH，平台权限不替代主机账户的最小权限配置；凭据和录像解密密钥必须跨 Core 实例一致。
 

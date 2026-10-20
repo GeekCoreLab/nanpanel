@@ -83,7 +83,7 @@ public class BastionTerminalWebSocket {
       switch (type) {
         case "input" -> input(terminal, event.path("data").asText());
         case "resize" -> resize(terminal, event.path("columns").asInt(), event.path("rows").asInt());
-        case "keepalive" -> { }
+        case "keepalive" -> send(connection, Map.of("type", "keepalive"));
         case "close" -> closeTerminal(connection, terminal, "CLOSED", null, null);
         default -> connection.closeAndAwait(new CloseReason(1003, "unknown message type"));
       }
@@ -101,7 +101,33 @@ public class BastionTerminalWebSocket {
       terminal.close();
       sessions.finish(terminal.access.sessionId(), "CLOSED", null,
           terminal.channel.getExitStatus());
+    } else {
+      UUID sessionId;
+      try {
+        sessionId = UUID.fromString(connection.pathParam("sessionId"));
+      } catch (RuntimeException invalidSession) {
+        LOG.debug("Closed unauthenticated WebSocket with an invalid bastion session id");
+        return;
+      }
+      sessions.finish(sessionId, "FAILED", "TERMINAL_DISCONNECTED", null);
     }
+  }
+
+  void forceTerminate(UUID sessionId) {
+    active.forEach((connectionId, terminal) -> {
+      if (!terminal.access.sessionId().equals(sessionId) ||
+          !active.remove(connectionId, terminal)) return;
+      try {
+        terminal.close();
+      } catch (RuntimeException failure) {
+        LOG.warnf(failure, "Could not close target SSH channel for session %s", sessionId);
+      }
+      try {
+        terminal.connection.closeAndAwait(new CloseReason(4001, "session force terminated"));
+      } catch (RuntimeException failure) {
+        LOG.warnf(failure, "Could not close bastion WebSocket for session %s", sessionId);
+      }
+    });
   }
 
   private void authenticate(WebSocketConnection connection, JsonNode event, String idValue) {

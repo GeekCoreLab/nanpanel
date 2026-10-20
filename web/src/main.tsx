@@ -12,7 +12,7 @@ import { agentMaintenanceCommand, type AgentMaintenanceMode } from './lib/agent-
 import type { Host, HostPage, Agent, AgentInstallation, AgentUpdateOperation, SystemService, SystemServicePage, Operation, OperationPage, SessionContext, AdminOverview, AdminUser, AdminUserPage, PlatformSettings, AuditEventPage, WebSessionList, BuiltinRoleList, AgentEnrollmentCreated, HostHelperOperationRequest, SshProbeResult, SshSystemdStatusResult, SshSystemdJournalResult, HostSshConfig, SshHostKeyProbe, BastionSession, BastionSessionTicket, BastionCommand, BastionRecordingChunk } from './lib/types';
 import './style.css';
 const nav = [['overview', '◫', '总览'], ['hosts', '▤', '主机资产'], ['topology', '⌘', '网络拓扑'], ['operations', '◷', '操作任务'], ['users', '♙', '管理员'], ['audit', '☷', '审计日志'], ['settings', '⚙', '平台设置'], ['account', '◎', '账号与会话']];
-const labels: Record<string, string> = { ONLINE: '在线', OFFLINE: '离线', UNKNOWN: '未知 / 结果未知', ACTIVE: '运行中', INACTIVE: '未运行', AVAILABLE: '可用', UNAVAILABLE: '不可用', SUCCEEDED: '成功', ACCEPTED: '已受理', FAILED: '失败', RUNNING: '执行中', PENDING: '等待中', CANCELLED: '已取消', DISABLED: '已禁用', DENIED: '已拒绝' };
+const labels: Record<string, string> = { ONLINE: '在线', OFFLINE: '离线', UNKNOWN: '未知 / 结果未知', ACTIVE: '运行中', INACTIVE: '未运行', AVAILABLE: '可用', UNAVAILABLE: '不可用', SUCCEEDED: '成功', ACCEPTED: '已受理', FAILED: '失败', FORCE_TERMINATED: '已强制阻断', RUNNING: '执行中', PENDING: '等待中', CANCELLED: '已取消', DISABLED: '已禁用', DENIED: '已拒绝' };
 function Badge({ value }: { value: string }) { return <span className={`badge ${value.toLowerCase()}`}><i />{labels[value] ?? value}</span>; }
 function Empty({ children = '暂无数据' }: { children?: ReactNode }) { return <div className="empty"><span>▧</span><p>{children}</p></div>; }
 function Field({ label, children }: { label: string; children: ReactNode }) { return <label className="field"><span>{label}</span>{children}</label>; }
@@ -355,6 +355,7 @@ function HostSshBastionPanel({ hostId }: { hostId: string }) {
  const [saveBusy, setSaveBusy] = useState(false); const [probeBusy, setProbeBusy] = useState(false); const [trustBusy, setTrustBusy] = useState(false);
  const [keyProbe, setKeyProbe] = useState<SshHostKeyProbe>(); const [probeReason, setProbeReason] = useState('');
  const [sessionReason, setSessionReason] = useState(''); const [sessionBusy, setSessionBusy] = useState(false);
+ const [terminatingSession, setTerminatingSession] = useState(''); const [historyMessage, setHistoryMessage] = useState('');
  const [ticket, setTicket] = useState<BastionSessionTicket>(); const [sessions, setSessions] = useState<BastionSession[]>([]);
  const [historyError, setHistoryError] = useState(''); const [selectedCommands, setSelectedCommands] = useState<{ session: BastionSession; items: BastionCommand[] }>();
  const [replay, setReplay] = useState<{ session: BastionSession; items: BastionRecordingChunk[] }>();
@@ -408,9 +409,22 @@ function HostSshBastionPanel({ hostId }: { hostId: string }) {
   try {
    await api('/auth/csrf');
    const result = await api<BastionSessionTicket>(`/hosts/${hostId}/ssh/sessions`, 'POST', { reason: sessionReason.trim(), columns: 120, rows: 36 }, {}, true);
-   setTicket(result.data); setSessionReason('');
+   setTicket(result.data); setSessionReason(''); await loadSessions();
   } catch (error) { setHistoryError((error as Error).message); }
   finally { setSessionBusy(false); }
+ }
+ async function forceTerminate(session: BastionSession) {
+  const reason = window.prompt(`强制阻断 ${session.targetUsername}@${session.targetAddress}:${session.targetPort}？该操作会立即断开终端并写入审计。请填写原因：`, '管理员执行强制阻断');
+  if (reason === null) return;
+  if (!reason.trim()) { setHistoryError('强制阻断原因不能为空'); return; }
+  setTerminatingSession(session.id); setHistoryError(''); setHistoryMessage('');
+  try {
+   await api('/auth/csrf');
+   await api(`/bastion-sessions/${session.id}/terminate`, 'POST', { reason: reason.trim() }, {}, true);
+   setHistoryMessage('会话已强制阻断，操作已写入审计记录');
+   await loadSessions();
+  } catch (error) { setHistoryError((error as Error).message); }
+  finally { setTerminatingSession(''); }
  }
  async function viewCommands(session: BastionSession) {
   try { const result = await api<{ items: BastionCommand[] }>(`/bastion-sessions/${session.id}/commands`, 'GET', undefined, {}, true); setSelectedCommands({ session, items: result.data.items }); }
@@ -441,39 +455,64 @@ function HostSshBastionPanel({ hostId }: { hostId: string }) {
   <form onSubmit={openShell}><Field label="开启 Shell 的原因"><textarea required maxLength={500} value={sessionReason} onChange={event => setSessionReason(event.target.value)} placeholder="记录本次主机 Shell 的操作目的" /></Field><div className="form-actions"><button className="primary" disabled={sessionBusy || !config?.hostKeyFingerprint || !sessionReason.trim()}>{sessionBusy ? '正在创建审计会话…' : '开启主机 Shell'}</button></div></form>
   {historyError && <div className="alert error" role="alert">{historyError}</div>}
  </section>
- <section className="restart-form"><h3>堡垒审计记录</h3>{sessions.length === 0 ? <p className="muted">还没有 SSH 堡垒 Shell 会话。</p> : sessions.map(session => <div className="bastion-session-row" key={session.id}><div><b>{time(session.startedAt)} · <Badge value={session.status} /></b><small>{session.targetUsername}@{session.targetAddress}:{session.targetPort} · {session.reason}</small><small>{session.bytesIn + session.bytesOut} 字节 · {session.durationMs == null ? '进行中' : `${Math.round(session.durationMs / 1000)} 秒`}</small></div><div className="form-actions"><button type="button" className="secondary" onClick={() => void viewCommands(session)}>命令记录</button><button type="button" className="secondary" onClick={() => void playRecording(session)}>回放录像</button></div></div>)}</section>
- {ticket && <BastionTerminal ticket={ticket} close={() => { setTicket(undefined); void loadSessions(); }} />}
+ <section className="restart-form"><h3>堡垒审计记录</h3>{historyMessage && <div className="alert" role="status">{historyMessage}</div>}{sessions.length === 0 ? <p className="muted">还没有 SSH 堡垒 Shell 会话。</p> : sessions.map(session => <div className="bastion-session-row" key={session.id}><div><b>{time(session.startedAt)} · <Badge value={session.failureCode === 'FORCE_TERMINATED' ? 'FORCE_TERMINATED' : session.status} /></b><small>{session.targetUsername}@{session.targetAddress}:{session.targetPort} · {session.reason}</small><small>{session.bytesIn + session.bytesOut} 字节 · {session.durationMs == null ? '进行中' : `${Math.round(session.durationMs / 1000)} 秒`}{session.failureCode && session.failureCode !== 'FORCE_TERMINATED' ? ` · ${session.failureCode}` : ''}</small></div><div className="form-actions">{['PENDING', 'RUNNING'].includes(session.status) && <button type="button" className="secondary" disabled={terminatingSession === session.id} onClick={() => void forceTerminate(session)}>{terminatingSession === session.id ? '正在阻断…' : '强制阻断'}</button>}<button type="button" className="secondary" onClick={() => void viewCommands(session)}>命令记录</button><button type="button" className="secondary" onClick={() => void playRecording(session)}>回放录像</button></div></div>)}</section>
+ {ticket && <BastionTerminal ticket={ticket} refresh={() => void loadSessions()} close={() => { setTicket(undefined); void loadSessions(); }} />}
  {replay && <BastionReplay session={replay.session} items={replay.items} commands={selectedCommands?.session.id === replay.session.id ? selectedCommands.items : undefined} close={() => setReplay(undefined)} />}
  {selectedCommands && !replay && <div className="modal-backdrop"><section className="modal"><div className="card-title"><h2>命令历史 · {selectedCommands.session.targetAddress}</h2><button className="icon-button" onClick={() => setSelectedCommands(undefined)}>×</button></div>{selectedCommands.items.length ? <ol className="bastion-command-list">{selectedCommands.items.map(command => <li key={command.sequence}><time>{time(command.occurredAt)}</time><code>{command.command}</code></li>)}</ol> : <p className="muted">没有记录到提交的命令行。</p>}</section></div>}
  </>;
 }
-function BastionTerminal({ ticket, close }: { ticket: BastionSessionTicket; close: () => void }) {
- const terminalElement = useRef<HTMLDivElement>(null); const endedRef = useRef(close); const [status, setStatus] = useState('正在建立受审计的 SSH 连接…');
- useEffect(() => { endedRef.current = close; }, [close]);
+function BastionTerminal({ ticket, close, refresh }: { ticket: BastionSessionTicket; close: () => void; refresh: () => void }) {
+ const terminalElement = useRef<HTMLDivElement>(null); const socketRef = useRef<WebSocket | undefined>(undefined);
+ const closeRef = useRef(close); const refreshRef = useRef(refresh); const readyRef = useRef(false); const closeRequestedRef = useRef(false);
+ const [status, setStatus] = useState('正在建立受审计的 SSH 连接…');
+ useEffect(() => { closeRef.current = close; }, [close]);
+ useEffect(() => { refreshRef.current = refresh; }, [refresh]);
  useEffect(() => {
   if (!terminalElement.current) return;
   const terminal = new Terminal({ cursorBlink: true, fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 13, theme: { background: '#07111f', foreground: '#dbeafe', cursor: '#83b8ff' } });
   const fit = new FitAddon(); terminal.loadAddon(fit); terminal.open(terminalElement.current); fit.fit(); terminal.focus();
   const url = new URL(ticket.websocketPath, window.location.href); url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   const socket = new WebSocket(url);
-  let ready = false;
+  socketRef.current = socket;
   socket.onopen = () => socket.send(JSON.stringify({ type: 'auth', ticket: ticket.ticket, columns: terminal.cols, rows: terminal.rows }));
   socket.onmessage = event => {
    try { const message = JSON.parse(String(event.data)) as { type: string; data?: string; message?: string };
-    if (message.type === 'ready') { ready = true; setStatus('已连接 · 终端输入和输出正在录像'); return; }
+    if (message.type === 'ready') { readyRef.current = true; setStatus('已连接 · 终端输入和输出正在录像'); refreshRef.current(); return; }
     if (message.type === 'output' && message.data) { const bytes = Uint8Array.from(atob(message.data), value => value.charCodeAt(0)); terminal.write(bytes); return; }
     if (message.type === 'error') { terminal.write(`\r\n\x1b[31m${message.message ?? 'SSH 连接失败'}\x1b[0m\r\n`); setStatus(message.message ?? 'SSH 连接失败'); }
    } catch { terminal.write(String(event.data)); }
   };
-  socket.onerror = () => setStatus('WebSocket 连接失败');
-  socket.onclose = () => { ready = false; setStatus('连接已关闭'); endedRef.current(); };
-  const input = terminal.onData(data => { if (ready && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'input', data })); });
-  const resize = () => { fit.fit(); if (ready && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', columns: terminal.cols, rows: terminal.rows })); };
+  socket.onerror = () => setStatus('WebSocket 握手或连接失败。终端窗口仍保持打开，可查看错误并手动关闭。');
+  socket.onclose = event => {
+   readyRef.current = false;
+   setStatus(event.code === 1000 ? '连接已关闭；录像已归档。' : `连接已关闭（${event.code}${event.reason ? ` · ${event.reason}` : ''}）。请检查 SSH 配置或服务端日志。`);
+   refreshRef.current();
+   if (closeRequestedRef.current) closeRef.current();
+  };
+  const input = terminal.onData(data => { if (readyRef.current && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'input', data })); });
+  const resize = () => { fit.fit(); if (readyRef.current && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'resize', columns: terminal.cols, rows: terminal.rows })); };
   window.addEventListener('resize', resize);
-  const keepalive = window.setInterval(() => { if (ready && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'keepalive' })); }, 30000);
-  return () => { window.clearInterval(keepalive); window.removeEventListener('resize', resize); input.dispose(); socket.close(); terminal.dispose(); };
+  const keepalive = window.setInterval(() => { if (readyRef.current && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'keepalive' })); }, 30000);
+  return () => { window.clearInterval(keepalive); window.removeEventListener('resize', resize); input.dispose(); if (socketRef.current === socket) socketRef.current = undefined; socket.close(); readyRef.current = false; terminal.dispose(); };
  }, [ticket.sessionId, ticket.websocketPath, ticket.ticket]);
- function end() { setStatus('正在结束会话并保存录像…'); close(); }
+ async function end() {
+  closeRequestedRef.current = true;
+  const socket = socketRef.current;
+  if (socket && socket.readyState === WebSocket.OPEN && readyRef.current) {
+   setStatus('正在结束会话并保存录像…');
+   socket.send(JSON.stringify({ type: 'close' }));
+   window.setTimeout(() => { if (socket.readyState !== WebSocket.CLOSED) socket.close(); closeRef.current(); }, 2000);
+   return;
+  }
+  setStatus('正在结束未建立或已断开的会话…');
+  try {
+   await api('/auth/csrf');
+   await api(`/bastion-sessions/${ticket.sessionId}/terminate`, 'POST', { reason: '操作者关闭未连接的堡垒终端' }, {}, true);
+  } catch (error) {
+   if ((error as ApiError).status !== 409) setStatus(`结束会话失败：${(error as Error).message}`);
+  }
+  closeRef.current();
+ }
  return <div className="modal-backdrop bastion-terminal-backdrop"><section className="modal bastion-terminal-modal"><div className="card-title"><div><span className="eyebrow">RECORDED SSH SESSION</span><h2>堡垒 Shell · {ticket.sessionId.slice(0, 8)}</h2></div><button className="icon-button" aria-label="结束 SSH 会话" onClick={end}>×</button></div><p className="muted">{status}</p><div className="bastion-terminal" ref={terminalElement} /><div className="form-actions"><button className="secondary" onClick={end}>结束会话并归档</button></div></section></div>;
 }
 function BastionReplay({ session, items, commands, close }: { session: BastionSession; items: BastionRecordingChunk[]; commands?: BastionCommand[]; close: () => void }) {

@@ -1052,6 +1052,37 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+  /api/v1/bastion-sessions/{sessionId}/terminate:
+    parameters:
+    - name: sessionId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    post:
+      tags: [SshBastion]
+      operationId: forceTerminateBastionSshSession
+      summary: 强制阻断堡垒 Shell 会话
+      description: 立即撤销未消费票据或断开 RUNNING 会话的目标 SSH PTY。记录操作者、原因、来源地址和终止动作；会话状态为 FAILED，failureCode 为 FORCE_TERMINATED。要求管理员 Cookie 会话和 CSRF。
+      x-implementation-status: implemented
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TerminateBastionSessionRequest'
+      responses:
+        '204':
+          description: 会话已阻断并写入审计记录。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Unprocessable'
   /api/v1/bastion-sessions/{sessionId}/terminal:
     parameters:
     - name: sessionId
@@ -3250,6 +3281,12 @@ components:
         reason: { type: string, minLength: 1, maxLength: 500 }
         columns: { type: integer, minimum: 20, maximum: 500, default: 120 }
         rows: { type: integer, minimum: 5, maximum: 200, default: 36 }
+    TerminateBastionSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 500 }
     BastionSessionTicket:
       type: object
       additionalProperties: false
@@ -3292,7 +3329,9 @@ components:
         durationMs: { type: [integer, 'null'], minimum: 0 }
         bytesIn: { type: integer, minimum: 0 }
         bytesOut: { type: integer, minimum: 0 }
-        failureCode: { type: [string, 'null'] }
+        failureCode:
+          type: [string, 'null']
+          description: FORCE_TERMINATED 表示管理员已强制阻断该会话。
     BastionCommandList:
       type: object
       additionalProperties: false

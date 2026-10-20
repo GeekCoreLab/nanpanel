@@ -21,6 +21,7 @@ import java.util.UUID;
 @Produces(MediaType.APPLICATION_JSON)
 public class BastionSessionResource {
   @Inject BastionSessionService sessions;
+  @Inject BastionTerminalWebSocket terminal;
   @Context jakarta.ws.rs.container.ContainerRequestContext request;
   @Context io.vertx.core.http.HttpServerRequest http;
 
@@ -41,6 +42,8 @@ public class BastionSessionResource {
       throw AuthResource.fail(401, "UNAUTHENTICATED", "请登录以继续");
     return session;
   }
+
+  public record TerminateRequest(String reason) {}
 
   @POST
   @Path("hosts/{hostId}/ssh/sessions")
@@ -104,5 +107,22 @@ public class BastionSessionResource {
     body.put("encoding", "base64");
     body.put("format", "nanpanel-terminal-v1");
     return Response.ok(body).header("Cache-Control", "no-store").build();
+  }
+
+  @POST
+  @Path("bastion-sessions/{sessionId}/terminate")
+  public Response terminate(@PathParam("sessionId") String sessionValue,
+                            TerminateRequest input) {
+    Map<String, Object> session = authenticated();
+    String reason = input == null || input.reason() == null ? "" : input.reason().trim();
+    if (reason.isEmpty() || reason.length() > 500 ||
+        reason.chars().anyMatch(Character::isISOControl))
+      throw AuthResource.fail(422, "VALIDATION_FAILED", "强制阻断原因无效");
+    UUID sessionId = uuid(sessionValue, "sessionId");
+    String clientIp = http.remoteAddress() == null ? null : http.remoteAddress().host();
+    UUID operatorId = UUID.fromString(String.valueOf(session.get("user_id")));
+    sessions.forceTerminate(sessionId, operatorId, reason, clientIp);
+    terminal.forceTerminate(sessionId);
+    return Response.noContent().build();
   }
 }
