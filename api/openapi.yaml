@@ -2,7 +2,7 @@ openapi: 3.1.1
 info:
   title: NaNPanel 管理 API
   version: 0.1.0-draft.2
-  description: 契约优先的 Web 平台 API。管理操作使用 HttpOnly Cookie 会话和写请求 CSRF；Agent 使用独立的一次性接入码、客户端证书和 mTLS/gRPC。除 host-bound alias 管理外，主机资产可保存 AES-GCM 加密的直连 SSH 密码或私钥，并支持指纹确认后自动安装 Agent。管理员可开启经一次性 WebSocket 票据授权的交互式 SSH 堡垒 Shell；会话、命令行和有界终端录像独立持久化。systemd、Helper、SSH alias 管理仍受 allowlist 限制。ADR-011 安装时签名备用名单已实现；真实 DNS/故障验收仍待完成。
+  description: 契约优先的 Web 平台 API。管理操作使用 HttpOnly Cookie 会话和写请求 CSRF；Agent 使用独立的一次性接入码、客户端证书和 mTLS/gRPC。除 host-bound alias 管理外，主机资产可保存 AES-GCM 加密的直连 SSH 密码或私钥，并支持指纹确认后自动安装 Agent。管理员可开启经一次性 WebSocket 票据授权的交互式 SSH 堡垒 Shell；会话、命令行和有界终端录像独立持久化。Agent/Helper 操作 allowlist 默认逐项生效，主机 root 可通过统一 allowlist-mode 配置临时关闭；Core 侧 SSH alias/unit 管理仍使用独立 allowlist。ADR-011 安装时签名备用名单已实现；真实 DNS/故障验收仍待完成。
   x-status: draft
 servers:
 - url: http://127.0.0.1:8080
@@ -534,7 +534,7 @@ paths:
       - SystemServices
       operationId: readSystemdJournal
       summary: 查询服务的最近 journal 记录
-      description: 仅对 root Helper 管理的 journal allowlist 中的 unit 开放。Core 检查新鲜观测、Agent/Helper 状态和已报告能力，持久化审计任务后通过 mTLS Agent 路径读取最多 12 行；结果截断并在 Operation.result 中返回。需携带 If-Match 与 Idempotency-Key。查询不会执行任意命令。
+      description: 默认仅对 root Helper journal allowlist 中的 unit 开放；主机 root 可通过统一 /etc/nanpanel/managed/allowlist-mode 配置临时关闭所有 Helper allowlist 匹配。Core 检查新鲜观测、Agent/Helper 状态和已报告能力，持久化审计任务后通过 mTLS Agent 路径读取最多 12 行；结果截断并在 Operation.result 中返回。需携带 If-Match 与 Idempotency-Key。查询不会执行任意命令。
       x-implementation-status: implemented
       parameters:
       - $ref: '#/components/parameters/IdempotencyKey'
@@ -1114,8 +1114,8 @@ paths:
     post:
       tags: [Operations]
       operationId: submitHostHelperOperation
-      summary: 提交受 allowlist 限制的主机 Helper 操作
-      description: 支持 allowlist 软件包安装、受保护文件原子写入、受限 Docker/Podman 容器操作和限定接口/协议/端口的临时防火墙放行。网络规则必须先成功调度 systemd 定时回滚，并由最小权限工作进程核验；本地 allowlist 默认为空。Core 检查主机版本、Agent 能力、在线状态和 Helper 状态；Helper 再独立检查 root 管理的本地 allowlist。无任意 Shell、任意路径、任意镜像或任意网络参数入口。结果通过 durable Operation 回传。
+      summary: 提交类型化主机 Helper 操作
+      description: 支持软件包安装、受保护文件原子写入、Docker/Podman 容器操作和临时防火墙规则。Helper allowlist 默认逐项限制；主机 root 可通过统一 /etc/nanpanel/managed/allowlist-mode 配置临时关闭所有 Helper allowlist 匹配。关闭匹配不关闭目标名/参数校验、受保护文件目录、容器运行参数限制、loopback 端口绑定和容器资源上限；网络规则仍先调度 30–300 秒 systemd 自动回滚，并由最小权限工作进程核验。无任意 Shell 或任意路径入口。Core 检查主机版本、Agent 能力、在线状态和 Helper 状态；结果通过 durable Operation 回传。
       x-implementation-status: implemented
       parameters:
       - $ref: '#/components/parameters/IdempotencyKey'
@@ -1132,7 +1132,7 @@ paths:
                   target: ''
                   payload:
                     packages: [curl]
-                  reason: Install an approved diagnostic utility
+                  reason: Install a diagnostic utility
                   timeoutSeconds: 300
                   expectedGeneration: 1
               listAllowedContainers:
@@ -1147,8 +1147,22 @@ paths:
                   capability: network.firewall.expose
                   target: ssh-test
                   payload:
+                    interfaceName: eth0
+                    protocol: tcp
+                    port: 2222
                     rollbackSeconds: 90
                   reason: Verify a restricted management path
+                  timeoutSeconds: 60
+                  expectedGeneration: 1
+              deployContainer:
+                value:
+                  capability: container.deploy
+                  target: web-gateway
+                  payload:
+                    image: nginx:1.27
+                    hostPort: 8080
+                    containerPort: 80
+                  reason: Deploy a web gateway
                   timeoutSeconds: 60
                   expectedGeneration: 1
       security:
@@ -3170,14 +3184,15 @@ components:
         target:
           type: string
           maxLength: 128
-          description: 容器和网络操作为 allowlist 名称；文件写入为单一文件名；其余能力为空字符串。
+          description: 容器或网络操作的目标名；文件写入为单一文件名；其余能力为空字符串。allowlist-mode=disabled 时仍要求符合固定名称格式。
         payload:
           oneOf:
           - $ref: '#/components/schemas/PackageInstallPayload'
           - $ref: '#/components/schemas/ProtectedFilePayload'
+          - $ref: '#/components/schemas/ContainerDeployPayload'
           - $ref: '#/components/schemas/NetworkFirewallPayload'
           - type: 'null'
-          description: 软件包、受保护文件和临时防火墙操作接受对应参数对象。
+          description: 各类型化 Helper 操作接受对应参数对象。
         reason:
           type: string
           minLength: 1
@@ -3523,17 +3538,50 @@ components:
         content:
           type: string
           maxLength: 32768
-          description: UTF-8 文件内容；目标文件名须在 root-managed files.allowlist 中。
+          description: UTF-8 文件内容；目标文件为 root-managed files 目录内的单层文件。
+    ContainerDeployPayload:
+      type: object
+      additionalProperties: false
+      required: [image, hostPort, containerPort]
+      properties:
+        image:
+          type: string
+          minLength: 1
+          maxLength: 255
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._:/@-]{0,254}$'
+          description: 容器镜像；部署仍使用只读根文件系统、资源限制和 loopback 端口绑定。
+        hostPort:
+          type: [integer, 'null']
+          minimum: 1
+          maximum: 65535
+          description: 可选 loopback 主机端口；需与 containerPort 同时设置或同时为空。
+        containerPort:
+          type: [integer, 'null']
+          minimum: 1
+          maximum: 65535
     NetworkFirewallPayload:
       type: object
       additionalProperties: false
-      required: [rollbackSeconds]
+      required: [interfaceName, protocol, port, rollbackSeconds]
       properties:
+        interfaceName:
+          type: string
+          minLength: 1
+          maxLength: 15
+          pattern: '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}$'
+          description: 防火墙规则绑定的主机网络接口。
+        protocol:
+          type: string
+          enum: [tcp, udp]
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
         rollbackSeconds:
           type: integer
           minimum: 30
           maximum: 300
-          description: 网络规则自动回滚时间；Helper 在应用规则前先启动受限 systemd 回滚单元。
+          description: 网络规则自动回滚时间；Helper 在应用规则前先启动 systemd 回滚单元。
     OperationError:
       type: object
       additionalProperties: false

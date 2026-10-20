@@ -68,6 +68,7 @@ pub struct HelperConfig {
     pub agent_binary: std::path::PathBuf,
     pub allowed_service_units: HashSet<String>,
     pub allowed_journal_units: HashSet<String>,
+    pub allowlists_disabled: bool,
     pub allowed_packages: HashSet<String>,
     pub allowed_files: HashSet<String>,
     pub allowed_containers: HashMap<String, ContainerSpec>,
@@ -76,7 +77,7 @@ pub struct HelperConfig {
     network_operations_available: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContainerSpec {
     image: String,
     host_port: Option<u16>,
@@ -93,7 +94,18 @@ struct NetworkRuleSpec {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct NetworkFirewallPayload {
+    interface_name: String,
+    protocol: String,
+    port: u16,
     rollback_seconds: u16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ContainerDeployPayload {
+    image: String,
+    host_port: Option<u16>,
+    container_port: Option<u16>,
 }
 
 struct UnitAllowlist {
@@ -109,6 +121,7 @@ struct HelperRuntime {
     controller_cert: reqwest::Certificate,
     agent_binary: std::path::PathBuf,
     allowed_units: Arc<UnitAllowlist>,
+    allowlists_disabled: bool,
     allowed_packages: Arc<HashSet<String>>,
     allowed_files: Arc<HashSet<String>>,
     allowed_containers: Arc<HashMap<String, ContainerSpec>>,
@@ -122,6 +135,7 @@ struct HelperRuntime {
 struct CapabilityAllowlist<'a> {
     restart_units: &'a HashSet<String>,
     journal_units: &'a HashSet<String>,
+    allowlists_disabled: bool,
     packages: &'a HashSet<String>,
     files: &'a HashSet<String>,
     containers: &'a HashMap<String, ContainerSpec>,
@@ -135,6 +149,7 @@ impl HelperRuntime {
         CapabilityAllowlist {
             restart_units: &self.allowed_units.restart,
             journal_units: &self.allowed_units.journal,
+            allowlists_disabled: self.allowlists_disabled,
             packages: &self.allowed_packages,
             files: &self.allowed_files,
             containers: &self.allowed_containers,
@@ -184,6 +199,7 @@ impl HelperConfig {
         let allowed_service_units = read_service_allowlist(&allowed_read_root)?;
         let allowed_journal_units =
             read_unit_allowlist(&allowed_read_root, "journal-units.allowlist")?;
+        let allowlists_disabled = read_allowlist_mode(&allowed_read_root)?;
         let allowed_packages = read_simple_allowlist(
             &allowed_read_root,
             "packages.allowlist",
@@ -251,6 +267,7 @@ impl HelperConfig {
             agent_binary,
             allowed_service_units,
             allowed_journal_units,
+            allowlists_disabled,
             allowed_packages,
             allowed_files,
             allowed_containers,
@@ -283,6 +300,7 @@ pub async fn serve(config: HelperConfig) -> Result<()> {
             restart: config.allowed_service_units,
             journal: config.allowed_journal_units,
         }),
+        allowlists_disabled: config.allowlists_disabled,
         allowed_packages: Arc::new(config.allowed_packages),
         allowed_files: Arc::new(config.allowed_files),
         allowed_containers: Arc::new(config.allowed_containers),
@@ -383,18 +401,10 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                 Err(error) => Err(error),
                                 Ok(()) => match request.capability.as_str() {
                                     "helper.status" => Ok("AVAILABLE".to_owned()),
-                                    "helper.capabilities" => {
-                                        Ok(serde_json::json!(available_capabilities(
-                                            &runtime.allowed_units,
-                                            &runtime.allowed_packages,
-                                            &runtime.allowed_files,
-                                            &runtime.allowed_containers,
-                                            &runtime.allowed_network_rules,
-                                            runtime.container_runtime.is_some(),
-                                            runtime.network_operations_available,
-                                        ))
-                                        .to_string())
-                                    }
+                                    "helper.capabilities" => Ok(serde_json::json!(
+                                        available_capabilities(runtime.capability_allowlist(),)
+                                    )
+                                    .to_string()),
                                     "agent.update" => {
                                         update_agent(
                                             &runtime.controller_url,
@@ -411,12 +421,18 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                     }
                                     "file.read.allowed" => execute(&request, &runtime.read_root),
                                     "package.install" => {
-                                        install_packages(&request, &runtime.allowed_packages).await
+                                        install_packages(
+                                            &request,
+                                            &runtime.allowed_packages,
+                                            runtime.allowlists_disabled,
+                                        )
+                                        .await
                                     }
                                     "file.write.protected" => write_protected_file(
                                         &request,
                                         &runtime.write_root,
                                         &runtime.allowed_files,
+                                        runtime.allowlists_disabled,
                                     ),
                                     "container.list" => {
                                         manage_container(
@@ -426,6 +442,7 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                                 .container_runtime
                                                 .as_deref()
                                                 .map(|path| path.as_path()),
+                                            runtime.allowlists_disabled,
                                         )
                                         .await
                                     }
@@ -438,6 +455,7 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                                 .container_runtime
                                                 .as_deref()
                                                 .map(|path| path.as_path()),
+                                            runtime.allowlists_disabled,
                                         )
                                         .await
                                     }
@@ -446,6 +464,7 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                         expose_network_port(
                                             &request,
                                             &runtime.allowed_network_rules,
+                                            runtime.allowlists_disabled,
                                         )
                                         .await
                                     }
@@ -550,29 +569,50 @@ fn validate_capability_target(
     match capability {
         "helper.status" | "helper.capabilities" | "agent.update" if target.is_empty() => Ok(()),
         "systemd.restart"
-            if target == "nanpanel-agent.service" || allowed.restart_units.contains(target) =>
+            if valid_systemd_unit(target)
+                && (target == "nanpanel-agent.service"
+                    || allowed.allowlists_disabled
+                    || allowed.restart_units.contains(target)) =>
         {
             Ok(())
         }
-        "systemd.journal.read" if allowed.journal_units.contains(target) => Ok(()),
+        "systemd.journal.read"
+            if valid_systemd_unit(target)
+                && (allowed.allowlists_disabled || allowed.journal_units.contains(target)) =>
+        {
+            Ok(())
+        }
         "file.read.allowed" => Ok(()),
-        "package.install" if target.is_empty() && !allowed.packages.is_empty() => Ok(()),
-        "file.write.protected" if allowed.files.contains(target) => Ok(()),
+        "package.install"
+            if target.is_empty()
+                && (allowed.allowlists_disabled || !allowed.packages.is_empty()) =>
+        {
+            Ok(())
+        }
+        "file.write.protected"
+            if valid_file_name(target)
+                && (allowed.allowlists_disabled || allowed.files.contains(target)) =>
+        {
+            Ok(())
+        }
         "container.list"
             if target.is_empty()
                 && allowed.has_container_runtime
-                && !allowed.containers.is_empty() =>
+                && (allowed.allowlists_disabled || !allowed.containers.is_empty()) =>
         {
             Ok(())
         }
         "container.logs" | "container.start" | "container.stop" | "container.deploy"
-            if allowed.containers.contains_key(target) && allowed.has_container_runtime =>
+            if valid_container_name(target)
+                && allowed.has_container_runtime
+                && (allowed.allowlists_disabled || allowed.containers.contains_key(target)) =>
         {
             Ok(())
         }
         "network.firewall.expose"
             if allowed.network_operations_available
-                && allowed.network_rules.contains_key(target) =>
+                && valid_network_rule_name(target)
+                && (allowed.allowlists_disabled || allowed.network_rules.contains_key(target)) =>
         {
             Ok(())
         }
@@ -616,26 +656,20 @@ fn audit_target(request: &Request) -> String {
     request.target.clone()
 }
 
-fn available_capabilities(
-    units: &UnitAllowlist,
-    packages: &HashSet<String>,
-    files: &HashSet<String>,
-    containers: &HashMap<String, ContainerSpec>,
-    network_rules: &HashMap<String, NetworkRuleSpec>,
-    has_container_runtime: bool,
-    network_operations_available: bool,
-) -> Vec<&'static str> {
+fn available_capabilities(allowed: CapabilityAllowlist<'_>) -> Vec<&'static str> {
     let mut capabilities = vec!["systemd.restart", "helper.capabilities"];
-    if !units.journal.is_empty() {
+    if allowed.allowlists_disabled || !allowed.journal_units.is_empty() {
         capabilities.push("systemd.journal.read");
     }
-    if !packages.is_empty() {
+    if allowed.allowlists_disabled || !allowed.packages.is_empty() {
         capabilities.push("package.install");
     }
-    if !files.is_empty() {
+    if allowed.allowlists_disabled || !allowed.files.is_empty() {
         capabilities.push("file.write.protected");
     }
-    if has_container_runtime && !containers.is_empty() {
+    if allowed.has_container_runtime
+        && (allowed.allowlists_disabled || !allowed.containers.is_empty())
+    {
         capabilities.extend([
             "container.list",
             "container.logs",
@@ -644,7 +678,9 @@ fn available_capabilities(
             "container.deploy",
         ]);
     }
-    if network_operations_available && !network_rules.is_empty() {
+    if allowed.network_operations_available
+        && (allowed.allowlists_disabled || !allowed.network_rules.is_empty())
+    {
         capabilities.push("network.firewall.expose");
     }
     capabilities
@@ -665,16 +701,16 @@ struct ProtectedFilePayload {
 async fn install_packages(
     request: &Request,
     allowed_packages: &HashSet<String>,
+    allowlists_disabled: bool,
 ) -> std::result::Result<String, String> {
     let payload = parse_payload::<PackageInstallPayload>(request)?;
     if payload.packages.is_empty()
         || payload.packages.len() > 16
-        || payload
-            .packages
-            .iter()
-            .any(|name| !valid_package_name(name) || !allowed_packages.contains(name))
+        || payload.packages.iter().any(|name| {
+            !valid_package_name(name) || (!allowlists_disabled && !allowed_packages.contains(name))
+        })
     {
-        return Err("DENIED: package list is empty, invalid, or not allowlisted".to_owned());
+        return Err("DENIED: package list is empty, invalid, or not authorized".to_owned());
     }
     let mut unique = HashSet::new();
     if payload.packages.iter().any(|name| !unique.insert(name)) {
@@ -705,10 +741,13 @@ fn write_protected_file(
     request: &Request,
     write_root: &File,
     allowed_files: &HashSet<String>,
+    allowlists_disabled: bool,
 ) -> std::result::Result<String, String> {
     let payload = parse_payload::<ProtectedFilePayload>(request)?;
-    if !allowed_files.contains(&request.target) || !valid_file_name(&request.target) {
-        return Err("DENIED: protected file is not allowlisted".to_owned());
+    if !valid_file_name(&request.target)
+        || (!allowlists_disabled && !allowed_files.contains(&request.target))
+    {
+        return Err("DENIED: protected file is not authorized".to_owned());
     }
     if payload.content.len() > MAX_WRITE_BYTES || payload.content.contains('\0') {
         return Err("DENIED: protected file content exceeds 32 KiB or contains NUL".to_owned());
@@ -726,17 +765,37 @@ fn write_protected_file(
 async fn expose_network_port(
     request: &Request,
     allowlist: &HashMap<String, NetworkRuleSpec>,
+    allowlists_disabled: bool,
 ) -> std::result::Result<String, String> {
     let payload = parse_payload::<NetworkFirewallPayload>(request)?;
-    if !(30..=300).contains(&payload.rollback_seconds) {
-        return Err("DENIED: rollbackSeconds must be between 30 and 300".to_owned());
+    if !(30..=300).contains(&payload.rollback_seconds)
+        || !valid_network_interface(&payload.interface_name)
+        || !matches!(payload.protocol.as_str(), "tcp" | "udp")
+        || payload.port == 0
+    {
+        return Err(
+            "DENIED: firewall interface, protocol, port, or rollback is invalid".to_owned(),
+        );
     }
-    let Some(rule) = allowlist.get(&request.target) else {
-        return Err("DENIED: network rule is not allowlisted".to_owned());
-    };
     if !valid_network_rule_name(&request.target) {
         return Err("DENIED: network rule name is invalid".to_owned());
     }
+    let requested_rule = NetworkRuleSpec {
+        interface: payload.interface_name,
+        protocol: payload.protocol,
+        port: payload.port,
+    };
+    let rule = if allowlists_disabled {
+        requested_rule
+    } else {
+        let Some(allowed_rule) = allowlist.get(&request.target) else {
+            return Err("DENIED: network rule is not allowlisted".to_owned());
+        };
+        if allowed_rule != &requested_rule {
+            return Err("DENIED: firewall parameters do not match the allowlisted rule".to_owned());
+        }
+        allowed_rule.clone()
+    };
     let operation_id = uuid::Uuid::parse_str(&request.operation_id)
         .map_err(|_| "DENIED: network operation ID must be a UUID".to_owned())?
         .hyphenated()
@@ -758,7 +817,7 @@ async fn expose_network_port(
         &systemd_run,
         &helper_binary,
         &operation_id,
-        rule,
+        &rule,
         payload.rollback_seconds,
     )
     .await
@@ -1213,6 +1272,7 @@ async fn manage_container(
     request: &Request,
     allowed_containers: &HashMap<String, ContainerSpec>,
     runtime: Option<&Path>,
+    allowlists_disabled: bool,
 ) -> std::result::Result<String, String> {
     let Some(runtime) = runtime else {
         return Err(
@@ -1225,22 +1285,33 @@ async fn manage_container(
             if request.payload_json.is_some() {
                 return Err("DENIED: container.list does not accept a payload".to_owned());
             }
-            if allowed_containers.is_empty() {
+            if !allowlists_disabled && allowed_containers.is_empty() {
                 return Err("DENIED: no containers are allowlisted".to_owned());
             }
-            args.extend([
-                "inspect".to_owned(),
-                "--format".to_owned(),
-                "{{.Name}} {{.State.Status}}".to_owned(),
-            ]);
-            args.extend(allowed_containers.keys().cloned());
+            if allowlists_disabled {
+                args.extend([
+                    "ps".to_owned(),
+                    "--all".to_owned(),
+                    "--format".to_owned(),
+                    "{{.Names}} {{.Status}}".to_owned(),
+                ]);
+            } else {
+                args.extend([
+                    "inspect".to_owned(),
+                    "--format".to_owned(),
+                    "{{.Name}} {{.State.Status}}".to_owned(),
+                ]);
+                args.extend(allowed_containers.keys().cloned());
+            }
         }
         "container.logs" => {
             if request.payload_json.is_some() {
                 return Err("DENIED: container.logs does not accept a payload".to_owned());
             }
-            if !allowed_containers.contains_key(&request.target) {
-                return Err("DENIED: container is not allowlisted".to_owned());
+            if !valid_container_name(&request.target)
+                || (!allowlists_disabled && !allowed_containers.contains_key(&request.target))
+            {
+                return Err("DENIED: container is not authorized".to_owned());
             }
             args.extend([
                 "logs".to_owned(),
@@ -1251,13 +1322,19 @@ async fn manage_container(
             ]);
         }
         "container.start" => {
-            if request.payload_json.is_some() || !allowed_containers.contains_key(&request.target) {
+            if request.payload_json.is_some()
+                || !valid_container_name(&request.target)
+                || (!allowlists_disabled && !allowed_containers.contains_key(&request.target))
+            {
                 return Err("DENIED: container start target or payload is invalid".to_owned());
             }
             args.extend(["start".to_owned(), request.target.clone()]);
         }
         "container.stop" => {
-            if request.payload_json.is_some() || !allowed_containers.contains_key(&request.target) {
+            if request.payload_json.is_some()
+                || !valid_container_name(&request.target)
+                || (!allowlists_disabled && !allowed_containers.contains_key(&request.target))
+            {
                 return Err("DENIED: container stop target or payload is invalid".to_owned());
             }
             args.extend([
@@ -1268,11 +1345,25 @@ async fn manage_container(
             ]);
         }
         "container.deploy" => {
-            if request.payload_json.is_some() {
-                return Err("DENIED: container.deploy does not accept a payload".to_owned());
-            }
-            let Some(spec) = allowed_containers.get(&request.target) else {
-                return Err("DENIED: container deployment is not allowlisted".to_owned());
+            let requested_spec = match request.payload_json.as_deref() {
+                Some(_) => parse_container_deploy_spec(request)?,
+                None if !allowlists_disabled => allowed_containers
+                    .get(&request.target)
+                    .cloned()
+                    .ok_or_else(|| "DENIED: container deployment is not allowlisted".to_owned())?,
+                None => {
+                    return Err(
+                        "DENIED: container deploy requires an image specification".to_owned()
+                    );
+                }
+            };
+            if !allowlists_disabled
+                && allowed_containers.get(&request.target) != Some(&requested_spec)
+            {
+                return Err(
+                    "DENIED: container parameters do not match the allowlisted specification"
+                        .to_owned(),
+                );
             };
             args.extend([
                 "run".to_owned(),
@@ -1288,13 +1379,15 @@ async fn manage_container(
                 "--read-only".to_owned(),
                 "--network=bridge".to_owned(),
             ]);
-            if let (Some(host_port), Some(container_port)) = (spec.host_port, spec.container_port) {
+            if let (Some(host_port), Some(container_port)) =
+                (requested_spec.host_port, requested_spec.container_port)
+            {
                 args.extend([
                     "--publish".to_owned(),
                     format!("127.0.0.1:{host_port}:{container_port}"),
                 ]);
             }
-            args.push(spec.image.clone());
+            args.push(requested_spec.image);
         }
         _ => return Err("DENIED: unsupported container capability".to_owned()),
     }
@@ -1318,6 +1411,22 @@ where
     }
     serde_json::from_str(payload)
         .map_err(|_| "DENIED: operation payload schema is invalid".to_owned())
+}
+
+fn parse_container_deploy_spec(request: &Request) -> std::result::Result<ContainerSpec, String> {
+    let payload = parse_payload::<ContainerDeployPayload>(request)?;
+    if !valid_container_image(&payload.image)
+        || payload.host_port.is_some_and(|port| port == 0)
+        || payload.container_port.is_some_and(|port| port == 0)
+        || payload.host_port.is_some() != payload.container_port.is_some()
+    {
+        return Err("DENIED: container image or port mapping is invalid".to_owned());
+    }
+    Ok(ContainerSpec {
+        image: payload.image,
+        host_port: payload.host_port,
+        container_port: payload.container_port,
+    })
 }
 
 async fn run_fixed_command(
@@ -1575,6 +1684,26 @@ fn truncate_journal_output(text: &str) -> String {
 
 fn read_service_allowlist(root: &File) -> Result<HashSet<String>> {
     read_unit_allowlist(root, "systemd-units.allowlist")
+}
+
+fn read_allowlist_mode(root: &File) -> Result<bool> {
+    match read_beneath(root, "allowlist-mode") {
+        Ok(mode) => Ok(allowlist_mode_is_disabled(&mode)),
+        Err(error)
+            if error.chain().any(|source| {
+                source
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+            }) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error).context("read root-managed operation allowlist mode"),
+    }
+}
+
+fn allowlist_mode_is_disabled(mode: &str) -> bool {
+    mode.trim() == "disabled"
 }
 
 fn read_unit_allowlist(root: &File, filename: &str) -> Result<HashSet<String>> {
@@ -1842,8 +1971,10 @@ fn valid_network_rule_name(name: &str) -> bool {
 fn valid_network_interface(interface: &str) -> bool {
     !interface.is_empty()
         && interface.len() <= 15
-        && interface != "."
-        && interface != ".."
+        && interface
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
         && interface
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
@@ -1852,7 +1983,10 @@ fn valid_network_interface(interface: &str) -> bool {
 fn valid_container_image(image: &str) -> bool {
     !image.is_empty()
         && image.len() <= 255
-        && !image.starts_with('-')
+        && image
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
         && image
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"._:/@-".contains(&byte))
@@ -1860,6 +1994,10 @@ fn valid_container_image(image: &str) -> bool {
 
 fn valid_systemd_unit(unit_name: &str) -> bool {
     unit_name.len() <= 255
+        && unit_name
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
         && unit_name.ends_with(".service")
         && unit_name
             .bytes()
@@ -2100,6 +2238,7 @@ mod tests {
         let allowlist = CapabilityAllowlist {
             restart_units: &allowed,
             journal_units: &journal_allowed,
+            allowlists_disabled: false,
             packages: &no_packages,
             files: &no_files,
             containers: &no_containers,
@@ -2114,10 +2253,50 @@ mod tests {
         assert!(target_allowed("systemd.restart", "nanpanel-agent.service").is_ok());
         assert!(target_allowed("systemd.restart", "ssh.service").is_ok());
         assert!(target_allowed("systemd.restart", "sshd.service").is_err());
+        assert!(target_allowed("systemd.restart", "--help").is_err());
+        assert!(target_allowed("systemd.restart", "--help.service").is_err());
         assert!(target_allowed("systemd.journal.read", "cron.service").is_ok());
         assert!(target_allowed("systemd.journal.read", "ssh.service").is_err());
+        assert!(target_allowed("systemd.journal.read", "--help").is_err());
+        assert!(target_allowed("systemd.journal.read", "--help.service").is_err());
         assert!(target_allowed("agent.update", "https://evil.invalid").is_err());
         assert!(target_allowed("package.install", "nano").is_err());
+        let unrestricted = CapabilityAllowlist {
+            allowlists_disabled: true,
+            has_container_runtime: true,
+            network_operations_available: true,
+            ..allowlist
+        };
+        assert!(
+            validate_capability_target("systemd.restart", "sshd.service", &unrestricted).is_ok()
+        );
+        assert!(
+            validate_capability_target("systemd.journal.read", "ssh.service", &unrestricted)
+                .is_ok()
+        );
+        assert!(validate_capability_target("systemd.restart", "--help", &unrestricted).is_err());
+        assert!(
+            validate_capability_target("systemd.restart", "--help.service", &unrestricted).is_err()
+        );
+        assert!(
+            validate_capability_target("systemd.journal.read", "--help", &unrestricted).is_err()
+        );
+        assert!(
+            validate_capability_target("systemd.journal.read", "--help.service", &unrestricted)
+                .is_err()
+        );
+        for (capability, target) in [
+            ("package.install", ""),
+            ("file.write.protected", "new.conf"),
+            ("container.list", ""),
+            ("container.logs", "web-test"),
+            ("container.start", "web-test"),
+            ("container.stop", "web-test"),
+            ("container.deploy", "web-test"),
+            ("network.firewall.expose", "temporary-test"),
+        ] {
+            assert!(validate_capability_target(capability, target, &unrestricted).is_ok());
+        }
         Ok(())
     }
 
@@ -2141,6 +2320,7 @@ mod tests {
         let unavailable = CapabilityAllowlist {
             restart_units: &no_units.restart,
             journal_units: &no_units.journal,
+            allowlists_disabled: false,
             packages: &empty_packages,
             files: &empty_files,
             containers: &empty_containers,
@@ -2152,26 +2332,28 @@ mod tests {
             validate_capability_target("network.firewall.expose", "ssh-temp", &unavailable)
                 .is_err()
         );
-        let unavailable_capabilities = available_capabilities(
-            &no_units,
-            &empty_packages,
-            &empty_files,
-            &empty_containers,
-            &rules,
-            false,
-            false,
-        );
+        let unavailable_capabilities = available_capabilities(unavailable);
         assert!(!unavailable_capabilities.contains(&"network.firewall.expose"));
-        let available_capabilities = available_capabilities(
-            &no_units,
-            &empty_packages,
-            &empty_files,
-            &empty_containers,
-            &rules,
-            false,
-            true,
-        );
-        assert!(available_capabilities.contains(&"network.firewall.expose"));
+        let available_network_capabilities = available_capabilities(CapabilityAllowlist {
+            network_operations_available: true,
+            ..unavailable
+        });
+        assert!(available_network_capabilities.contains(&"network.firewall.expose"));
+        let unrestricted_allowlist = CapabilityAllowlist {
+            allowlists_disabled: true,
+            has_container_runtime: true,
+            ..unavailable
+        };
+        let unrestricted_capabilities = available_capabilities(unrestricted_allowlist);
+        assert!(unrestricted_capabilities.contains(&"systemd.journal.read"));
+        assert!(unrestricted_capabilities.contains(&"package.install"));
+        assert!(unrestricted_capabilities.contains(&"file.write.protected"));
+        assert!(unrestricted_capabilities.contains(&"container.deploy"));
+        let unrestricted_network_capabilities = available_capabilities(CapabilityAllowlist {
+            network_operations_available: true,
+            ..unrestricted_allowlist
+        });
+        assert!(unrestricted_network_capabilities.contains(&"network.firewall.expose"));
     }
 
     #[test]
@@ -2179,6 +2361,10 @@ mod tests {
         assert!(valid_package_name("libssl3"));
         assert!(!valid_package_name("-y"));
         assert!(!valid_package_name("curl;id"));
+        assert!(valid_container_image("nginx:1.27"));
+        assert!(!valid_container_image("./nginx"));
+        assert!(valid_network_interface("br-0"));
+        assert!(!valid_network_interface("-eth0"));
         let root = tempfile::tempdir()?;
         std::fs::write(
             root.path().join("containers.allowlist"),
@@ -2270,26 +2456,40 @@ mod tests {
             .as_millis() as i64;
         let mut request = request("file.write.protected", "app.conf", now + 30_000);
         request.payload_json = Some(r#"{"content":"port=8080\n"}"#.to_owned());
-        let result =
-            write_protected_file(&request, &write_root, &allowed).map_err(anyhow::Error::msg)?;
+        let result = write_protected_file(&request, &write_root, &allowed, false)
+            .map_err(anyhow::Error::msg)?;
         assert!(result.contains("\"bytesWritten\":10"));
         assert_eq!(
             std::fs::read_to_string(write_root_path.join("app.conf"))?,
             "port=8080\n"
         );
+        request.target = "unlisted.conf".to_owned();
+        assert!(write_protected_file(&request, &write_root, &allowed, false).is_err());
+        write_protected_file(&request, &write_root, &allowed, true).map_err(anyhow::Error::msg)?;
+        assert!(write_root_path.join("unlisted.conf").is_file());
         request.target = "../outside".to_owned();
-        assert!(write_protected_file(&request, &write_root, &allowed).is_err());
+        assert!(write_protected_file(&request, &write_root, &allowed, true).is_err());
         Ok(())
     }
 
     #[test]
     fn root_managed_systemd_allowlist_rejects_invalid_units() -> Result<()> {
         let root = tempfile::tempdir()?;
+        let root_fd = File::open(root.path())?;
+        assert!(!read_allowlist_mode(&root_fd)?);
+        std::fs::write(root.path().join("allowlist-mode"), "disabled\n")?;
+        assert!(read_allowlist_mode(&root_fd)?);
+        std::fs::write(root.path().join("allowlist-mode"), "restricted\n")?;
+        assert!(!read_allowlist_mode(&root_fd)?);
         std::fs::write(
             root.path().join("systemd-units.allowlist"),
             "# root-controlled\nssh.service\ninvalid;command.service\n",
         )?;
-        let root_fd = File::open(root.path())?;
+        assert!(read_service_allowlist(&root_fd).is_err());
+        std::fs::write(
+            root.path().join("systemd-units.allowlist"),
+            "--help.service\n",
+        )?;
         assert!(read_service_allowlist(&root_fd).is_err());
         std::fs::write(
             root.path().join("systemd-units.allowlist"),

@@ -544,7 +544,18 @@ struct DispatchRequest {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct NetworkFirewallPayload {
+    interface_name: String,
+    protocol: String,
+    port: u16,
     rollback_seconds: u16,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ContainerDeployPayload {
+    image: String,
+    host_port: Option<u16>,
+    container_port: Option<u16>,
 }
 
 async fn dispatch_control(
@@ -647,9 +658,20 @@ fn valid_dispatch_payload(capability: &str, payload: Option<&str>) -> bool {
             serde_json::from_str::<serde_json::Value>(json).is_ok_and(|value| value.is_object())
         }
         ("network.firewall.expose", Some(json)) => {
-            serde_json::from_str::<NetworkFirewallPayload>(json)
-                .is_ok_and(|payload| (30..=300).contains(&payload.rollback_seconds))
+            serde_json::from_str::<NetworkFirewallPayload>(json).is_ok_and(|payload| {
+                valid_network_interface(&payload.interface_name)
+                    && matches!(payload.protocol.as_str(), "tcp" | "udp")
+                    && payload.port > 0
+                    && (30..=300).contains(&payload.rollback_seconds)
+            })
         }
+        ("container.deploy", Some(json)) => serde_json::from_str::<ContainerDeployPayload>(json)
+            .is_ok_and(|payload| {
+                valid_container_image(&payload.image)
+                    && payload.host_port.is_some() == payload.container_port.is_some()
+                    && payload.host_port.is_none_or(|port| port > 0)
+                    && payload.container_port.is_none_or(|port| port > 0)
+            }),
         (
             "agent.update"
             | "systemd.restart"
@@ -682,8 +704,36 @@ fn valid_container_target(target: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
 }
 
+fn valid_network_interface(interface: &str) -> bool {
+    !interface.is_empty()
+        && interface.len() <= 15
+        && interface
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        && interface
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+}
+
+fn valid_container_image(image: &str) -> bool {
+    !image.is_empty()
+        && image.len() <= 255
+        && image
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && image
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:/@-".contains(&byte))
+}
+
 fn valid_service_unit(unit_name: &str) -> bool {
     unit_name.len() <= 255
+        && unit_name
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
         && unit_name.ends_with(".service")
         && unit_name
             .bytes()
@@ -1037,17 +1087,35 @@ mod tests {
         ));
         assert!(valid_dispatch_payload(
             "network.firewall.expose",
-            Some(r#"{"rollbackSeconds":90}"#),
+            Some(r#"{"interfaceName":"eth0","protocol":"tcp","port":2222,"rollbackSeconds":90}"#),
         ));
         assert!(!valid_dispatch_payload(
             "network.firewall.expose",
-            Some(r#"{"rollbackSeconds":301}"#),
+            Some(r#"{"interfaceName":"eth0","protocol":"tcp","port":2222,"rollbackSeconds":301}"#),
         ));
         assert!(!valid_dispatch_payload(
             "network.firewall.expose",
-            Some(r#"{"rollbackSeconds":90,"command":"id"}"#),
+            Some(
+                r#"{"interfaceName":"eth0","protocol":"tcp","port":2222,"rollbackSeconds":90,"command":"id"}"#
+            ),
         ));
         assert!(!valid_dispatch_payload("network.firewall.expose", None));
+        assert!(!valid_dispatch_payload(
+            "network.firewall.expose",
+            Some(r#"{"interfaceName":"-eth0","protocol":"tcp","port":2222,"rollbackSeconds":90}"#),
+        ));
+        assert!(valid_dispatch_payload(
+            "container.deploy",
+            Some(r#"{"image":"nginx:1.27","hostPort":8080,"containerPort":80}"#),
+        ));
+        assert!(!valid_dispatch_payload(
+            "container.deploy",
+            Some(r#"{"image":"--privileged","hostPort":8080,"containerPort":80}"#),
+        ));
+        assert!(!valid_dispatch_payload(
+            "container.deploy",
+            Some(r#"{"image":"./nginx","hostPort":8080,"containerPort":80}"#),
+        ));
     }
 
     #[test]

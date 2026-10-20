@@ -480,7 +480,8 @@ class SystemResourceTest {
         .body("id", equalTo(packageOperationId));
     var invalidNetworkRequest = Map.of(
         "capability", "network.firewall.expose", "target", "ssh-test",
-        "payload", Map.of("rollbackSeconds", 301),
+        "payload", Map.of("interfaceName", "eth0", "protocol", "tcp", "port", 2222,
+            "rollbackSeconds", 301),
         "reason", "Test bounded rollback validation", "timeoutSeconds", 60,
         "expectedGeneration", 1);
     given().cookie("nanpanel_session", restoredCookie)
@@ -489,9 +490,33 @@ class SystemResourceTest {
         .contentType("application/json").body(invalidNetworkRequest)
         .post("/api/v1/hosts/" + hostId + "/operations")
         .then().statusCode(422).body("code", equalTo("VALIDATION_FAILED"));
+    var invalidContainerRequest = Map.of(
+        "capability", "container.deploy", "target", "web-test",
+        "payload", Map.of("image", "--privileged", "hostPort", 8080, "containerPort", 80),
+        "reason", "Reject an invalid container image", "timeoutSeconds", 60,
+        "expectedGeneration", 1);
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("Idempotency-Key", "helper-container-invalid-01")
+        .contentType("application/json").body(invalidContainerRequest)
+        .post("/api/v1/hosts/" + hostId + "/operations")
+        .then().statusCode(422).body("code", equalTo("VALIDATION_FAILED"));
+    var invalidNetworkInterfaceRequest = Map.of(
+        "capability", "network.firewall.expose", "target", "ssh-test",
+        "payload", Map.of("interfaceName", "-eth0", "protocol", "tcp", "port", 2222,
+            "rollbackSeconds", 90),
+        "reason", "Reject an invalid interface name", "timeoutSeconds", 60,
+        "expectedGeneration", 1);
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("Idempotency-Key", "helper-network-interface-invalid-01")
+        .contentType("application/json").body(invalidNetworkInterfaceRequest)
+        .post("/api/v1/hosts/" + hostId + "/operations")
+        .then().statusCode(422).body("code", equalTo("VALIDATION_FAILED"));
     var networkRequest = Map.of(
         "capability", "network.firewall.expose", "target", "ssh-test",
-        "payload", Map.of("rollbackSeconds", 90),
+        "payload", Map.of("interfaceName", "eth0", "protocol", "tcp", "port", 2222,
+            "rollbackSeconds", 90),
         "reason", "Test bounded network operation", "timeoutSeconds", 60,
         "expectedGeneration", 1);
     String networkOperationKey = "helper-network-valid-01";

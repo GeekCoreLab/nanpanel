@@ -49,6 +49,10 @@ public class HostHelperOperationResource {
       java.util.regex.Pattern.compile("[A-Za-z0-9_.-]{1,128}");
   private static final java.util.regex.Pattern CONTAINER_NAME =
       java.util.regex.Pattern.compile("[A-Za-z0-9][A-Za-z0-9_.-]{0,62}");
+  private static final java.util.regex.Pattern CONTAINER_IMAGE =
+      java.util.regex.Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:/@-]{0,254}");
+  private static final java.util.regex.Pattern NETWORK_INTERFACE =
+      java.util.regex.Pattern.compile("[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}");
   private static final java.util.regex.Pattern NETWORK_RULE_NAME =
       java.util.regex.Pattern.compile("[A-Za-z0-9][A-Za-z0-9_.-]{0,62}");
 
@@ -297,16 +301,41 @@ public class HostHelperOperationResource {
         throw fail(422, "VALIDATION_FAILED", "受保护文件内容无效或超过 32 KiB");
       return;
     }
+    if (capability.equals("container.deploy") && payload != null && !payload.isNull()) {
+      JsonNode image = payload.get("image");
+      JsonNode hostPort = payload.get("hostPort");
+      JsonNode containerPort = payload.get("containerPort");
+      boolean hostPortMissing = hostPort == null || hostPort.isNull();
+      boolean containerPortMissing = containerPort == null || containerPort.isNull();
+      if (!payload.isObject() || payload.size() != 3 || image == null || !image.isTextual() ||
+          !CONTAINER_IMAGE.matcher(image.asText()).matches() ||
+          hostPortMissing != containerPortMissing ||
+          (!hostPortMissing && (!validPort(hostPort) || !validPort(containerPort))))
+        throw fail(422, "VALIDATION_FAILED", "容器镜像或端口映射无效");
+      return;
+    }
     if (capability.equals("network.firewall.expose")) {
       JsonNode timeout = payload == null ? null : payload.get("rollbackSeconds");
-      if (payload == null || !payload.isObject() || payload.size() != 1 || timeout == null ||
+      JsonNode interfaceName = payload == null ? null : payload.get("interfaceName");
+      JsonNode protocol = payload == null ? null : payload.get("protocol");
+      JsonNode port = payload == null ? null : payload.get("port");
+      if (payload == null || !payload.isObject() || payload.size() != 4 || timeout == null ||
           !timeout.isIntegralNumber() || !timeout.canConvertToInt() ||
-          timeout.intValue() < 30 || timeout.intValue() > 300)
-        throw fail(422, "VALIDATION_FAILED", "网络规则回滚时间必须为 30 至 300 秒");
+          timeout.intValue() < 30 || timeout.intValue() > 300 ||
+          interfaceName == null || !interfaceName.isTextual() ||
+          !NETWORK_INTERFACE.matcher(interfaceName.asText()).matches() ||
+          protocol == null || !protocol.isTextual() ||
+          !Set.of("tcp", "udp").contains(protocol.asText()) || !validPort(port))
+        throw fail(422, "VALIDATION_FAILED", "网络接口、协议、端口或回滚时间无效");
       return;
     }
     if (payload != null && !payload.isNull())
       throw fail(422, "VALIDATION_FAILED", "该容器操作不接受附加参数");
+  }
+
+  private boolean validPort(JsonNode value) {
+    return value != null && value.isIntegralNumber() && value.canConvertToInt() &&
+        value.intValue() >= 1 && value.intValue() <= 65535;
   }
 
   private int defaultTimeout(String capability) {

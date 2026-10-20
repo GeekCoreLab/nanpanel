@@ -41,7 +41,18 @@ struct HostSnapshot {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct NetworkFirewallPayload {
+    interface_name: String,
+    protocol: String,
+    port: u16,
     rollback_seconds: u16,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ContainerDeployPayload {
+    image: String,
+    host_port: Option<u16>,
+    container_port: Option<u16>,
 }
 
 #[derive(Clone, Debug)]
@@ -411,18 +422,24 @@ async fn connect_once(
     let heartbeat_sender = sender.clone();
     let restart_allowlist = allowed_systemd_restart_units();
     let journal_allowlist = allowed_systemd_journal_units();
+    let allowlists_disabled = allowlists_disabled();
     let heartbeat_task = tokio::spawn(async move {
         let mut ticker = time::interval(interval);
         ticker.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         let mut systemd_services =
-            collect_systemd_services(&restart_allowlist, &journal_allowlist).await;
+            collect_systemd_services(&restart_allowlist, &journal_allowlist, allowlists_disabled)
+                .await;
         let mut systemd_observed_at = systemd_services.as_ref().and_then(|_| epoch_ms().ok());
         let mut systemd_refresh_at = time::Instant::now();
         loop {
             ticker.tick().await;
             if systemd_refresh_at.elapsed() >= Duration::from_secs(30) {
-                systemd_services =
-                    collect_systemd_services(&restart_allowlist, &journal_allowlist).await;
+                systemd_services = collect_systemd_services(
+                    &restart_allowlist,
+                    &journal_allowlist,
+                    allowlists_disabled,
+                )
+                .await;
                 systemd_observed_at = if systemd_services.is_some() {
                     epoch_ms().ok()
                 } else {
@@ -870,6 +887,7 @@ fn is_direct_dns_fallback_allowed(host: &str, tls_domain: &str) -> bool {
 async fn collect_systemd_services(
     restart_allowlist: &HashSet<String>,
     journal_allowlist: &HashSet<String>,
+    allowlists_disabled: bool,
 ) -> Option<Vec<SystemdService>> {
     let output = time::timeout(
         Duration::from_secs(3),
@@ -890,13 +908,19 @@ async fn collect_systemd_services(
     if !output.status.success() {
         return None;
     }
-    parse_systemd_services(&output.stdout, restart_allowlist, journal_allowlist)
+    parse_systemd_services(
+        &output.stdout,
+        restart_allowlist,
+        journal_allowlist,
+        allowlists_disabled,
+    )
 }
 
 fn parse_systemd_services(
     output: &[u8],
     restart_allowlist: &HashSet<String>,
     journal_allowlist: &HashSet<String>,
+    allowlists_disabled: bool,
 ) -> Option<Vec<SystemdService>> {
     let units: serde_json::Value = serde_json::from_slice(output).ok()?;
     let units = units.as_array()?;
@@ -928,9 +952,10 @@ fn parse_systemd_services(
                 }
                 .to_owned(),
                 sub_state: sub_state.to_owned(),
-                restart_allowed: unit_name == "nanpanel-agent.service"
+                restart_allowed: allowlists_disabled
+                    || unit_name == "nanpanel-agent.service"
                     || restart_allowlist.contains(unit_name),
-                journal_read_allowed: journal_allowlist.contains(unit_name),
+                journal_read_allowed: allowlists_disabled || journal_allowlist.contains(unit_name),
             })
         })
         .take(512)
@@ -940,6 +965,10 @@ fn parse_systemd_services(
 
 fn valid_service_unit(unit_name: &str) -> bool {
     unit_name.len() <= 255
+        && unit_name
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
         && unit_name.ends_with(".service")
         && unit_name
             .bytes()
@@ -966,14 +995,32 @@ fn valid_control(capability: &str, target: &str, payload_json: &str) -> bool {
                 && serde_json::from_str::<serde_json::Value>(payload_json)
                     .is_ok_and(|value| value.is_object())
         }
-        "container.logs" | "container.start" | "container.stop" | "container.deploy" => {
+        "container.logs" | "container.start" | "container.stop" => {
             valid_container_target(target) && !has_payload
+        }
+        "container.deploy" => {
+            valid_container_target(target)
+                && (!has_payload
+                    || serde_json::from_str::<ContainerDeployPayload>(payload_json).is_ok_and(
+                        |payload| {
+                            valid_container_image(&payload.image)
+                                && payload.host_port.is_some() == payload.container_port.is_some()
+                                && payload.host_port.is_none_or(|port| port > 0)
+                                && payload.container_port.is_none_or(|port| port > 0)
+                        },
+                    ))
         }
         "network.firewall.expose" => {
             valid_container_target(target)
                 && has_payload
-                && serde_json::from_str::<NetworkFirewallPayload>(payload_json)
-                    .is_ok_and(|payload| (30..=300).contains(&payload.rollback_seconds))
+                && serde_json::from_str::<NetworkFirewallPayload>(payload_json).is_ok_and(
+                    |payload| {
+                        valid_network_interface(&payload.interface_name)
+                            && matches!(payload.protocol.as_str(), "tcp" | "udp")
+                            && payload.port > 0
+                            && (30..=300).contains(&payload.rollback_seconds)
+                    },
+                )
         }
         _ => false,
     }
@@ -994,6 +1041,30 @@ fn valid_container_target(target: &str) -> bool {
         && target
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+}
+
+fn valid_network_interface(interface: &str) -> bool {
+    !interface.is_empty()
+        && interface.len() <= 15
+        && interface
+            .as_bytes()
+            .first()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        && interface
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+}
+
+fn valid_container_image(image: &str) -> bool {
+    !image.is_empty()
+        && image.len() <= 255
+        && image
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && image
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:/@-".contains(&byte))
 }
 
 fn allowed_systemd_restart_units() -> HashSet<String> {
@@ -1024,6 +1095,15 @@ fn allowed_systemd_journal_units() -> HashSet<String> {
         .take(128)
         .map(str::to_owned)
         .collect()
+}
+
+fn allowlists_disabled() -> bool {
+    std::fs::read_to_string("/etc/nanpanel/managed/allowlist-mode")
+        .is_ok_and(|mode| allowlist_mode_is_disabled(&mode))
+}
+
+fn allowlist_mode_is_disabled(mode: &str) -> bool {
+    mode.trim() == "disabled"
 }
 
 async fn send_operation_result(
@@ -1211,6 +1291,7 @@ mod tests {
             input,
             &HashSet::from(["ssh.service".to_owned()]),
             &HashSet::from(["failed.service".to_owned()]),
+            false,
         )
         .ok_or_else(|| anyhow!("valid systemd JSON should parse"))?;
         assert_eq!(services.len(), 2);
@@ -1221,14 +1302,28 @@ mod tests {
         assert!(services[0].restart_allowed);
         assert!(!services[0].journal_read_allowed);
         assert!(services[1].journal_read_allowed);
+        let unrestricted = parse_systemd_services(input, &HashSet::new(), &HashSet::new(), true)
+            .ok_or_else(|| anyhow!("valid systemd JSON should parse in unrestricted mode"))?;
+        assert!(unrestricted.iter().all(|service| service.restart_allowed));
+        assert!(
+            unrestricted
+                .iter()
+                .all(|service| service.journal_read_allowed)
+        );
         Ok(())
     }
 
     #[test]
     fn rejects_invalid_systemd_json() {
         let none = HashSet::new();
-        assert!(parse_systemd_services(b"not-json", &none, &none).is_none());
-        assert!(parse_systemd_services(br#"{"unit":"ssh.service"}"#, &none, &none).is_none());
+        assert!(parse_systemd_services(b"not-json", &none, &none, false).is_none());
+        assert!(
+            parse_systemd_services(br#"{"unit":"ssh.service"}"#, &none, &none, false).is_none()
+        );
+        assert!(!valid_service_unit("--help.service"));
+        assert!(!allowlist_mode_is_disabled("restricted\n"));
+        assert!(allowlist_mode_is_disabled("disabled\n"));
+        assert!(!allowlist_mode_is_disabled("DISABLED\n"));
     }
 
     #[test]
@@ -1236,22 +1331,42 @@ mod tests {
         assert!(valid_control(
             "network.firewall.expose",
             "ssh-test",
-            r#"{"rollbackSeconds":90}"#,
+            r#"{"interfaceName":"eth0","protocol":"tcp","port":2222,"rollbackSeconds":90}"#,
         ));
         assert!(!valid_control(
             "network.firewall.expose",
             "ssh-test",
-            r#"{"rollbackSeconds":301}"#,
+            r#"{"interfaceName":"eth0","protocol":"tcp","port":2222,"rollbackSeconds":301}"#,
         ));
         assert!(!valid_control(
             "network.firewall.expose",
             "ssh-test;id",
-            r#"{"rollbackSeconds":90}"#,
+            r#"{"interfaceName":"eth0","protocol":"tcp","port":2222,"rollbackSeconds":90}"#,
         ));
         assert!(!valid_control(
             "network.firewall.expose",
             "ssh-test",
-            r#"{"rollbackSeconds":90,"command":"id"}"#,
+            r#"{"interfaceName":"-eth0","protocol":"tcp","port":2222,"rollbackSeconds":90}"#,
+        ));
+        assert!(!valid_control(
+            "network.firewall.expose",
+            "ssh-test",
+            r#"{"interfaceName":"eth0","protocol":"tcp","port":2222,"rollbackSeconds":90,"command":"id"}"#,
+        ));
+        assert!(valid_control(
+            "container.deploy",
+            "web-app",
+            r#"{"image":"nginx:1.27","hostPort":8080,"containerPort":80}"#,
+        ));
+        assert!(!valid_control(
+            "container.deploy",
+            "web-app",
+            r#"{"image":"-v","hostPort":8080,"containerPort":80}"#,
+        ));
+        assert!(!valid_control(
+            "container.deploy",
+            "web-app",
+            r#"{"image":"./nginx","hostPort":8080,"containerPort":80}"#,
         ));
     }
 }

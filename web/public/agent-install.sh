@@ -130,6 +130,18 @@ install -d -o root -g root -m 0755 /etc/nanpanel-agent
 install -d -o "$agent_user" -g "$agent_user" -m 0750 /var/lib/nanpanel-agent
 install -d -o root -g "$agent_user" -m 0750 /etc/nanpanel/managed
 install -d -o root -g root -m 0700 /etc/nanpanel/managed/files
+if [[ -L /etc/nanpanel/managed/allowlist-mode ]]; then
+    printf 'Refusing a symlinked allowlist mode configuration.\n' >&2
+    exit 1
+fi
+if [[ ! -e /etc/nanpanel/managed/allowlist-mode ]]; then
+    install -o root -g "$agent_user" -m 0640 /dev/null \
+        /etc/nanpanel/managed/allowlist-mode
+    printf 'restricted\n' > /etc/nanpanel/managed/allowlist-mode
+else
+    chown root:"$agent_user" /etc/nanpanel/managed/allowlist-mode
+    chmod 0640 /etc/nanpanel/managed/allowlist-mode
+fi
 if [[ -L /etc/nanpanel/managed/systemd-units.allowlist ]]; then
     printf 'Refusing a symlinked systemd allowlist.\n' >&2
     exit 1

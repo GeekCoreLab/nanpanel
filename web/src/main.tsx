@@ -196,7 +196,7 @@ function HostEnrollmentDialog({ close, onCreated }: { close: () => void; onCreat
    <p className="muted">为目标主机创建一条资产记录和 15 分钟有效的一次性接入码。首次心跳会自动补齐主机名、系统和架构。</p>
    <Field label="资产名称"><input autoFocus required maxLength={255} value={hostname} onChange={e => setHostname(e.target.value)} placeholder="例如 node-01" /></Field>
    <section className="restart-form"><h3>SSH 直连（可选）</h3>{directSshFields}</section>
-   <div className="alert">Agent 使用独立 mTLS 证书接入并上报主机清单、systemd 服务观测；root Helper 只执行系统管理员配置白名单中的操作。</div>
+   <div className="alert">Agent 使用独立 mTLS 证书接入并上报主机清单、systemd 服务观测；Helper 默认按主机 root 配置的白名单限制操作，也可通过统一模式配置临时关闭名单匹配。</div>
    {error && <div className="alert error" role="alert">{error}</div>}
    <div className="form-actions"><button type="button" className="secondary" onClick={close}>取消</button><button className="primary" disabled={busy || !hostname.trim()}>{busy ? '正在创建接入码…' : '生成安装命令'}</button></div>
   </form> : <div className="enrollment-result">
@@ -287,7 +287,7 @@ function SystemdServicesDialog({ host, helperStatus, close, notify }: {
  }
  const unavailableMessage = helperStatus !== 'AVAILABLE'
   ? 'Agent 或 root Helper 当前不可用，暂时不能执行服务操作。'
-  : '操作需要目标主机 root 管理员逐项授权：重启写入 /etc/nanpanel/managed/systemd-units.allowlist，日志读取写入 /etc/nanpanel/managed/journal-units.allowlist；每行一个 .service unit。修改后重启 nanpanel-helper.service 和 nanpanel-agent.service 以刷新授权。';
+  : '操作需要目标主机 root 管理员逐项授权：重启写入 /etc/nanpanel/managed/systemd-units.allowlist，日志读取写入 /etc/nanpanel/managed/journal-units.allowlist；每行一个 .service unit。若要临时关闭全部 Helper allowlist 匹配，将统一配置 /etc/nanpanel/managed/allowlist-mode 内容设为 disabled。修改后重启 nanpanel-helper.service 和 nanpanel-agent.service 以刷新授权。';
  return <div className="modal-backdrop systemd-services-backdrop"><section className="modal systemd-services-modal" role="dialog" aria-modal="true" aria-label={`${host.hostname} systemd 服务`}>
   <div className="card-title"><div><span className="eyebrow">SYSTEMD SERVICES</span><h2>{host.hostname} · systemd 服务</h2><p className="muted">每页最多 25 个服务；操作结果与日志会直接显示在此弹窗。</p></div><button className="icon-button" aria-label="关闭 systemd 服务详情" onClick={close}>×</button></div>
   <div className="systemd-services-content">
@@ -603,16 +603,18 @@ function BastionReplay({ session, items, commands, close }: { session: BastionSe
 }
 function HelperOperationPanel({ host, agent, notify, refresh }: { host: Host; agent: Agent; notify: (s: string) => void; refresh: () => void }) {
  const actionLabels: Record<HostHelperOperationRequest['capability'], string> = {
-  'package.install': '安装 allowlist 软件包', 'file.write.protected': '写入受保护文件',
-  'container.list': '列出受管容器', 'container.logs': '读取容器日志',
-  'container.start': '启动受管容器', 'container.stop': '停止受管容器',
-  'container.deploy': '部署预设容器', 'network.firewall.expose': '临时开放 allowlist 防火墙端口'
+  'package.install': '安装软件包', 'file.write.protected': '写入受保护目录文件',
+  'container.list': '列出容器', 'container.logs': '读取容器日志',
+  'container.start': '启动容器', 'container.stop': '停止容器',
+  'container.deploy': '部署容器', 'network.firewall.expose': '临时开放防火墙端口'
  };
  const supported = (['package.install', 'file.write.protected', 'container.list', 'container.logs', 'container.start', 'container.stop', 'container.deploy', 'network.firewall.expose'] as const)
   .filter(capability => agent.capabilities.includes(capability));
  const helperReady = agent.status === 'ONLINE' && agent.helperStatus === 'AVAILABLE';
  const [capability, setCapability] = useState<HostHelperOperationRequest['capability']>(supported[0] ?? 'container.list');
  const [target, setTarget] = useState(''); const [packages, setPackages] = useState(''); const [content, setContent] = useState(''); const [rollbackSeconds, setRollbackSeconds] = useState('90');
+ const [image, setImage] = useState('nginx:1.27'); const [hostPort, setHostPort] = useState(''); const [containerPort, setContainerPort] = useState('');
+ const [firewallInterface, setFirewallInterface] = useState(''); const [firewallProtocol, setFirewallProtocol] = useState<'tcp' | 'udp'>('tcp'); const [firewallPort, setFirewallPort] = useState('');
  const [reason, setReason] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [key, setKey] = useState(createUuid());
  useEffect(() => { if (!supported.includes(capability)) setCapability(supported[0] ?? 'container.list'); }, [agent.capabilities.join(','), capability]);
  const needsTarget = capability === 'file.write.protected' || capability === 'network.firewall.expose' || ['container.logs', 'container.start', 'container.stop', 'container.deploy'].includes(capability);
@@ -620,30 +622,32 @@ function HelperOperationPanel({ host, agent, notify, refresh }: { host: Host; ag
   event.preventDefault(); if (!supported.includes(capability) || !helperReady) return;
   const payload = capability === 'package.install' ? { packages: packages.split(',').map(name => name.trim()).filter(Boolean) }
    : capability === 'file.write.protected' ? { content }
-   : capability === 'network.firewall.expose' ? { rollbackSeconds: Number(rollbackSeconds) } : undefined;
+   : capability === 'container.deploy' ? { image: image.trim(), hostPort: hostPort.trim() ? Number(hostPort) : null, containerPort: containerPort.trim() ? Number(containerPort) : null }
+   : capability === 'network.firewall.expose' ? { interfaceName: firewallInterface.trim(), protocol: firewallProtocol, port: Number(firewallPort), rollbackSeconds: Number(rollbackSeconds) } : undefined;
   const body: HostHelperOperationRequest = { capability, target: needsTarget ? target.trim() : '', reason, timeoutSeconds: capability === 'package.install' ? 300 : 60, expectedGeneration: host.generation, ...(payload ? { payload } : {}) };
   setBusy(true); setError('');
   try {
    await api<Operation>(`/hosts/${host.id}/operations`, 'POST', body, { 'Idempotency-Key': key }, true);
    notify(`${isMock ? '模拟' : ''}Helper 任务已接受，可在操作任务中查看结果`);
-   setReason(''); setTarget(''); setPackages(''); setContent(''); setRollbackSeconds('90'); setKey(createUuid()); refresh();
+   setReason(''); setTarget(''); setPackages(''); setContent(''); setRollbackSeconds('90'); setImage('nginx:1.27'); setHostPort(''); setContainerPort(''); setFirewallInterface(''); setFirewallProtocol('tcp'); setFirewallPort(''); setKey(createUuid()); refresh();
   } catch (e) { setError((e as Error).message); }
   finally { setBusy(false); }
  }
- if (supported.length === 0) return <><h3>受限 Helper 操作</h3><p className="muted">主机尚未上报可用的 allowlist 操作；本机默认授权清单为空。</p></>;
- return <><h3>受限 Helper 操作</h3><form className="restart-form" onSubmit={submit}>
-  <p className="muted">只执行主机 root 管理 allowlist 中的类型化操作；没有任意命令或任意路径入口。</p>
+ if (supported.length === 0) return <><h3>Helper 主机操作</h3><p className="muted">主机尚未上报可用操作。allowlist 默认逐项限制，可由 root 在 /etc/nanpanel/managed/allowlist-mode 中设置 disabled；容器和防火墙还需要对应运行时及系统工具。</p></>;
+ const deploymentPortsMismatch = Boolean(hostPort.trim()) !== Boolean(containerPort.trim());
+ return <><h3>Helper 主机操作</h3><form className="restart-form" onSubmit={submit}>
+  <p className="muted">操作通过固定 Helper 能力执行，不开放任意命令或路径。allowlist 默认逐项限制；主机 root 可在 /etc/nanpanel/managed/allowlist-mode 中设置 disabled 关闭全部 Helper allowlist 匹配。固定参数校验、受保护目录、容器资源限制和防火墙自动回滚仍生效。</p>
   <Field label="操作类型"><select value={capability} onChange={event => { setCapability(event.target.value as HostHelperOperationRequest['capability']); setKey(createUuid()); setError(''); }}>
    {supported.map(item => <option key={item} value={item}>{actionLabels[item]}</option>)}
   </select></Field>
-  {needsTarget && <Field label={capability === 'file.write.protected' ? 'allowlist 文件名' : capability === 'network.firewall.expose' ? 'allowlist 网络规则名' : 'allowlist 容器名'}><input required maxLength={128} value={target} onChange={event => setTarget(event.target.value)} placeholder={capability === 'file.write.protected' ? '例如 app.conf' : capability === 'network.firewall.expose' ? '例如 ssh-test' : '例如 web-gateway'} /></Field>}
+  {needsTarget && <Field label={capability === 'file.write.protected' ? '文件名' : capability === 'network.firewall.expose' ? '规则名（受限模式需匹配授权项）' : '容器名（受限模式需匹配授权项）'}><input required maxLength={128} value={target} onChange={event => setTarget(event.target.value)} placeholder={capability === 'file.write.protected' ? '例如 app.conf' : capability === 'network.firewall.expose' ? '例如 ssh-test' : '例如 web-gateway'} /></Field>}
   {capability === 'package.install' && <Field label="软件包名（逗号分隔）"><input required maxLength={512} value={packages} onChange={event => setPackages(event.target.value)} placeholder="例如 curl, jq" /></Field>}
   {capability === 'file.write.protected' && <Field label="文件内容"><textarea required maxLength={32768} value={content} onChange={event => setContent(event.target.value)} placeholder="最多 32 KiB；写入主机 root 管理的固定目录" /></Field>}
-  {capability === 'network.firewall.expose' && <Field label="自动回滚秒数"><input required type="number" min={30} max={300} step={1} value={rollbackSeconds} onChange={event => setRollbackSeconds(event.target.value)} /><small className="muted">仅临时开放主机 root allowlist 中指定接口、协议和端口；执行前会挂载 systemd 定时回滚。</small></Field>}
+  {capability === 'container.deploy' && <><Field label="容器镜像"><input required maxLength={255} pattern="[A-Za-z0-9][A-Za-z0-9._:/@-]{0,254}" value={image} onChange={event => setImage(event.target.value)} placeholder="例如 nginx:1.27" /></Field><div className="ssh-form-grid"><Field label="Loopback 主机端口（可选）"><input type="number" min={1} max={65535} value={hostPort} onChange={event => setHostPort(event.target.value)} /></Field><Field label="容器端口（可选）"><input type="number" min={1} max={65535} value={containerPort} onChange={event => setContainerPort(event.target.value)} /></Field></div><small className="muted">两个端口必须同时填写或留空；端口发布仍仅绑定 127.0.0.1。受限模式下镜像和端口必须匹配主机授权规格。</small></>}
+  {capability === 'network.firewall.expose' && <><div className="ssh-form-grid"><Field label="网络接口"><input required maxLength={15} pattern="[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}" value={firewallInterface} onChange={event => setFirewallInterface(event.target.value)} placeholder="例如 eth0" /></Field><Field label="协议"><select value={firewallProtocol} onChange={event => setFirewallProtocol(event.target.value as 'tcp' | 'udp')}><option value="tcp">TCP</option><option value="udp">UDP</option></select></Field></div><Field label="端口"><input required type="number" min={1} max={65535} step={1} value={firewallPort} onChange={event => setFirewallPort(event.target.value)} /></Field><Field label="自动回滚秒数"><input required type="number" min={30} max={300} step={1} value={rollbackSeconds} onChange={event => setRollbackSeconds(event.target.value)} /><small className="muted">临时添加接口/协议/端口规则，执行前先挂载 systemd 定时回滚；受限模式下参数必须匹配主机授权项。</small></Field></>}
   <Field label="操作原因"><textarea required maxLength={500} value={reason} onChange={event => setReason(event.target.value)} placeholder="记录本次运维操作的原因" /></Field>
-  {capability === 'container.deploy' && <small className="muted">部署规格、镜像和 loopback 端口取自主机 allowlist；运行时资源与 Linux capabilities 受限。</small>}
   {error && <div className="alert error" role="alert">{error}</div>}
-  <div className="form-actions"><span className="muted">主机版本 {host.generation} · 截止 60–300 秒</span><button className="primary" disabled={busy || !helperReady || !reason.trim() || (needsTarget && !target.trim())}>{busy ? '正在下发…' : '提交受限操作'}</button></div>
+  <div className="form-actions"><span className="muted">主机版本 {host.generation} · 截止 60–300 秒</span><button className="primary" disabled={busy || !helperReady || !reason.trim() || (needsTarget && !target.trim()) || (capability === 'container.deploy' && (!image.trim() || deploymentPortsMismatch))}>{busy ? '正在下发…' : '提交 Helper 操作'}</button></div>
  </form></>;
 }
 function AgentMaintenanceDialog({ agentId, mode, installation, installationError, selfUpdateSupported, selfUpdateReported, agentStatus, helperStatus, close }: { agentId: string; mode: AgentMaintenanceMode; installation?: AgentInstallation; installationError: string; selfUpdateSupported: boolean; selfUpdateReported: boolean; agentStatus?: Agent['status']; helperStatus?: Agent['helperStatus']; close: () => void }) {
@@ -689,7 +693,7 @@ function operationTitle(operation: Operation) {
  if (operation.kind === 'SYSTEM_SERVICE_RESTART') return 'systemd 服务重启';
  if (operation.kind === 'SSH_SYSTEMD_RESTART') return 'SSH systemd 救援';
  if (operation.kind === 'SSH_AGENT_INSTALL') return 'SSH Agent 初始化';
- const titles: Record<string, string> = { 'package.install': '安装 allowlist 软件包', 'file.write.protected': '写入受保护文件', 'container.list': '列出受管容器', 'container.logs': '读取容器日志', 'container.start': '启动受管容器', 'container.stop': '停止受管容器', 'container.deploy': '部署预设容器', 'network.firewall.expose': '临时开放 allowlist 防火墙端口' };
+ const titles: Record<string, string> = { 'package.install': '安装软件包', 'file.write.protected': '写入受保护文件', 'container.list': '列出容器', 'container.logs': '读取容器日志', 'container.start': '启动容器', 'container.stop': '停止容器', 'container.deploy': '部署容器', 'network.firewall.expose': '临时开放防火墙端口' };
  return titles[operation.capability ?? ''] ?? operation.capability ?? '受限 Helper 操作';
 }
 function Operations() {

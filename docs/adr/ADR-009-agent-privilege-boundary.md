@@ -14,7 +14,7 @@ Agent/Helper 协议不提供任意 Shell 执行接口。需要交互式远程终
 
 ## 实施与验收
 
-实际特权执行通过独立 Helper 落地。验证授权服务操作成功、非可信调用方与越权参数被拒绝，网络变更可回退，结果有审计。Agent/Helper 不使用 systemd 沙箱；Helper 的固定能力接口、root allowlist、参数校验和审计仍约束远程可请求的操作。
+实际特权执行通过独立 Helper 落地。验证授权服务操作成功、非可信调用方与越权参数被拒绝，网络变更可回退，结果有审计。Agent/Helper 不使用 systemd 沙箱；Helper 的固定能力接口、root allowlist、参数校验和审计仍约束远程可请求的操作。各 Helper 能力的逐项 allowlist 默认生效；主机 root 可将 `/etc/nanpanel/managed/allowlist-mode` 设为 `disabled` 临时停用全部 Helper allowlist 匹配。固定参数边界、受保护文件目录、容器运行约束和网络自动回滚继续生效。
 
 ## 代价
 

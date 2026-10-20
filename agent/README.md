@@ -1,20 +1,32 @@
 # Rust 边缘执行组件
 
-`Cargo.toml` 建立了独立 workspace，包含 `daemon`、`relay`、`runtime-drivers`、`privileged-helper`。Agent 使用 Rust gRPC 双向流、mTLS 客户端证书、周期主机清单/systemd 观测和指数退避重连；Core 通过一次性接入码签发客户端证书，Gateway 校验证书并将心跳转发至 Core。独立 Control Relay 接受 Agent 与 Core 出站双向流，Core Gateway 在配置至少两个 Relay 时并行连接；Relay 只在 Core 校验 Agent 证书指纹后开放控制路由。Linux x86_64 静态 Agent 和 Helper 随 Core 镜像发布，安装器在证书指纹校验后部署普通用户 Agent 与 root Helper。两个 systemd unit 直接使用宿主机环境，不配置 systemd 文件系统、临时目录、内核或 syscall 沙箱；Agent 仍是普通用户，只有 Helper 以 root 运行。Helper 通过 `SO_PEERCRED` 校验 UID，开放状态探测、从固定控制器原子更新 Agent、allowlist systemd unit 重启、独立 allowlist 的有界 journal 读取、受控软件包安装、受保护文件原子写入、allowlist 容器操作，以及带 systemd 定时回滚的 nftables 临时规则。网络变更仅限预设防火墙规则；Core 的 alias SSH 操作包括 host-bound 探测、allowlist systemd 状态/有界日志读取与救援重启，以及通过固定安装脚本异步初始化 Agent。另支持主机资产保存加密直连凭据、host key 确认后执行固定 Agent 初始化，和独立的管理员 SSH PTY 堡垒 Shell；堡垒命令与录像采用专用表加密保存，不借用 Agent/Helper 的提权通道。alias 与 systemd unit allowlist 默认为空。真实双主机 SSH/堡垒终端验收与固定范围之外的 agentless 管理能力仍待完成。
+`Cargo.toml` 建立了独立 workspace，包含 `daemon`、`relay`、`runtime-drivers`、`privileged-helper`。Agent 使用 Rust gRPC 双向流、mTLS 客户端证书、周期主机清单/systemd 观测和指数退避重连；Core 通过一次性接入码签发客户端证书，Gateway 校验证书并将心跳转发至 Core。独立 Control Relay 接受 Agent 与 Core 出站双向流，Core Gateway 在配置至少两个 Relay 时并行连接；Relay 只在 Core 校验 Agent 证书指纹后开放控制路由。Linux x86_64 静态 Agent 和 Helper 随 Core 镜像发布，安装器在证书指纹校验后部署普通用户 Agent 与 root Helper。两个 systemd unit 直接使用宿主机环境，不配置 systemd 文件系统、临时目录、内核或 syscall 沙箱；Agent 仍是普通用户，只有 Helper 以 root 运行。Helper 通过 `SO_PEERCRED` 校验 UID，开放状态探测、从固定控制器原子更新 Agent、默认按 root allowlist 限制的 systemd unit 重启和有界 journal 读取、受控软件包安装、受保护文件原子写入、allowlist 容器操作，以及带 systemd 定时回滚的 nftables 临时规则。网络变更仅限预设防火墙规则；Core 的 alias SSH 操作包括 host-bound 探测、allowlist systemd 状态/有界日志读取与救援重启，以及通过固定安装脚本异步初始化 Agent。另支持主机资产保存加密直连凭据、host key 确认后执行固定 Agent 初始化，和独立的管理员 SSH PTY 堡垒 Shell；堡垒命令与录像采用专用表加密保存，不借用 Agent/Helper 的提权通道。alias 与 systemd unit allowlist 默认为空。真实双主机 SSH/堡垒终端验收与固定范围之外的 agentless 管理能力仍待完成。
 
-Agent 接入、Helper 状态回报、自更新、systemd、软件包、受保护文件、容器及临时防火墙操作已接入 Core；更新只从安装时配置的 HTTPS 控制器取包，所有 Helper 操作均固定能力、固定参数边界且不提供任意 root 命令。软件包、文件目标、容器映射和网络规则配置位于 `/etc/nanpanel/managed/`，安装器创建空 allowlist；只有 root 编辑后对应能力才会被 Agent 上报。容器部署只能使用预设镜像与 loopback 端口，并启用只读根文件系统、资源上限和 `no-new-privileges`。防火墙规则限定接口/协议/端口，在应用前启动独立定时回滚，并由只获得 `CAP_NET_ADMIN` 的瞬时 worker 执行和验证。缺少可信 nft 或 systemd-run 时不报告该能力。非更新操作在执行前持久化幂等 claim，结果在 Core 确认后才清除；重连时重放未确认结果，执行状态不明的记录拒绝重复执行。断网/崩溃边界已有单元及 Core 集成测试，仍需两台非 K3s 宿主机端到端故障验收。固定范围 SSH 代码已包含 alias 探测、allowlist systemd 状态/日志/重启与固定脚本 Agent 初始化；真实双主机 SSH 验收仍待完成。Agent/Core 双向 Relay、签名备用名单和 Cloudflare DNS 滞回/冷却/对账已有代码；公共 DNS 与故障验收仍待完成。证书吊销/续期、在线名单更新和超出固定 allowlist 的 agentless 管理仍未实现。
+Agent 接入、Helper 状态回报、自更新、systemd、软件包、受保护文件、容器及临时防火墙操作已接入 Core；更新只从安装时配置的 HTTPS 控制器取包，所有 Helper 操作均固定能力、固定参数边界且不提供任意 root 命令。软件包、文件目标、容器映射和网络规则配置位于 `/etc/nanpanel/managed/`；逐项 allowlist 默认启用，root 可通过统一 `allowlist-mode` 临时关闭所有 Helper allowlist 匹配。容器部署仍使用受限镜像参数、loopback 端口、只读根文件系统、资源上限和 `no-new-privileges`。防火墙规则仍限制接口/协议/端口，在应用前启动独立定时回滚，并由只获得 `CAP_NET_ADMIN` 的瞬时 worker 执行和验证。缺少可信 nft 或 systemd-run 时不报告该能力。非更新操作在执行前持久化幂等 claim，结果在 Core 确认后才清除；重连时重放未确认结果，执行状态不明的记录拒绝重复执行。断网/崩溃边界已有单元及 Core 集成测试，仍需两台非 K3s 宿主机端到端故障验收。固定范围 SSH 代码已包含 alias 探测、allowlist systemd 状态/日志/重启与固定脚本 Agent 初始化；真实双主机 SSH 验收仍待完成。Agent/Core 双向 Relay、签名备用名单和 Cloudflare DNS 滞回/冷却/对账已有代码；公共 DNS 与故障验收仍待完成。证书吊销/续期、在线名单更新和超出固定 allowlist 的 agentless 管理仍未实现。
 
 Core SSH 探测和恢复默认关闭。/etc/nanpanel/ssh-aliases.allowlist 每行写 <host-UUID> <OpenSSH-alias>，同一主机只能绑定一个 alias，alias 也不能重复绑定。/etc/nanpanel/ssh-units.allowlist 每行写 <host-UUID> <systemd-unit.service>，只有 root 显式添加的 unit 才能经 SSH 重启；文件缺失或为空时恢复能力禁用。/etc/nanpanel/ssh_config 与 /etc/nanpanel/ssh_known_hosts 必须是 root 管理且不可被组或其他用户写入的普通文件。Core 不保存私钥或密码；凭据由 Core 服务进程可访问的 IdentityFile 或密钥代理提供。探测只运行固定 true 命令；恢复只运行固定 sudo systemctl restart/is-active 参数，不开放终端、转发或任意命令。
 
-allowlist 格式（默认文件为空，修改后重启 `nanpanel-helper.service` 以刷新 Helper 的能力快照）：
+Helper 白名单模式由统一的 `/etc/nanpanel/managed/allowlist-mode` 配置。安装时若该文件不存在会创建为 `restricted`，更新时保留现有值。修改后重启 `nanpanel-helper.service` 和 `nanpanel-agent.service` 以刷新执行授权和 Agent 上报状态：
 
+- `systemd-units.allowlist`：每行一个 `.service` unit；仅列出的 unit 可重启。
+- `journal-units.allowlist`：每行一个 `.service` unit；仅列出的 unit 可读取最近日志。
+- `allowlist-mode`：所有 Helper 操作共用的模式开关；内容为 `disabled` 时跳过各能力的 allowlist 成员匹配，其他内容或文件缺失时按 `restricted` 处理。临时关闭所有 Helper allowlist 匹配时，以 root 写入单行 `disabled`。该模式覆盖 systemd 重启/日志、软件包、受保护文件、容器目标和防火墙规则。目标语法、参数校验、受保护文件目录、可信系统工具、容器资源限制、loopback 端口绑定与防火墙自动回滚仍生效。恢复限制时删除该文件或改为 `restricted`。容器运行时仍须由 root 通过 `container-runtime` 显式选择。
 - `packages.allowlist`：每行一个软件包名；仅从主机已配置的 apt/dnf 可信软件源安装。
 - `files.allowlist`：每行一个文件名；Helper 仅原子写入 `/etc/nanpanel/managed/files/` 的单层普通文件，最大 32 KiB。
 - `container-runtime`：仅写 `docker` 或 `podman`，显式选择固定运行时；空文件表示禁用容器能力。
 - `containers.allowlist`：每行 `名称 镜像 主机端口 容器端口`；无端口写 `名称 镜像 - -`。部署固定绑定 `127.0.0.1`，不接受挂载、特权模式或客户端自选镜像。
 - `network.allowlist`：每行 `规则名 接口 tcp|udp 端口`，例如 `ssh-test eth0 tcp 2222`；规则仅临时应用且必须配置 30–300 秒回滚，能力默认禁用。
 
-例如，先将目标镜像和端口放入 root 管理的容器清单，再通过 Core 操作；allowlist 内容由主机管理员维护，不由 Web API 修改。`systemd-units.allowlist` 与 `journal-units.allowlist` 继续分别控制服务重启和日志读取。
+临时关闭全部 Helper allowlist 匹配并刷新授权：
+
+```sh
+printf 'disabled\n' > /etc/nanpanel/managed/allowlist-mode
+systemctl restart nanpanel-helper.service nanpanel-agent.service
+```
+
+恢复默认逐项限制时，将内容改为 `restricted` 并重启这两个服务，或删除模式文件后重启。
+
+allowlist 内容由主机管理员维护，不由 Web API 修改。`allowlist-mode` 是 root 管理的统一临时整体切换；停用时仍保留 Helper 的固定能力接口和各项结构化安全约束。
 
 主控 Core 使用 Java；Agent 与 mTLS/gRPC Gateway 使用 Rust。默认普通用户 Agent + root Helper；每项提权仍须经过 Core 控制消息和 Helper 本地能力白名单。`backend/panel-agent-gateway` 目前尚未承接生产 Gateway 运行时。可复现实验见 [P0 验收说明](../tests/p0/README.md)。详见 [ADR-009](../docs/adr/ADR-009-agent-privilege-boundary.md) 与 [ADR-010](../docs/adr/ADR-010-rust-edge-components.md)。
 
