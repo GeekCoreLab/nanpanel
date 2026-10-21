@@ -37,4 +37,20 @@ shown the route edge. The target route-matching acceptance gate therefore
 remains open until an operator adds a Router node for `10.0.0.1` and verifies
 the displayed edge against the live Agent snapshot.
 
-Image/commit: to be filled after CI publication and target deployment.
+## Deployment
+
+- Implementation commit: `29827b84964621b0c11e0cf2b95c57ffd01f6872`.
+- [Publish workflow](https://github.com/GeekCoreLab/nanpanel/actions/runs/39587962017)
+  passed validation and published both immutable `sha-29827b84964621b0c11e0cf2b95c57ffd01f6872`
+  images.
+- `./deploy/k3s/deploy.sh` completed successfully against SSH target `k3s-1`.
+  The first rollout wait timed out while GHCR reset an IPv6 download connection;
+  Kubernetes retained the old Core Pod, then its automatic pull retry succeeded.
+  Re-running the idempotent deployment script completed the remaining rollout
+  and Agent verification.
+- Final remote state: Core 1/1 and Web 1/1 on the immutable images; both new
+  Pods have zero restarts. `nanpanel-postgres-0` stayed Running and its existing
+  5 GiB PVC remains Bound to `pvc-3428a4ec-567f-4678-b44c-fd548a57e5b2`.
+  `nanpanel-agent.service` is active with zero systemd restarts.
+- Runtime checks: `https://10.100.0.1:30443/q/health/ready` reports `UP`; the
+  HTTPS home page returns `200 OK` and references `assets/index-B1BD5i-8.js`.
