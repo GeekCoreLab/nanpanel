@@ -38,7 +38,7 @@ P4_API_ENDPOINT_B=https://172.30.92.11:6443 \
 NANPANEL_TEST_PASSWORD='<disposable Core password>' \
 P4_NEXT_PASSWORD='<next disposable Core password>' \
 KUBECONFIG='<mode-0600 two-context kubeconfig>' \
-tests/p4/kind-multi-cluster-import.sh
+tests/p4/multi-cluster-import.sh
 ```
 
 Result: **PASS**. Core imported both distinct K3s endpoints under their explicit

@@ -19,7 +19,7 @@ NANPANEL_TEST_PASSWORD='<disposable bootstrap password>' \
 P4_NEXT_PASSWORD='<disposable replacement password>' \
 P4_API_ENDPOINT_A=https://10.89.8.12:6443 \
 P4_API_ENDPOINT_B=https://10.89.8.13:6443 \
-tests/p4/kind-multi-cluster-import.sh
+tests/p4/multi-cluster-import.sh
 ```
 
 Result: **PASS**. Both explicit kubeconfig contexts imported as distinct healthy clusters with one Node each. A third context with Node/Namespace read-only RBAC imported successfully; its Deployment create request returned `403`. For the first cluster, a registered Deployment was created (`201`), listed, scaled from one to two replicas, and deleted (`204`). Invalid replica count returned `422`; deleting that Deployment through the other cluster ID returned `404`; deleting an unmanaged Deployment through the control plane returned `404` and the workload remained present. Duplicate cluster names returned `409`; exec plugins and insecure TLS returned `422`; a context without required Node/Namespace read RBAC returned `403`; the cluster list contained no kubeconfig credentials. Harness cleanup removed temporary Deployments, ServiceAccounts, ClusterRole/Binding, and files; the disposable Core database was discarded with its container.

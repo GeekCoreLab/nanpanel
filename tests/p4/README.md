@@ -37,7 +37,20 @@ disposable cluster, never the production `k3s-1` cluster.
   `tests/p4/runs/2026-10-21-kind-multi-cluster-import.md`. It covers independent
   API endpoints, namespace-scoped Deployment create/list/scale/delete, ownership
   and cross-cluster rejection, and RBAC paths. Kind is only the local API/CRUD
-  test fixture: it does not satisfy any target K3s acceptance. The separate live
+  test fixture: it does not satisfy target K3s acceptance. The reusable harness
+  is named `tests/p4/multi-cluster-import.sh`; the fixture type comes from the
+  explicit kubeconfig contexts and is recorded per run.
+- A mixed-cluster API run imported real `k3s-1` and a separate isolated K3s
+  `v1.33.5+k3s1` API into one disposable Core. Cross-cluster IDs, unowned
+  deletion, invalid kubeconfig forms, duplicate names, insufficient RBAC, and
+  credential leakage were rejected; Deployment create/list/scale/delete passed
+  in the isolated cluster. The target cluster was read-only apart from a
+  temporary namespace-scoped ServiceAccount and `get/list` ClusterRole, all of
+  which were removed. Its Node was not mutated. The disposable K3s API had one
+  synthetic NotReady Node and no kubelet/Agent, so target multi-node mapping and
+  Node-removal acceptance remain open; see
+  [`k3s-target-multi-cluster-api.md`](runs/2026-10-21-k3s-target-multi-cluster-api.md).
+  The separate live
   K3s report below covers only one-cluster import/mapping and scoped Deployment
   CRUD; target multi-cluster acceptance remains open.
 - A separate isolated K3s API-only integration run is recorded at

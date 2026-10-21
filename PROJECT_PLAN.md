@@ -488,7 +488,7 @@ hybrid-infrastructure-platform/
 - [x] Agent 自动探测安装主机上的 kubelet/K3s 并按 Host 保存发现记录；目标 `k3s-1` 实时记录与当前部署复核见[部署记录](tests/p4/runs/2026-10-21-agent-kubernetes-runtime-discovery-deployment.md)。发现记录不代替集群 API 凭据导入。
 - [ ] 在目标 K3s 环境验收已映射主机路由的下一跳匹配；Mock/Kind UI 场景仅覆盖代码路径。
 - [x] 在目标 K3s 上完成单集群导入、Node UID 映射及 namespace 限定 Deployment 创建/列表/缩放/删除，见 [真实 K3s API 验收](tests/p4/runs/2026-10-21-k3s-target-api-smoke.md)。
-- [ ] 在目标 K3s 环境完成多集群隔离、跨集群资源拒绝、多节点映射冲突及 Node 移除/解除映射验收；本机 Kind 仅作为 API/CRUD 开发测试，不计入该项。
+- [ ] 在目标 K3s 环境完成多集群隔离、跨集群资源拒绝、多节点映射冲突及 Node 移除/解除映射验收；目标 `k3s-1` 与隔离 K3s API 的跨集群拒绝已通过，但多节点映射/移除仍未在目标环境完成，见[混合集群 API 验收](tests/p4/runs/2026-10-21-k3s-target-multi-cluster-api.md)。本机 Kind 仅作为 API/CRUD 开发测试，不计入该项。
 - [ ] K3s 安装、升级前校验、健康监测、失败处理。单主机能力和持久化逐节点升级计划已有代码；计划尚缺多节点执行故障注入与隔离 K3s 实机报告，单主机安装也未编排为集群计划。
 - [ ] KubeEdge Provider 的 CloudCore/EdgeCore 状态与注册管理。
 - [x] 普通 Linux Gateway 为 Ready K3s Service 提供入口，并验证 TLS、访问控制及回滚；见 [目标 K3s Gateway 入口验收](tests/p4/runs/2026-10-21-linux-gateway-k3s-service-ingress.md)。拓扑到远程 Gateway 的自动协调仍未实现。
