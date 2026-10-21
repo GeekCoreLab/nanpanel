@@ -177,6 +177,9 @@ public class HostHelperOperationResource {
       long generation = ((Number)host.get("generation")).longValue();
       if (input.expectedGeneration() != generation)
         throw fail(412, "PRECONDITION_FAILED", "主机版本已变化，请刷新后重试");
+      if (input.capability().equals("k3s.upgrade")) {
+        requireK3sUpgradeGate(c, hostId, now);
+      }
       if (host.get("agent_id") == null)
         throw fail(503, "AGENT_OFFLINE", "该主机尚未接入 Agent");
       var settings = query(c, "SELECT host_offline_after_seconds FROM platform_settings WHERE id=1");
@@ -225,6 +228,53 @@ public class HostHelperOperationResource {
         .header("Location", "/api/v1/operations/" + decision.operation().get("id"))
         .header("Retry-After", "2")
         .header("Idempotency-Replayed", Boolean.toString(decision.replayed())).build();
+  }
+
+  private void requireK3sUpgradeGate(java.sql.Connection connection, UUID hostId, Instant now)
+      throws java.sql.SQLException {
+    var mappings = query(connection,
+        "SELECT c.id AS cluster_id,c.kind,c.health_status,c.observed_at,n.node_present,n.ready "
+            + "FROM kubernetes_cluster_node n JOIN kubernetes_cluster c ON c.id=n.cluster_id "
+            + "WHERE n.host_id=? FOR UPDATE", hostId);
+    if (mappings.isEmpty()) {
+      throw fail(409, "K3S_UPGRADE_CLUSTER_UNMAPPED",
+          "升级前需将主机映射到已登记的 K3s Node");
+    }
+    var mapping = mappings.getFirst();
+    if (!"K3S".equals(mapping.get("kind"))) {
+      throw fail(409, "K3S_UPGRADE_CLUSTER_KIND",
+          "该主机映射到的集群不是 K3s，不能执行 K3s 升级");
+    }
+    Instant observedAt = instant(mapping.get("observed_at"));
+    boolean stale = observedAt == null || observedAt.isBefore(now.minusSeconds(120));
+    if (!"HEALTHY".equals(mapping.get("health_status")) || stale
+        || !Boolean.TRUE.equals(mapping.get("node_present"))
+        || !Boolean.TRUE.equals(mapping.get("ready"))) {
+      throw fail(409, "K3S_CLUSTER_HEALTH_GATE",
+          "K3s 集群或目标 Node 未通过最近 120 秒内的 Ready 健康检查");
+    }
+    UUID clusterId = (UUID)mapping.get("cluster_id");
+    var active = query(connection,
+        "SELECT o.id FROM operation o JOIN kubernetes_cluster_node n ON n.host_id=o.host_id "
+            + "WHERE n.cluster_id=? AND o.kind='HOST_HELPER_OPERATION' "
+            + "AND o.capability IN ('k3s.install','k3s.upgrade') "
+            + "AND o.status IN ('PENDING','RUNNING','UNKNOWN') LIMIT 1", clusterId);
+    if (!active.isEmpty()) {
+      throw fail(409, "K3S_UPGRADE_IN_PROGRESS",
+          "集群内已有 K3s 安装或升级任务，需等待任务结束并重新检查集群健康");
+    }
+    var lastMutation = query(connection,
+        "SELECT MAX(o.finished_at) AS finished_at FROM operation o "
+            + "JOIN kubernetes_cluster_node n ON n.host_id=o.host_id WHERE n.cluster_id=? "
+            + "AND o.kind='HOST_HELPER_OPERATION' "
+            + "AND o.capability IN ('k3s.install','k3s.upgrade') "
+            + "AND o.status IN ('SUCCEEDED','FAILED','CANCELLED')", clusterId);
+    Instant finishedAt = lastMutation.isEmpty() ? null
+        : instant(lastMutation.getFirst().get("finished_at"));
+    if (finishedAt != null && (observedAt == null || observedAt.isBefore(finishedAt))) {
+      throw fail(409, "K3S_CLUSTER_HEALTH_GATE",
+          "上一次 K3s 操作后尚未刷新集群 Node 健康状态");
+    }
   }
 
   private void dispatch(Decision decision, String actor, UUID hostId, String key) {

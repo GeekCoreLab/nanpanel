@@ -40,6 +40,15 @@ disposable cluster, never the production `k3s-1` cluster.
   test fixture: it does not satisfy any target K3s acceptance. The separate live
   K3s report below covers only one-cluster import/mapping and scoped Deployment
   CRUD; target multi-cluster acceptance remains open.
+- A separate isolated K3s API-only integration run is recorded at
+  `tests/p4/runs/2026-10-21-k3s-multi-cluster-api-only.md`. It used two actual
+  K3s `v1.33.5+k3s1` API servers with independent endpoints and exercised the
+  same import, RBAC, resource isolation, Node UID mapping conflict, removed-Node
+  tombstone, and explicit unmap paths. These control planes ran with
+  `--disable-agent`; their Node objects were synthetic and NotReady. This is
+  stronger than the Kind API fixture but does not prove real kubelet/Agent
+  behavior or multi-node lifecycle on the target `k3s-1`, so the target gate
+  remains open.
 - Topology route matching now shares one resolver for displayed summaries and
   observed edges. `web/scripts/topology.test.mjs` covers direct routes, one
   distinct Host owner, duplicate references to the same owner, ambiguous
@@ -103,9 +112,17 @@ disposable cluster, never the production `k3s-1` cluster.
   binary during the service health gate, and attempts automatic restoration if
   server readiness or agent service activation fails. Agent Node registration
   remains pending cluster-level verification. This is still a single-host
-  operation: persistent ordered plans, cross-node health gates and live K3s
-  upgrade evidence remain open. See
+  operation: persistent ordered plans and live K3s upgrade evidence remain
+  open. See
   `tests/p4/runs/2026-10-21-k3s-single-node-upgrade-capability.md`.
+- Core gates upgrades for a host mapped to a registered K3s cluster: its Node
+  must be present and Ready, the cluster observation must be at most 120 seconds
+  old, and no K3s install/upgrade may be pending anywhere in that cluster. Once
+  a K3s operation finishes, a newer cluster observation is required before the
+  next upgrade. A host mapped to KubeEdge or another Kubernetes kind is rejected.
+  Integration coverage exercises unhealthy, concurrent, wrong-kind, and
+  gate-passed paths. This per-request admission gate does not yet persist an
+  ordered multi-node rollout plan or automatically advance steps.
 - The live Linux Gateway-to-Ready-K3s-Service path, TLS/access policy, backend
   transition, and compensation passed on 2026-10-21; evidence is in
   `runs/2026-10-21-linux-gateway-k3s-service-ingress.md`. FRPC/Nginx were

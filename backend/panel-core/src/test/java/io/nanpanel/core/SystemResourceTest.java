@@ -1027,7 +1027,6 @@ class SystemResourceTest {
         .contentType("application/json").body(invalidK3sUpgrade)
         .post("/api/v1/hosts/" + hostId + "/operations")
         .then().statusCode(422).body("code", equalTo("VALIDATION_FAILED"));
-    String upgradeKey = "helper-k3s-upgrade-valid-01";
     var validK3sUpgrade = Map.of(
         "capability", "k3s.upgrade", "target", "",
         "payload", Map.of("role", "server", "version", "v1.37.1+k3s1"),
@@ -1035,21 +1034,99 @@ class SystemResourceTest {
         "expectedGeneration", 1);
     given().cookie("nanpanel_session", restoredCookie)
         .header("X-CSRF-Token", restored.path("csrfToken"))
-        .header("Idempotency-Key", upgradeKey)
+        .header("Idempotency-Key", "helper-k3s-upgrade-valid-01")
         .contentType("application/json").body(validK3sUpgrade)
         .post("/api/v1/hosts/" + hostId + "/operations")
-        .then().statusCode(503).body("code", equalTo("EXECUTION_OUTCOME_UNKNOWN"));
-    var upgradeOperations = given().cookie("nanpanel_session", restoredCookie)
-        .get("/api/v1/operations?hostId=" + hostId).then().statusCode(200).extract();
-    String upgradeOperationId = upgradeOperations.path(
-        "items.find { it.idempotencyKey == '" + upgradeKey + "' }.id");
-    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
-        .contentType("application/json")
-        .body(Map.of("agentId", agentId, "operationId", upgradeOperationId,
-            "idempotencyKey", upgradeKey, "status", "FAILED",
-            "detail", "FAILED: test fixture confirms the host has no live Agent session"))
-        .post("/internal/agent-control-results").then().statusCode(204)
-        .header("X-NanPanel-Result-Ack", equalTo("true"));
+        .then().statusCode(409).body("code", equalTo("K3S_UPGRADE_CLUSTER_UNMAPPED"));
+    UUID upgradeHostId = UUID.randomUUID();
+    UUID upgradeClusterId = UUID.randomUUID();
+    UUID activeUpgradeId = UUID.randomUUID();
+    Instant upgradeObservedAt = Instant.now();
+    store.transaction(c -> {
+      AuthStore.update(c, "INSERT INTO host (id,hostname,os,arch,capabilities,generation,"
+          + "observed_generation,status,created_at) VALUES (?,?,?,?,'[]',1,1,'ONLINE',?)",
+          upgradeHostId, "k3s-upgrade-gate-host", "Ubuntu 24.04", "x86_64",
+          java.sql.Timestamp.from(upgradeObservedAt));
+      AuthStore.update(c, "INSERT INTO kubernetes_cluster (id,name,kind,endpoint,context_name,"
+          + "encrypted_kubeconfig,health_status,observed_at,imported_by,created_at,updated_at) "
+          + "VALUES (?,?, 'K3S',?,?,?,'UNAVAILABLE',?,?,?,?)", upgradeClusterId,
+          "system-resource-k3s-upgrade-gate", "https://k3s-upgrade.example.test:6443",
+          "test-context", new byte[] {1}, java.sql.Timestamp.from(upgradeObservedAt),
+          restored.path("user.id").toString(), java.sql.Timestamp.from(upgradeObservedAt),
+          java.sql.Timestamp.from(upgradeObservedAt));
+      AuthStore.update(c, "INSERT INTO kubernetes_cluster_node (cluster_id,node_uid,node_name,"
+          + "roles,node_present,ready,kubelet_version,internal_ip,container_owner,host_id,observed_at) "
+          + "VALUES (?,?,?,'control-plane',TRUE,FALSE,?,'192.0.2.20','KUBERNETES',?,?)",
+          upgradeClusterId, "k3s-upgrade-gate-node-uid", "k3s-upgrade-gate-host",
+          "v1.36.5+k3s1", upgradeHostId, java.sql.Timestamp.from(upgradeObservedAt));
+      return null;
+    });
+    var k3sUpgradePayload = Map.of("capability", "k3s.upgrade", "target", "",
+        "payload", Map.of("role", "server", "version", "v1.37.1+k3s1"),
+        "reason", "Verify K3s cluster health and serialization gates", "timeoutSeconds", 600,
+        "expectedGeneration", 1);
+    java.util.function.Function<io.restassured.specification.RequestSpecification,
+        io.restassured.specification.RequestSpecification> k3sUpgradeHeaders = spec -> spec
+        .cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .contentType("application/json").body(k3sUpgradePayload);
+    store.transaction(c -> {
+      AuthStore.update(c, "UPDATE kubernetes_cluster SET kind='KUBEEDGE' WHERE id=?",
+          upgradeClusterId);
+      return null;
+    });
+    k3sUpgradeHeaders.apply(given()).header("Idempotency-Key", "k3s-upgrade-kind-gate-01")
+        .post("/api/v1/hosts/" + upgradeHostId + "/operations")
+        .then().statusCode(409).body("code", equalTo("K3S_UPGRADE_CLUSTER_KIND"));
+    store.transaction(c -> {
+      AuthStore.update(c, "UPDATE kubernetes_cluster SET kind='K3S' WHERE id=?", upgradeClusterId);
+      return null;
+    });
+    k3sUpgradeHeaders.apply(given()).header("Idempotency-Key", "k3s-upgrade-health-gate-01")
+        .post("/api/v1/hosts/" + upgradeHostId + "/operations")
+        .then().statusCode(409).body("code", equalTo("K3S_CLUSTER_HEALTH_GATE"));
+    store.transaction(c -> {
+      AuthStore.update(c, "UPDATE kubernetes_cluster SET health_status='HEALTHY',observed_at=? "
+          + "WHERE id=?", java.sql.Timestamp.from(Instant.now().minusSeconds(121)), upgradeClusterId);
+      AuthStore.update(c, "UPDATE kubernetes_cluster_node SET ready=TRUE WHERE cluster_id=? "
+          + "AND node_uid=?", upgradeClusterId, "k3s-upgrade-gate-node-uid");
+      return null;
+    });
+    k3sUpgradeHeaders.apply(given()).header("Idempotency-Key", "k3s-upgrade-stale-gate-01")
+        .post("/api/v1/hosts/" + upgradeHostId + "/operations")
+        .then().statusCode(409).body("code", equalTo("K3S_CLUSTER_HEALTH_GATE"));
+    store.transaction(c -> {
+      AuthStore.update(c, "UPDATE kubernetes_cluster SET observed_at=? WHERE id=?",
+          java.sql.Timestamp.from(Instant.now()), upgradeClusterId);
+      AuthStore.update(c, "INSERT INTO operation (id,idempotency_key,phase,status,error,created_at,"
+          + "updated_at,kind,host_id,capability) VALUES (?,?,?,'RUNNING',NULL,?,?,?,?,'k3s.upgrade')",
+          activeUpgradeId, "k3s-upgrade-gate-active-01", "APPLY",
+          java.sql.Timestamp.from(Instant.now()), java.sql.Timestamp.from(Instant.now()),
+          "HOST_HELPER_OPERATION", upgradeHostId);
+      return null;
+    });
+    k3sUpgradeHeaders.apply(given()).header("Idempotency-Key", "k3s-upgrade-active-gate-01")
+        .post("/api/v1/hosts/" + upgradeHostId + "/operations")
+        .then().statusCode(409).body("code", equalTo("K3S_UPGRADE_IN_PROGRESS"));
+    store.transaction(c -> {
+      Instant finishedAt = Instant.now();
+      AuthStore.update(c, "UPDATE operation SET status='FAILED',finished_at=? WHERE id=?",
+          java.sql.Timestamp.from(finishedAt), activeUpgradeId);
+      AuthStore.update(c, "UPDATE kubernetes_cluster SET observed_at=? WHERE id=?",
+          java.sql.Timestamp.from(finishedAt.minusSeconds(1)), upgradeClusterId);
+      return null;
+    });
+    k3sUpgradeHeaders.apply(given()).header("Idempotency-Key", "k3s-upgrade-refresh-gate-01")
+        .post("/api/v1/hosts/" + upgradeHostId + "/operations")
+        .then().statusCode(409).body("code", equalTo("K3S_CLUSTER_HEALTH_GATE"));
+    store.transaction(c -> {
+      AuthStore.update(c, "UPDATE kubernetes_cluster SET observed_at=? WHERE id=?",
+          java.sql.Timestamp.from(Instant.now()), upgradeClusterId);
+      return null;
+    });
+    k3sUpgradeHeaders.apply(given()).header("Idempotency-Key", "k3s-upgrade-ready-gate-01")
+        .post("/api/v1/hosts/" + upgradeHostId + "/operations")
+        .then().statusCode(503).body("code", equalTo("AGENT_OFFLINE"));
     var invalidNetworkRequest = Map.of(
         "capability", "network.firewall.expose", "target", "ssh-test",
         "payload", Map.of("interfaceName", "eth0", "protocol", "tcp", "port", 2222,

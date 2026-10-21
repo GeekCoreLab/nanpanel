@@ -17,6 +17,14 @@ password=${NANPANEL_TEST_PASSWORD:?Set NANPANEL_TEST_PASSWORD for the disposable
 next_password=${P4_NEXT_PASSWORD:-P4-kind-import-temporary-2026}
 context_a=${P4_CONTEXT_A:-kind-p4-a}
 context_b=${P4_CONTEXT_B:-kind-p4-b}
+cluster_a_name=${P4_CLUSTER_A_NAME:-p4-kind-a}
+cluster_b_name=${P4_CLUSTER_B_NAME:-p4-kind-b}
+fixture_name=${P4_FIXTURE_NAME:-Kind}
+expected_node_count=${P4_EXPECTED_NODE_COUNT:-1}
+test_node_mapping=${P4_TEST_NODE_MAPPING:-no}
+[[ $expected_node_count =~ ^[1-9][0-9]{0,2}$ ]] || {
+    printf 'P4_EXPECTED_NODE_COUNT must be an integer from 1 through 999.\n' >&2; exit 2;
+}
 
 command -v curl >/dev/null
 command -v kubectl >/dev/null
@@ -27,7 +35,31 @@ denied_account=
 restricted_binding=
 restricted_role=
 unmanaged_deployment=
-trap 'if [[ -n ${unmanaged_deployment:-} ]]; then kubectl --context="$context_a" -n default delete deployment "$unmanaged_deployment" --ignore-not-found >/dev/null 2>&1 || true; fi; if [[ -n ${restricted_binding:-} ]]; then kubectl --context="$context_a" delete clusterrolebinding "$restricted_binding" --ignore-not-found >/dev/null 2>&1 || true; fi; if [[ -n ${restricted_role:-} ]]; then kubectl --context="$context_a" delete clusterrole "$restricted_role" --ignore-not-found >/dev/null 2>&1 || true; fi; if [[ -n ${denied_account:-} ]]; then kubectl --context="$context_a" -n default delete serviceaccount "$denied_account" --ignore-not-found >/dev/null 2>&1 || true; fi; rm -rf "$tmp"' EXIT
+mapping_node_a=
+mapping_node_b=
+cleanup() {
+    if [[ -n $unmanaged_deployment ]]; then kubectl --context="$context_a" -n default delete deployment "$unmanaged_deployment" --ignore-not-found >/dev/null 2>&1 || true; fi
+    if [[ -n $restricted_binding ]]; then kubectl --context="$context_a" delete clusterrolebinding "$restricted_binding" --ignore-not-found >/dev/null 2>&1 || true; fi
+    if [[ -n $restricted_role ]]; then kubectl --context="$context_a" delete clusterrole "$restricted_role" --ignore-not-found >/dev/null 2>&1 || true; fi
+    if [[ -n $denied_account ]]; then kubectl --context="$context_a" -n default delete serviceaccount "$denied_account" --ignore-not-found >/dev/null 2>&1 || true; fi
+    if [[ -n $mapping_node_a ]]; then kubectl --context="$context_a" delete node "$mapping_node_a" --ignore-not-found >/dev/null 2>&1 || true; fi
+    if [[ -n $mapping_node_b ]]; then kubectl --context="$context_b" delete node "$mapping_node_b" --ignore-not-found >/dev/null 2>&1 || true; fi
+    rm -rf "$tmp"
+}
+trap cleanup EXIT
+
+if [[ $test_node_mapping == yes ]]; then
+    mapping_node_a="p4-map-a-$(date +%s)"
+    mapping_node_b="p4-map-b-$(date +%s)"
+    for entry in "$context_a:$mapping_node_a" "$context_b:$mapping_node_b"; do
+        context=${entry%%:*}
+        node_name=${entry#*:}
+        printf '{"apiVersion":"v1","kind":"Node","metadata":{"name":"%s"}}\n' "$node_name" |
+            kubectl --context="$context" apply -f - >/dev/null
+        kubectl --context="$context" patch node "$node_name" --subresource=status \
+            --type=merge -p '{"status":{"nodeInfo":{"kubeletVersion":"p4-fixture"}}}' >/dev/null
+    done
+fi
 
 kubectl config view --raw --flatten --minify --context="$context_a" -o json > "$tmp/a.json"
 kubectl config view --raw --flatten --minify --context="$context_b" -o json > "$tmp/b.json"
@@ -143,15 +175,15 @@ post_import() {
     fi
 }
 
-make_import "$tmp/a.json" p4-kind-a "$context_a" "$tmp/import-a.json"
+make_import "$tmp/a.json" "$cluster_a_name" "$context_a" "$tmp/import-a.json"
 post_import "$tmp/import-a.json" "$tmp/import-a-response.json"
 printf 'Imported context %s.\n' "$context_a" >&2
-make_import "$tmp/b.json" p4-kind-b "$context_b" "$tmp/import-b.json"
+make_import "$tmp/b.json" "$cluster_b_name" "$context_b" "$tmp/import-b.json"
 post_import "$tmp/import-b.json" "$tmp/import-b-response.json"
 printf 'Imported context %s.\n' "$context_b" >&2
 
 python3 - "$tmp/a.json" "$tmp/b.json" "$tmp/import-a-response.json" \
-    "$tmp/import-b-response.json" "$context_a" "$context_b" <<'PY'
+    "$tmp/import-b-response.json" "$context_a" "$context_b" "$expected_node_count" <<'PY'
 import json
 import sys
 
@@ -162,13 +194,93 @@ if [response["contextName"] for response in responses] != sys.argv[5:7]:
     raise SystemExit("Imported clusters did not retain their explicit contexts")
 if [response["endpoint"] for response in responses] != servers or servers[0] == servers[1]:
     raise SystemExit("Imported endpoints do not match the two independent API servers")
-if any(response["healthStatus"] != "HEALTHY" or response["nodeCount"] != 1
+if any(response["healthStatus"] != "HEALTHY" or response["nodeCount"] != int(sys.argv[7])
        for response in responses):
-    raise SystemExit("Both imported clusters must return a healthy one-node snapshot")
+    raise SystemExit("Both imported clusters must return the configured healthy Node snapshot")
 PY
 
 cluster_a_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$tmp/import-a-response.json")
 cluster_b_id=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$tmp/import-b-response.json")
+
+if [[ $test_node_mapping == yes ]]; then
+    curl --fail-with-body --silent --show-error -H "Origin: $origin" -b "$tmp/cookies" \
+        "$core_url/api/v1/kubernetes/clusters/$cluster_a_id/nodes" > "$tmp/mapping-nodes-a.json"
+    curl --fail-with-body --silent --show-error -H "Origin: $origin" -b "$tmp/cookies" \
+        "$core_url/api/v1/kubernetes/clusters/$cluster_b_id/nodes" > "$tmp/mapping-nodes-b.json"
+    mapping_uid_a=$(python3 - "$tmp/mapping-nodes-a.json" "$mapping_node_a" <<'PY'
+import json,sys
+nodes=json.load(open(sys.argv[1],encoding="utf-8"))["items"]
+matches=[node["nodeUid"] for node in nodes if node["nodeName"]==sys.argv[2] and node["nodePresent"]]
+if len(matches)!=1: raise SystemExit("Synthetic first-cluster Node was not reconciled by UID")
+print(matches[0])
+PY
+)
+    mapping_uid_b=$(python3 - "$tmp/mapping-nodes-b.json" "$mapping_node_b" <<'PY'
+import json,sys
+nodes=json.load(open(sys.argv[1],encoding="utf-8"))["items"]
+matches=[node["nodeUid"] for node in nodes if node["nodeName"]==sys.argv[2] and node["nodePresent"]]
+if len(matches)!=1: raise SystemExit("Synthetic second-cluster Node was not reconciled by UID")
+print(matches[0])
+PY
+)
+    mapping_uid_a_other=$(python3 - "$tmp/mapping-nodes-a.json" "$mapping_uid_a" <<'PY'
+import json,sys
+nodes=json.load(open(sys.argv[1],encoding="utf-8"))["items"]
+matches=[node["nodeUid"] for node in nodes if node["nodePresent"] and node["nodeUid"]!=sys.argv[2]]
+if len(matches)!=1: raise SystemExit("Expected one other Node in the first cluster")
+print(matches[0])
+PY
+)
+    printf '%s' '{"hostname":"p4-k3s-mapped-host"}' > "$tmp/mapping-enrollment.json"
+    curl --fail-with-body --silent --show-error -H "Origin: $origin" -H "X-CSRF-Token: $csrf" \
+        -H 'Content-Type: application/json' -b "$tmp/cookies" -c "$tmp/cookies" \
+        --data-binary "@$tmp/mapping-enrollment.json" "$core_url/api/v1/agent-enrollments" \
+        > "$tmp/mapping-enrollment-response.json"
+    mapping_host_id=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["hostId"])' \
+        "$tmp/mapping-enrollment-response.json")
+    printf '{"hostId":"%s"}' "$mapping_host_id" > "$tmp/mapping-host.json"
+    map_status=$(curl --silent --show-error -o "$tmp/mapping-response.json" -w '%{http_code}' -X PUT \
+        -H "Origin: $origin" -H "X-CSRF-Token: $csrf" -H 'Content-Type: application/json' \
+        -b "$tmp/cookies" -c "$tmp/cookies" --data-binary "@$tmp/mapping-host.json" \
+        "$core_url/api/v1/kubernetes/clusters/$cluster_a_id/nodes/$mapping_uid_a/host")
+    [[ $map_status == 200 ]] || { printf 'First Node mapping returned HTTP %s\n' "$map_status" >&2; exit 1; }
+    for mapping_target in \
+        "$core_url/api/v1/kubernetes/clusters/$cluster_a_id/nodes/$mapping_uid_a_other/host" \
+        "$core_url/api/v1/kubernetes/clusters/$cluster_b_id/nodes/$mapping_uid_b/host"; do
+        conflict_status=$(curl --silent --show-error -o "$tmp/mapping-conflict.json" -w '%{http_code}' -X PUT \
+            -H "Origin: $origin" -H "X-CSRF-Token: $csrf" -H 'Content-Type: application/json' \
+            -b "$tmp/cookies" -c "$tmp/cookies" --data-binary "@$tmp/mapping-host.json" "$mapping_target")
+        [[ $conflict_status == 409 ]] || { printf 'Conflicting Node mapping returned HTTP %s, expected 409\n' "$conflict_status" >&2; exit 1; }
+    done
+    kubectl --context="$context_a" delete node "$mapping_node_a" >/dev/null
+    curl --fail-with-body --silent --show-error -H "Origin: $origin" -b "$tmp/cookies" \
+        "$core_url/api/v1/kubernetes/clusters/$cluster_a_id/nodes" > "$tmp/mapping-removed-node.json"
+    python3 - "$tmp/mapping-removed-node.json" "$mapping_uid_a" "$mapping_host_id" <<'PY'
+import json,sys
+nodes=json.load(open(sys.argv[1],encoding="utf-8"))["items"]
+matches=[node for node in nodes if node["nodeUid"]==sys.argv[2]]
+if len(matches)!=1 or matches[0]["nodePresent"] or matches[0]["hostId"]!=sys.argv[3]:
+ raise SystemExit("Removed Node did not retain its UID tombstone and Host mapping")
+PY
+    removed_map_status=$(curl --silent --show-error -o "$tmp/removed-map.json" -w '%{http_code}' -X PUT \
+        -H "Origin: $origin" -H "X-CSRF-Token: $csrf" -H 'Content-Type: application/json' \
+        -b "$tmp/cookies" -c "$tmp/cookies" --data-binary "@$tmp/mapping-host.json" \
+        "$core_url/api/v1/kubernetes/clusters/$cluster_a_id/nodes/$mapping_uid_a/host")
+    [[ $removed_map_status == 404 ]] || { printf 'Mapping removed Node returned HTTP %s, expected 404\n' "$removed_map_status" >&2; exit 1; }
+    unmap_status=$(curl --silent --show-error -o "$tmp/unmap-response.json" -w '%{http_code}' -X DELETE \
+        -H "Origin: $origin" -H "X-CSRF-Token: $csrf" -b "$tmp/cookies" -c "$tmp/cookies" \
+        "$core_url/api/v1/kubernetes/clusters/$cluster_a_id/nodes/$mapping_uid_a/host")
+    [[ $unmap_status == 204 ]] || { printf 'Explicit stale-Node unmap returned HTTP %s, expected 204\n' "$unmap_status" >&2; exit 1; }
+    curl --fail-with-body --silent --show-error -H "Origin: $origin" -b "$tmp/cookies" \
+        "$core_url/api/v1/hosts?limit=100" > "$tmp/mapping-hosts.json"
+    python3 - "$tmp/mapping-hosts.json" "$mapping_host_id" <<'PY'
+import json,sys
+hosts=json.load(open(sys.argv[1],encoding="utf-8"))["items"]
+if not any(host["id"]==sys.argv[2] for host in hosts):
+ raise SystemExit("Host asset identity was lost after Node removal and explicit unmap")
+PY
+fi
+
 deployment_name="p4-managed-$(date +%s)"
 deployment_path="$core_url/api/v1/kubernetes/clusters/$cluster_a_id/namespaces/default/deployments"
 python3 - "$tmp/deployment.json" "$deployment_name" <<'PY'
@@ -285,7 +397,7 @@ kubectl --context="$context_a" -n default delete serviceaccount "$denied_account
 denied_account=
 
 # A duplicate name must not overwrite the first cluster or its credentials.
-make_import "$tmp/b.json" p4-kind-a "$context_b" "$tmp/duplicate.json"
+make_import "$tmp/b.json" "$cluster_a_name" "$context_b" "$tmp/duplicate.json"
 duplicate_status=$(curl --silent --show-error -o "$tmp/duplicate-response.json" -w '%{http_code}' \
     -H "Origin: $origin" -H "X-CSRF-Token: $csrf" \
     -H 'Content-Type: application/json' -b "$tmp/cookies" -c "$tmp/cookies" \
@@ -345,15 +457,16 @@ denied_status=$(curl --silent --show-error -o "$tmp/denied-response.json" -w '%{
 curl --fail-with-body --silent --show-error \
     -H "Origin: $origin" -b "$tmp/cookies" \
     "$core_url/api/v1/kubernetes/clusters" > "$tmp/clusters.json"
-python3 - "$tmp/clusters.json" "$tmp/a.json" "$tmp/b.json" <<'PY'
+python3 - "$tmp/clusters.json" "$tmp/a.json" "$tmp/b.json" \
+    "$cluster_a_name" "$cluster_b_name" <<'PY'
 import json
 import sys
 
 clusters = json.load(open(sys.argv[1], encoding="utf-8"))["items"]
-if {cluster["name"] for cluster in clusters} != {"p4-kind-a", "p4-kind-b", "p4-deployment-rbac"}:
+if {cluster["name"] for cluster in clusters} != {sys.argv[4], sys.argv[5], "p4-deployment-rbac"}:
     raise SystemExit("Rejected contexts changed the registered cluster inventory")
 serialized = json.dumps(clusters)
-for path in sys.argv[2:]:
+for path in sys.argv[2:4]:
     config = json.load(open(path, encoding="utf-8"))
     user = config["users"][0]["user"]
     for key in ("client-certificate-data", "client-key-data", "token"):
@@ -363,4 +476,7 @@ if "kubeconfig" in serialized.lower() or "client-key-data" in serialized:
     raise SystemExit("Cluster list exposed credential fields")
 PY
 
-printf 'PASS: two independent Kind API servers imported by explicit context; managed Deployment create/list/scale/delete passed; invalid input, cross-cluster and unowned deletion, insufficient RBAC, duplicate name, exec plugin, insecure TLS, and credential leakage rejected.\n'
+printf 'PASS: two independent %s API servers imported by explicit context; managed Deployment create/list/scale/delete passed; invalid input, cross-cluster and unowned deletion, insufficient RBAC, duplicate name, exec plugin, insecure TLS, and credential leakage rejected.\n' "$fixture_name"
+if [[ $test_node_mapping == yes ]]; then
+    printf 'PASS: Node UID mapping, same-cluster and cross-cluster mapping conflicts, removed-Node tombstone, explicit unmap, and retained Host identity.\n'
+fi

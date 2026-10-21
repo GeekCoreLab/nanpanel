@@ -133,6 +133,8 @@ public class KubernetesClusterRegistryService {
       nodes = discoverNodes(client, input.kind());
       cloudCore = observeCloudCore(client, input.kind());
     } catch (RuntimeException failure) {
+      LOG.warnf("Kubernetes API verification failed during cluster import (%s)",
+          failure.getClass().getSimpleName());
       throw clusterFailure(failure);
     }
     byte[] encrypted = vault.encrypt(clusterId, selected.sanitizedYaml());
