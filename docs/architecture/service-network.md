@@ -36,7 +36,9 @@ not a mutation of desired topology.
 `panel-cluster` reads Services and EndpointSlices in one explicitly chosen
 namespace and emits a bounded snapshot with service ports, endpoint addresses,
 readiness conditions, Pod target identity, and observation time. Core enriches
-Pod endpoints with the live `istio-proxy` readiness and image version. For up
+Pod endpoints with the live `istio-proxy` readiness and image version, including
+both regular containers and Kubernetes native sidecars reported under
+`initContainers`. For up
 to 24 Ready sidecars per refresh, it reads the fixed private Pod address
 `http://PodIP:15090/stats/prometheus` directly, without following redirects or
 using a proxy. It accepts only destination-side `istio_requests_total` samples

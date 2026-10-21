@@ -1,13 +1,61 @@
 package io.nanpanel.core;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import io.fabric8.kubernetes.api.model.PodBuilder;
 import io.nanpanel.cluster.KubernetesServiceDiscovery.IstioTrafficEdge;
 import java.util.HashMap;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 
 class KubernetesIstioTelemetryCollectorTest {
+  @Test
+  void detectsReadyIstioNativeSidecarFromInitContainerStatus() {
+    var pod = new PodBuilder()
+        .withNewMetadata().withName("mesh-http").withNamespace("nanpanel-mesh").endMetadata()
+        .withNewSpec()
+            .addNewContainer().withName("http").withImage("example/http:1").endContainer()
+            .addNewInitContainer().withName("istio-init").withImage("istio/proxyv2:1.31.1")
+                .endInitContainer()
+            .addNewInitContainer().withName("istio-proxy").withImage("istio/proxyv2:1.31.1")
+                .withRestartPolicy("Always").endInitContainer()
+        .endSpec()
+        .withNewStatus().withPodIP("10.42.0.10")
+            .addNewInitContainerStatus().withName("istio-proxy").withReady(true)
+                .endInitContainerStatus()
+        .endStatus()
+        .build();
+
+    var observation = KubernetesIstioTelemetryCollector.observePod(pod);
+
+    assertTrue(observation.proxyPresent());
+    assertTrue(observation.proxyReady());
+    assertEquals("1.31.1", observation.proxyVersion());
+  }
+
+  @Test
+  void detectsReadyIstioRegularSidecarFromContainerStatus() {
+    var pod = new PodBuilder()
+        .withNewMetadata().withName("legacy-mesh-http").withNamespace("nanpanel-mesh")
+            .endMetadata()
+        .withNewSpec()
+            .addNewContainer().withName("http").withImage("example/http:1").endContainer()
+            .addNewContainer().withName("istio-proxy").withImage("istio/proxyv2:1.30.0")
+                .endContainer()
+        .endSpec()
+        .withNewStatus()
+            .addNewContainerStatus().withName("istio-proxy").withReady(true).endContainerStatus()
+        .endStatus()
+        .build();
+
+    var observation = KubernetesIstioTelemetryCollector.observePod(pod);
+
+    assertTrue(observation.proxyPresent());
+    assertTrue(observation.proxyReady());
+    assertEquals("1.30.0", observation.proxyVersion());
+  }
+
   @Test
   void acceptsDestinationSideIstioCountersOnlyForKnownNamespaceServices() {
     String metrics = String.join("\n",

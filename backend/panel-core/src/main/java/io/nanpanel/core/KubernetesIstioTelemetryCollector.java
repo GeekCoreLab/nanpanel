@@ -1,6 +1,7 @@
 package io.nanpanel.core;
 
 import io.fabric8.kubernetes.api.model.Container;
+import io.fabric8.kubernetes.api.model.ContainerStatus;
 import io.fabric8.kubernetes.api.model.ListOptionsBuilder;
 import io.fabric8.kubernetes.api.model.Pod;
 import io.fabric8.kubernetes.api.model.PodList;
@@ -121,20 +122,33 @@ public class KubernetesIstioTelemetryCollector {
         }).toList();
   }
 
-  private static PodObservation observePod(Pod pod) {
+  static PodObservation observePod(Pod pod) {
     var spec = pod.getSpec();
     var status = pod.getStatus();
     String podIp = status == null ? null : status.getPodIP();
-    Container proxy = spec == null || spec.getContainers() == null ? null : spec.getContainers()
-        .stream().filter(container -> container != null && "istio-proxy".equals(container.getName()))
-        .findFirst().orElse(null);
+    Container proxy = spec == null ? null : spec.getContainers() == null ? null
+        : spec.getContainers().stream()
+            .filter(container -> container != null && "istio-proxy".equals(container.getName()))
+            .findFirst().orElse(null);
+    boolean nativeSidecar = false;
+    if (proxy == null && spec != null && spec.getInitContainers() != null) {
+      proxy = spec.getInitContainers().stream().filter(container -> container != null
+          && "istio-proxy".equals(container.getName())
+          && "Always".equals(container.getRestartPolicy())).findFirst().orElse(null);
+      nativeSidecar = proxy != null;
+    }
     if (proxy == null) return new PodObservation(podIp, false, false, null);
     String version = imageVersion(proxy.getImage());
-    boolean ready = status != null && status.getContainerStatuses() != null
-        && status.getContainerStatuses().stream().filter(java.util.Objects::nonNull)
+    boolean ready = status != null && (nativeSidecar
+        ? isReady(status.getInitContainerStatuses())
+        : isReady(status.getContainerStatuses()));
+    return new PodObservation(podIp, true, ready, version);
+  }
+
+  private static boolean isReady(List<ContainerStatus> statuses) {
+    return statuses != null && statuses.stream().filter(java.util.Objects::nonNull)
         .anyMatch(containerStatus -> "istio-proxy".equals(containerStatus.getName())
             && Boolean.TRUE.equals(containerStatus.getReady()));
-    return new PodObservation(podIp, true, ready, version);
   }
 
   private static String imageVersion(String image) {
@@ -273,8 +287,8 @@ public class KubernetesIstioTelemetryCollector {
     }
   }
 
-  private record PodObservation(String podIp, boolean proxyPresent, boolean proxyReady,
-                                String proxyVersion) {}
+  record PodObservation(String podIp, boolean proxyPresent, boolean proxyReady,
+                        String proxyVersion) {}
   private record ProxyTarget(String podName, String address, boolean ready) {}
   record TrafficKey(String sourceWorkload, String sourceNamespace,
                     String destinationWorkload, String destinationService,
