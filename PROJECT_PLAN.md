@@ -481,6 +481,8 @@ hybrid-infrastructure-platform/
 
 ### P4｜K3s / KubeEdge
 
+持久化逐节点升级计划已部署至目标 `k3s-1`（commit `6f146e3`）；镜像摘要、服务健康及部署边界见[部署记录](tests/p4/runs/2026-10-21-k3s-rollout-plan-deployment.md)。这只验证计划 API/UI 所在版本已运行，不代表已执行真实 K3s 升级或通过多节点故障恢复验收。
+
 - [x] 拓扑文件夹支持多层编辑（本机浏览器场景已覆盖）。
 - [x] 在目标 K3s 环境读取 Namespace、Ingress 路由、Service、Pod 及容器端口/状态；见 [真实 K3s API 与拓扑视图验收](tests/p4/runs/2026-10-21-k3s-target-api-smoke.md)。
 - [x] Agent 自动探测安装主机上的 kubelet/K3s 并按 Host 保存发现记录；目标 `k3s-1` 实时记录与当前部署复核见[部署记录](tests/p4/runs/2026-10-21-agent-kubernetes-runtime-discovery-deployment.md)。发现记录不代替集群 API 凭据导入。

@@ -143,9 +143,12 @@ disposable cluster, never the production `k3s-1` cluster.
   leaves it in `VERIFYING`. API validation, authentication, version range, and
   schema tests pass. This remains code-level evidence: the successful auto-advance,
   operation failure/UNKNOWN recovery, and multi-node behavior still need an
-  isolated multi-node K3s integration run. There is no multi-node installation
-  plan, and no upgrade has been run on production `k3s-1`; see
-  [`k3s-rollout-plan-code.md`](runs/k3s-rollout-plan-code.md).
+  isolated multi-node K3s integration run. The plan API/UI is deployed on
+  `k3s-1` at commit `6f146e3`; the Core/Web image digests and health evidence
+  are recorded in
+  [`k3s-rollout-plan-deployment.md`](runs/2026-10-21-k3s-rollout-plan-deployment.md).
+  No upgrade plan was created or run on `k3s-1`. There is no multi-node
+  installation plan; see [`k3s-rollout-plan-code.md`](runs/k3s-rollout-plan-code.md).
 - The live Linux Gateway-to-Ready-K3s-Service path, TLS/access policy, backend
   transition, and compensation passed on 2026-10-21; evidence is in
   `runs/2026-10-21-linux-gateway-k3s-service-ingress.md`. FRPC/Nginx were
