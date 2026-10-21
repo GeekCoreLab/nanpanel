@@ -499,6 +499,8 @@ hybrid-infrastructure-platform/
 
 Agent Kubernetes runtime discovery 的代码测试和 `k3s-1` 部署证据见[部署记录](tests/p4/runs/2026-10-21-agent-kubernetes-runtime-discovery-deployment.md)。
 
+多节点 K3s 首次安装计划已合入并推送 `main`（commit `f6c373c2fbf2f45bf88dcfec17c1a5249495e6e4`），CI 验证和 Core/Web GHCR 发布通过。目标滚动更新时 k3s-1 拉取 Core 镜像层反复遇到 IPv6 GHCR 连接重置；指定的 1ms Registry 代理对 Core 返回 504、对私有 Web 镜像返回 403。为避免新 Web 与旧 Core 混跑，Core/Web Deployment 均已回滚到已运行版本；服务 Ready 与 HTTPS 健康检查恢复。安装计划代码尚未在目标服务中运行；详见[目标发布尝试记录](tests/p4/runs/2026-10-21-k3s-installation-plan-deploy.md)。
+
 ### P5｜高级发布
 
 - [ ] K3s 上的 Gateway API + Argo Rollouts 对接。
