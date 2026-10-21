@@ -27,6 +27,7 @@ type DeviceNode = Node<{
   gatewayAssetError?: string;
   gatewayBoundAssetIds?: string[];
   clusterChoices?: KubernetesClusterSummary[];
+  onRouterAddressChange?: (nodeId: string, address: string) => void;
   onGatewayAssetFocus?: (nodeId: string) => void;
   onGatewayAssetSearch?: (nodeId: string, value: string) => void;
   onGatewayAssetClose?: (nodeId: string) => void;
@@ -36,7 +37,7 @@ type DeviceNode = Node<{
 }, 'device'>;
 type P0RouteEvidence = { status: 'VERIFIED'; route: string; httpStatus: number; responseBody: string; configSha256: string; diff: string; verifiedAt: string };
 const virtualKinds: TopologyNodeKind[] = ['SWITCH', 'MERGE', 'SPLIT', 'FORWARDER'];
-const asNode = (model: TopologyNode, asset?: Host): DeviceNode => ({ id: model.id, type: 'device', position: model.position, data: { model: { ...model, parentId: model.parentId ?? null, assetId: model.assetId ?? null, clusterId: model.clusterId ?? null }, asset } });
+const asNode = (model: TopologyNode, asset?: Host): DeviceNode => ({ id: model.id, type: 'device', position: model.position, data: { model: { ...model, parentId: model.parentId ?? null, assetId: model.assetId ?? null, clusterId: model.clusterId ?? null, ipAddress: model.ipAddress ?? null }, asset } });
 const asEdge = (link: TopologyLink): Edge => ({ id: link.id, source: link.sourceNodeId, sourceHandle: link.sourcePort, target: link.targetNodeId, targetHandle: link.targetPort, type: 'directed', markerEnd: { type: MarkerType.ArrowClosed, color: '#4a86ed' }, data: { status: 'UNVERIFIED', state: link.state ?? 'PENDING', layer: link.layer, protocol: link.protocol }, ariaLabel: `期望连接，${link.state ?? 'PENDING'} · ${link.layer}/${link.protocol}` });
 const asLink = (edge: Edge): TopologyLink => ({ id: edge.id, sourceNodeId: edge.source, sourcePort: edge.sourceHandle ?? '', targetNodeId: edge.target, targetPort: edge.targetHandle ?? '', layer: (edge.data?.layer as TopologyLink['layer']) ?? 'L4', protocol: (edge.data?.protocol as TopologyLink['protocol']) ?? 'TCP', status: 'UNVERIFIED' });
 const linkStateLabels = { PENDING: '待部署', VERIFIED: '已验证', ERROR: '异常', UNSUPPORTED: '不可支持', OBSERVED: 'Agent 路由观测' } as const;
@@ -96,6 +97,7 @@ function Device({ data, selected }: NodeProps<DeviceNode>) {
   return <div className={`topology-device ${node.kind === 'FOLDER' ? 'is-folder' : ''} ${selected ? 'is-selected' : ''}`}>
     <div className="device-title"><span className="device-symbol">{node.kind === 'FOLDER' ? '▰' : node.kind === 'SWITCH' ? '▦' : virtualKinds.includes(node.kind) ? '⇄' : '▤'}</span><div><strong>{node.name}</strong><small>{node.assetId ? `主机资产 · ${data.asset?.status ?? '读取中'}` : nodePresets[node.kind].description}</small></div></div>
     {node.kind === 'FOLDER' && <div className="folder-cluster-control nodrag"><label htmlFor={`folder-cluster-${node.id}`}>关联 Kubernetes 集群</label><select id={`folder-cluster-${node.id}`} className="nodrag nowheel" aria-label={`${node.name}关联 Kubernetes 集群`} value={node.clusterId ?? ''} onChange={event => data.onFolderClusterSelect?.(node.id, event.target.value || null)}><option value="">使用默认集群</option>{(data.clusterChoices ?? []).map(cluster => <option value={cluster.id} key={cluster.id}>{cluster.name} · {cluster.healthStatus === 'HEALTHY' ? '健康' : '不可用'}</option>)}</select></div>}
+    {node.kind === 'ROUTER' && <div className="router-address-control nodrag"><label htmlFor={`router-address-${node.id}`}>下一跳 IP 地址</label><input id={`router-address-${node.id}`} className="nodrag" inputMode="text" maxLength={45} placeholder="例如 10.0.0.1" value={node.ipAddress ?? ''} onChange={event => data.onRouterAddressChange?.(node.id, event.target.value)} /></div>}
     {node.kind === 'GATEWAY' && <div className="gateway-asset-control nodrag">
       <label htmlFor={`gateway-asset-search-${node.id}`}>绑定主机资产 <span className={`gateway-asset-source ${data.gatewayAssetMock ? 'is-mock' : ''}`}>{data.gatewayAssetMock ? 'Mock 演示数据' : '实时资产'}</span></label>
       <input ref={gatewaySearchInput} id={`gateway-asset-search-${node.id}`} className="nodrag" role="combobox" aria-label="搜索 Gateway 主机资产" aria-autocomplete="list" aria-expanded={!!data.gatewayAssetOpen} aria-controls={gatewayListId} placeholder={data.asset?.hostname ?? '输入主机名搜索…'} value={data.gatewayAssetSearch ?? ''} onFocus={() => data.onGatewayAssetFocus?.(node.id)} onBlur={() => data.onGatewayAssetClose?.(node.id)} onChange={event => data.onGatewayAssetSearch?.(node.id, event.target.value)} onKeyDown={event => { if (event.key === 'Escape') data.onGatewayAssetClose?.(node.id); }} />
@@ -221,6 +223,13 @@ function Editor() {
     setNodes(current => current.map(node => node.id === nodeId ? { ...node, data: { ...node.data, model: { ...node.data.model, clusterId } } } : node));
     if (folderId === nodeId) { setKubernetesNamespaces(undefined); setExpandedNamespace(undefined); setExpandedPod(undefined); }
     setDirty(true); setKubernetesError(''); setMessage(clusterId ? '文件夹已关联独立 Kubernetes 集群' : '文件夹将使用默认 Kubernetes 集群');
+  }
+  function selectRouterAddress(nodeId: string, address: string) {
+    setNodes(current => current.map(node => node.id === nodeId
+      ? { ...node, data: { ...node.data, model: { ...node.data.model, ipAddress: address.trim() || null } } }
+      : node));
+    setDirty(true);
+    setRouteEvidence(undefined);
   }
   function loadMoreGatewayHostAssets(nodeId: string) {
     const page = gatewayAssetPages[nodeId];
@@ -371,6 +380,9 @@ function Editor() {
     if (node.data.model.kind === 'FOLDER') {
       return { ...node, data: { ...node.data, clusterChoices: kubernetesClusters, onFolderClusterSelect: selectFolderCluster } };
     }
+    if (node.data.model.kind === 'ROUTER') {
+      return { ...node, data: { ...node.data, onRouterAddressChange: selectRouterAddress } };
+    }
     return node;
   });
   const activeEdges = edges.filter(edge => {
@@ -379,18 +391,26 @@ function Editor() {
   });
   const folder = nodes.find(node => node.id === folderId)?.data.model;
   const rootAssetNodes = nodes.filter(node => !node.data.model.parentId && node.data.model.assetId);
-  const hostByAddress = new Map<string, Host[]>();
+  const hostByAddress = new Map<string, { id: string; hostname: string; kind: 'HOST' | 'ROUTER' }[]>();
   for (const node of rootAssetNodes) {
     const asset = hostAssets[node.data.model.assetId!];
     for (const networkInterface of asset?.inventory.interfaces ?? []) {
       for (const address of networkInterface.addresses) {
         const owners = hostByAddress.get(address.address.toLowerCase()) ?? [];
-        if (!owners.some(owner => owner.id === asset.host.id)) owners.push(asset.host);
+        if (!owners.some(owner => owner.id === asset.host.id)) owners.push({ id: asset.host.id, hostname: asset.host.hostname, kind: 'HOST' });
         hostByAddress.set(address.address.toLowerCase(), owners);
       }
     }
   }
-  const rootNodeByAssetId = new Map(rootAssetNodes.map(node => [node.data.model.assetId!, node]));
+  const rootNodeByNextHopId = new Map(rootAssetNodes.map(node => [node.data.model.assetId!, node]));
+  for (const node of nodes.filter(item => !item.data.model.parentId && item.data.model.kind === 'ROUTER')) {
+    const address = node.data.model.ipAddress?.trim().toLowerCase();
+    if (!address) continue;
+    const owners = hostByAddress.get(address) ?? [];
+    if (!owners.some(owner => owner.id === node.id)) owners.push({ id: node.id, hostname: node.data.model.name, kind: 'ROUTER' });
+    hostByAddress.set(address, owners);
+    rootNodeByNextHopId.set(node.id, node);
+  }
   const observedRouteCounts = new Map<string, { source: DeviceNode; target: DeviceNode; count: number }>();
   for (const source of rootAssetNodes) {
     const sourceAsset = hostAssets[source.data.model.assetId!];
@@ -398,7 +418,7 @@ function Editor() {
     for (const route of sourceAsset.inventory.routes) {
       const resolution = resolveRouteNextHop(route.gateway, sourceAsset.host.id, hostByAddress);
       if (resolution.kind !== 'MATCHED') continue;
-      const target = rootNodeByAssetId.get(resolution.host.id);
+      const target = rootNodeByNextHopId.get(resolution.host.id);
       if (!target || target.data.model.inputCount < 1 || source.data.model.outputCount < 1) continue;
       const key = `${source.id}:${target.id}`;
       const observed = observedRouteCounts.get(key);
@@ -480,7 +500,7 @@ function Editor() {
       </ReactFlow>
     </section>
     {!folderId && <section className="service-network card" aria-labelledby="host-routes-title">
-      <div className="card-title"><div><h2 id="host-routes-title">主机路由观测与自动下一跳匹配</h2><p>从已绑定主机的 Agent 路由快照读取，并按网卡地址自动关联已加入主拓扑的下一跳主机</p></div></div>
+      <div className="card-title"><div><h2 id="host-routes-title">主机路由观测与自动下一跳匹配</h2><p>读取已绑定主机的 Agent 路由快照，并按网卡地址关联主拓扑中的 Host 或配置了 IP 的 Router</p></div></div>
       {rootAssetNodes.length ? <div className="service-network-list">{rootAssetNodes.map(node => {
         const asset = hostAssets[node.data.model.assetId!];
         if (!asset) return <article className="service-network-item" key={node.id}><strong>{node.data.model.name}</strong><p>正在读取主机和路由快照，或当前会话无权读取。</p></article>;
@@ -488,9 +508,9 @@ function Editor() {
           <div className="service-network-title"><div><strong>{asset.host.hostname}</strong><small>{asset.inventory.observedAt ? `路由观测于 ${new Date(asset.inventory.observedAt).toLocaleString()}` : 'Agent 尚未上报网络快照'}</small></div><span className={`badge ${asset.host.status === 'ONLINE' ? 'online' : asset.host.status === 'OFFLINE' ? 'offline' : 'unknown'}`}>{asset.host.status}</span></div>
           {asset.inventory.routes.length ? <div className="host-route-list">{asset.inventory.routes.map((route, index) => {
             const nextHop = resolveRouteNextHop(route.gateway, asset.host.id, hostByAddress);
-            const summary = nextHop.kind === 'MATCHED' ? `${asset.host.hostname} → ${nextHop.host.hostname}`
+            const summary = nextHop.kind === 'MATCHED' ? `${asset.host.hostname} → ${nextHop.host.hostname}${nextHop.host.kind === 'ROUTER' ? '（Router）' : ''}`
               : nextHop.kind === 'DIRECT' ? '直连路由'
-                : `via ${route.gateway}${nextHop.kind === 'AMBIGUOUS' ? '（地址匹配到多个拓扑主机）' : nextHop.kind === 'SELF' ? '（下一跳地址属于自身）' : '（未匹配拓扑主机）'}`;
+                : `via ${route.gateway}${nextHop.kind === 'AMBIGUOUS' ? '（地址匹配到多个 Host/Router）' : nextHop.kind === 'SELF' ? '（下一跳地址属于自身）' : '（未匹配主拓扑 Host/Router）'}`;
             return <div className="host-route-row" key={`${route.destination}-${route.table}-${route.metric}-${index}`}><code>{route.destination}</code><span>{summary}</span><small>{route.interfaceName || '—'} · table {route.table} · metric {route.metric} · {route.routeType}</small></div>;
           })}</div> : <div className="empty">暂无路由记录</div>}
         </article>;

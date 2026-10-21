@@ -1,10 +1,10 @@
 // Generated from api/openapi.yaml. Regenerate with scripts/generate-types.py.
-export type TopologyNodeKind = "GATEWAY" | "HOST" | "SERVICE" | "SWITCH" | "MERGE" | "SPLIT" | "FORWARDER" | "FOLDER";
+export type TopologyNodeKind = "GATEWAY" | "HOST" | "ROUTER" | "SERVICE" | "SWITCH" | "MERGE" | "SPLIT" | "FORWARDER" | "FOLDER";
 export type TopologyPosition = { x: number; y: number };
 export type TopologyLayer = "L2" | "L3" | "L4" | "L7";
 export type TopologyProtocol = "ETHERNET" | "IP" | "TCP" | "UDP" | "SCTP" | "HTTP" | "HTTPS";
 export type TopologyPort = { id: string; direction: "INPUT" | "OUTPUT"; layer: TopologyLayer; protocols: (TopologyProtocol)[] };
-export type TopologyNode = { id: string; kind: TopologyNodeKind; name: string; position: TopologyPosition; inputCount: number; outputCount: number; ports: (TopologyPort)[]; parentId?: string | null; assetId?: string | null; clusterId?: string | null };
+export type TopologyNode = { id: string; kind: TopologyNodeKind; name: string; position: TopologyPosition; inputCount: number; outputCount: number; ports: (TopologyPort)[]; parentId?: string | null; assetId?: string | null; clusterId?: string | null; ipAddress?: string | null };
 export type TopologyLink = { id: string; sourceNodeId: string; sourcePort: string; targetNodeId: string; targetPort: string; layer: TopologyLayer; protocol: TopologyProtocol; status: "UNVERIFIED"; state?: "PENDING" | "VERIFIED" | "ERROR" | "UNSUPPORTED" };
 export type TopologyDraftWrite = { nodes: (TopologyNode)[]; links: (TopologyLink)[] };
 export type TopologyDraft = { revisionId: string; generation: number; nodes: (TopologyNode)[]; links: (TopologyLink)[]; updatedAt: string; updatedBy: string | null };
@@ -23,7 +23,7 @@ export type NetworkProviderObservationRequest = { resourceKey: string };
 export type NetworkProviderObservation = { providerId: string; resourceKey: string; snapshot: string };
 export type NetworkProviderOperation = { id: string; providerId: string; generation: number; state: "PLANNED" | "VALIDATED" | "APPLYING" | "APPLIED" | "VERIFIED" | "DRIFTED" | "COMPENSATING" | "COMPENSATED" | "UNKNOWN" | "FAILED"; detail: string; createdAt: string; updatedAt: string };
 export type KubernetesClusterList = { items: (KubernetesClusterSummary)[] };
-export type KubernetesRuntimeDiscoveryList = { items: KubernetesRuntimeDiscovery[] };
+export type KubernetesRuntimeDiscoveryList = { items: (KubernetesRuntimeDiscovery)[] };
 export type KubernetesRuntimeDiscovery = { hostId: string; hostname: string; runtimeKind: "K3S" | "KUBERNETES"; detected: boolean; kubeletRunning: boolean; apiServerLocal: boolean; observedAt: string; agentLastSeen: string | null };
 export type KubernetesClusterSummary = { id: string; name: string; kind: "K3S" | "KUBEEDGE" | "KUBERNETES"; endpoint: string; contextName: string; healthStatus: "UNKNOWN" | "HEALTHY" | "DEGRADED" | "UNAVAILABLE"; cloudCoreStatus: "HEALTHY" | "DEGRADED" | "UNAVAILABLE" | "NOT_OBSERVED" | "UNKNOWN"; cloudCoreObservedAt: string | null; observedAt: string | null; observationsStale: boolean; lastErrorCode: string | null; nodeCount: number; createdAt: string };
 export type KubernetesClusterImportRequest = { name: string; kind: "K3S" | "KUBEEDGE" | "KUBERNETES"; contextName: string; kubeconfig: string };

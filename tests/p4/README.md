@@ -49,14 +49,18 @@ disposable cluster, never the production `k3s-1` cluster.
   stronger than the Kind API fixture but does not prove real kubelet/Agent
   behavior or multi-node lifecycle on the target `k3s-1`, so the target gate
   remains open.
-- Topology route matching now shares one resolver for displayed summaries and
-  observed edges. `web/scripts/topology.test.mjs` covers direct routes, one
-  distinct Host owner, duplicate references to the same owner, ambiguous
-  multiple owners, self-addresses, and unmatched gateways; the browser fixture
-  confirms a unique next-hop match. The target inventory records an active
-  Agent and `k3s-1` default gateway `10.0.0.1`, but no authenticated production
-  Core evidence maps that address to a Host asset. Target route matching remains
-  open; see `runs/2026-10-21-k3s-target-inventory.md`.
+- Topology route matching shares one resolver for displayed summaries and
+  observed edges. Host interface addresses and top-level Router `ipAddress`
+  values are eligible owners; multiple distinct owners remain ambiguous. The
+  Router field is validated and persisted by Core. Frontend tests cover unique
+  Host/Router ownership, duplicate references, ambiguity, self-addresses and
+  unmatched gateways; Core tests cover valid Router persistence and invalid IP
+  rejection. The target inventory records the `k3s-1` default gateway
+  `10.0.0.1`, which is a router and has no matching Host asset. The feature
+  supports representing that next hop without inventing a Host, but the live
+  production topology has not been edited and authenticated UI route-edge
+  evidence remains open; see `runs/2026-10-21-k3s-route-router-matching.md` and
+  `runs/2026-10-21-k3s-target-inventory.md`.
 - A live target-K3s smoke report is recorded at
   `tests/p4/runs/2026-10-21-k3s-target-api-smoke.md`. Using a disposable local
   Core/database and a short-lived, namespace-scoped K3s credential, it imported

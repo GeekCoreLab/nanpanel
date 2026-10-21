@@ -1,7 +1,7 @@
 import { createUuid } from './uuid.ts';
 import type { TopologyDraftWrite, TopologyLink, TopologyNode, TopologyNodeKind, TopologyPort } from './types';
 
-export type RouteNextHopHost = { id: string; hostname: string };
+export type RouteNextHopHost = { id: string; hostname: string; kind?: 'HOST' | 'ROUTER' };
 export type RouteNextHopResolution =
   | { kind: 'DIRECT' }
   | { kind: 'MATCHED'; host: RouteNextHopHost }
@@ -9,7 +9,7 @@ export type RouteNextHopResolution =
   | { kind: 'UNMATCHED' }
   | { kind: 'SELF' };
 
-/** Resolve a route gateway only when exactly one different Host asset owns its address. */
+/** Resolve a route gateway only when exactly one different Host or Router node owns its address. */
 export function resolveRouteNextHop(
   gateway: string | null | undefined,
   sourceHostId: string,
@@ -36,6 +36,7 @@ const protocolLayer: Record<TopologyPort['layer'], TopologyPort['protocols'][num
 export const nodePresets: Record<TopologyNodeKind, { name: string; inputs: number; outputs: number; description: string }> = {
   GATEWAY: { name: '公网 Gateway', inputs: 0, outputs: 1, description: '公网流量源' },
   HOST: { name: 'NAT Host', inputs: 1, outputs: 1, description: '受管主机' },
+  ROUTER: { name: '网络路由器', inputs: 1, outputs: 1, description: '按 IP 地址匹配 Agent 下一跳' },
   SERVICE: { name: 'K3s Service', inputs: 1, outputs: 0, description: '服务终点' },
   SWITCH: { name: '虚拟交换机', inputs: 4, outputs: 4, description: '多端口逻辑互联' },
   MERGE: { name: '多合一转发器', inputs: 3, outputs: 1, description: '多个入口汇聚至一个出口' },
@@ -45,7 +46,7 @@ export const nodePresets: Record<TopologyNodeKind, { name: string; inputs: numbe
 };
 export function createTopologyNode(kind: TopologyNodeKind, position: { x: number; y: number }): TopologyNode {
   const preset = nodePresets[kind];
-  return { id: createUuid(), kind, name: preset.name, position, inputCount: preset.inputs, outputCount: preset.outputs, ports: portsFor(preset.inputs, preset.outputs), parentId: null, assetId: null, clusterId: null };
+  return { id: createUuid(), kind, name: preset.name, position, inputCount: preset.inputs, outputCount: preset.outputs, ports: portsFor(preset.inputs, preset.outputs), parentId: null, assetId: null, clusterId: null, ipAddress: null };
 }
 export function initialTopology(): TopologyDraftWrite {
   return { nodes: [createTopologyNode('GATEWAY', { x: 0, y: 100 }), createTopologyNode('HOST', { x: 350, y: 180 }), createTopologyNode('SERVICE', { x: 700, y: 100 })], links: [] };
@@ -62,6 +63,7 @@ export function validNodeShape(node: TopologyNode): boolean {
     case 'GATEWAY': return i === 0 && o >= 1;
     case 'SERVICE': return i >= 1 && o === 0;
     case 'HOST': return i >= 1 && o >= 1;
+    case 'ROUTER': return i >= 1 && o >= 1;
     case 'MERGE': return i >= 2 && o === 1;
     case 'SPLIT': return i === 1 && o >= 2;
     case 'SWITCH': case 'FORWARDER': return i >= 2 && o >= 2;
@@ -94,7 +96,7 @@ export function draftError(value: unknown): string | null {
   const ids = new Set<string>();
   for (const n of value.nodes) {
     const requiredNodeKeys = ['id', 'kind', 'name', 'position', 'inputCount', 'outputCount', 'ports'];
-    const optionalNodeKeys = ['parentId', 'assetId', 'clusterId'];
+    const optionalNodeKeys = ['parentId', 'assetId', 'clusterId', 'ipAddress'];
     if (!record(n) || requiredNodeKeys.some(key => !Object.hasOwn(n, key)) || Object.keys(n).some(key => !requiredNodeKeys.includes(key) && !optionalNodeKeys.includes(key)) || typeof n.id !== 'string' || !uuid.test(n.id) || ids.has(n.id)) return '节点 ID 必须为唯一 UUID，且不能包含未定义字段';
     ids.add(n.id);
     if (typeof n.name !== 'string' || !n.name.trim() || [...n.name].length > 100 || !record(n.position) || !keysAre(n.position, ['x', 'y']) || ![n.position.x, n.position.y].every(v => typeof v === 'number' && Number.isFinite(v) && Math.abs(v) <= 10000)) return '节点名称或坐标无效';
@@ -106,6 +108,7 @@ export function draftError(value: unknown): string | null {
     if (n.assetId != null && n.kind !== 'HOST' && n.kind !== 'GATEWAY') return '只有主机或 Gateway 节点可以绑定主机资产';
     if (n.clusterId !== undefined && n.clusterId !== null && (typeof n.clusterId !== 'string' || !uuid.test(n.clusterId))) return 'Kubernetes 集群 ID 无效';
     if (n.clusterId != null && n.kind !== 'FOLDER') return '只有文件夹节点可以关联 Kubernetes 集群';
+    if (n.ipAddress !== undefined && n.ipAddress !== null && (typeof n.ipAddress !== 'string' || n.kind !== 'ROUTER' || !validIpAddress(n.ipAddress))) return '下一跳 IP 只能设置在 Router 节点上，且必须是有效 IPv4/IPv6 地址';
     if (parentId === n.id) return '文件夹不能包含自身';
   }
   const nodesById = new Map((value.nodes as TopologyNode[]).map(n => [n.id, n]));
@@ -136,4 +139,19 @@ export function draftError(value: unknown): string | null {
     links.push(l as unknown as TopologyLink);
   }
   return null;
+}
+
+function validIpAddress(value: string): boolean {
+  const address = value.trim();
+  if (!address || address.length > 45 || !/^[0-9a-f:.]+$/i.test(address)) return false;
+  if (!address.includes(':')) {
+    const octets = address.split('.');
+    return octets.length === 4 && octets.every(part => /^\d{1,3}$/.test(part) && Number(part) <= 255);
+  }
+  try {
+    new URL(`http://[${address}]/`);
+    return true;
+  } catch {
+    return false;
+  }
 }

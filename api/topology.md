@@ -14,6 +14,7 @@ The editor currently creates `L4` ports that support TCP and UDP, and creates TC
 | --- | --- | --- |
 | `GATEWAY` | 0 / 1 | 0 / 1–16 |
 | `HOST` | 1 / 1 | 1–16 / 1–16 |
+| `ROUTER` | 1 / 1 | 1–16 / 1–16 |
 | `SERVICE` | 1 / 0 | 1–16 / 0 |
 | `SWITCH` | 4 / 4 | 2–16 / 2–16 |
 | `MERGE` | 3 / 1 | 2–16 / 1 |
@@ -23,7 +24,7 @@ The editor currently creates `L4` ports that support TCP and UDP, and creates TC
 
 These are desired logical nodes, not deployed devices. Their names do not imply MAC learning, traffic replication, load balancing, port mapping or route selection. Providers must declare the capabilities and execution semantics they support.
 
-The outer topology can include registered Host assets. Their read-only Agent network snapshots are matched against other selected assets by interface address to display known route next hops. The route table is not changed by saving the topology; general host route deployment still needs a capable Provider and an explicit operation.
+The outer topology can include registered Host assets and Router nodes. A Router may declare an IPv4 or IPv6 `ipAddress`; read-only Agent network snapshots match route gateways against selected Host interface addresses and top-level Router addresses to display known next hops. A unique address owner creates an observed route connection; duplicate owners remain ambiguous. Router addresses are static topology annotations and do not create or change operating-system routes. Saving the topology does not change a route table; general host route deployment still needs a capable Provider and an explicit operation.
 
 Opening a folder allows editing its child topology and browsing a selected registered Kubernetes cluster. A folder may be bound to a cluster UUID; an unbound folder uses the server-configured default cluster. Namespace, Ingress, Service, Pod and container metadata is fetched on demand, bounded, and never reads Secrets. Registered clusters have independent kubeconfig contexts and encrypted credentials. Cluster Node mappings use Kubernetes UIDs and explicit Host asset selection. KubeEdge cluster summaries include CloudCore status and observation time; the current observer covers CloudCore Pods in the `kubeedge` namespace and reports binary CloudCore as `NOT_OBSERVED`. EdgeNode status reflects its Kubernetes edge role and Ready condition; it does not imply that Core installed or manages EdgeCore.
 

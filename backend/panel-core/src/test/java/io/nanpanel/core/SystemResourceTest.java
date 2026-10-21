@@ -461,6 +461,7 @@ class SystemResourceTest {
           {"id":"10000000-0000-0000-0000-000000000002","kind":"SERVICE","name":"服务","position":{"x":300,"y":0},"inputCount":1,"outputCount":0,"ports":[{"id":"in-1","direction":"INPUT","layer":"L4","protocols":["TCP"]}]}
         ,{"id":"10000000-0000-0000-0000-000000000003","kind":"FOLDER","name":"K3s","position":{"x":600,"y":0},"inputCount":1,"outputCount":1,"ports":[{"id":"in-1","direction":"INPUT","layer":"L4","protocols":["TCP"]},{"id":"out-1","direction":"OUTPUT","layer":"L4","protocols":["TCP"]}],"parentId":null,"assetId":null}
         ,{"id":"10000000-0000-0000-0000-000000000004","kind":"SERVICE","name":"Pod Service","position":{"x":0,"y":0},"inputCount":1,"outputCount":0,"ports":[{"id":"in-1","direction":"INPUT","layer":"L4","protocols":["TCP"]}],"parentId":"10000000-0000-0000-0000-000000000003","assetId":null}
+        ,{"id":"10000000-0000-0000-0000-000000000005","kind":"ROUTER","name":"Default Router","position":{"x":300,"y":0},"inputCount":1,"outputCount":1,"ports":[{"id":"in-1","direction":"INPUT","layer":"L4","protocols":["TCP"]},{"id":"out-1","direction":"OUTPUT","layer":"L4","protocols":["TCP"]}],"ipAddress":"10.0.0.1"}
         ],"links":[{"id":"10000000-0000-0000-0000-000000000003","sourceNodeId":"10000000-0000-0000-0000-000000000001","sourcePort":"out-1","targetNodeId":"10000000-0000-0000-0000-000000000002","targetPort":"in-1","layer":"L4","protocol":"TCP","status":"UNVERIFIED"}]}
         """;
     var topologySaved = given().cookie("nanpanel_session", restoredCookie)
@@ -474,6 +475,7 @@ class SystemResourceTest {
     assertEquals("UNVERIFIED", topologySaved.path("links[0].status"));
     assertEquals("10000000-0000-0000-0000-000000000003",
         topologySaved.path("nodes[3].parentId"));
+    assertEquals("10.0.0.1", topologySaved.path("nodes[4].ipAddress"));
     given().cookie("nanpanel_session", restoredCookie)
         .header("X-CSRF-Token", restored.path("csrfToken"))
         .header("If-Match", topologyEtag).contentType("application/json").body(topologyWrite)
@@ -485,6 +487,13 @@ class SystemResourceTest {
         .header("X-CSRF-Token", restored.path("csrfToken"))
         .header("If-Match", topologySaved.header("ETag"))
         .contentType("application/json").body(crossScope)
+        .put("/api/v1/topology/draft").then().statusCode(422)
+        .body("code", equalTo("INVALID_TOPOLOGY"));
+    String invalidRouterAddress = topologyWrite.replace("10.0.0.1", "not-an-ip");
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("If-Match", topologySaved.header("ETag"))
+        .contentType("application/json").body(invalidRouterAddress)
         .put("/api/v1/topology/draft").then().statusCode(422)
         .body("code", equalTo("INVALID_TOPOLOGY"));
     given().cookie("nanpanel_session", restoredCookie)

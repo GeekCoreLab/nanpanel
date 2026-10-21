@@ -51,20 +51,25 @@ test('folder hierarchy, host asset binding and same-scope connections are valida
   assert.match(draftError({ nodes: [{ ...service, assetId: crypto.randomUUID() }], links: [] }), /只有主机或 Gateway 节点/);
 });
 
-test('route next-hop matching requires one distinct Host asset owner', () => {
+test('route next-hop matching accepts one distinct Host asset or Router owner', () => {
   const source = { id: 'source', hostname: 'source-host' };
   const target = { id: 'target', hostname: 'target-host' };
+  const router = { id: 'router', hostname: 'edge-router', kind: 'ROUTER' };
   const addressOwners = new Map([
     ['10.0.0.1', [target]],
     ['10.0.0.2', [source]],
     ['10.0.0.3', [source, target]],
     ['10.0.0.4', [target, target]],
+    ['10.0.0.5', [router]],
+    ['10.0.0.6', [target, router]],
   ]);
   assert.deepEqual(resolveRouteNextHop(null, source.id, addressOwners), { kind: 'DIRECT' });
   assert.deepEqual(resolveRouteNextHop(' 10.0.0.1 ', source.id, addressOwners), { kind: 'MATCHED', host: target });
   assert.deepEqual(resolveRouteNextHop('10.0.0.2', source.id, addressOwners), { kind: 'SELF' });
   assert.deepEqual(resolveRouteNextHop('10.0.0.3', source.id, addressOwners), { kind: 'AMBIGUOUS' });
   assert.deepEqual(resolveRouteNextHop('10.0.0.4', source.id, addressOwners), { kind: 'MATCHED', host: target });
+  assert.deepEqual(resolveRouteNextHop('10.0.0.5', source.id, addressOwners), { kind: 'MATCHED', host: router });
+  assert.deepEqual(resolveRouteNextHop('10.0.0.6', source.id, addressOwners), { kind: 'AMBIGUOUS' });
   assert.deepEqual(resolveRouteNextHop('10.0.0.9', source.id, addressOwners), { kind: 'UNMATCHED' });
 });
 

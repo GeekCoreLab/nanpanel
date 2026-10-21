@@ -131,6 +131,7 @@ public final class NetworkGraphValidator {
             case "FOLDER" -> inputs >= 1 && inputs <= 16 && outputs >= 1 && outputs <= 16;
             case "SERVICE" -> inputs >= 1 && inputs <= 16 && outputs == 0;
             case "HOST" -> inputs >= 1 && inputs <= 16 && outputs >= 1 && outputs <= 16;
+            case "ROUTER" -> inputs >= 1 && inputs <= 16 && outputs >= 1 && outputs <= 16;
             case "MERGE" -> inputs >= 2 && inputs <= 16 && outputs == 1;
             case "SPLIT" -> inputs == 1 && outputs >= 2 && outputs <= 16;
             case "SWITCH", "FORWARDER" -> inputs >= 2 && inputs <= 16 && outputs >= 2 && outputs <= 16;

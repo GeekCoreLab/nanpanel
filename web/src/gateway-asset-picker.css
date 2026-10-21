@@ -16,3 +16,4 @@
 .gateway-asset-more{width:100%;padding:8px;border:0;border-top:1px solid #edf1f7;background:#fff;color:#5780cb;font-size:9px}
 .gateway-asset-clear{margin-top:7px;padding:3px 0;border:0;background:none;color:#9a7180;font-size:8px}
 .folder-cluster-control{display:grid;gap:5px;padding:8px 12px;border-bottom:1px solid #e8edf6;background:#f8faff}.folder-cluster-control label{color:#788aa3;font-size:9px}.folder-cluster-control select{width:100%;min-width:0;height:29px;padding:4px 7px;font-size:9px}
+.router-address-control{display:grid;gap:5px;padding:8px 12px;border-bottom:1px solid #e8edf6;background:#f8faff}.router-address-control label{color:#788aa3;font-size:9px}.router-address-control input{width:100%;min-width:0;height:29px;padding:4px 7px;font-size:10px}

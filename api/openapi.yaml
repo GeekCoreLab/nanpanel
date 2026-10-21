@@ -3929,6 +3929,7 @@ components:
       enum:
       - GATEWAY
       - HOST
+      - ROUTER
       - SERVICE
       - SWITCH
       - MERGE
@@ -4023,6 +4024,10 @@ components:
           type: [string, 'null']
           format: uuid
           description: Registered Kubernetes cluster ID for a FOLDER node.
+        ipAddress:
+          type: [string, 'null']
+          maxLength: 45
+          description: Static IPv4/IPv6 address used by a ROUTER node for next-hop matching.
     TopologyLink:
       type: object
       additionalProperties: false

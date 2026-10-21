@@ -58,7 +58,7 @@ public class TopologyResource {
   public record PortView(String id, String direction, String layer, List<String> protocols) {}
   public record NodeView(String id, String kind, String name, Position position,
                          int inputCount, int outputCount, List<PortView> ports,
-                         String parentId, String assetId, String clusterId) {}
+                         String parentId, String assetId, String clusterId, String ipAddress) {}
   public record LinkView(String id, String sourceNodeId, String sourcePort, String targetNodeId,
                          String targetPort, String layer, String protocol, String status,
                          String state) {}
@@ -224,7 +224,9 @@ public class TopologyResource {
           || !node.path("name").isTextual() || !node.path("position").path("x").isNumber()
           || !node.path("position").path("y").isNumber()
           || !node.path("inputCount").isIntegralNumber()
-          || !node.path("outputCount").isIntegralNumber()) {
+          || !node.path("outputCount").isIntegralNumber()
+          || node.has("ipAddress") && !node.get("ipAddress").isNull()
+              && !node.get("ipAddress").isTextual()) {
         throw fail(422, "INVALID_TOPOLOGY", "节点坐标或端口字段无效");
       }
       for (JsonNode port : node.path("ports")) {
@@ -275,7 +277,8 @@ public class TopologyResource {
       }).toList();
       return new NodeView(node.id(), node.kind(), node.name() == null ? null : node.name().strip(),
           node.position(), node.inputCount(), node.outputCount(), ports, node.parentId(),
-          node.assetId(), node.clusterId());
+          node.assetId(), node.clusterId(), node.ipAddress() == null || node.ipAddress().isBlank()
+              ? null : node.ipAddress().strip());
     }).toList();
     List<LinkInput> links = input.links().stream().map(link -> {
       if (link == null) {
@@ -322,6 +325,10 @@ public class TopologyResource {
         if (!"FOLDER".equals(node.kind())) {
           return "只有文件夹节点可以关联 Kubernetes 集群";
         }
+      }
+      if (node.ipAddress() != null && (!"ROUTER".equals(node.kind())
+          || !validIpAddress(node.ipAddress()))) {
+        return "下一跳 IP 只能设置在 Router 节点上，且必须是有效 IPv4/IPv6 地址";
       }
     }
     for (NodeView node : value.nodes()) {
@@ -445,7 +452,7 @@ public class TopologyResource {
 
   private boolean objectWithNodeKeys(JsonNode value) {
     Set<String> allowed = Set.of("id", "kind", "name", "position", "inputCount",
-        "outputCount", "ports", "parentId", "assetId", "clusterId");
+        "outputCount", "ports", "parentId", "assetId", "clusterId", "ipAddress");
     Set<String> required = Set.of("id", "kind", "name", "position", "inputCount",
         "outputCount", "ports");
     if (value == null || !value.isObject() || value.size() < required.size()
@@ -462,6 +469,18 @@ public class TopologyResource {
       found.add(name);
     }
     return found.containsAll(required);
+  }
+
+  private boolean validIpAddress(String value) {
+    if (value == null || value.isBlank() || value.length() > 45
+        || !value.matches("[0-9A-Fa-f:.]+")) return false;
+    try {
+      java.net.InetAddress address = java.net.InetAddress.getByName(value);
+      return value.contains(":") ? address instanceof java.net.Inet6Address
+          : address instanceof java.net.Inet4Address;
+    } catch (java.net.UnknownHostException invalid) {
+      return false;
+    }
   }
 
   private UUID uuid(String value) {
