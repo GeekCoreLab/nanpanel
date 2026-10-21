@@ -143,6 +143,7 @@ function Editor() {
   const [serviceSearch, setServiceSearch] = useState('');
   const [folderId, setFolderId] = useState<string | null>(null);
   const [hostAssets, setHostAssets] = useState<Record<string, { host: Host; inventory: HostNetworkInventory }>>({});
+  const hostAssetLoads = useRef(new Set<string>());
   const [assetChoices, setAssetChoices] = useState<Host[]>([]); const [assetNextCursor, setAssetNextCursor] = useState<string | null>(null); const [assetPickerOpen, setAssetPickerOpen] = useState(false); const [assetPickerBusy, setAssetPickerBusy] = useState(false);
   const [gatewayAssetPages, setGatewayAssetPages] = useState<Record<string, { choices: Host[]; nextCursor: string | null; loading: boolean; error?: string }>>({}); const [gatewayAssetSearch, setGatewayAssetSearch] = useState<Record<string, string>>({}); const [gatewayAssetOpen, setGatewayAssetOpen] = useState<Record<string, boolean>>({});
   const gatewayAssetRequest = useRef<Record<string, number>>({});
@@ -268,23 +269,22 @@ function Editor() {
   }, []);
   useEffect(() => {
     const known = new Set(Object.keys(hostAssets));
-    const missing = [...new Set(nodes.map(node => node.data.model.assetId).filter((value): value is string => !!value))].filter(id => !known.has(id));
+    const missing = [...new Set(nodes.map(node => node.data.model.assetId).filter((value): value is string => !!value))]
+      .filter(id => !known.has(id) && !hostAssetLoads.current.has(id));
     if (!missing.length) return;
-    let cancelled = false;
+    missing.forEach(id => hostAssetLoads.current.add(id));
     void Promise.all(missing.map(async id => {
       try {
         const [host, inventory] = await Promise.all([api<Host>(`/hosts/${id}`, 'GET', undefined, {}, true), api<HostNetworkInventory>(`/hosts/${id}/network-inventory`, 'GET', undefined, {}, true)]);
         return [id, { host: host.data, inventory: inventory.data }] as const;
       } catch { return null; }
     })).then(results => {
-      if (cancelled) return;
       const ready = Object.fromEntries(results.filter((entry): entry is NonNullable<typeof entry> => !!entry));
       if (Object.keys(ready).length) {
         setHostAssets(current => ({ ...current, ...ready }));
         setNodes(current => current.map(node => ready[node.data.model.assetId ?? ''] ? { ...node, data: { ...node.data, asset: ready[node.data.model.assetId!].host } } : node));
       }
-    });
-    return () => { cancelled = true; };
+    }).finally(() => missing.forEach(id => hostAssetLoads.current.delete(id)));
   }, [nodes, hostAssets]);
   useEffect(() => {
     if (!folderId) { setKubernetesNamespaces(undefined); setExpandedNamespace(undefined); setExpandedPod(undefined); return; }

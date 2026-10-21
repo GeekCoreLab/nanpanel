@@ -71,11 +71,12 @@ record can establish discovery and control-plane connectivity, but does not by
 itself prove whether a specific data path is direct or relayed. That path type
 must come from the peer's local connection status or an equivalent provider
 observation, and a successful probe must confirm the requested service path.
-The isolated Istio fixture now checks the Kubernetes-native mapping from its
+The isolated Istio fixture checks the Kubernetes-native mapping from its
 Service port to a ready EndpointSlice Pod and performs allowed and denied HTTP
-probes. Core separately persists the latest namespace-scoped Kubernetes
-inventory and optional TCP probes; it does not yet persist Istio-specific proxy
-or policy status.
+probes. P4 extends the persisted inventory with live proxy readiness/version
+and bounded Envoy destination counters. These observations do not expose raw
+Prometheus data or reconcile Istio policy; both HTTP policy configuration and
+production injection remain Provider work.
 
 The Agent can ingest optional NetBird loopback metrics as a timestamped host
 summary (known, connected, P2P, and relayed peer counts). When the root Helper

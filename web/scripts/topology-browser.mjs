@@ -124,8 +124,9 @@ try {
   await expect(observedRouter.locator('.router-address-control code')).toHaveText('192.0.2.1');
   await expect(observedRouter.locator('.router-address-control input')).toHaveCount(0);
   await expect(page.locator('.host-route-row').filter({ hasText: 'homelab-node-01 → 自动发现 Router 192.0.2.1' })).toBeVisible();
-  await expect(page.locator('.react-flow__edge')).toHaveCount(4);
-  await expect(page.locator('.link-state-observed')).toHaveCount(2);
+  await page.getByRole('button', { name: 'fit view' }).click();
+  await expect(page.locator('.react-flow__edge')).toHaveCount(3);
+  await expect(page.locator('.link-state-observed')).toHaveCount(1);
   await page.getByRole('button', { name: '＋ 添加节点' }).click();
   await page.getByRole('menuitem', { name: 'K3s 集群文件夹 1 入 / 1 出' }).click();
   const cluster = device('K3s 集群文件夹');
