@@ -7,6 +7,7 @@ view alone does not complete the stage.
 | Gate | Required evidence |
 | --- | --- |
 | Multi-cluster import | Import two independently addressed clusters using explicit kubeconfig contexts; reject invalid credentials, exec plugins, insecure TLS, unauthorized RBAC, duplicate names, and credential leakage. |
+| Agent runtime auto-enrollment | A Host Agent that detects a local Kubernetes runtime automatically adds the corresponding cluster to managed inventory without manual kubeconfig import; define least-privilege credential acquisition and idempotent handling for unreachable or already-imported clusters. |
 | Node mapping | Reconcile ClusterNodes by Kubernetes UID, explicitly map/unmap Hosts, reject conflicting mappings, and preserve both identities after either side is removed. |
 | Basic resource management | Exercise only documented, namespace-scoped operations using the imported cluster's RBAC; reject cross-cluster IDs, unsupported kinds, unowned destructive changes, and missing permissions. |
 | K3s install and upgrade | Exercise Agent-mediated server/agent installation and upgrade plans, preflight blockers, one-node-at-a-time ordering, health gates, timeout/failure reporting, and recovery without arbitrary shell access. |
@@ -53,6 +54,12 @@ disposable cluster, never the production `k3s-1` cluster.
   The separate live
   K3s report below covers only one-cluster import/mapping and scoped Deployment
   CRUD; target multi-cluster acceptance remains open.
+- Agent runtime discovery currently stores a per-Host Kubelet/K3s observation
+  and displays it in the Kubernetes UI, but it does not automatically register
+  that cluster or transfer API credentials. This does not satisfy the user's
+  requested automatic managed-cluster enrollment. The new P4 gate above stays
+  open until credential acquisition, minimum permissions, deduplication,
+  unreachable API behavior, and live enrollment are implemented and verified.
 - A separate isolated K3s API-only integration run is recorded at
   `tests/p4/runs/2026-10-21-k3s-multi-cluster-api-only.md`. It used two actual
   K3s `v1.33.5+k3s1` API servers with independent endpoints and exercised the
@@ -161,12 +168,14 @@ disposable cluster, never the production `k3s-1` cluster.
   leaves it in `VERIFYING`. API validation, authentication, version range, and
   schema tests pass. This remains code-level evidence: the successful auto-advance,
   operation failure/UNKNOWN recovery, and multi-node behavior still need an
-  isolated multi-node K3s integration run. The plan API/UI is deployed on
-  `k3s-1` at commit `6f146e3`; the Core/Web image digests and health evidence
-  are recorded in
-  [`k3s-rollout-plan-deployment.md`](runs/2026-10-21-k3s-rollout-plan-deployment.md).
-  No upgrade or installation plan was created or run on `k3s-1`. The installation
-  plan still needs the disposable multi-node run in
+  isolated multi-node K3s integration run. The upgrade plan was initially
+  deployed at commit `6f146e3`; current `k3s-1` runs commit
+  `f6c373c2fbf2f45bf88dcfec17c1a5249495e6e4`, which also includes the persistent
+  installation-plan API/UI. Current image, migration, Agent, and health evidence
+  is recorded in
+  [`k3s-installation-plan-deploy.md`](runs/2026-10-21-k3s-installation-plan-deploy.md).
+  No upgrade or installation plan was created or run on production `k3s-1`.
+  The installation plan still needs the disposable multi-node run in
   [`k3s-installation-plan-code.md`](runs/k3s-installation-plan-code.md); upgrade
   recovery still needs the separate acceptance in
   [`k3s-rollout-plan-code.md`](runs/k3s-rollout-plan-code.md).

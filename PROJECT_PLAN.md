@@ -485,7 +485,8 @@ hybrid-infrastructure-platform/
 
 - [x] 拓扑文件夹支持多层编辑（本机浏览器场景已覆盖）。
 - [x] 在目标 K3s 环境读取 Namespace、Ingress 路由、Service、Pod 及容器端口/状态；见 [真实 K3s API 与拓扑视图验收](tests/p4/runs/2026-10-21-k3s-target-api-smoke.md)。
-- [x] Agent 自动探测安装主机上的 kubelet/K3s 并按 Host 保存发现记录；目标 `k3s-1` 实时记录与当前部署复核见[部署记录](tests/p4/runs/2026-10-21-agent-kubernetes-runtime-discovery-deployment.md)。发现记录不代替集群 API 凭据导入。
+- [x] Agent 自动探测安装主机上的 kubelet/K3s 并按 Host 保存发现记录；目标 `k3s-1` 实时记录与当前部署复核见[部署记录](tests/p4/runs/2026-10-21-agent-kubernetes-runtime-discovery-deployment.md)。
+- [ ] 按用户要求，在发现本机 Kubernetes 后自动纳入集群管理；需定义安全的 API 凭据取得、最小权限、重复发现和 API 不可达处理，不能把“显示发现记录”当作自动导入完成。当前仍需管理员手动导入 kubeconfig。
 - [ ] 在目标 K3s 环境验收已映射主机路由的下一跳匹配；Mock/Kind UI 场景仅覆盖代码路径。
 - [x] 在目标 K3s 上完成单集群导入、Node UID 映射及 namespace 限定 Deployment 创建/列表/缩放/删除，见 [真实 K3s API 验收](tests/p4/runs/2026-10-21-k3s-target-api-smoke.md)。
 - [ ] 在目标 K3s 环境完成多集群隔离、跨集群资源拒绝、多节点映射冲突及 Node 移除/解除映射验收；目标 `k3s-1` 与隔离 K3s API 的跨集群拒绝已通过，但多节点映射/移除仍未在目标环境完成，见[混合集群 API 验收](tests/p4/runs/2026-10-21-k3s-target-multi-cluster-api.md)。本机 Kind 仅作为 API/CRUD 开发测试，不计入该项。
