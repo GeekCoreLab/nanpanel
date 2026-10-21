@@ -37,6 +37,17 @@ shown the route edge. The target route-matching acceptance gate therefore
 remains open until an operator adds a Router node for `10.0.0.1` and verifies
 the displayed edge against the live Agent snapshot.
 
+### Read-only deployment recheck
+
+On 2026-10-21, `ssh k3s-1` confirmed the target K3s node remained Ready and
+`nanpanel-agent.service` remained active. A read-only query of the deployed
+Core database found two Host assets with route inventory (`bt-main` and
+`k3s-1`); each reports the next hop `10.0.0.1`. The persisted topology draft
+is still generation 0 with zero nodes and no Router for that address. This
+confirms the source route data exists while the production topology has not
+yet been configured to display its observed edge. No production topology or
+route table was changed.
+
 ## Deployment
 
 - Implementation commit: `29827b84964621b0c11e0cf2b95c57ffd01f6872`.

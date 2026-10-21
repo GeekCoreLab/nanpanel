@@ -9,7 +9,7 @@ import { api, ApiError, isMock, mockBusiness } from './lib/api';
 import { DEMO_PASSWORD } from './lib/mock';
 import { createUuid } from './lib/uuid.ts';
 import { agentMaintenanceCommand, type AgentMaintenanceMode } from './lib/agent-maintenance.ts';
-import type { Host, HostPage, Agent, AgentInstallation, AgentUpdateOperation, SystemService, SystemServicePage, Operation, OperationPage, SessionContext, AdminOverview, AdminUser, AdminUserPage, PlatformSettings, AuditEventPage, WebSessionList, ApiKeyList, CreatedApiKey, BuiltinRoleList, AgentEnrollmentCreated, HostHelperOperationRequest, HostNetworkInventory, HostNetworkInterface, HostNetworkRoute, HostFileListing, SshProbeResult, SshSystemdStatusResult, SshSystemdJournalResult, HostSshConfig, SshHostKeyProbe, BastionSession, BastionSessionTicket, BastionCommand, BastionRecordingChunk, KubernetesClusterList, KubernetesRuntimeDiscovery, KubernetesRuntimeDiscoveryList, KubernetesClusterImportRequest, KubernetesClusterSummary, KubernetesClusterNodeList, KubernetesClusterNode, KubernetesManagedDeployment, KubernetesManagedDeploymentCreateRequest, KubernetesManagedDeploymentScaleRequest, KubernetesManagedDeploymentList, KubernetesTopologyNamespaceSnapshot, K3sRolloutList, K3sRolloutPlan } from './lib/types';
+import type { Host, HostPage, Agent, AgentInstallation, AgentUpdateOperation, SystemService, SystemServicePage, Operation, OperationPage, SessionContext, AdminOverview, AdminUser, AdminUserPage, PlatformSettings, AuditEventPage, WebSessionList, ApiKeyList, CreatedApiKey, BuiltinRoleList, AgentEnrollmentCreated, HostHelperOperationRequest, HostNetworkInventory, HostNetworkInterface, HostNetworkRoute, HostFileListing, SshProbeResult, SshSystemdStatusResult, SshSystemdJournalResult, HostSshConfig, SshHostKeyProbe, BastionSession, BastionSessionTicket, BastionCommand, BastionRecordingChunk, KubernetesClusterList, KubernetesRuntimeDiscovery, KubernetesRuntimeDiscoveryList, KubernetesClusterImportRequest, KubernetesClusterSummary, KubernetesClusterNodeList, KubernetesClusterNode, KubernetesManagedDeployment, KubernetesManagedDeploymentCreateRequest, KubernetesManagedDeploymentScaleRequest, KubernetesManagedDeploymentList, KubernetesTopologyNamespaceSnapshot, K3sRolloutList, K3sRolloutPlan, K3sInstallationList, K3sInstallationPlan } from './lib/types';
 import './api-keys.css';
 import './kubernetes-clusters.css';
 import './kubernetes-upgrade.css';
@@ -818,6 +818,7 @@ function Operations() {
 function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
  const [clusters, setClusters] = useState<KubernetesClusterSummary[]>([]); const [hosts, setHosts] = useState<Host[]>([]); const [discoveries, setDiscoveries] = useState<KubernetesRuntimeDiscovery[]>([]); const [nodes, setNodes] = useState<Record<string, KubernetesClusterNode[]>>({});
  const [rollouts, setRollouts] = useState<K3sRolloutPlan[]>([]); const [rolloutClusterId, setRolloutClusterId] = useState(''); const [rolloutVersion, setRolloutVersion] = useState(''); const [rolloutReason, setRolloutReason] = useState(''); const [rolloutConfirmed, setRolloutConfirmed] = useState(false); const [rolloutBusy, setRolloutBusy] = useState(false);
+ const [installations, setInstallations] = useState<K3sInstallationPlan[]>([]); const [installServerHostId, setInstallServerHostId] = useState(''); const [installAgentHostIds, setInstallAgentHostIds] = useState<string[]>([]); const [installVersion, setInstallVersion] = useState(''); const [installServerUrl, setInstallServerUrl] = useState(''); const [installToken, setInstallToken] = useState(''); const [installReason, setInstallReason] = useState(''); const [installConfirmed, setInstallConfirmed] = useState(false); const [installClusterIds, setInstallClusterIds] = useState<Record<string, string>>({}); const [installBusy, setInstallBusy] = useState(false);
  const [name, setName] = useState(''); const [kind, setKind] = useState<KubernetesClusterImportRequest['kind']>('K3S'); const [contextName, setContextName] = useState(''); const [kubeconfig, setKubeconfig] = useState('');
  const [loading, setLoading] = useState(true); const [busy, setBusy] = useState(false); const [nodeLoading, setNodeLoading] = useState<Record<string, boolean>>({}); const [error, setError] = useState('');
  const [namespaceSnapshots, setNamespaceSnapshots] = useState<Record<string, KubernetesTopologyNamespaceSnapshot>>({}); const [selectedNamespaces, setSelectedNamespaces] = useState<Record<string, string>>({});
@@ -826,14 +827,17 @@ function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
   if (isMock) { setLoading(false); return; }
   setLoading(true); setError('');
   try {
-   const [clusterResult, hostResult, discoveryResult, rolloutResult] = await Promise.all([
+   const [clusterResult, hostResult, discoveryResult, rolloutResult, installationResult] = await Promise.all([
     api<KubernetesClusterList>('/kubernetes/clusters', 'GET', undefined, {}, true),
     api<HostPage>('/hosts?limit=100', 'GET', undefined, {}, true),
     api<KubernetesRuntimeDiscoveryList>('/kubernetes/discoveries', 'GET', undefined, {}, true),
     api<K3sRolloutList>('/kubernetes/rollouts', 'GET', undefined, {}, true),
+    api<K3sInstallationList>('/kubernetes/installations', 'GET', undefined, {}, true),
    ]);
    setClusters(clusterResult.data.items); setHosts(hostResult.data.items); setDiscoveries(discoveryResult.data.items);
    setRollouts(rolloutResult.data.items);
+   setInstallations(installationResult.data.items);
+   setInstallServerHostId(current => current || hostResult.data.items.find(host => host.capabilities.includes('k3s.install'))?.id || '');
    setRolloutClusterId(current => current || clusterResult.data.items.find(cluster => cluster.kind === 'K3S')?.id || '');
   } catch (e) { setError((e as Error).message); }
   finally { setLoading(false); }
@@ -844,6 +848,8 @@ function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
   const timer = window.setInterval(() => {
    void api<K3sRolloutList>('/kubernetes/rollouts', 'GET', undefined, {}, true)
     .then(result => setRollouts(result.data.items)).catch(() => undefined);
+   void api<K3sInstallationList>('/kubernetes/installations', 'GET', undefined, {}, true)
+    .then(result => setInstallations(result.data.items)).catch(() => undefined);
   }, 5000);
   return () => window.clearInterval(timer);
  }, []);
@@ -877,6 +883,39 @@ function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
    setRolloutConfirmed(false); notify(`已启动 K3s 升级计划 ${plan.id.slice(0, 8)}`);
   } catch (e) { setError((e as Error).message); }
   finally { setRolloutBusy(false); }
+ }
+ async function createInstallation(event: FormEvent<HTMLFormElement>) {
+  event.preventDefault(); setInstallBusy(true); setError('');
+  try {
+   const result = await api<K3sInstallationPlan>('/kubernetes/installations', 'POST', {
+    serverHostId: installServerHostId, agentHostIds: installAgentHostIds,
+    targetVersion: installVersion.trim(), serverUrl: installServerUrl.trim(), token: installToken,
+    reason: installReason.trim(),
+   }, {}, true);
+   setInstallations(current => [result.data, ...current]); setInstallToken(''); setInstallVersion(''); setInstallServerUrl(''); setInstallReason(''); setInstallAgentHostIds([]); setInstallConfirmed(false);
+   notify(`已创建 K3s 安装草稿 ${result.data.id.slice(0, 8)}；请检查主机顺序后显式启动`);
+  } catch (e) { setError((e as Error).message); }
+  finally { setInstallBusy(false); }
+ }
+ async function startInstallation(plan: K3sInstallationPlan) {
+  if (!installConfirmed || !window.confirm(`将先在所选主机安装 K3s Server，再等待集群登记和 Node 映射后逐台加入 ${plan.steps.length - 1} 个 Agent。确认启动？`)) return;
+  setInstallBusy(true); setError('');
+  try {
+   const result = await api<K3sInstallationPlan>(`/kubernetes/installations/${encodeURIComponent(plan.id)}/start`, 'POST', {}, {}, true);
+   setInstallations(current => current.map(item => item.id === plan.id ? result.data : item)); setInstallConfirmed(false);
+   notify(`已启动 K3s 安装计划 ${plan.id.slice(0, 8)}`);
+  } catch (e) { setError((e as Error).message); }
+  finally { setInstallBusy(false); }
+ }
+ async function registerInstallationCluster(plan: K3sInstallationPlan) {
+  const clusterId = installClusterIds[plan.id]; if (!clusterId) return;
+  setInstallBusy(true); setError('');
+  try {
+   const result = await api<K3sInstallationPlan>(`/kubernetes/installations/${encodeURIComponent(plan.id)}/register-cluster`, 'POST', { clusterId }, {}, true);
+   setInstallations(current => current.map(item => item.id === plan.id ? result.data : item));
+   notify(`已关联集群；Agent 将在 Server Node Ready 并映射后逐台安装`);
+  } catch (e) { setError((e as Error).message); }
+  finally { setInstallBusy(false); }
  }
  function prepareDiscoveredImport(discovery: KubernetesRuntimeDiscovery) {
   setName(`${discovery.hostname}-${discovery.runtimeKind.toLowerCase()}`.slice(0, 80));
@@ -965,6 +1004,27 @@ function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
  return <><PageHeading title="Kubernetes 集群" description="导入独立集群、刷新 Node 清单，并将 Kubernetes Node 映射到主机资产。" action={<button className="secondary" onClick={() => void load()} disabled={loading || isMock}>↻ 刷新</button>} />
   {isMock && <div className="alert">当前是纯 Mock 演示模式，集群管理 API 已停用。切换到 hybrid 或 live 模式后可导入真实集群。</div>}
   {error && <div className="alert error" role="alert">{error}</div>}
+  {!isMock && <section className="card"><div className="card-title"><div><h2>K3s 多节点首次安装</h2><p>计划先在空白主机安装一个 Server，随后等待你导入该集群并把 Server Node 映射到主机；每安装一台 Agent 后，也要等对应 Node Ready 并完成主机映射才会继续。令牌加密保存，不在计划详情中返回。</p></div></div>
+   <form className="managed-deployment-form" onSubmit={event => void createInstallation(event)}>
+    <Field label="K3s Server 主机"><select required value={installServerHostId} onChange={event => setInstallServerHostId(event.target.value)}><option value="">选择 Server 主机资产</option>{hosts.filter(host => host.capabilities.includes('k3s.install')).map(host => <option key={host.id} value={host.id}>{host.hostname} · {host.status}</option>)}</select></Field>
+    <Field label="K3s Agent 主机（可多选）"><select multiple size={Math.min(5, Math.max(2, hosts.filter(host => host.capabilities.includes('k3s.install') && host.id !== installServerHostId).length))} value={installAgentHostIds} onChange={event => setInstallAgentHostIds(Array.from(event.currentTarget.selectedOptions, option => option.value))}>{hosts.filter(host => host.capabilities.includes('k3s.install') && host.id !== installServerHostId).map(host => <option key={host.id} value={host.id}>{host.hostname} · {host.status}</option>)}</select><small className="muted">仅显示已上报 k3s.install 能力的主机。实际安装前 Helper 仍会执行空白主机与系统条件校验。</small></Field>
+    <Field label="固定 K3s 版本"><input required maxLength={32} pattern="v[0-9]+\.[0-9]+\.[0-9]+\+k3s[0-9]+" value={installVersion} onChange={event => setInstallVersion(event.target.value)} placeholder="v1.33.5+k3s1" /></Field>
+    <Field label="Agent 可访问的 Server HTTPS API 地址"><input required maxLength={512} type="url" pattern="https://.*" value={installServerUrl} onChange={event => setInstallServerUrl(event.target.value)} placeholder="https://k3s.example.net:6443" /></Field>
+    <Field label="K3s 短令牌"><input required type="password" autoComplete="new-password" minLength={16} maxLength={512} pattern="[A-Za-z0-9_.:-]+" value={installToken} onChange={event => setInstallToken(event.target.value)} /><small className="muted">Server 初始化与 Agent 加入共用短令牌；令牌只加密存储并在调度时传给 Helper。</small></Field>
+    <Field label="安装原因"><input required maxLength={500} value={installReason} onChange={event => setInstallReason(event.target.value)} placeholder="例如：建立测试 K3s 集群" /></Field>
+    <button className="primary" disabled={installBusy || !installServerHostId || !installVersion.trim() || !installServerUrl.trim() || !installToken || !installReason.trim()}>创建安装草稿</button>
+   </form>
+   {installations.map(plan => <article className="managed-deployment-row" key={plan.id}>
+    <div><strong>K3s 安装 → {plan.targetVersion}</strong><span className={`badge ${plan.state.toLowerCase()}`}>{plan.state}</span><small>{plan.reason} · {plan.steps.length} 台主机 · 创建于 {time(plan.createdAt)}</small>{plan.errorMessage && <small className="alert">{plan.errorCode}: {plan.errorMessage}</small>}
+     {plan.state === 'AWAITING_CLUSTER_REGISTRATION' && <div className="form-actions"><select aria-label="已导入的 K3s 集群" value={installClusterIds[plan.id] ?? ''} onChange={event => setInstallClusterIds(current => ({ ...current, [plan.id]: event.target.value }))}><option value="">先导入并选择 K3s 集群</option>{clusters.filter(cluster => cluster.kind === 'K3S').map(cluster => <option key={cluster.id} value={cluster.id}>{cluster.name} · {cluster.healthStatus}</option>)}</select><button className="secondary" disabled={installBusy || !installClusterIds[plan.id]} onClick={() => void registerInstallationCluster(plan)}>校验 Server 映射并继续</button><small className="muted">先在下方“导入集群”，再在对应 Node 行映射到 Server 主机资产。</small></div>}
+     {plan.state === 'AWAITING_NODE_MAPPING' && <small className="alert">Agent 已安装。请刷新关联集群的 Node 清单，并把新 Ready Node 映射到该步骤主机；映射成功后计划会自动继续。</small>}
+     <div className="table-wrap"><table><thead><tr><th>顺序</th><th>主机</th><th>角色</th><th>步骤状态</th></tr></thead><tbody>{plan.steps.map(step => <tr key={`${plan.id}:${step.ordinal}`}><td>{step.ordinal + 1}</td><td>{hosts.find(host => host.id === step.hostId)?.hostname ?? step.hostId}<small className="mono">{step.hostId}</small></td><td>{step.role === 'server' ? 'Server' : 'Agent'}</td><td>{step.state}{step.operationId && <small className="mono">任务 {step.operationId}</small>}</td></tr>)}</tbody></table></div>
+    </div>
+    <div className="managed-deployment-actions">{plan.state === 'DRAFT' && <button className="primary" disabled={installBusy || !installConfirmed} onClick={() => void startInstallation(plan)}>启动计划</button>}</div>
+   </article>)}
+   {installations.some(plan => plan.state === 'DRAFT') && <label className="check-field"><input type="checkbox" checked={installConfirmed} onChange={event => setInstallConfirmed(event.target.checked)} /><span>我已确认所选主机是空白安装目标，API 地址可由 Agent 访问，且理解计划会等待集群导入与 Node 映射。</span></label>}
+   {!installations.length && <p className="muted">尚无 K3s 安装计划。</p>}
+  </section>}
   {!isMock && <section className="card"><div className="card-title"><div><h2>K3s 逐节点升级计划</h2><p>创建草稿不会执行升级。启动后按 Server 优先、Agent 随后的顺序逐台处理；每步都要刷新并确认所有 Node Ready，未知结果会停止计划。</p></div></div>
    <form className="managed-deployment-form" onSubmit={event => void createRollout(event)}>
     <Field label="K3s 集群"><select required value={rolloutClusterId} onChange={event => setRolloutClusterId(event.target.value)}><option value="">选择已登记的 K3s 集群</option>{clusters.filter(cluster => cluster.kind === 'K3S').map(cluster => <option key={cluster.id} value={cluster.id}>{cluster.name} · {cluster.healthStatus}</option>)}</select></Field>

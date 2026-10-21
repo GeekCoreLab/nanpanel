@@ -1010,6 +1010,14 @@ class SystemResourceTest {
         .contentType("application/json").body(invalidK3sInstall)
         .post("/api/v1/hosts/" + hostId + "/operations")
         .then().statusCode(422).body("code", equalTo("VALIDATION_FAILED"));
+    var k3sAbsentHeartbeat = new java.util.HashMap<>(heartbeat);
+    k3sAbsentHeartbeat.put("capabilities", discoveredCapabilities);
+    k3sAbsentHeartbeat.put("kubernetesRuntime", Map.of(
+        "detected", false, "kubeletRunning", false, "apiServerLocal", false,
+        "runtimeKind", "NONE", "observedAtEpochMs", System.currentTimeMillis()));
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json").body(k3sAbsentHeartbeat)
+        .post("/internal/agent-heartbeats").then().statusCode(204);
     var validK3sInstall = Map.of(
         "capability", "k3s.install", "target", "",
         "payload", Map.of("role", "agent", "version", "v1.36.5+k3s1",
@@ -1079,6 +1087,18 @@ class SystemResourceTest {
           "v1.36.5+k3s1", upgradeHostId, java.sql.Timestamp.from(upgradeObservedAt));
       return null;
     });
+    var installOnMappedHost = Map.of(
+        "capability", "k3s.install", "target", "",
+        "payload", Map.of("role", "agent", "version", "v1.36.5+k3s1",
+            "serverUrl", "https://k3s.example.test:6443", "token", "short-token-for-test-012345"),
+        "reason", "Reject installation over an already managed Node",
+        "timeoutSeconds", 600, "expectedGeneration", 1);
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("Idempotency-Key", "k3s-install-mapped-host-gate-01")
+        .contentType("application/json").body(installOnMappedHost)
+        .post("/api/v1/hosts/" + upgradeHostId + "/operations")
+        .then().statusCode(409).body("code", equalTo("K3S_INSTALL_HOST_ALREADY_MANAGED"));
     var k3sUpgradePayload = Map.of("capability", "k3s.upgrade", "target", "",
         "payload", Map.of("role", "server", "version", "v1.37.1+k3s1"),
         "reason", "Verify K3s cluster health and serialization gates", "timeoutSeconds", 600,

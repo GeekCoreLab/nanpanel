@@ -11,7 +11,7 @@ import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
-/** Encrypts imported cluster kubeconfigs with cluster-bound authenticated data. */
+/** Encrypts cluster kubeconfigs and K3s install tokens with context-bound authenticated data. */
 @ApplicationScoped
 public class KubernetesClusterCredentialVault {
   private static final int NONCE_BYTES = 12;
@@ -23,7 +23,19 @@ public class KubernetesClusterCredentialVault {
   String credentialKey;
 
   byte[] encrypt(UUID clusterId, String kubeconfig) {
-    byte[] cleartext = kubeconfig.getBytes(StandardCharsets.UTF_8);
+    return encrypt(clusterId, "nanpanel-kubernetes-cluster:v1:", kubeconfig);
+  }
+
+  byte[] encryptK3sInstallToken(UUID planId, String token) {
+    return encrypt(planId, "nanpanel-k3s-install-plan:v1:", token);
+  }
+
+  String decryptK3sInstallToken(UUID planId, byte[] envelope) {
+    return decrypt(planId, "nanpanel-k3s-install-plan:v1:", envelope);
+  }
+
+  private byte[] encrypt(UUID id, String context, String value) {
+    byte[] cleartext = value.getBytes(StandardCharsets.UTF_8);
     byte[] key = keyBytes();
     try {
       byte[] nonce = new byte[NONCE_BYTES];
@@ -31,7 +43,7 @@ public class KubernetesClusterCredentialVault {
       Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
       cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"),
           new GCMParameterSpec(TAG_BITS, nonce));
-      cipher.updateAAD(aad(clusterId));
+      cipher.updateAAD(aad(context, id));
       byte[] ciphertext = cipher.doFinal(cleartext);
       byte[] envelope = new byte[1 + NONCE_BYTES + ciphertext.length];
       envelope[0] = ENVELOPE_VERSION;
@@ -48,6 +60,10 @@ public class KubernetesClusterCredentialVault {
   }
 
   String decrypt(UUID clusterId, byte[] envelope) {
+    return decrypt(clusterId, "nanpanel-kubernetes-cluster:v1:", envelope);
+  }
+
+  private String decrypt(UUID id, String context, byte[] envelope) {
     if (envelope == null || envelope.length <= 1 + NONCE_BYTES
         || envelope[0] != ENVELOPE_VERSION) {
       throw new IllegalStateException("Encrypted Kubernetes credentials are invalid");
@@ -60,7 +76,7 @@ public class KubernetesClusterCredentialVault {
       Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
       cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"),
           new GCMParameterSpec(TAG_BITS, nonce));
-      cipher.updateAAD(aad(clusterId));
+      cipher.updateAAD(aad(context, id));
       cleartext = cipher.doFinal(ciphertext);
       Arrays.fill(ciphertext, (byte)0);
       return new String(cleartext, StandardCharsets.UTF_8);
@@ -83,7 +99,7 @@ public class KubernetesClusterCredentialVault {
     }
   }
 
-  private static byte[] aad(UUID clusterId) {
-    return ("nanpanel-kubernetes-cluster:v1:" + clusterId).getBytes(StandardCharsets.UTF_8);
+  private static byte[] aad(String context, UUID id) {
+    return (context + id).getBytes(StandardCharsets.UTF_8);
   }
 }

@@ -30,6 +30,14 @@ resource request.
   API-manageable only after an administrator imports and validates credentials.
 - Node mappings are cluster-scoped and do not merge cluster membership or
   authorize cross-cluster resource operations.
+- A multi-node K3s first-install plan uses a separately domain-bound AES-GCM
+  envelope for its short join token, keyed by the existing Kubernetes
+  credential key and plan UUID. The plan installs one Server first and pauses
+  until an imported K3s cluster reports that Ready Node mapped to the Server
+  Host. It then installs Agents serially and waits for each requested-version
+  Ready Node to be mapped to its planned Host before advancing. Plan and audit
+  views never return the join token. This does not transfer kubeconfig; an
+  administrator must still import and validate the API credentials.
 
 ## Consequences
 

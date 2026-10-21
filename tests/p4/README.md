@@ -120,11 +120,16 @@ disposable cluster, never the production `k3s-1` cluster.
   root-only systemd environment file without arbitrary shell. Server bootstrap
   accepts only a short token; agents accept short or secure tokens. A single
   server waits for a Ready Node; an agent install result explicitly leaves Node
-  health pending. This installation capability is per-host: multi-node
-  installation orchestration, failure recovery, and K3s-specific live
-  validation remain open. Code evidence
-  is recorded in [`k3s-preflight-agent-helper.md`](runs/2026-10-21-k3s-preflight-agent-helper.md)
-  and [`k3s-install-helper-capability.md`](runs/2026-10-21-k3s-install-helper-capability.md).
+  health pending. Core and the Kubernetes UI now persist first-Server-then-Agent
+  installation plans: the encrypted short token is not returned, the Server
+  must be imported and mapped before Agent install, and each Agent must map to
+  a Ready Node at the requested version before the next step. API, encryption,
+  and frontend build checks pass. This remains code-level evidence; sequential
+  multi-node execution, restart recovery, failure injection, and K3s-specific
+  live validation remain open. Code evidence is recorded in
+  [`k3s-preflight-agent-helper.md`](runs/2026-10-21-k3s-preflight-agent-helper.md),
+  [`k3s-install-helper-capability.md`](runs/2026-10-21-k3s-install-helper-capability.md),
+  and [`k3s-installation-plan-code.md`](runs/k3s-installation-plan-code.md).
 - A typed `k3s.upgrade` Agent/Helper capability now upgrades only the exact
   systemd unit and root-owned binary created by the NaNPanel installer. It
   pins and checksums the target release, rejects downgrades and Kubernetes
@@ -160,8 +165,11 @@ disposable cluster, never the production `k3s-1` cluster.
   `k3s-1` at commit `6f146e3`; the Core/Web image digests and health evidence
   are recorded in
   [`k3s-rollout-plan-deployment.md`](runs/2026-10-21-k3s-rollout-plan-deployment.md).
-  No upgrade plan was created or run on `k3s-1`. There is no multi-node
-  installation plan; see [`k3s-rollout-plan-code.md`](runs/k3s-rollout-plan-code.md).
+  No upgrade or installation plan was created or run on `k3s-1`. The installation
+  plan still needs the disposable multi-node run in
+  [`k3s-installation-plan-code.md`](runs/k3s-installation-plan-code.md); upgrade
+  recovery still needs the separate acceptance in
+  [`k3s-rollout-plan-code.md`](runs/k3s-rollout-plan-code.md).
 - The live Linux Gateway-to-Ready-K3s-Service path, TLS/access policy, backend
   transition, and compensation passed on 2026-10-21; evidence is in
   `runs/2026-10-21-linux-gateway-k3s-service-ingress.md`. FRPC/Nginx were

@@ -114,6 +114,18 @@ public class HostHelperOperationResource {
             600, expectedGeneration), actor, null);
   }
 
+  Response submitPlannedInstall(UUID hostId, String idempotencyKey, String role, String version,
+                                String serverUrl, String token, long expectedGeneration,
+                                String reason, String actor) {
+    var payload = mapper.createObjectNode().put("role", role).put("version", version)
+        .put("token", token);
+    if (serverUrl == null) payload.putNull("serverUrl");
+    else payload.put("serverUrl", serverUrl);
+    return submitAs(hostId, idempotencyKey,
+        new HelperOperationRequest("k3s.install", "", payload, reason, 600,
+            expectedGeneration), actor, null);
+  }
+
   private Response submitAs(UUID hostId, String idempotencyKey, HelperOperationRequest input,
                             String actor, String remoteAddress) {
     String key = validateIdempotencyKey(idempotencyKey);
@@ -190,6 +202,9 @@ public class HostHelperOperationResource {
         throw fail(412, "PRECONDITION_FAILED", "主机版本已变化，请刷新后重试");
       if (input.capability().equals("k3s.upgrade")) {
         requireK3sUpgradeGate(c, hostId, now);
+      }
+      if (input.capability().equals("k3s.install")) {
+        requireK3sInstallGate(c, hostId);
       }
       if (host.get("agent_id") == null)
         throw fail(503, "AGENT_OFFLINE", "该主机尚未接入 Agent");
@@ -285,6 +300,23 @@ public class HostHelperOperationResource {
     if (finishedAt != null && (observedAt == null || observedAt.isBefore(finishedAt))) {
       throw fail(409, "K3S_CLUSTER_HEALTH_GATE",
           "上一次 K3s 操作后尚未刷新集群 Node 健康状态");
+    }
+  }
+
+  private void requireK3sInstallGate(java.sql.Connection connection, UUID hostId)
+      throws java.sql.SQLException {
+    var mappings = query(connection,
+        "SELECT cluster_id FROM kubernetes_cluster_node WHERE host_id=? FOR UPDATE", hostId);
+    if (!mappings.isEmpty()) {
+      throw fail(409, "K3S_INSTALL_HOST_ALREADY_MANAGED",
+          "已映射到 Kubernetes Node 的主机不能作为首次安装目标");
+    }
+    var discovery = query(connection,
+        "SELECT host_id FROM host_kubernetes_runtime_discovery "
+            + "WHERE host_id=? AND detected=TRUE FOR UPDATE", hostId);
+    if (!discovery.isEmpty()) {
+      throw fail(409, "K3S_INSTALL_HOST_ALREADY_MANAGED",
+          "Agent 已发现此主机正在运行 Kubernetes，不能作为首次安装目标");
     }
   }
 
@@ -458,7 +490,7 @@ public class HostHelperOperationResource {
       throw fail(422, "VALIDATION_FAILED", "该 Helper 操作不接受附加参数");
   }
 
-  private boolean validK3sServerUrl(String value) {
+  boolean validK3sServerUrl(String value) {
     if (value.length() > 512 || value.contains("@")) return false;
     try {
       URI uri = URI.create(value);

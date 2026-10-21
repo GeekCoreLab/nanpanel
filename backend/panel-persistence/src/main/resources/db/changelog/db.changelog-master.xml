@@ -31,4 +31,5 @@
 <changeSet id="029-kubernetes-node-presence" author="nanpanel"><sqlFile path="029-kubernetes-node-presence.sql" relativeToChangelogFile="true"/><rollback><sql>ALTER TABLE kubernetes_cluster_node DROP COLUMN node_present;</sql></rollback></changeSet>
 <changeSet id="030-host-kubernetes-runtime-discovery" author="nanpanel"><sqlFile path="030-host-kubernetes-runtime-discovery.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE host_kubernetes_runtime_discovery;</sql></rollback></changeSet>
 <changeSet id="031-k3s-rollout-plans" author="nanpanel"><sqlFile path="031-k3s-rollout-plans.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE k3s_rollout_step; DROP TABLE k3s_rollout_plan;</sql></rollback></changeSet>
+<changeSet id="032-k3s-installation-plans" author="nanpanel"><sqlFile path="032-k3s-installation-plans.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE k3s_install_step; DROP TABLE k3s_install_plan;</sql></rollback></changeSet>
 </databaseChangeLog>
