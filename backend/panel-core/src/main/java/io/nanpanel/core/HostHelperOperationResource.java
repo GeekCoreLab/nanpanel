@@ -103,8 +103,19 @@ public class HostHelperOperationResource {
       @PathParam("hostId") String hostValue,
       @HeaderParam("Idempotency-Key") String idempotencyKey,
       HelperOperationRequest input) {
-    UUID hostId = uuid(hostValue, "hostId");
-    String actor = actorId();
+    return submitAs(uuid(hostValue, "hostId"), idempotencyKey, input, actorId(), clientIp());
+  }
+
+  Response submitPlannedUpgrade(UUID hostId, String idempotencyKey, String role, String version,
+                                long expectedGeneration, String reason, String actor) {
+    var payload = mapper.createObjectNode().put("role", role).put("version", version);
+    return submitAs(hostId, idempotencyKey,
+        new HelperOperationRequest("k3s.upgrade", "", payload, reason,
+            600, expectedGeneration), actor, null);
+  }
+
+  private Response submitAs(UUID hostId, String idempotencyKey, HelperOperationRequest input,
+                            String actor, String remoteAddress) {
     String key = validateIdempotencyKey(idempotencyKey);
     if (input == null || !CAPABILITIES.contains(input.capability()))
       throw fail(422, "OPERATION_UNSUPPORTED", "该主机 Helper 操作能力不受支持");
@@ -217,13 +228,13 @@ public class HostHelperOperationResource {
           java.sql.Timestamp.from(now), java.sql.Timestamp.from(deadline), requestHash,
           input.capability(), target);
       audit(c, actor, input.capability(), "host", hostId.toString(), "ACCEPTED",
-          clientIp(), "接受受限 Helper 操作：" + reason);
+          remoteAddress, "接受受限 Helper 操作：" + reason);
       var created = query(c, operationSelect() + " WHERE o.id=?", operationId);
       return new Decision(view(created.getFirst()), 202, false, agentId,
           input.capability(), target, payloadJson, deadline.toEpochMilli());
     });
 
-    if (!decision.replayed()) dispatch(decision, actor, hostId, key);
+    if (!decision.replayed()) dispatch(decision, actor, hostId, key, remoteAddress);
     return Response.status(decision.status()).entity(decision.operation())
         .header("Location", "/api/v1/operations/" + decision.operation().get("id"))
         .header("Retry-After", "2")
@@ -277,7 +288,8 @@ public class HostHelperOperationResource {
     }
   }
 
-  private void dispatch(Decision decision, String actor, UUID hostId, String key) {
+  private void dispatch(Decision decision, String actor, UUID hostId, String key,
+                       String remoteAddress) {
     try {
       var dispatch = new LinkedHashMap<String, Object>();
       dispatch.put("agentId", decision.agentId().toString());
@@ -298,7 +310,7 @@ public class HostHelperOperationResource {
         boolean uncertain = response.statusCode() >= 500;
         String detail = "Agent Gateway rejected the Helper operation (HTTP " +
             response.statusCode() + ")";
-        failDispatch(decision, actor, hostId, detail, uncertain);
+        failDispatch(decision, actor, hostId, detail, uncertain, remoteAddress);
         throw fail(503, uncertain ? "EXECUTION_OUTCOME_UNKNOWN" : "GATEWAY_UNAVAILABLE",
             uncertain ? "Gateway 未确认任务状态，请使用原幂等键查询"
                 : "Gateway 拒绝了任务，请检查 Agent 状态后重试");
@@ -307,13 +319,14 @@ public class HostHelperOperationResource {
       throw e;
     } catch (Exception e) {
       failDispatch(decision, actor, hostId,
-          "Agent Gateway response was not received; task execution is uncertain", true);
+          "Agent Gateway response was not received; task execution is uncertain", true,
+          remoteAddress);
       throw fail(503, "EXECUTION_OUTCOME_UNKNOWN", "未收到 Gateway 确认，请使用原幂等键查询任务状态");
     }
   }
 
   private void failDispatch(Decision decision, String actor, UUID hostId,
-                            String detail, boolean uncertain) {
+                            String detail, boolean uncertain, String remoteAddress) {
     UUID operationId = UUID.fromString(String.valueOf(decision.operation().get("id")));
     store.transaction(c -> {
       String error = mapper.writeValueAsString(Map.of(
@@ -327,7 +340,7 @@ public class HostHelperOperationResource {
           java.sql.Timestamp.from(Instant.now()),
           uncertain ? null : java.sql.Timestamp.from(Instant.now()), operationId);
       audit(c, actor, decision.capability(), "host", hostId.toString(),
-          uncertain ? "UNKNOWN" : "FAILED", clientIp(), detail);
+          uncertain ? "UNKNOWN" : "FAILED", remoteAddress, detail);
       return null;
     });
   }

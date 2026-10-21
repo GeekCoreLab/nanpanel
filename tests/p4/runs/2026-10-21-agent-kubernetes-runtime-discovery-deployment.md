@@ -31,3 +31,24 @@ replica and the database remained available. After the pull completed, the
 idempotent deploy script finished successfully and updated the Agent from the
 published Core image. No kubeconfig was transferred; discovery records do not
 grant Core Kubernetes API access.
+
+## Live revalidation
+
+Rechecked on 2026-10-21 after subsequent P4 updates:
+
+- Core and Web are still running immutable image
+  `sha-29827b84964621b0c11e0cf2b95c57ffd01f6872`; both Deployments are 1/1
+  ready, and both current Pods have zero restarts. This image descends from the
+  discovery implementation commit `ba85ac183b49b77e6315cff1b670b17af831543c`.
+- `nanpanel-agent.service` is active on `k3s-1`. The latest persisted discovery
+  is `k3s-1|K3S|true|true|true`, and its observation is less than five minutes
+  old. The current Agent binary SHA-256 is
+  `7b7bfdebbaf971993f10e954ecbc34abc3232c61d4800c726ef8fe841a3ad200`.
+  The managed cluster `k3s-1-k3s` remains `HEALTHY`.
+- Core readiness is `UP`; the served Web bundle still contains the discovery
+  panel and the kubeconfig import prompt. PostgreSQL PVC remains Bound.
+- No deployment was needed during this revalidation: source changes after the
+  running image contain only Core test coverage and documentation, not runtime
+  code. Automatic discovery records runtime evidence; a newly discovered API
+  cluster still requires an administrator to import and verify its kubeconfig
+  before resource management is enabled.

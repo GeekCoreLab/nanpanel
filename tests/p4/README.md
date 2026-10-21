@@ -107,9 +107,9 @@ disposable cluster, never the production `k3s-1` cluster.
   root-only systemd environment file without arbitrary shell. Server bootstrap
   accepts only a short token; agents accept short or secure tokens. A single
   server waits for a Ready Node; an agent install result explicitly leaves Node
-  health pending. This is a per-host capability, not a persistent rollout plan:
-  ordered server/agent orchestration, upgrades, health gates across nodes,
-  failure recovery, and K3s-specific live validation remain open. Code evidence
+  health pending. This installation capability is per-host: multi-node
+  installation orchestration, failure recovery, and K3s-specific live
+  validation remain open. Code evidence
   is recorded in [`k3s-preflight-agent-helper.md`](runs/2026-10-21-k3s-preflight-agent-helper.md)
   and [`k3s-install-helper-capability.md`](runs/2026-10-21-k3s-install-helper-capability.md).
 - A typed `k3s.upgrade` Agent/Helper capability now upgrades only the exact
@@ -119,8 +119,7 @@ disposable cluster, never the production `k3s-1` cluster.
   binary during the service health gate, and attempts automatic restoration if
   server readiness or agent service activation fails. Agent Node registration
   remains pending cluster-level verification. This is still a single-host
-  operation: persistent ordered plans and live K3s upgrade evidence remain
-  open. See
+  operation: live K3s upgrade evidence remains open. See
   `tests/p4/runs/2026-10-21-k3s-single-node-upgrade-capability.md`.
 - Core gates upgrades for a host mapped to a registered K3s cluster: its Node
   must be present and Ready, the cluster observation must be at most 120 seconds
@@ -128,8 +127,25 @@ disposable cluster, never the production `k3s-1` cluster.
   a K3s operation finishes, a newer cluster observation is required before the
   next upgrade. A host mapped to KubeEdge or another Kubernetes kind is rejected.
   Integration coverage exercises unhealthy, concurrent, wrong-kind, and
-  gate-passed paths. This per-request admission gate does not yet persist an
-  ordered multi-node rollout plan or automatically advance steps.
+  gate-passed paths. The per-request admission gate is also used by the
+  persistent K3s upgrade-plan worker described below.
+- Persistent ordered K3s **upgrade** plans are now implemented in Core and the
+  Kubernetes UI. Creation saves a DRAFT after refreshing Nodes, checking every
+  present Node is Ready and mapped, every mapped Host has a fresh Agent and
+  available Helper with `k3s.upgrade`, and the requested version is neither a
+  downgrade nor more than one Kubernetes minor ahead. An explicit start refreshes
+  cluster state again and verifies the plan's Node membership, Host generations,
+  and all-Node readiness. A scheduled Core worker submits one step at a time
+  through the existing Helper admission path, reusing a stable idempotency key
+  after restart. It advances only after a fresh observation confirms all Nodes
+  Ready and the upgraded Node's `kubeletVersion` equals the requested version;
+  failed or unknown operation results stop the plan, while temporary API failure
+  leaves it in `VERIFYING`. API validation, authentication, version range, and
+  schema tests pass. This remains code-level evidence: the successful auto-advance,
+  operation failure/UNKNOWN recovery, and multi-node behavior still need an
+  isolated multi-node K3s integration run. There is no multi-node installation
+  plan, and no upgrade has been run on production `k3s-1`; see
+  [`k3s-rollout-plan-code.md`](runs/k3s-rollout-plan-code.md).
 - The live Linux Gateway-to-Ready-K3s-Service path, TLS/access policy, backend
   transition, and compensation passed on 2026-10-21; evidence is in
   `runs/2026-10-21-linux-gateway-k3s-service-ingress.md`. FRPC/Nginx were

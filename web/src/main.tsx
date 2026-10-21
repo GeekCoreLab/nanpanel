@@ -9,7 +9,7 @@ import { api, ApiError, isMock, mockBusiness } from './lib/api';
 import { DEMO_PASSWORD } from './lib/mock';
 import { createUuid } from './lib/uuid.ts';
 import { agentMaintenanceCommand, type AgentMaintenanceMode } from './lib/agent-maintenance.ts';
-import type { Host, HostPage, Agent, AgentInstallation, AgentUpdateOperation, SystemService, SystemServicePage, Operation, OperationPage, SessionContext, AdminOverview, AdminUser, AdminUserPage, PlatformSettings, AuditEventPage, WebSessionList, ApiKeyList, CreatedApiKey, BuiltinRoleList, AgentEnrollmentCreated, HostHelperOperationRequest, HostNetworkInventory, HostNetworkInterface, HostNetworkRoute, HostFileListing, SshProbeResult, SshSystemdStatusResult, SshSystemdJournalResult, HostSshConfig, SshHostKeyProbe, BastionSession, BastionSessionTicket, BastionCommand, BastionRecordingChunk, KubernetesClusterList, KubernetesRuntimeDiscovery, KubernetesRuntimeDiscoveryList, KubernetesClusterImportRequest, KubernetesClusterSummary, KubernetesClusterNodeList, KubernetesClusterNode, KubernetesManagedDeployment, KubernetesManagedDeploymentCreateRequest, KubernetesManagedDeploymentScaleRequest, KubernetesManagedDeploymentList, KubernetesTopologyNamespaceSnapshot } from './lib/types';
+import type { Host, HostPage, Agent, AgentInstallation, AgentUpdateOperation, SystemService, SystemServicePage, Operation, OperationPage, SessionContext, AdminOverview, AdminUser, AdminUserPage, PlatformSettings, AuditEventPage, WebSessionList, ApiKeyList, CreatedApiKey, BuiltinRoleList, AgentEnrollmentCreated, HostHelperOperationRequest, HostNetworkInventory, HostNetworkInterface, HostNetworkRoute, HostFileListing, SshProbeResult, SshSystemdStatusResult, SshSystemdJournalResult, HostSshConfig, SshHostKeyProbe, BastionSession, BastionSessionTicket, BastionCommand, BastionRecordingChunk, KubernetesClusterList, KubernetesRuntimeDiscovery, KubernetesRuntimeDiscoveryList, KubernetesClusterImportRequest, KubernetesClusterSummary, KubernetesClusterNodeList, KubernetesClusterNode, KubernetesManagedDeployment, KubernetesManagedDeploymentCreateRequest, KubernetesManagedDeploymentScaleRequest, KubernetesManagedDeploymentList, KubernetesTopologyNamespaceSnapshot, K3sRolloutList, K3sRolloutPlan } from './lib/types';
 import './api-keys.css';
 import './kubernetes-clusters.css';
 import './kubernetes-upgrade.css';
@@ -817,6 +817,7 @@ function Operations() {
 }
 function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
  const [clusters, setClusters] = useState<KubernetesClusterSummary[]>([]); const [hosts, setHosts] = useState<Host[]>([]); const [discoveries, setDiscoveries] = useState<KubernetesRuntimeDiscovery[]>([]); const [nodes, setNodes] = useState<Record<string, KubernetesClusterNode[]>>({});
+ const [rollouts, setRollouts] = useState<K3sRolloutPlan[]>([]); const [rolloutClusterId, setRolloutClusterId] = useState(''); const [rolloutVersion, setRolloutVersion] = useState(''); const [rolloutReason, setRolloutReason] = useState(''); const [rolloutConfirmed, setRolloutConfirmed] = useState(false); const [rolloutBusy, setRolloutBusy] = useState(false);
  const [name, setName] = useState(''); const [kind, setKind] = useState<KubernetesClusterImportRequest['kind']>('K3S'); const [contextName, setContextName] = useState(''); const [kubeconfig, setKubeconfig] = useState('');
  const [loading, setLoading] = useState(true); const [busy, setBusy] = useState(false); const [nodeLoading, setNodeLoading] = useState<Record<string, boolean>>({}); const [error, setError] = useState('');
  const [namespaceSnapshots, setNamespaceSnapshots] = useState<Record<string, KubernetesTopologyNamespaceSnapshot>>({}); const [selectedNamespaces, setSelectedNamespaces] = useState<Record<string, string>>({});
@@ -825,16 +826,27 @@ function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
   if (isMock) { setLoading(false); return; }
   setLoading(true); setError('');
   try {
-   const [clusterResult, hostResult, discoveryResult] = await Promise.all([
+   const [clusterResult, hostResult, discoveryResult, rolloutResult] = await Promise.all([
     api<KubernetesClusterList>('/kubernetes/clusters', 'GET', undefined, {}, true),
     api<HostPage>('/hosts?limit=100', 'GET', undefined, {}, true),
     api<KubernetesRuntimeDiscoveryList>('/kubernetes/discoveries', 'GET', undefined, {}, true),
+    api<K3sRolloutList>('/kubernetes/rollouts', 'GET', undefined, {}, true),
    ]);
    setClusters(clusterResult.data.items); setHosts(hostResult.data.items); setDiscoveries(discoveryResult.data.items);
+   setRollouts(rolloutResult.data.items);
+   setRolloutClusterId(current => current || clusterResult.data.items.find(cluster => cluster.kind === 'K3S')?.id || '');
   } catch (e) { setError((e as Error).message); }
   finally { setLoading(false); }
  }
  useEffect(() => { void load(); }, []);
+ useEffect(() => {
+  if (isMock) return;
+  const timer = window.setInterval(() => {
+   void api<K3sRolloutList>('/kubernetes/rollouts', 'GET', undefined, {}, true)
+    .then(result => setRollouts(result.data.items)).catch(() => undefined);
+  }, 5000);
+  return () => window.clearInterval(timer);
+ }, []);
  async function importCluster(event: FormEvent<HTMLFormElement>) {
   event.preventDefault(); setBusy(true); setError('');
   const request: KubernetesClusterImportRequest = { name: name.trim(), kind, contextName: contextName.trim(), kubeconfig };
@@ -844,6 +856,27 @@ function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
    setName(''); setContextName(''); setKubeconfig(''); notify(`已导入 Kubernetes 集群 ${result.data.name}`);
   } catch (e) { setError((e as Error).message); }
   finally { setBusy(false); }
+ }
+ async function createRollout(event: FormEvent<HTMLFormElement>) {
+  event.preventDefault(); setRolloutBusy(true); setError('');
+  try {
+   const result = await api<K3sRolloutPlan>('/kubernetes/rollouts', 'POST', {
+    clusterId: rolloutClusterId, targetVersion: rolloutVersion.trim(), reason: rolloutReason.trim(),
+   }, {}, true);
+   setRollouts(current => [result.data, ...current]); setRolloutVersion(''); setRolloutReason(''); setRolloutConfirmed(false);
+   notify(`已创建 K3s 升级草稿 ${result.data.id.slice(0, 8)}；请核对节点顺序后显式启动`);
+  } catch (e) { setError((e as Error).message); }
+  finally { setRolloutBusy(false); }
+ }
+ async function startRollout(plan: K3sRolloutPlan) {
+  if (!rolloutConfirmed || !window.confirm(`将按列出的顺序逐台升级 ${plan.clusterName} 至 ${plan.targetVersion}。确认启动？`)) return;
+  setRolloutBusy(true); setError('');
+  try {
+   const result = await api<K3sRolloutPlan>(`/kubernetes/rollouts/${encodeURIComponent(plan.id)}/start`, 'POST', {}, {}, true);
+   setRollouts(current => current.map(item => item.id === plan.id ? result.data : item));
+   setRolloutConfirmed(false); notify(`已启动 K3s 升级计划 ${plan.id.slice(0, 8)}`);
+  } catch (e) { setError((e as Error).message); }
+  finally { setRolloutBusy(false); }
  }
  function prepareDiscoveredImport(discovery: KubernetesRuntimeDiscovery) {
   setName(`${discovery.hostname}-${discovery.runtimeKind.toLowerCase()}`.slice(0, 80));
@@ -932,6 +965,23 @@ function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
  return <><PageHeading title="Kubernetes 集群" description="导入独立集群、刷新 Node 清单，并将 Kubernetes Node 映射到主机资产。" action={<button className="secondary" onClick={() => void load()} disabled={loading || isMock}>↻ 刷新</button>} />
   {isMock && <div className="alert">当前是纯 Mock 演示模式，集群管理 API 已停用。切换到 hybrid 或 live 模式后可导入真实集群。</div>}
   {error && <div className="alert error" role="alert">{error}</div>}
+  {!isMock && <section className="card"><div className="card-title"><div><h2>K3s 逐节点升级计划</h2><p>创建草稿不会执行升级。启动后按 Server 优先、Agent 随后的顺序逐台处理；每步都要刷新并确认所有 Node Ready，未知结果会停止计划。</p></div></div>
+   <form className="managed-deployment-form" onSubmit={event => void createRollout(event)}>
+    <Field label="K3s 集群"><select required value={rolloutClusterId} onChange={event => setRolloutClusterId(event.target.value)}><option value="">选择已登记的 K3s 集群</option>{clusters.filter(cluster => cluster.kind === 'K3S').map(cluster => <option key={cluster.id} value={cluster.id}>{cluster.name} · {cluster.healthStatus}</option>)}</select></Field>
+    <Field label="目标版本"><input required maxLength={32} pattern="v[0-9]+\.[0-9]+\.[0-9]+\+k3s[0-9]+" value={rolloutVersion} onChange={event => setRolloutVersion(event.target.value)} placeholder="v1.34.0+k3s1" /></Field>
+    <Field label="升级原因"><input required maxLength={500} value={rolloutReason} onChange={event => setRolloutReason(event.target.value)} placeholder="例如：维护窗口升级" /></Field>
+    <button className="primary" disabled={rolloutBusy || !rolloutClusterId || !rolloutReason.trim()}>{rolloutBusy ? '处理中…' : '创建升级草稿'}</button>
+   </form>
+   {rollouts.map(plan => <article className="managed-deployment-row" key={plan.id}>
+    <div><strong>{plan.clusterName} → {plan.targetVersion}</strong><span className={`badge ${plan.state.toLowerCase()}`}>{plan.state}</span><small>{plan.reason} · {plan.steps.length} 个节点 · 创建于 {time(plan.createdAt)}</small>
+     {plan.errorMessage && <small className="alert error">{plan.errorCode}: {plan.errorMessage}</small>}
+     <div className="table-wrap"><table><thead><tr><th>顺序</th><th>Node / Host</th><th>角色</th><th>步骤状态</th></tr></thead><tbody>{plan.steps.map(step => <tr key={`${plan.id}:${step.ordinal}`}><td>{step.ordinal + 1}</td><td>{step.nodeName}<small className="mono">{step.hostId}</small></td><td>{step.role === 'server' ? 'Server' : 'Agent'}</td><td>{step.state}{step.operationId && <small className="mono">任务 {step.operationId}</small>}</td></tr>)}</tbody></table></div>
+    </div>
+    <div className="managed-deployment-actions">{plan.state === 'DRAFT' && <button className="primary" disabled={rolloutBusy || !rolloutConfirmed} onClick={() => void startRollout(plan)}>启动计划</button>}</div>
+   </article>)}
+   {rollouts.some(plan => plan.state === 'DRAFT') && <label className="check-field"><input type="checkbox" checked={rolloutConfirmed} onChange={event => setRolloutConfirmed(event.target.checked)} /><span>我已核对草稿中的节点顺序、目标版本和维护窗口，确认启动后将按计划逐台升级。</span></label>}
+   {!rollouts.length && <p className="muted">尚无 K3s 升级计划。</p>}
+  </section>}
   {discoveries.length > 0 && <section className="card"><div className="card-title"><div><h2>Agent 自动发现</h2><p>这些主机正在运行 kubelet/K3s。发现结果会自动登记；读取集群资源仍需验证并加密保存 kubeconfig。</p></div></div><div className="table-wrap"><table><thead><tr><th>主机</th><th>运行时</th><th>本机 API</th><th>最近心跳</th><th /></tr></thead><tbody>{discoveries.map(discovery => <tr key={discovery.hostId}><td>{discovery.hostname}<small className="mono">{discovery.hostId}</small></td><td>{discovery.runtimeKind} · kubelet 运行中</td><td>{discovery.apiServerLocal ? '127.0.0.1:6443 可连接' : '本机 6443 不可连接'}</td><td>{time(discovery.agentLastSeen)}</td><td><button className="link" onClick={() => prepareDiscoveredImport(discovery)}>准备导入</button></td></tr>)}</tbody></table></div></section>}
   <section className="card"><div className="card-title"><div><h2>导入集群</h2><p>选择 kubeconfig 中的单一 context。凭据只发送到 Core 并加密保存，页面不会持久化副本。</p></div></div>
    <form className="cluster-import-form" onSubmit={event => void importCluster(event)}>

@@ -45,6 +45,101 @@ tags:
 - name: NetworkProviders
   description: 管理端网络 Provider 计划、变更、验证与补偿
 paths:
+  /api/v1/kubernetes/rollouts:
+    get:
+      tags: [KubernetesClusters]
+      operationId: listK3sRollouts
+      summary: 查询当前管理员创建的 K3s 升级计划
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 最近创建的升级计划。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/K3sRolloutList' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [KubernetesClusters]
+      operationId: createK3sRollout
+      summary: 创建一个未启动的 K3s 逐节点升级计划
+      description: 刷新并检查集群所有 Node、Host 映射、Agent 在线状态、Helper 能力和版本兼容性。创建计划不会执行升级；管理员必须显式启动。计划按 server 后 agent 排序，每次只提交一个节点，并在每步后要求所有 Node Ready。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/K3sRolloutCreateRequest' }
+      responses:
+        '201':
+          description: 已保存为 DRAFT 的升级计划。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/K3sRolloutPlan' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: 集群状态、Node、Agent、Helper 能力或版本不满足安全前置条件。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /api/v1/kubernetes/rollouts/{planId}:
+    parameters:
+    - name: planId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    get:
+      tags: [KubernetesClusters]
+      operationId: getK3sRollout
+      summary: 查询升级计划与节点步骤
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 升级计划状态与按序执行的 Node 步骤。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/K3sRolloutPlan' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/kubernetes/rollouts/{planId}/start:
+    parameters:
+    - name: planId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    post:
+      tags: [KubernetesClusters]
+      operationId: startK3sRollout
+      summary: 显式启动草稿升级计划
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      responses:
+        '202':
+          description: 计划已启动，后续步骤由 Core 持久化调度器推进。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/K3sRolloutPlan' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 计划不是 DRAFT 状态，或同一集群已有运行计划。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
   /api/v1/kubernetes/clusters:
     get:
       tags: [KubernetesClusters]
@@ -4410,6 +4505,117 @@ components:
           format: date-time
         updatedAt:
           type: string
+          format: date-time
+    K3sRolloutCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [clusterId, targetVersion, reason]
+      properties:
+        clusterId:
+          type: string
+          format: uuid
+        targetVersion:
+          type: string
+          pattern: '^v[0-9]+\.[0-9]+\.[0-9]+\+k3s[0-9]+$'
+          maxLength: 32
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+    K3sRolloutList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/K3sRolloutPlan'
+    K3sRolloutPlan:
+      type: object
+      additionalProperties: false
+      required: [id, clusterId, clusterName, targetVersion, reason, state, activeOrdinal, errorCode, errorMessage, requestedBy, createdAt, startedAt, finishedAt, steps]
+      properties:
+        id:
+          type: string
+          format: uuid
+        clusterId:
+          type: string
+          format: uuid
+        clusterName:
+          type: string
+        targetVersion:
+          type: string
+        reason:
+          type: string
+        state:
+          type: string
+          enum: [DRAFT, RUNNING, VERIFYING, SUCCEEDED, FAILED, UNKNOWN]
+        activeOrdinal:
+          type: integer
+          minimum: 0
+        errorCode:
+          type: [string, 'null']
+        errorMessage:
+          type: [string, 'null']
+        requestedBy:
+          type: string
+          format: uuid
+        createdAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: [string, 'null']
+          format: date-time
+        finishedAt:
+          type: [string, 'null']
+          format: date-time
+        steps:
+          type: array
+          maxItems: 1000
+          items:
+            $ref: '#/components/schemas/K3sRolloutStep'
+    K3sRolloutStep:
+      type: object
+      additionalProperties: false
+      required: [ordinal, hostId, nodeUid, nodeName, role, expectedGeneration, state, operationId, errorCode, errorMessage, createdAt, updatedAt, finishedAt]
+      properties:
+        ordinal:
+          type: integer
+          minimum: 0
+        hostId:
+          type: string
+          format: uuid
+        nodeUid:
+          type: string
+        nodeName:
+          type: string
+        role:
+          type: string
+          enum: [server, agent]
+        expectedGeneration:
+          type: integer
+          format: int64
+          minimum: 1
+        state:
+          type: string
+          enum: [PENDING, SUBMITTING, RUNNING, VERIFYING, SUCCEEDED, FAILED, UNKNOWN]
+        operationId:
+          type: [string, 'null']
+          format: uuid
+        errorCode:
+          type: [string, 'null']
+        errorMessage:
+          type: [string, 'null']
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        finishedAt:
+          type: [string, 'null']
           format: date-time
     KubernetesClusterList:
       type: object
