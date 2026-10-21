@@ -494,6 +494,8 @@ hybrid-infrastructure-platform/
 
 **当前实现边界**：Agent/Helper 提供类型化 `k3s.preflight` 只读检查、`k3s.install` 单主机首次安装和 `k3s.upgrade` 单主机升级能力。Agent 还会扫描本机 kubelet/K3s 进程和 systemd 服务，并在心跳中上报；Core 按 Host 自动保存发现记录，Kubernetes 集群页可查看并预填导入信息。本功能不传输 kubeconfig，发现记录不等同于已注册的 API 集群；管理员仍须导入并验证 kubeconfig 才能读取集群资源。安装/升级都限定固定稳定版本并校验官方 release checksum；安装拒绝覆盖已有数据，并将令牌只写入 root 可读 systemd 环境文件。升级仅支持由 NaNPanel 固定 unit 管理的节点、拒绝降级和跨越一个 Kubernetes minor 以上的升级，并在节点健康检查失败时尝试恢复旧二进制。Server 操作等待本地 Ready Node，Agent 操作仍要求后续确认 Node Ready；当前没有持久化的多节点 rollout 协调器。KubeEdge 集群摘要可读 CloudCore Pod 就绪情况；Node 清单以 Edge 角色标签、Node 存在性和 Ready 条件派生 EdgeCore 注册状态，并将已映射 Host Agent 最近的 `edgecore.service` systemd 观测合并为独立进程状态，过期观测不会显示为健康。该状态来自缓存观测而非同步进程探测。持久化安装/升级计划、逐节点排序与集群级健康门槛、KubeEdge 安装注册流程和拓扑到远程 Gateway 的自动协调仍未完成；对应清单保持未勾选。
 
+Agent Kubernetes runtime discovery 的代码测试和 `k3s-1` 部署证据见[部署记录](tests/p4/runs/2026-10-21-agent-kubernetes-runtime-discovery-deployment.md)。
+
 ### P5｜高级发布
 
 - [ ] K3s 上的 Gateway API + Argo Rollouts 对接。
