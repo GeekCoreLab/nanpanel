@@ -24,6 +24,10 @@ resource request.
   kubeconfig material, bearer tokens, client keys, or certificate data.
 - The Core uses the imported cluster's Kubernetes RBAC. It does not escalate to
   `cluster-admin`; absent permissions remain visible as capability failures.
+- The Host Agent may report local kubelet/K3s runtime evidence for discovery.
+  This creates a host discovery record only; it does not transfer host
+  kubeconfig or authorize Core to access the cluster API. A cluster becomes
+  API-manageable only after an administrator imports and validates credentials.
 - Node mappings are cluster-scoped and do not merge cluster membership or
   authorize cross-cluster resource operations.
 

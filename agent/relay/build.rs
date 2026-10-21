@@ -1,5 +1,6 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::configure()
+        .boxed(".nanpanel.agent.v1.AgentMessage.payload")
         .boxed(".nanpanel.agent.v1.RelayedAgentMessage.message")
         .build_server(true)
         .build_client(false)

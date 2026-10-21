@@ -429,6 +429,15 @@ impl Gateway {
                             connection_type: peer.connection_type,
                         })
                         .collect(),
+                    kubernetes_runtime: heartbeat.kubernetes_runtime.map(|runtime| {
+                        KubernetesRuntimeReport {
+                            detected: runtime.detected,
+                            kubelet_running: runtime.kubelet_running,
+                            api_server_local: runtime.api_server_local,
+                            runtime_kind: runtime.runtime_kind,
+                            observed_at_epoch_ms: runtime.observed_at_epoch_ms,
+                        }
+                    }),
                     systemd_services: heartbeat
                         .systemd_services
                         .into_iter()
@@ -542,6 +551,17 @@ struct HeartbeatReport {
     netbird_overlay: Option<NetbirdOverlayReport>,
     netbird_peer_paths_observed_at_epoch_ms: i64,
     netbird_peer_paths: Vec<NetbirdPeerPathReport>,
+    kubernetes_runtime: Option<KubernetesRuntimeReport>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct KubernetesRuntimeReport {
+    detected: bool,
+    kubelet_running: bool,
+    api_server_local: bool,
+    runtime_kind: String,
+    observed_at_epoch_ms: i64,
 }
 
 #[derive(Serialize)]
@@ -1094,6 +1114,15 @@ impl AgentGateway for Gateway {
                                             connection_type: peer.connection_type,
                                         })
                                         .collect(),
+                                    kubernetes_runtime: heartbeat.kubernetes_runtime.map(
+                                        |runtime| KubernetesRuntimeReport {
+                                            detected: runtime.detected,
+                                            kubelet_running: runtime.kubelet_running,
+                                            api_server_local: runtime.api_server_local,
+                                            runtime_kind: runtime.runtime_kind,
+                                            observed_at_epoch_ms: runtime.observed_at_epoch_ms,
+                                        },
+                                    ),
                                     systemd_services: heartbeat
                                         .systemd_services
                                         .into_iter()

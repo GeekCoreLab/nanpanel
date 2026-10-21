@@ -22,7 +22,7 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity
 use tracing::{info, warn};
 
 use crate::v1::{
-    AgentMessage, ControlMessage, Heartbeat, NetbirdOverlaySummary,
+    AgentMessage, ControlMessage, Heartbeat, KubernetesRuntimeDiscovery, NetbirdOverlaySummary,
     NetbirdPeerPath as NetbirdPeerPathMessage, NetworkAddress, NetworkInterface, NetworkRoute,
     OperationResult, RelayMessage, SystemdService, agent_gateway_client::AgentGatewayClient,
     agent_message::Payload, control_relay_client::ControlRelayClient,
@@ -90,6 +90,15 @@ struct NetbirdOverlayObservation {
 #[derive(Clone, Debug)]
 struct NetbirdPeerPathObservation {
     peers: Vec<helper::NetbirdPeerPath>,
+    observed_at_epoch_ms: i64,
+}
+
+#[derive(Clone, Debug)]
+struct KubernetesRuntimeObservation {
+    detected: bool,
+    kubelet_running: bool,
+    api_server_local: bool,
+    runtime_kind: String,
     observed_at_epoch_ms: i64,
 }
 
@@ -542,6 +551,8 @@ async fn connect_once(
         let mut systemd_services = collect_systemd_services().await;
         let mut systemd_observed_at = systemd_services.as_ref().and_then(|_| epoch_ms().ok());
         let mut systemd_refresh_at = time::Instant::now();
+        let mut kubernetes_runtime = collect_kubernetes_runtime(systemd_services.as_deref()).await;
+        let mut kubernetes_runtime_refresh_at = time::Instant::now();
         let mut network_inventory = collect_network_inventory().await;
         let mut network_refresh_at = time::Instant::now();
         let mut netbird_overlay = collect_netbird_overlay(
@@ -560,6 +571,10 @@ async fn connect_once(
                     None
                 };
                 systemd_refresh_at = time::Instant::now();
+            }
+            if kubernetes_runtime_refresh_at.elapsed() >= Duration::from_secs(30) {
+                kubernetes_runtime = collect_kubernetes_runtime(systemd_services.as_deref()).await;
+                kubernetes_runtime_refresh_at = time::Instant::now();
             }
             if network_refresh_at.elapsed() >= Duration::from_secs(30) {
                 network_inventory = collect_network_inventory().await;
@@ -596,6 +611,9 @@ async fn connect_once(
                 peer_paths_refresh_at = time::Instant::now();
             }
             let mut capabilities = vec!["host.inventory".to_owned(), "agent.heartbeat".to_owned()];
+            if kubernetes_runtime.is_some() {
+                capabilities.push("kubernetes.runtime.detect".to_owned());
+            }
             if helper_is_available {
                 capabilities.push("agent.self_update".to_owned());
                 for capability in helper_capabilities {
@@ -651,7 +669,7 @@ async fn connect_once(
                 agent_id: agent_id.clone(),
                 sequence,
                 sent_at_epoch_ms,
-                payload: Some(Payload::Heartbeat(Heartbeat {
+                payload: Some(Payload::Heartbeat(Box::new(Heartbeat {
                     version: env!("NANPANEL_AGENT_VERSION").to_owned(),
                     hostname: host.hostname.clone(),
                     os: host.os.clone(),
@@ -719,7 +737,16 @@ async fn connect_once(
                         .as_ref()
                         .map(|snapshot| snapshot.observed_at_epoch_ms)
                         .unwrap_or_default(),
-                })),
+                    kubernetes_runtime: kubernetes_runtime.as_ref().map(|runtime| {
+                        KubernetesRuntimeDiscovery {
+                            detected: runtime.detected,
+                            kubelet_running: runtime.kubelet_running,
+                            api_server_local: runtime.api_server_local,
+                            runtime_kind: runtime.runtime_kind.clone(),
+                            observed_at_epoch_ms: runtime.observed_at_epoch_ms,
+                        }
+                    }),
+                }))),
             };
             if heartbeat_sender.send(message).await.is_err() {
                 break;
@@ -968,6 +995,96 @@ async fn connect_once(
     }
     heartbeat_task.abort();
     Ok(())
+}
+
+async fn collect_kubernetes_runtime(
+    services: Option<&[SystemdService]>,
+) -> Option<KubernetesRuntimeObservation> {
+    let services = services.unwrap_or_default();
+    let active_units: Vec<_> = services
+        .iter()
+        .filter(|service| service.active_state == "ACTIVE")
+        .map(|service| service.unit_name.as_str())
+        .collect();
+    let (kubelet_process, k3s_process) = tokio::task::spawn_blocking(kubernetes_processes_running)
+        .await
+        .ok()
+        .unwrap_or_default();
+    let (detected, kubelet_running, runtime_kind) =
+        runtime_from_evidence(kubelet_process, k3s_process, &active_units);
+    let api_server_local = tokio::time::timeout(
+        Duration::from_millis(500),
+        tokio::net::TcpStream::connect(("127.0.0.1", 6443)),
+    )
+    .await
+    .is_ok_and(|result| result.is_ok());
+    Some(KubernetesRuntimeObservation {
+        detected,
+        kubelet_running,
+        api_server_local,
+        runtime_kind: runtime_kind.to_owned(),
+        observed_at_epoch_ms: epoch_ms().ok()?,
+    })
+}
+
+fn kubernetes_processes_running() -> (bool, bool) {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return (false, false);
+    };
+    let mut kubelet = false;
+    let mut k3s = false;
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+        {
+            continue;
+        }
+        let Ok(name) = std::fs::read_to_string(entry.path().join("comm")) else {
+            continue;
+        };
+        match name.trim() {
+            "kubelet" => kubelet = true,
+            "k3s-server" | "k3s-agent" | "k3s" => k3s = true,
+            _ => {}
+        }
+    }
+    (kubelet, k3s)
+}
+
+fn runtime_from_evidence(
+    kubelet_process: bool,
+    k3s_process: bool,
+    active_units: &[&str],
+) -> (bool, bool, &'static str) {
+    let k3s = k3s_process
+        || active_units
+            .iter()
+            .any(|unit| matches!(*unit, "k3s.service" | "k3s-agent.service"));
+    let kubelet = kubelet_process
+        || active_units.iter().any(|unit| {
+            matches!(
+                *unit,
+                "kubelet.service"
+                    | "rke2-server.service"
+                    | "rke2-agent.service"
+                    | "microk8s.daemon-kubelet.service"
+            )
+        });
+    let detected = k3s || kubelet;
+    (
+        detected,
+        detected,
+        if k3s {
+            "K3S"
+        } else if kubelet {
+            "KUBERNETES"
+        } else {
+            "NONE"
+        },
+    )
 }
 
 enum ControlStream {
@@ -1665,12 +1782,12 @@ async fn send_operation_result(
         agent_id: agent_id.to_owned(),
         sequence: *sequence_guard,
         sent_at_epoch_ms: epoch_ms()?,
-        payload: Some(Payload::OperationResult(OperationResult {
+        payload: Some(Payload::OperationResult(Box::new(OperationResult {
             operation_id,
             idempotency_key,
             status: status.to_owned(),
             detail: detail.to_owned(),
-        })),
+        }))),
     };
     sender.send(message).await.context("send operation result")
 }
@@ -1726,6 +1843,27 @@ fn host_snapshot() -> HostSnapshot {
 mod tests {
     use super::*;
     use ring::signature::KeyPair;
+
+    #[test]
+    fn detects_active_kubernetes_and_distinguishes_k3s() {
+        assert_eq!(
+            runtime_from_evidence(false, false, &["kubelet.service"]),
+            (true, true, "KUBERNETES")
+        );
+        assert_eq!(
+            runtime_from_evidence(false, false, &["k3s.service"]),
+            (true, true, "K3S")
+        );
+        assert_eq!(
+            runtime_from_evidence(false, false, &[]),
+            (false, false, "NONE")
+        );
+        assert_eq!(
+            runtime_from_evidence(true, false, &[]),
+            (true, true, "KUBERNETES")
+        );
+        assert_eq!(runtime_from_evidence(false, true, &[]), (true, true, "K3S"));
+    }
 
     #[test]
     fn parses_bounded_network_interface_addresses_and_routes() -> Result<()> {

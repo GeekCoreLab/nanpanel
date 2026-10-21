@@ -63,6 +63,7 @@ public class InternalAgentHeartbeatResource {
         !validNetworkInventory(report) ||
         !validOverlayNetwork(report) ||
         !validNetbirdPeerPaths(report) ||
+        !validKubernetesRuntime(report) ||
         report.version().isBlank() || report.version().length() > 64 ||
         report.hostname().isBlank() || report.hostname().length() > 255 ||
         report.hostname().chars().anyMatch(Character::isISOControl) ||
@@ -73,6 +74,7 @@ public class InternalAgentHeartbeatResource {
                 "file.write.protected", "container.list", "container.logs", "container.start",
                 "container.stop", "container.deploy", "network.firewall.expose",
                 "k3s.preflight", "k3s.install", "k3s.upgrade",
+                "kubernetes.runtime.detect",
                 "network.inventory", "network.overlay.observe", "network.overlay.peer_paths.observe",
                 "file.list", "file.read", "file.write", "file.delete")
                 .contains(capability)) ||
@@ -195,8 +197,44 @@ public class InternalAgentHeartbeatResource {
         }
       }
       persistNetbirdPeerPaths(c, hostId, report);
+      if (report.kubernetesRuntime() != null) {
+        var runtime = report.kubernetesRuntime();
+        Instant observedAt = Instant.ofEpochMilli(runtime.observedAtEpochMs());
+        var existing = query(c,
+            "SELECT host_id FROM host_kubernetes_runtime_discovery WHERE host_id=?", hostId);
+        if (existing.isEmpty()) {
+          update(c,
+              "INSERT INTO host_kubernetes_runtime_discovery "
+                  + "(host_id,detected,kubelet_running,api_server_local,runtime_kind,observed_at) "
+                  + "VALUES (?,?,?,?,?,?)",
+              hostId, runtime.detected(), runtime.kubeletRunning(), runtime.apiServerLocal(),
+              runtime.runtimeKind(), java.sql.Timestamp.from(observedAt));
+        } else {
+          update(c,
+              "UPDATE host_kubernetes_runtime_discovery SET detected=?,kubelet_running=?,"
+                  + "api_server_local=?,runtime_kind=?,observed_at=? WHERE host_id=?",
+              runtime.detected(), runtime.kubeletRunning(), runtime.apiServerLocal(),
+              runtime.runtimeKind(), java.sql.Timestamp.from(observedAt), hostId);
+        }
+      }
       return Response.noContent().build();
     });
+  }
+
+  private boolean validKubernetesRuntime(AgentEnrollmentResource.HeartbeatReport report) {
+    var runtime = report.kubernetesRuntime();
+    boolean capability = report.capabilities().contains("kubernetes.runtime.detect");
+    if (runtime == null) return !capability;
+    if (!capability || runtime.observedAtEpochMs() == null
+        || runtime.observedAtEpochMs() <= 0
+        || runtime.observedAtEpochMs() > Instant.now().plusSeconds(60).toEpochMilli()
+        || runtime.observedAtEpochMs() < Instant.now().minusSeconds(300).toEpochMilli()) {
+      return false;
+    }
+    if (runtime.detected() != runtime.kubeletRunning()) return false;
+    return runtime.detected()
+        ? Set.of("K3S", "KUBERNETES").contains(runtime.runtimeKind())
+        : "NONE".equals(runtime.runtimeKind());
   }
 
   private boolean validOverlayNetwork(AgentEnrollmentResource.HeartbeatReport report) {

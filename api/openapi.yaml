@@ -115,6 +115,24 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+  /api/v1/kubernetes/discoveries:
+    get:
+      tags: [KubernetesClusters]
+      operationId: listKubernetesRuntimeDiscoveries
+      summary: 查询 Agent 自动发现的 Kubernetes 主机
+      description: 返回 Agent 报告为运行 kubelet/K3s 的主机。发现记录不包含 kubeconfig；检测本身不能授权 Core 访问集群 API，管理员仍需导入有效凭据。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 最近检测到 Kubernetes runtime 的主机列表。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KubernetesRuntimeDiscoveryList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
   /api/v1/kubernetes/clusters/{clusterId}:
     parameters:
     - name: clusterId
@@ -4398,6 +4416,42 @@ components:
           maxItems: 50
           items:
             $ref: '#/components/schemas/KubernetesClusterSummary'
+    KubernetesRuntimeDiscoveryList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/KubernetesRuntimeDiscovery'
+    KubernetesRuntimeDiscovery:
+      type: object
+      additionalProperties: false
+      required: [hostId, hostname, runtimeKind, detected, kubeletRunning, apiServerLocal, observedAt, agentLastSeen]
+      properties:
+        hostId:
+          type: string
+          format: uuid
+        hostname:
+          type: string
+          maxLength: 255
+        runtimeKind:
+          type: string
+          enum: [K3S, KUBERNETES]
+        detected:
+          type: boolean
+        kubeletRunning:
+          type: boolean
+        apiServerLocal:
+          type: boolean
+        observedAt:
+          type: string
+          format: date-time
+        agentLastSeen:
+          type: [string, 'null']
+          format: date-time
     KubernetesClusterSummary:
       type: object
       additionalProperties: false

@@ -592,7 +592,7 @@ class SystemResourceTest {
     heartbeat.put("hostname", "panel-test-host-real");
     heartbeat.put("os", "Ubuntu 24.04");
     heartbeat.put("arch", "x86_64");
-    heartbeat.put("capabilities", java.util.List.of(
+    var heartbeatCapabilities = new java.util.ArrayList<>(java.util.List.of(
         "host.inventory", "agent.heartbeat", "agent.self_update", "systemd.read",
         "systemd.restart", "systemd.journal.read", "package.install", "file.write.protected",
         "container.list", "container.logs", "container.start", "container.stop",
@@ -600,6 +600,7 @@ class SystemResourceTest {
         "k3s.upgrade",
         "network.inventory",
         "network.overlay.observe", "network.overlay.peer_paths.observe"));
+    heartbeat.put("capabilities", heartbeatCapabilities);
     heartbeat.put("helperStatus", "AVAILABLE");
     heartbeat.put("systemdObservedAtEpochMs", System.currentTimeMillis());
     heartbeat.put("networkObservedAtEpochMs", System.currentTimeMillis());
@@ -667,6 +668,41 @@ class SystemResourceTest {
         .body(heartbeat)
         .post("/internal/agent-heartbeats")
         .then().statusCode(204);
+    var discoveredKubernetesHeartbeat = new java.util.HashMap<>(heartbeat);
+    var discoveredCapabilities = new java.util.ArrayList<>(heartbeatCapabilities);
+    discoveredCapabilities.add("kubernetes.runtime.detect");
+    discoveredKubernetesHeartbeat.put("capabilities", discoveredCapabilities);
+    discoveredKubernetesHeartbeat.put("kubernetesRuntime", Map.of(
+        "detected", true, "kubeletRunning", true, "apiServerLocal", true,
+        "runtimeKind", "K3S", "observedAtEpochMs", System.currentTimeMillis()));
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json").body(discoveredKubernetesHeartbeat)
+        .post("/internal/agent-heartbeats").then().statusCode(204);
+    given().get("/api/v1/kubernetes/discoveries").then().statusCode(401);
+    given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/kubernetes/discoveries")
+        .then().statusCode(200)
+        .body("items.size()", equalTo(1))
+        .body("items[0].hostId", equalTo(hostId))
+        .body("items[0].hostname", equalTo("panel-test-host-real"))
+        .body("items[0].runtimeKind", equalTo("K3S"))
+        .body("items[0].kubeletRunning", equalTo(true))
+        .body("items[0].apiServerLocal", equalTo(true));
+    var invalidKubernetesRuntimeHeartbeat = new java.util.HashMap<>(discoveredKubernetesHeartbeat);
+    invalidKubernetesRuntimeHeartbeat.put("kubernetesRuntime", Map.of(
+        "detected", false, "kubeletRunning", true, "apiServerLocal", false,
+        "runtimeKind", "NONE", "observedAtEpochMs", System.currentTimeMillis()));
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json").body(invalidKubernetesRuntimeHeartbeat)
+        .post("/internal/agent-heartbeats")
+        .then().statusCode(400).body("code", equalTo("INVALID_HEARTBEAT"));
+    var unadvertisedKubernetesRuntimeHeartbeat = new java.util.HashMap<>(discoveredKubernetesHeartbeat);
+    unadvertisedKubernetesRuntimeHeartbeat.put("capabilities", java.util.List.of(
+        "host.inventory", "agent.heartbeat", "agent.self_update", "systemd.read"));
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json").body(unadvertisedKubernetesRuntimeHeartbeat)
+        .post("/internal/agent-heartbeats")
+        .then().statusCode(400).body("code", equalTo("INVALID_HEARTBEAT"));
     given().cookie("nanpanel_session", restoredCookie)
         .get("/api/v1/hosts?limit=20&search=PANEL-TEST-HOST-REAL")
         .then().statusCode(200)

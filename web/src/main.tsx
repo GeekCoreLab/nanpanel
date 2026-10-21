@@ -9,7 +9,7 @@ import { api, ApiError, isMock, mockBusiness } from './lib/api';
 import { DEMO_PASSWORD } from './lib/mock';
 import { createUuid } from './lib/uuid.ts';
 import { agentMaintenanceCommand, type AgentMaintenanceMode } from './lib/agent-maintenance.ts';
-import type { Host, HostPage, Agent, AgentInstallation, AgentUpdateOperation, SystemService, SystemServicePage, Operation, OperationPage, SessionContext, AdminOverview, AdminUser, AdminUserPage, PlatformSettings, AuditEventPage, WebSessionList, ApiKeyList, CreatedApiKey, BuiltinRoleList, AgentEnrollmentCreated, HostHelperOperationRequest, HostNetworkInventory, HostNetworkInterface, HostNetworkRoute, HostFileListing, SshProbeResult, SshSystemdStatusResult, SshSystemdJournalResult, HostSshConfig, SshHostKeyProbe, BastionSession, BastionSessionTicket, BastionCommand, BastionRecordingChunk, KubernetesClusterList, KubernetesClusterImportRequest, KubernetesClusterSummary, KubernetesClusterNodeList, KubernetesClusterNode, KubernetesManagedDeployment, KubernetesManagedDeploymentCreateRequest, KubernetesManagedDeploymentScaleRequest, KubernetesManagedDeploymentList, KubernetesTopologyNamespaceSnapshot } from './lib/types';
+import type { Host, HostPage, Agent, AgentInstallation, AgentUpdateOperation, SystemService, SystemServicePage, Operation, OperationPage, SessionContext, AdminOverview, AdminUser, AdminUserPage, PlatformSettings, AuditEventPage, WebSessionList, ApiKeyList, CreatedApiKey, BuiltinRoleList, AgentEnrollmentCreated, HostHelperOperationRequest, HostNetworkInventory, HostNetworkInterface, HostNetworkRoute, HostFileListing, SshProbeResult, SshSystemdStatusResult, SshSystemdJournalResult, HostSshConfig, SshHostKeyProbe, BastionSession, BastionSessionTicket, BastionCommand, BastionRecordingChunk, KubernetesClusterList, KubernetesRuntimeDiscovery, KubernetesRuntimeDiscoveryList, KubernetesClusterImportRequest, KubernetesClusterSummary, KubernetesClusterNodeList, KubernetesClusterNode, KubernetesManagedDeployment, KubernetesManagedDeploymentCreateRequest, KubernetesManagedDeploymentScaleRequest, KubernetesManagedDeploymentList, KubernetesTopologyNamespaceSnapshot } from './lib/types';
 import './api-keys.css';
 import './kubernetes-clusters.css';
 import './kubernetes-upgrade.css';
@@ -816,7 +816,7 @@ function Operations() {
  return <><PageHeading title="操作任务" description="跟踪已持久化任务的执行、验证与最终结果。" /><div className="alert">UNKNOWN 表示执行结果不确定，需要对账；不能视作失败或自动重新执行。</div><section className="card"><div className="toolbar"><select aria-label="任务状态" value={status} onChange={e => setStatus(e.target.value)}><option value="">全部状态</option>{['PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED', 'UNKNOWN', 'CANCELLED'].map(s => <option key={s} value={s}>{labels[s]}</option>)}</select><span className="muted">每 1.5 秒自动更新</span></div><ResourceState {...r} /><div className="table-wrap"><table><thead><tr><th>任务 / 原因</th><th>主机</th><th>状态</th><th>阶段</th><th>创建时间</th><th /></tr></thead><tbody>{r.data?.items.map(o => <tr key={o.id}><td><b>{operationTitle(o)}</b><small>{o.target || o.reason}</small></td><td className="mono">{o.hostId.slice(0, 8)}</td><td><Badge value={o.status} /></td><td className="mono">{o.phase}</td><td>{time(o.createdAt)}</td><td><button className="link" onClick={() => setSelected(o.id)}>查看详情</button></td></tr>)}</tbody></table>{!r.data?.items.length && !r.loading && <Empty>暂无任务。前往主机资产查看服务操作。</Empty>}</div></section>{op && <div className="modal-backdrop"><div className="modal"><div className="card-title"><h2>任务详情</h2><button className="icon-button" aria-label="关闭任务详情" onClick={() => setSelected(undefined)}>×</button></div><Badge value={op.status} /><dl className="info-list">{[['任务 ID', op.id], ['执行阶段', op.phase], ['创建时间', time(op.createdAt)], ['结束时间', time(op.finishedAt)], ['执行依据', evidence ?? op.error?.message ?? '等待执行与验证结果']].map(([k, v]) => <div key={k}><dt>{k}</dt><dd>{v}</dd></div>)}</dl>{journal && <pre className="journal-output">{journal}</pre>}{helperOutput && <pre className="journal-output">{helperOutput}</pre>}<div className="alert">{op.status === 'UNKNOWN' ? '结果未知，保持互斥锁，等待 Agent 执行记录对账。' : op.kind === 'SYSTEMD_JOURNAL_READ' || op.kind === 'HOST_HELPER_OPERATION' ? '输出可能包含敏感信息，请按管理员权限保护操作记录。' : '任务成功仅确认服务状态，不代表业务端到端健康。'}</div></div></div>}</>;
 }
 function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
- const [clusters, setClusters] = useState<KubernetesClusterSummary[]>([]); const [hosts, setHosts] = useState<Host[]>([]); const [nodes, setNodes] = useState<Record<string, KubernetesClusterNode[]>>({});
+ const [clusters, setClusters] = useState<KubernetesClusterSummary[]>([]); const [hosts, setHosts] = useState<Host[]>([]); const [discoveries, setDiscoveries] = useState<KubernetesRuntimeDiscovery[]>([]); const [nodes, setNodes] = useState<Record<string, KubernetesClusterNode[]>>({});
  const [name, setName] = useState(''); const [kind, setKind] = useState<KubernetesClusterImportRequest['kind']>('K3S'); const [contextName, setContextName] = useState(''); const [kubeconfig, setKubeconfig] = useState('');
  const [loading, setLoading] = useState(true); const [busy, setBusy] = useState(false); const [nodeLoading, setNodeLoading] = useState<Record<string, boolean>>({}); const [error, setError] = useState('');
  const [namespaceSnapshots, setNamespaceSnapshots] = useState<Record<string, KubernetesTopologyNamespaceSnapshot>>({}); const [selectedNamespaces, setSelectedNamespaces] = useState<Record<string, string>>({});
@@ -825,11 +825,12 @@ function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
   if (isMock) { setLoading(false); return; }
   setLoading(true); setError('');
   try {
-   const [clusterResult, hostResult] = await Promise.all([
+   const [clusterResult, hostResult, discoveryResult] = await Promise.all([
     api<KubernetesClusterList>('/kubernetes/clusters', 'GET', undefined, {}, true),
     api<HostPage>('/hosts?limit=100', 'GET', undefined, {}, true),
+    api<KubernetesRuntimeDiscoveryList>('/kubernetes/discoveries', 'GET', undefined, {}, true),
    ]);
-   setClusters(clusterResult.data.items); setHosts(hostResult.data.items);
+   setClusters(clusterResult.data.items); setHosts(hostResult.data.items); setDiscoveries(discoveryResult.data.items);
   } catch (e) { setError((e as Error).message); }
   finally { setLoading(false); }
  }
@@ -843,6 +844,13 @@ function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
    setName(''); setContextName(''); setKubeconfig(''); notify(`已导入 Kubernetes 集群 ${result.data.name}`);
   } catch (e) { setError((e as Error).message); }
   finally { setBusy(false); }
+ }
+ function prepareDiscoveredImport(discovery: KubernetesRuntimeDiscovery) {
+  setName(`${discovery.hostname}-${discovery.runtimeKind.toLowerCase()}`.slice(0, 80));
+  setKind(discovery.runtimeKind === 'K3S' ? 'K3S' : 'KUBERNETES');
+  setContextName(discovery.runtimeKind === 'K3S' ? 'default' : 'kubernetes-admin@kubernetes');
+  document.querySelector('.cluster-import-form')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  notify(`已为 ${discovery.hostname} 填入导入信息；请粘贴 kubeconfig 完成凭据验证`);
  }
  async function refreshClusterStatus(clusterId: string) {
   try {
@@ -924,6 +932,7 @@ function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
  return <><PageHeading title="Kubernetes 集群" description="导入独立集群、刷新 Node 清单，并将 Kubernetes Node 映射到主机资产。" action={<button className="secondary" onClick={() => void load()} disabled={loading || isMock}>↻ 刷新</button>} />
   {isMock && <div className="alert">当前是纯 Mock 演示模式，集群管理 API 已停用。切换到 hybrid 或 live 模式后可导入真实集群。</div>}
   {error && <div className="alert error" role="alert">{error}</div>}
+  {discoveries.length > 0 && <section className="card"><div className="card-title"><div><h2>Agent 自动发现</h2><p>这些主机正在运行 kubelet/K3s。发现结果会自动登记；读取集群资源仍需验证并加密保存 kubeconfig。</p></div></div><div className="table-wrap"><table><thead><tr><th>主机</th><th>运行时</th><th>本机 API</th><th>最近心跳</th><th /></tr></thead><tbody>{discoveries.map(discovery => <tr key={discovery.hostId}><td>{discovery.hostname}<small className="mono">{discovery.hostId}</small></td><td>{discovery.runtimeKind} · kubelet 运行中</td><td>{discovery.apiServerLocal ? '127.0.0.1:6443 可连接' : '本机 6443 不可连接'}</td><td>{time(discovery.agentLastSeen)}</td><td><button className="link" onClick={() => prepareDiscoveredImport(discovery)}>准备导入</button></td></tr>)}</tbody></table></div></section>}
   <section className="card"><div className="card-title"><div><h2>导入集群</h2><p>选择 kubeconfig 中的单一 context。凭据只发送到 Core 并加密保存，页面不会持久化副本。</p></div></div>
    <form className="cluster-import-form" onSubmit={event => void importCluster(event)}>
     <Field label="集群名称"><input required maxLength={80} value={name} onChange={event => setName(event.target.value)} placeholder="例如 production-k3s" /></Field>

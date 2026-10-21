@@ -207,6 +207,55 @@ if [[ "$tls_rotated" == true ]]; then
 fi
 ssh "$ssh_target" kubectl -n nanpanel rollout status deployment/nanpanel-core --timeout=240s
 ssh "$ssh_target" kubectl -n nanpanel rollout status deployment/nanpanel-web --timeout=180s
+if ssh "$ssh_target" systemctl is-enabled nanpanel-agent.service >/dev/null 2>&1; then
+    ssh "$ssh_target" bash -s <<'REMOTE'
+set -Eeuo pipefail
+agent=/usr/local/bin/nanpanel-agent
+pod=deployment/nanpanel-core
+container=core
+image_sha=$(kubectl -n nanpanel exec "$pod" -c "$container" -- sha256sum /work/nanpanel-agent | awk '{print $1}')
+current_sha=$(sudo -n sha256sum "$agent" | awk '{print $1}')
+if [[ ! "$image_sha" =~ ^[0-9a-f]{64}$ || ! "$current_sha" =~ ^[0-9a-f]{64}$ ]]; then
+    printf 'Unable to verify Agent binary hashes.\n' >&2
+    exit 1
+fi
+if [[ "$image_sha" != "$current_sha" ]]; then
+    backup="/var/lib/nanpanel-agent/nanpanel-agent.pre-${current_sha}"
+    if ! sudo -n test -e "$backup"; then
+        sudo -n cp --preserve=mode,ownership "$agent" "$backup"
+    fi
+    temporary=$(sudo -n mktemp /usr/local/bin/.nanpanel-agent.XXXXXX)
+    trap 'sudo -n rm -f -- "$temporary"' EXIT
+    kubectl -n nanpanel exec "$pod" -c "$container" -- cat /work/nanpanel-agent |
+        sudo -n install -o root -g root -m 0755 /dev/stdin "$temporary"
+    downloaded_sha=$(sudo -n sha256sum "$temporary" | awk '{print $1}')
+    if [[ "$downloaded_sha" != "$image_sha" ]] ||
+        ! sudo -n python3 - "$temporary" <<'PY'
+import pathlib
+import sys
+
+if pathlib.Path(sys.argv[1]).read_bytes()[:4] != b"\x7fELF":
+    raise SystemExit("Agent image artifact is not a Linux executable")
+PY
+    then
+        printf 'Downloaded Agent binary failed verification.\n' >&2
+        exit 1
+    fi
+    sudo -n mv -f -- "$temporary" "$agent"
+    trap - EXIT
+    if ! sudo -n systemctl restart nanpanel-agent.service; then
+        sudo -n cp --preserve=mode,ownership "$backup" "$temporary"
+        sudo -n mv -f -- "$temporary" "$agent"
+        sudo -n systemctl restart nanpanel-agent.service || true
+        exit 1
+    fi
+    sudo -n systemctl is-active --quiet nanpanel-agent.service
+    printf 'Updated nanpanel-agent: image sha256=%s, previous binary backed up at %s\n' "$image_sha" "$backup"
+else
+    printf 'nanpanel-agent already matches the Core image artifact (sha256=%s)\n' "$image_sha"
+fi
+REMOTE
+fi
 if [[ "$tls_rotated" == true ]] &&
     ssh "$ssh_target" systemctl is-enabled nanpanel-agent >/dev/null 2>&1; then
     ssh "$ssh_target" "install -o root -g root -m 0644 /dev/stdin /etc/nanpanel-agent/controller.pem && systemctl restart nanpanel-agent" \

@@ -39,6 +39,15 @@ message Heartbeat {
   int64 netbird_overlay_observed_at_epoch_ms = 13;
   repeated NetbirdPeerPath netbird_peer_paths = 14;
   int64 netbird_peer_paths_observed_at_epoch_ms = 15;
+  KubernetesRuntimeDiscovery kubernetes_runtime = 16;
+}
+
+message KubernetesRuntimeDiscovery {
+  bool detected = 1;
+  bool kubelet_running = 2;
+  bool api_server_local = 3;
+  string runtime_kind = 4;
+  int64 observed_at_epoch_ms = 5;
 }
 
 message NetbirdOverlaySummary {

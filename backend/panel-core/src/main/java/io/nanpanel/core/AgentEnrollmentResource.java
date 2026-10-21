@@ -66,7 +66,8 @@ public class AgentEnrollmentResource {
       Long netbirdOverlayObservedAtEpochMs,
       OverlayNetworkReport netbirdOverlay,
       Long netbirdPeerPathsObservedAtEpochMs,
-      List<NetbirdPeerPathReport> netbirdPeerPaths) {}
+      List<NetbirdPeerPathReport> netbirdPeerPaths,
+      KubernetesRuntimeReport kubernetesRuntime) {}
   @JsonIgnoreProperties(ignoreUnknown = true)
   public record SystemdServiceReport(String unitName, String displayName,
                                      String activeState, String subState) {}
@@ -81,6 +82,8 @@ public class AgentEnrollmentResource {
                                      Long p2pPeerCount, Long relayedPeerCount) {}
   public record NetbirdPeerPathReport(String peerName, String status,
                                       String connectionType) {}
+  public record KubernetesRuntimeReport(boolean detected, boolean kubeletRunning,
+      boolean apiServerLocal, String runtimeKind, Long observedAtEpochMs) {}
 
   private String actor() {
     @SuppressWarnings("unchecked")
