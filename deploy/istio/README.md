@@ -59,7 +59,15 @@ Provider and certificate lifecycle are still unimplemented.
 Core Service discovery uses the Kubernetes identity of the Core process and is
 disabled by default. `deploy/k3s/core.yaml` creates the dedicated
 `nanpanel-core` ServiceAccount, and `deploy/istio/core-inventory-rbac.yaml`
-grants it only `list` access to Services and EndpointSlices in `nanpanel-mesh`.
+grants it only `list` access to Services, Pods, and EndpointSlices in
+`nanpanel-mesh`. For Ready injected Pods, Core reads the fixed Istio Envoy
+Prometheus endpoint (`PodIP:15090/stats/prometheus`) over the cluster network.
+It filters to destination-side `istio_requests_total` for Services in that
+namespace, retaining workload names, response codes, and the reported mTLS
+security policy. It does not query arbitrary addresses, expose raw Prometheus
+labels, or persist credentials. The scan is capped at 24 proxies per refresh
+with 500 ms connect/read timeouts; larger meshes are sampled and reported as
+partial.
 Apply the RBAC file only when enabling discovery:
 
 ```sh
@@ -80,7 +88,7 @@ kubectl auth can-i list pods -n nanpanel-mesh --as=system:serviceaccount:nanpane
 kubectl auth can-i get secrets -n nanpanel-mesh --as=system:serviceaccount:nanpanel:nanpanel-core
 ```
 
-The expected results are `yes`, `yes`, `no`, `no`. The refresh job reads every
+The expected results are `yes`, `yes`, `yes`, `no`. The refresh job reads every
 60 seconds; the authenticated refresh endpoint can also request one read. The
 API accepts no caller-provided namespace or selector. Keep the Core namespace
 outside Istio until gateway, health, and certificate paths have their own

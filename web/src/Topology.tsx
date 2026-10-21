@@ -13,6 +13,7 @@ import { connectionError, createTopologyNode, draftError, nodePresets, resolveRo
 import './topology-status.css';
 import './topology-hierarchy.css';
 import './gateway-asset-picker.css';
+import './service-network.css';
 import type { Host, HostNetworkInventory, HostPage, KubernetesClusterList, KubernetesClusterSummary, KubernetesServiceInventorySnapshot, KubernetesServiceProbeSnapshot, KubernetesTopologyNamespaceDetail, KubernetesTopologyNamespaceSnapshot, TopologyDraft, TopologyDraftWrite, TopologyLink, TopologyNode, TopologyNodeKind } from './lib/types';
 
 type DeviceNode = Node<{
@@ -139,6 +140,7 @@ function Editor() {
   const [serviceInventory, setServiceInventory] = useState<KubernetesServiceInventorySnapshot>();
   const [serviceProbes, setServiceProbes] = useState<KubernetesServiceProbeSnapshot>();
   const [serviceInventoryError, setServiceInventoryError] = useState(''); const [inventoryBusy, setInventoryBusy] = useState(false);
+  const [serviceSearch, setServiceSearch] = useState('');
   const [folderId, setFolderId] = useState<string | null>(null);
   const [hostAssets, setHostAssets] = useState<Record<string, { host: Host; inventory: HostNetworkInventory }>>({});
   const [assetChoices, setAssetChoices] = useState<Host[]>([]); const [assetNextCursor, setAssetNextCursor] = useState<string | null>(null); const [assetPickerOpen, setAssetPickerOpen] = useState(false); const [assetPickerBusy, setAssetPickerBusy] = useState(false);
@@ -163,6 +165,11 @@ function Editor() {
     catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   }
   async function loadServiceInventory(refresh = false) {
+    if (isMock) {
+      setServiceInventory(undefined);
+      setServiceInventoryError('服务网络只显示真实 Kubernetes 与 Istio 数据；Mock 模式不会提供模拟服务图。');
+      return;
+    }
     setInventoryBusy(true); setServiceInventoryError('');
     try {
       const result = await api<KubernetesServiceInventorySnapshot>(refresh ? '/kubernetes/service-inventory/refresh' : '/kubernetes/service-inventory', refresh ? 'POST' : 'GET');
@@ -250,7 +257,7 @@ function Editor() {
     finally { setKubernetesBusy(false); }
   }
   useEffect(() => { void load(); }, []);
-  useEffect(() => { void loadServiceInventory(); }, []);
+  useEffect(() => { if (!isMock) void loadServiceInventory(); }, []);
   useEffect(() => {
     if (isMock) { setKubernetesClusters([]); return; }
     let cancelled = false;
@@ -521,6 +528,17 @@ function Editor() {
   }
   const contextNode = nodes.find(n => n.id === menu?.nodeId)?.data.model;
   const contextEdge = edges.find(edge => edge.id === menu?.edgeId);
+  const visibleNetworkServices = serviceInventory?.services.filter(service =>
+    service.serviceName.toLocaleLowerCase().includes(serviceSearch.trim().toLocaleLowerCase())) ?? [];
+  const totalServiceEndpoints = serviceInventory?.services.reduce((count, service) =>
+    count + service.endpoints.length, 0) ?? 0;
+  const readyServiceEndpoints = serviceInventory?.services.reduce((count, service) =>
+    count + service.endpoints.filter(endpoint => endpoint.ready === true).length, 0) ?? 0;
+  const istioTraffic = serviceInventory?.istio.traffic.filter(edge =>
+    `${edge.sourceWorkload} ${edge.destinationService} ${edge.destinationWorkload}`
+      .toLocaleLowerCase().includes(serviceSearch.trim().toLocaleLowerCase())) ?? [];
+  const observedIstioRequests = serviceInventory?.istio.traffic.reduce((count, edge) =>
+    count + edge.requestCount, 0) ?? 0;
   return <>
     {folderId && <nav className="topology-breadcrumb" aria-label="拓扑层级"><button className="secondary" onClick={() => { setFolderId(null); requestAnimationFrame(() => { void fitView({ padding: .2 }); }); }}>主拓扑</button>{folderPath().map((item, index) => <span key={item.id}><span className="muted">/</span>{index === folderPath().length - 1 ? <strong>{item.name}</strong> : <button className="secondary" onClick={() => enterFolder(item.id)}>{item.name}</button>}</span>)}</nav>}
     <div className="page-heading"><div><h1>{isP0Lab ? '拓扑到实际路由 P0 实验' : folder?.name ?? '网络拓扑实验室'}</h1><p>{folderId ? '编辑此文件夹内的期望网络拓扑；下方可逐级浏览 Namespace、Ingress、Service 和 Pod。' : '双击文件夹进入子拓扑。绿色出口 → 蓝色入口，用多端口节点组织期望转发路径。'}</p></div><div className="topology-actions"><button className="secondary" disabled={busy} onClick={load}>{dirty ? '重新读取（丢弃未保存）' : '↻ 重新读取'}</button>{!folderId && <button className="secondary" disabled={!loaded || busy || assetPickerBusy} onClick={() => void loadHostAssets()}>{assetPickerBusy ? '读取主机…' : '＋ 添加主机资产'}</button>}<button className="primary" disabled={!loaded || busy || !dirty || !etag} onClick={save}>{busy ? '处理中…' : '保存草稿'}</button>{isP0Lab && <button className="primary" disabled={!loaded || busy || !!draftError(draft()) || !!p0RouteError(draft())} onClick={applyP0Route}>{busy ? '处理中…' : '应用到 FRP 实际路由'}</button>}</div></div>
@@ -584,18 +602,41 @@ function Editor() {
       })}</div> : <div className="empty">{kubernetesNamespaces ? '此集群没有 Namespace。' : '尚未读取集群清单。'}</div>}
     </section>}
     {!folderId && <section className="service-network card" aria-labelledby="service-network-title">
-      <div className="card-title"><div><h2 id="service-network-title">Kubernetes 服务网络</h2><p>Service 与 EndpointSlice 持久化快照；TCP 探测需单独显式启用</p></div><button className="secondary" disabled={inventoryBusy} onClick={() => void loadServiceInventory(true)}>{inventoryBusy ? '读取中…' : '↻ 刷新清单'}</button></div>
-        {serviceInventoryError && <div className="alert error" role="alert">{serviceInventoryError}{!isMock && ' · 请在 Core 配置集群身份、namespace 并显式启用 Kubernetes 服务发现。'}</div>}
-      {serviceInventory && <>
-        <div className="service-network-meta"><span><b>{serviceInventory.sourceId}</b> · namespace <b>{serviceInventory.namespace}</b></span><span>{serviceInventory.observedAt ? `观测于 ${new Date(serviceInventory.observedAt).toLocaleString()}` : '尚无持久化快照'}</span>{serviceProbes && <span className={`badge ${serviceProbes.enabled ? 'available' : 'pending'}`}>TCP 探测{serviceProbes.enabled ? '已启用' : '已关闭'}</span>}{mockBusiness && <span className="badge pending">Mock 示例</span>}</div>
-        {serviceInventory.services.length ? <div className="service-network-list">{serviceInventory.services.map(service => <article className="service-network-item" key={service.serviceName}>
-          <div className="service-network-title"><div><strong>{service.serviceName}</strong><small>{service.type} · {service.clusterIps.length ? service.clusterIps.join(', ') : service.externalName ?? '无 ClusterIP'}</small></div><span className="badge">{service.endpoints.filter(endpoint => endpoint.ready === true).length}/{service.endpoints.length} ready</span></div>
-          <div className="service-network-ports">{service.ports.map((port, index) => <span className="chip" key={`${port.name ?? 'port'}-${index}`}>{port.name ? `${port.name} · ` : ''}{port.port}/{port.protocol} → {port.targetPort}</span>)}</div>
-          {service.endpoints.length ? <div className="service-network-endpoints">{service.endpoints.map((endpoint, index) => {
-            const endpointProbes = serviceProbes?.probes.filter(probe => probe.serviceName === service.serviceName && probe.address === endpoint.address) ?? [];
-            return <div key={`${endpoint.address}-${index}`}><span className={`badge ${endpoint.ready === true ? 'online' : endpoint.ready === false ? 'offline' : 'unknown'}`}>{endpoint.ready === true ? 'Ready' : endpoint.ready === false ? 'Not ready' : 'Unknown'}</span><code>{endpoint.address}</code><span>{endpoint.targetKind && endpoint.targetName ? `${endpoint.targetKind}/${endpoint.targetName}` : '无 Pod 身份'}</span><small>{endpoint.nodeName ?? endpoint.addressType}{endpoint.terminating ? ' · 正在终止' : ''}</small>{serviceProbes?.enabled && <span className="service-network-probe">{endpointProbes.length ? endpointProbes.map(probe => <span className={`badge ${probe.outcome === 'SUCCEEDED' ? 'succeeded' : probe.outcome === 'FAILED' ? 'failed' : 'unknown'}`} key={`${probe.port}/${probe.protocol}`} title={`清单观测 ${probe.inventoryObservedAt} · 探测 ${probe.observedAt}`}>{probe.protocol}/{probe.port} {probe.outcome}</span>) : <span className="badge pending">尚无 TCP 结果</span>}</span>}</div>;
-          })}</div> : <p className="service-network-empty">当前没有 EndpointSlice 地址</p>}
-        </article>)}</div> : <div className="empty">{serviceInventory.observedAt ? '该 namespace 当前没有 Service。' : '等待首次采集；可手动刷新清单。'}</div>}
+      <div className="card-title"><div><h2 id="service-network-title">Istio 服务网络</h2><p>Service / EndpointSlice 来自 Kubernetes API；流量、响应码和 mTLS 来自 Istio Envoy 实时指标</p></div>{!isMock && <button className="secondary" disabled={inventoryBusy} onClick={() => void loadServiceInventory(true)}>{inventoryBusy ? '读取中…' : '↻ 刷新实时数据'}</button>}</div>
+      {isMock ? <div className="service-network-live-required" role="note"><span className="service-network-live-icon">◉</span><div><strong>实时 Istio 数据尚未连接</strong><p>服务网络不显示 Mock 样例。切换到连接 K3s Core 的实时模式后，页面才会读取真实 Service、EndpointSlice 和 Envoy 指标。</p></div></div> : <>
+        {serviceInventoryError && <div className="alert error" role="alert">{serviceInventoryError} · 检查 Core 集群身份、namespace、Pod 读取权限及 Istio Envoy metrics 可达性。</div>}
+        {serviceInventory && <>
+          <div className="service-network-meta"><span>集群 <b>{serviceInventory.sourceId}</b></span><span>namespace <b>{serviceInventory.namespace}</b></span><span>清单 {serviceInventory.observedAt ? new Date(serviceInventory.observedAt).toLocaleString() : '未采集'}</span><span className={`badge ${serviceInventory.istio.status === 'LIVE' ? 'online' : serviceInventory.istio.status === 'PARTIAL' ? 'pending' : 'unknown'}`}>Istio {serviceInventory.istio.status}</span></div>
+          <div className="service-network-overview">
+            <article><span>Services</span><strong>{serviceInventory.services.length}</strong><small>{readyServiceEndpoints}/{totalServiceEndpoints} 个 Endpoint Ready</small></article>
+            <article><span>Istio sidecar</span><strong>{serviceInventory.istio.sidecarsReady}/{serviceInventory.istio.sidecarsDiscovered}</strong><small>{serviceInventory.istio.sidecarsScraped} 个代理取得指标</small></article>
+            <article><span>Envoy requests</span><strong>{observedIstioRequests.toLocaleString()}</strong><small>各代理自启动以来的目的端累计值</small></article>
+            <article><span>mTLS requests</span><strong>{serviceInventory.istio.traffic.filter(edge => edge.securityPolicy === 'MUTUAL_TLS').reduce((count, edge) => count + edge.requestCount, 0).toLocaleString()}</strong><small>{serviceProbes?.enabled ? 'TCP 连通探测另列，不代表 HTTP 策略' : '基于 Istio destination reporter'}</small></article>
+          </div>
+          <div className="service-network-controls"><label htmlFor="service-network-search">筛选 Service 或 workload</label><input id="service-network-search" type="search" value={serviceSearch} onChange={event => setServiceSearch(event.target.value)} placeholder="输入 service / workload 名称" /></div>
+          <div className="service-network-content">
+            <section className="service-network-services" aria-labelledby="service-network-services-title"><div className="service-network-section-heading"><div><h3 id="service-network-services-title">Kubernetes Services</h3><small>展开单项查看端点与 sidecar 状态</small></div><span>{visibleNetworkServices.length} / {serviceInventory.services.length}</span></div>
+              {visibleNetworkServices.length ? <div className="service-network-list">{visibleNetworkServices.map(service => {
+                const ready = service.endpoints.filter(endpoint => endpoint.ready === true).length;
+                const sidecarReady = service.endpoints.filter(endpoint => endpoint.istioProxyStatus === 'READY').length;
+                return <details className="service-network-item" key={service.serviceName}>
+                  <summary><span className="service-network-name"><strong>{service.serviceName}</strong><small>{service.type} · {service.clusterIps.length ? service.clusterIps.join(', ') : service.externalName ?? '无 ClusterIP'}</small></span><span className="service-network-summary-counts"><b>{ready}/{service.endpoints.length}</b><small>Ready · {sidecarReady} sidecar</small></span></summary>
+                  <div className="service-network-ports">{service.ports.map((port, index) => <span className="chip" key={`${port.name ?? 'port'}-${index}`}>{port.name ? `${port.name} · ` : ''}{port.port}/{port.protocol} → {port.targetPort}</span>)}</div>
+                  {service.endpoints.length ? <div className="service-network-endpoints">{service.endpoints.map((endpoint, index) => {
+                    const endpointProbes = serviceProbes?.probes.filter(probe => probe.serviceName === service.serviceName && probe.address === endpoint.address) ?? [];
+                    return <div key={`${endpoint.address}-${index}`}><span className={`badge ${endpoint.ready === true ? 'online' : endpoint.ready === false ? 'offline' : 'unknown'}`}>{endpoint.ready === true ? 'Ready' : endpoint.ready === false ? 'Not ready' : 'Unknown'}</span><code>{endpoint.address}</code><span>{endpoint.targetKind && endpoint.targetName ? `${endpoint.targetKind}/${endpoint.targetName}` : '无 Pod 身份'}</span><span className={`badge ${endpoint.istioProxyStatus === 'READY' ? 'available' : endpoint.istioProxyStatus === 'NOT_INJECTED' ? 'pending' : 'unknown'}`} title={endpoint.istioProxyVersion ?? undefined}>Istio {endpoint.istioProxyStatus === 'READY' ? endpoint.istioProxyVersion ?? 'Ready' : endpoint.istioProxyStatus === 'NOT_INJECTED' ? '未注入' : endpoint.istioProxyStatus === 'NOT_READY' ? 'Sidecar 未就绪' : '未知'}</span><small>{endpoint.nodeName ?? endpoint.addressType}{endpoint.terminating ? ' · 正在终止' : ''}</small>{serviceProbes?.enabled && <span className="service-network-probe">{endpointProbes.length ? endpointProbes.map(probe => <span className={`badge ${probe.outcome === 'SUCCEEDED' ? 'succeeded' : probe.outcome === 'FAILED' ? 'failed' : 'unknown'}`} key={`${probe.port}/${probe.protocol}`} title={`清单观测 ${probe.inventoryObservedAt} · 探测 ${probe.observedAt}`}>{probe.protocol}/{probe.port} {probe.outcome}</span>) : <span className="badge pending">尚无 TCP 结果</span>}</span>}</div>;
+                  })}</div> : <p className="service-network-empty">当前没有 EndpointSlice 地址</p>}
+                </details>;
+              })}</div> : <div className="empty">{serviceInventory.services.length ? '没有匹配的 Service。' : serviceInventory.observedAt ? '该 namespace 当前没有 Service。' : '等待首次采集。'}</div>}
+            </section>
+            <aside className="service-network-traffic" aria-labelledby="service-network-traffic-title"><div className="service-network-section-heading"><div><h3 id="service-network-traffic-title">Istio 实际流量</h3><small>{serviceInventory.istio.observedAt ? `采样于 ${new Date(serviceInventory.istio.observedAt).toLocaleTimeString()}` : '等待 Envoy 指标'}</small></div><span>{istioTraffic.length} 条</span></div>
+              {istioTraffic.length ? <div className="service-network-flow-list">{istioTraffic.slice(0, 10).map((flow, index) => <article className="service-network-flow" key={`${flow.sourceNamespace}/${flow.sourceWorkload}-${flow.destinationService}-${flow.responseCode}-${flow.securityPolicy}-${index}`}><div className="service-network-flow-path"><span><b>{flow.sourceWorkload}</b><small>{flow.sourceNamespace}</small></span><i aria-hidden="true">→</i><span><b>{flow.destinationService}</b><small>{flow.destinationWorkload}</small></span></div><div className="service-network-flow-stats"><span className={`badge ${flow.responseCode.startsWith('2') ? 'online' : flow.responseCode.startsWith('4') ? 'pending' : 'offline'}`}>HTTP {flow.responseCode}</span><span className={`badge ${flow.securityPolicy === 'MUTUAL_TLS' ? 'available' : 'unknown'}`}>{flow.securityPolicy === 'MUTUAL_TLS' ? 'mTLS' : flow.securityPolicy === 'PLAINTEXT' ? '明文' : '安全未知'}</span><strong>{flow.requestCount.toLocaleString()} req</strong></div></article>)}{istioTraffic.length > 10 && <details className="service-network-more-flows"><summary>展开其余 {istioTraffic.length - 10} 条观测</summary>{istioTraffic.slice(10).map((flow, index) => <article className="service-network-flow" key={`more-${flow.sourceNamespace}/${flow.sourceWorkload}-${flow.destinationService}-${flow.responseCode}-${index}`}><div className="service-network-flow-path"><span><b>{flow.sourceWorkload}</b><small>{flow.sourceNamespace}</small></span><i aria-hidden="true">→</i><span><b>{flow.destinationService}</b><small>{flow.destinationWorkload}</small></span></div><div className="service-network-flow-stats"><span>HTTP {flow.responseCode}</span><span>{flow.securityPolicy}</span><strong>{flow.requestCount.toLocaleString()} req</strong></div></article>)}</details>}</div> : <div className="service-network-no-flows">{serviceInventory.istio.status === 'NOT_INSTALLED' ? '此 namespace 没有 Istio sidecar。' : serviceInventory.istio.status === 'NOT_READY' ? 'Istio sidecar 尚未 Ready。' : serviceInventory.istio.status === 'UNAVAILABLE' ? 'Sidecar 存在，但 Envoy metrics 端点不可达。' : serviceInventory.istio.status === 'NOT_COLLECTED' ? '该快照尚无 Istio 指标，请刷新。' : '最近采样没有服务请求；实际流量会显示在这里。'}</div>}
+            </aside>
+          </div>
+          {serviceInventory.istio.status === 'PARTIAL' && <p className="service-network-footnote">当前为部分采样：每轮最多读取 24 个 Ready Envoy sidecar，500 ms 超时；指标按代理生命周期累计。</p>}
+          {serviceProbes && serviceProbes.enabled && <p className="service-network-footnote">TCP 探测独立于 Istio HTTP 流量统计；它仅证明到 Ready 私网端口可建立 TCP 连接。</p>}
+        </>}
+        {!serviceInventory && !serviceInventoryError && <div className="empty">正在读取真实 Kubernetes 与 Istio 快照…</div>}
       </>}
     </section>}
     <NetbirdProviderPanel />

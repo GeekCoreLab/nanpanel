@@ -11,6 +11,9 @@ try {
   const device = name => page.locator('.react-flow__node-device').filter({ has: page.getByText(name, { exact: true }) });
   const gateway = device('公网 Gateway'), host = device('NAT Host'), service = device('K3s Service');
   await gateway.waitFor();
+  await expect(page.getByRole('heading', { name: 'Istio 服务网络', exact: true })).toBeVisible();
+  await expect(page.getByText('实时 Istio 数据尚未连接')).toBeVisible();
+  await expect(page.locator('.service-network-item')).toHaveCount(0);
   await page.getByLabel('拓扑编辑器').scrollIntoViewIfNeeded();
   await expect(gateway.locator('[data-handleid="out-1"]')).toHaveCSS('background-color', 'rgb(46, 175, 131)');
   await expect(host.locator('[data-handleid="in-1"]')).toHaveCSS('background-color', 'rgb(74, 134, 237)');

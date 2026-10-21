@@ -35,20 +35,36 @@ not a mutation of desired topology.
 
 `panel-cluster` reads Services and EndpointSlices in one explicitly chosen
 namespace and emits a bounded snapshot with service ports, endpoint addresses,
-readiness conditions, Pod target identity, and observation time. Core exposes
-this read-only snapshot at `GET /api/v1/kubernetes/service-inventory`; the feature
-is disabled by default and the namespace and cluster identity come from server
-configuration. The topology page shows the inventory in Live mode and labels
-the in-memory sample in Mock mode. Core persists the latest bounded snapshot and
-refreshes it every 60 seconds. An independent, disabled-by-default probe switch
-can check at most 32 Ready EndpointSlice private IP/TCP ports per refresh; it
-stores the latest result per service/endpoint/port and prunes records after seven
-days. It skips FQDN, public, loopback, link-local, UDP, and non-Ready endpoints.
-A live Core run on the test cluster persisted a successful probe matching
-the current Service and EndpointSlice inventory. Authenticated inventory and
-probe API-level acceptance passed with a scoped read-only API key; see the
-[live acceptance record](../../tests/p2/runs/2026-10-20-core-service-probe-live.md).
-Istio policy reconciliation remains future Provider work.
+readiness conditions, Pod target identity, and observation time. Core enriches
+Pod endpoints with the live `istio-proxy` readiness and image version. For up
+to 24 Ready sidecars per refresh, it reads the fixed private Pod address
+`http://PodIP:15090/stats/prometheus` directly, without following redirects or
+using a proxy. It accepts only destination-side `istio_requests_total` samples
+whose destination Service belongs to the configured namespace and current
+inventory. The stored flow rows contain source/destination workload names,
+response code, reported `connection_security_policy`, and the Envoy request
+counter. Principals, raw Prometheus labels, and unrelated metrics are discarded.
+Each scrape has 500 ms connect/read timeouts and a 2 MiB response cap; larger
+namespaces show partial sampling. Request counters are cumulative over the
+sidecar lifetime, not a rate.
+
+Core exposes the bounded read-only snapshot at
+`GET /api/v1/kubernetes/service-inventory`; collection is disabled by default
+and cluster/namespace identity comes from server configuration. Core persists
+the latest snapshot and refreshes it every 60 seconds. The service-network UI
+refuses to display mock inventory: Mock mode shows a live-connection prompt,
+while connected mode shows compact service summaries with endpoints on demand
+and actual Istio flow observations alongside the Service list. An independent,
+disabled-by-default TCP probe switch can check at most 32 Ready EndpointSlice
+private IP/TCP ports per refresh; it stores the latest result per
+service/endpoint/port and prunes records after seven days. It skips FQDN, public,
+loopback, link-local, UDP, and non-Ready endpoints. These TCP checks do not
+represent Istio HTTP traffic or policy results.
+
+The target `k3s-1` mesh was read-only verified to expose the metrics endpoint
+from Core, report 200/mutual-TLS traffic for the allowed service account, and
+report 403/mutual-TLS traffic for the denied identity. Production Istio policy
+reconciliation remains future Provider work.
 
 Path display must be based on provider evidence. A NetBird management API peer
 record can establish discovery and control-plane connectivity, but does not by

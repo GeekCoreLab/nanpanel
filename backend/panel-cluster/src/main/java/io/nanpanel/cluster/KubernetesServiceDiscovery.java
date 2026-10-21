@@ -400,12 +400,36 @@ public final class KubernetesServiceDiscovery {
   }
 
   public record Snapshot(String sourceId, String namespace, Instant observedAt,
-                         List<ServiceObservation> services) {
+                         List<ServiceObservation> services, IstioTelemetry istio) {
+    public Snapshot(String sourceId, String namespace, Instant observedAt,
+                    List<ServiceObservation> services) {
+      this(sourceId, namespace, observedAt, services, IstioTelemetry.notCollected());
+    }
+
     public Snapshot {
       observedAt = observedAt == null ? null : observedAt.truncatedTo(ChronoUnit.MICROS);
       services = List.copyOf(services);
+      istio = istio == null ? IstioTelemetry.notCollected() : istio;
     }
   }
+
+  public record IstioTelemetry(String status, Instant observedAt, int sidecarsDiscovered,
+                               int sidecarsReady, int sidecarsScraped,
+                               List<IstioTrafficEdge> traffic) {
+    public IstioTelemetry {
+      observedAt = observedAt == null ? null : observedAt.truncatedTo(ChronoUnit.MICROS);
+      traffic = List.copyOf(traffic);
+    }
+
+    public static IstioTelemetry notCollected() {
+      return new IstioTelemetry("NOT_COLLECTED", null, 0, 0, 0, List.of());
+    }
+  }
+
+  public record IstioTrafficEdge(String sourceWorkload, String sourceNamespace,
+                                String destinationWorkload, String destinationService,
+                                String responseCode, String securityPolicy,
+                                long requestCount) {}
 
   public record ServiceObservation(String serviceName, String type, List<String> clusterIps,
                                    String externalName,
@@ -427,7 +451,16 @@ public final class KubernetesServiceDiscovery {
   public record EndpointObservation(String addressType, String address, Boolean ready,
                                     Boolean serving, Boolean terminating, String targetKind,
                                     String targetName, String targetNamespace, String nodeName,
-                                    String zone, List<EndpointPortObservation> ports) {
+                                    String zone, List<EndpointPortObservation> ports,
+                                    String istioProxyStatus, String istioProxyVersion) {
+    public EndpointObservation(String addressType, String address, Boolean ready,
+        Boolean serving, Boolean terminating, String targetKind, String targetName,
+        String targetNamespace, String nodeName, String zone,
+        List<EndpointPortObservation> ports) {
+      this(addressType, address, ready, serving, terminating, targetKind, targetName,
+          targetNamespace, nodeName, zone, ports, "UNKNOWN", null);
+    }
+
     public EndpointObservation {
       ports = List.copyOf(ports);
     }

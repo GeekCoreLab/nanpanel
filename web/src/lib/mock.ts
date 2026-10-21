@@ -158,24 +158,7 @@ export async function mockRequest(path: string, options: RequestInit, authentica
    ] },
   ] : [], pods });
  }
- if (p === '/kubernetes/service-inventory' || p === '/kubernetes/service-inventory/refresh') return ok({
-  sourceId: 'kubernetes:demo-cluster', namespace: 'nanpanel-mesh', observedAt: now(), services: [
-   { serviceName: 'catalog-api', type: 'ClusterIP', clusterIps: ['10.43.120.17'], externalName: null, ports: [{ name: 'http', protocol: 'TCP', port: 80, targetPort: '8080', appProtocol: 'http' }], endpoints: [
-    { addressType: 'IPv4', address: '10.42.1.23', ready: true, serving: true, terminating: false, targetKind: 'Pod', targetName: 'catalog-api-6c847d7d4b-kd2sh', targetNamespace: 'nanpanel-mesh', nodeName: 'k3s-worker-1', zone: null, ports: [{ name: 'http', protocol: 'TCP', port: 8080, appProtocol: 'http' }] },
-    { addressType: 'IPv4', address: '10.42.2.31', ready: true, serving: true, terminating: false, targetKind: 'Pod', targetName: 'catalog-api-6c847d7d4b-qv9mc', targetNamespace: 'nanpanel-mesh', nodeName: 'k3s-worker-2', zone: null, ports: [{ name: 'http', protocol: 'TCP', port: 8080, appProtocol: 'http' }] },
-   ] },
-   { serviceName: 'catalog-canary', type: 'ClusterIP', clusterIps: ['10.43.121.8'], externalName: null, ports: [{ name: 'http', protocol: 'TCP', port: 80, targetPort: '8080', appProtocol: 'http' }], endpoints: [
-    { addressType: 'IPv4', address: '10.42.1.46', ready: false, serving: true, terminating: false, targetKind: 'Pod', targetName: 'catalog-canary-7b89c56899-m88zg', targetNamespace: 'nanpanel-mesh', nodeName: 'k3s-worker-1', zone: null, ports: [{ name: 'http', protocol: 'TCP', port: 8080, appProtocol: 'http' }] },
-   ] },
-  ],
- });
- if (p === '/kubernetes/service-probes') return ok({
-  sourceId: 'kubernetes:demo-cluster', enabled: true, observedAt: now(), probes: [
-   { serviceName: 'catalog-api', address: '10.42.1.23', port: 8080, protocol: 'TCP', outcome: 'SUCCEEDED', observedAt: now() },
-   { serviceName: 'catalog-api', address: '10.42.2.31', port: 8080, protocol: 'TCP', outcome: 'SUCCEEDED', observedAt: now() },
-   { serviceName: 'catalog-canary', address: '10.42.1.46', port: 8080, protocol: 'TCP', outcome: 'TIMED_OUT', observedAt: now() },
-  ],
- });
+ if (p === '/kubernetes/service-inventory' || p === '/kubernetes/service-inventory/refresh' || p === '/kubernetes/service-probes') return fail(503, 'LIVE_ISTIO_REQUIRED', 'Mock 环境不生成服务网络或 Istio 流量数据');
  if (p === '/hosts') {
   const status = url.searchParams.get('status'); const search = (url.searchParams.get('search') ?? '').trim().toLocaleLowerCase();
   return ok(page(hosts.filter(host => (!status || host.status === status) && (!search || host.hostname.toLocaleLowerCase().includes(search)))));

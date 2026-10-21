@@ -37,6 +37,7 @@ public class KubernetesServiceInventoryService {
 
   @Inject AuthStore store;
   @Inject ObjectMapper mapper;
+  @Inject KubernetesIstioTelemetryCollector istioTelemetry;
 
   private final KubernetesServiceDiscovery discovery = new KubernetesServiceDiscovery();
   private final KubernetesTopologyDiscovery topologyDiscovery = new KubernetesTopologyDiscovery();
@@ -106,7 +107,7 @@ public class KubernetesServiceInventoryService {
       // Keep the public inventory timestamp identical to PostgreSQL's persisted
       // microsecond timestamp, which is also referenced by stored probe rows.
       return new Snapshot(stored.sourceId(), stored.namespace(), observedAt,
-          stored.services());
+          stored.services(), stored.istio());
     } catch (java.io.IOException failure) {
       throw new IllegalStateException("Unable to decode stored Kubernetes inventory", failure);
     }
@@ -117,6 +118,7 @@ public class KubernetesServiceInventoryService {
     Snapshot snapshot;
     try (var client = new KubernetesClientBuilder().build()) {
       snapshot = discovery.discover(client, clusterId, namespace);
+      snapshot = istioTelemetry.collect(client, snapshot);
     }
     persist(snapshot);
     if (serviceProbesEnabled) {

@@ -13,6 +13,7 @@ view alone does not complete the stage.
 | K3s install and upgrade | Exercise Agent-mediated server/agent installation and upgrade plans, preflight blockers, one-node-at-a-time ordering, health gates, timeout/failure reporting, and recovery without arbitrary shell access. |
 | KubeEdge ownership | Verify CloudCore/EdgeCore status and registration state; prove an explicitly mapped EdgeCore Host still supports OS diagnostics while Agent container operations are denied. |
 | K3s Service ingress | From a normal Linux Gateway, route through an explicit ingress/Service mapping to a Ready K3s endpoint; prove health, authorization, and rollback/failure reporting. |
+| Live Istio service network | In the target cluster, show real Kubernetes Service/EndpointSlice state, injected/Ready Envoy sidecars, destination request counters, HTTP results, and mTLS labels; Mock mode must not fabricate this view and the UI must expand details on demand. |
 | Control-plane failure | Block the Kubernetes API and prove Host Agent diagnostics remain available; report cluster observations stale without marking them healthy or stopping EdgeCore. |
 | Data ownership | Verify the Kubernetes API is the sole container lifecycle owner on KubeEdge nodes and that Core does not issue duplicate Agent container operations. |
 

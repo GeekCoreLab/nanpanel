@@ -102,6 +102,19 @@ test('Mock cluster hierarchy exposes namespaces, ingress routes, pods and contai
   await mockRequest('/auth/logout', { method: 'POST', headers: { 'X-CSRF-Token': login.csrfToken } });
 });
 
+test('Mock mode refuses to fabricate service inventory and Istio traffic', async () => {
+  const csrfToken = (await (await mockRequest('/auth/csrf', { method: 'GET' })).json()).csrfToken;
+  const login = await (await mockRequest('/auth/login', { method: 'POST', headers: { 'X-CSRF-Token': csrfToken }, body: JSON.stringify({ username: 'admin', password: DEMO_PASSWORD }) })).json();
+  const inventory = await mockRequest('/kubernetes/service-inventory', { method: 'GET' });
+  const refresh = await mockRequest('/kubernetes/service-inventory/refresh', { method: 'POST', headers: { 'X-CSRF-Token': login.csrfToken } });
+  const probes = await mockRequest('/kubernetes/service-probes', { method: 'GET' });
+  assert.equal(inventory.status, 503);
+  assert.equal(refresh.status, 503);
+  assert.equal(probes.status, 503);
+  assert.equal((await inventory.json()).code, 'LIVE_ISTIO_REQUIRED');
+  await mockRequest('/auth/logout', { method: 'POST', headers: { 'X-CSRF-Token': login.csrfToken } });
+});
+
 test('Mock topology API requires auth, CSRF, matching ETag; save is atomic and remains unverified', async () => {
   let csrf = '';
   async function call(method, body, etag, token = csrf) {

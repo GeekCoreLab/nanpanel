@@ -5,7 +5,7 @@ metadata:
   namespace: nanpanel-mesh
 rules:
   - apiGroups: [""]
-    resources: ["services"]
+    resources: ["services", "pods"]
     verbs: ["list"]
   - apiGroups: ["discovery.k8s.io"]
     resources: ["endpointslices"]

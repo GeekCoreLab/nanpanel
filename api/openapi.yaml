@@ -5107,7 +5107,7 @@ components:
     KubernetesServiceInventorySnapshot:
       type: object
       additionalProperties: false
-      required: [sourceId, namespace, observedAt, services]
+      required: [sourceId, namespace, observedAt, services, istio]
       properties:
         sourceId:
           type: string
@@ -5125,6 +5125,63 @@ components:
           maxItems: 512
           items:
             $ref: '#/components/schemas/KubernetesServiceObservation'
+        istio:
+          $ref: '#/components/schemas/KubernetesIstioTelemetry'
+    KubernetesIstioTelemetry:
+      type: object
+      additionalProperties: false
+      required: [status, observedAt, sidecarsDiscovered, sidecarsReady, sidecarsScraped, traffic]
+      properties:
+        status:
+          type: string
+          enum: [NOT_COLLECTED, NOT_INSTALLED, NOT_READY, UNAVAILABLE, PARTIAL, LIVE]
+        observedAt:
+          type: [string, 'null']
+          format: date-time
+        sidecarsDiscovered:
+          type: integer
+          minimum: 0
+          maximum: 1024
+        sidecarsReady:
+          type: integer
+          minimum: 0
+          maximum: 1024
+        sidecarsScraped:
+          type: integer
+          minimum: 0
+          maximum: 24
+        traffic:
+          type: array
+          maxItems: 1024
+          items:
+            $ref: '#/components/schemas/KubernetesIstioTrafficEdge'
+    KubernetesIstioTrafficEdge:
+      type: object
+      additionalProperties: false
+      required: [sourceWorkload, sourceNamespace, destinationWorkload, destinationService, responseCode, securityPolicy, requestCount]
+      properties:
+        sourceWorkload:
+          type: string
+          maxLength: 253
+        sourceNamespace:
+          type: string
+          maxLength: 253
+        destinationWorkload:
+          type: string
+          maxLength: 253
+        destinationService:
+          type: string
+          maxLength: 63
+        responseCode:
+          type: string
+          pattern: '^[1-5][0-9]{2}$'
+        securityPolicy:
+          type: string
+          enum: [MUTUAL_TLS, PLAINTEXT, UNKNOWN]
+        requestCount:
+          type: integer
+          format: int64
+          minimum: 0
     KubernetesTopologyNamespaceSnapshot:
       type: object
       additionalProperties: false
@@ -5430,7 +5487,7 @@ components:
     KubernetesEndpointObservation:
       type: object
       additionalProperties: false
-      required: [addressType, address, ready, serving, terminating, targetKind, targetName, targetNamespace, nodeName, zone, ports]
+      required: [addressType, address, ready, serving, terminating, targetKind, targetName, targetNamespace, nodeName, zone, ports, istioProxyStatus, istioProxyVersion]
       properties:
         addressType:
           type: string
@@ -5464,6 +5521,12 @@ components:
           maxItems: 128
           items:
             $ref: '#/components/schemas/KubernetesEndpointPortObservation'
+        istioProxyStatus:
+          type: string
+          enum: [READY, NOT_READY, NOT_INJECTED, UNKNOWN]
+        istioProxyVersion:
+          type: [string, 'null']
+          maxLength: 128
     KubernetesEndpointPortObservation:
       type: object
       additionalProperties: false
