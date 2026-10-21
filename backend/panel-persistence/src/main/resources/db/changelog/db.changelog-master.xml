@@ -28,4 +28,5 @@
 <changeSet id="026-api-keys" author="nanpanel"><sqlFile path="026-api-keys.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE api_key;</sql></rollback></changeSet>
 <changeSet id="027-topology-revisions" author="nanpanel"><sqlFile path="027-topology-revisions.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE topology_head; DROP TABLE topology_revision;</sql></rollback></changeSet>
 <changeSet id="028-kubernetes-clusters" author="nanpanel"><sqlFile path="028-kubernetes-clusters.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE kubernetes_managed_deployment; DROP TABLE kubernetes_cluster_node; DROP TABLE kubernetes_cluster;</sql></rollback></changeSet>
+<changeSet id="029-kubernetes-node-presence" author="nanpanel"><sqlFile path="029-kubernetes-node-presence.sql" relativeToChangelogFile="true"/><rollback><sql>ALTER TABLE kubernetes_cluster_node DROP COLUMN node_present;</sql></rollback></changeSet>
 </databaseChangeLog>

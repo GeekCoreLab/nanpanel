@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { connectionError, createTopologyNode, draftError, initialTopology, validNodeShape } from '../src/lib/topology-model.ts';
+import { connectionError, createTopologyNode, draftError, initialTopology, resolveRouteNextHop, validNodeShape } from '../src/lib/topology-model.ts';
 import { mockRequest, DEMO_PASSWORD } from '../src/lib/mock.ts';
 const node = kind => createTopologyNode(kind, { x: 0, y: 0 });
 const link = (source, target, out = 'out-1', input = 'in-1', layer = 'L4', protocol = 'TCP') => ({ id: crypto.randomUUID(), sourceNodeId: source.id, sourcePort: out, targetNodeId: target.id, targetPort: input, layer, protocol, status: 'UNVERIFIED' });
@@ -49,6 +49,23 @@ test('folder hierarchy, host asset binding and same-scope connections are valida
   assert.match(draftError({ nodes: [{ ...folder, parentId: service.id }, service], links: [] }), /文件夹/);
   assert.match(draftError({ nodes: [host, { ...host, id: crypto.randomUUID() }], links: [] }), /只能添加一次/);
   assert.match(draftError({ nodes: [{ ...service, assetId: crypto.randomUUID() }], links: [] }), /只有主机或 Gateway 节点/);
+});
+
+test('route next-hop matching requires one distinct Host asset owner', () => {
+  const source = { id: 'source', hostname: 'source-host' };
+  const target = { id: 'target', hostname: 'target-host' };
+  const addressOwners = new Map([
+    ['10.0.0.1', [target]],
+    ['10.0.0.2', [source]],
+    ['10.0.0.3', [source, target]],
+    ['10.0.0.4', [target, target]],
+  ]);
+  assert.deepEqual(resolveRouteNextHop(null, source.id, addressOwners), { kind: 'DIRECT' });
+  assert.deepEqual(resolveRouteNextHop(' 10.0.0.1 ', source.id, addressOwners), { kind: 'MATCHED', host: target });
+  assert.deepEqual(resolveRouteNextHop('10.0.0.2', source.id, addressOwners), { kind: 'SELF' });
+  assert.deepEqual(resolveRouteNextHop('10.0.0.3', source.id, addressOwners), { kind: 'AMBIGUOUS' });
+  assert.deepEqual(resolveRouteNextHop('10.0.0.4', source.id, addressOwners), { kind: 'MATCHED', host: target });
+  assert.deepEqual(resolveRouteNextHop('10.0.0.9', source.id, addressOwners), { kind: 'UNMATCHED' });
 });
 
 test('Mock cluster hierarchy exposes namespaces, ingress routes, pods and container details', async () => {

@@ -43,7 +43,8 @@ public class HostHelperOperationResource {
   private static final Set<String> CAPABILITIES = Set.of(
       "package.install", "file.write.protected", "container.list", "container.logs",
       "container.start", "container.stop", "container.deploy", "network.firewall.expose",
-      "file.list", "file.read", "file.write", "file.delete");
+      "file.list", "file.read", "file.write", "file.delete", "k3s.preflight", "k3s.install",
+      "k3s.upgrade");
   private static final java.util.regex.Pattern PACKAGE_NAME =
       java.util.regex.Pattern.compile("[A-Za-z0-9][A-Za-z0-9+_.:-]{0,127}");
   private static final java.util.regex.Pattern FILE_NAME =
@@ -112,9 +113,11 @@ public class HostHelperOperationResource {
     String reason = input.reason() == null ? "" : input.reason().trim();
     int timeoutSeconds = input.timeoutSeconds() == null ? defaultTimeout(input.capability())
         : input.timeoutSeconds();
+    int maximumTimeoutSeconds = Set.of("k3s.install", "k3s.upgrade").contains(input.capability())
+        ? 600 : 300;
     if (reason.isEmpty() || reason.length() > 500 ||
         reason.chars().anyMatch(Character::isISOControl) ||
-        timeoutSeconds < 5 || timeoutSeconds > 300 || input.expectedGeneration() == null ||
+        timeoutSeconds < 5 || timeoutSeconds > maximumTimeoutSeconds || input.expectedGeneration() == null ||
         input.expectedGeneration() < 1)
       throw fail(422, "VALIDATION_FAILED", "操作原因、超时或主机版本无效");
     String payloadJson = input.payload() == null || input.payload().isNull()
@@ -281,7 +284,7 @@ public class HostHelperOperationResource {
 
   private void validateTargetAndPayload(String capability, String target, JsonNode payload) {
     boolean validTarget = switch (capability) {
-      case "package.install", "container.list" -> target.isEmpty();
+      case "package.install", "container.list", "k3s.preflight", "k3s.install", "k3s.upgrade" -> target.isEmpty();
       case "file.write.protected" -> FILE_NAME.matcher(target).matches();
       case "file.list" -> validHostPath(target, true);
       case "file.read", "file.write", "file.delete" -> validHostPath(target, false);
@@ -302,6 +305,44 @@ public class HostHelperOperationResource {
             !names.add(packageName.asText()))
           throw fail(422, "VALIDATION_FAILED", "软件包名称无效或重复");
       }
+      return;
+    }
+    if (capability.equals("k3s.preflight")) {
+      JsonNode role = payload == null ? null : payload.get("role");
+      if (payload == null || !payload.isObject() || payload.size() != 1 || role == null ||
+          !role.isTextual() || !Set.of("server", "agent").contains(role.asText()))
+        throw fail(422, "VALIDATION_FAILED", "K3s 前置校验角色必须为 server 或 agent");
+      return;
+    }
+    if (capability.equals("k3s.install")) {
+      JsonNode role = payload == null ? null : payload.get("role");
+      JsonNode version = payload == null ? null : payload.get("version");
+      JsonNode serverUrl = payload == null ? null : payload.get("serverUrl");
+      JsonNode token = payload == null ? null : payload.get("token");
+      boolean validVersion = version != null && version.isTextual()
+          && version.asText().matches("v[0-9]+\\.[0-9]+\\.[0-9]+\\+k3s[0-9]+");
+      boolean validToken = token != null && token.isTextual()
+          && token.asText().matches("[A-Za-z0-9_.:-]{16,512}");
+      boolean validServer = role != null && role.isTextual() && switch (role.asText()) {
+        case "server" -> serverUrl != null && serverUrl.isNull() &&
+            !token.asText().startsWith("K10");
+        case "agent" -> serverUrl != null && serverUrl.isTextual()
+            && validK3sServerUrl(serverUrl.asText());
+        default -> false;
+      };
+      if (payload == null || !payload.isObject() || payload.size() != 4 || !validVersion
+          || !validToken || !validServer)
+        throw fail(422, "VALIDATION_FAILED", "K3s 安装角色、版本、服务端地址或令牌无效");
+      return;
+    }
+    if (capability.equals("k3s.upgrade")) {
+      JsonNode role = payload == null ? null : payload.get("role");
+      JsonNode version = payload == null ? null : payload.get("version");
+      if (payload == null || !payload.isObject() || payload.size() != 2 || role == null ||
+          !role.isTextual() || !Set.of("server", "agent").contains(role.asText()) ||
+          version == null || !version.isTextual() ||
+          !version.asText().matches("v[0-9]+\\.[0-9]+\\.[0-9]+\\+k3s[0-9]+"))
+        throw fail(422, "VALIDATION_FAILED", "K3s 升级角色或固定版本无效");
       return;
     }
     if (capability.equals("file.write.protected")) {
@@ -354,6 +395,28 @@ public class HostHelperOperationResource {
       throw fail(422, "VALIDATION_FAILED", "该 Helper 操作不接受附加参数");
   }
 
+  private boolean validK3sServerUrl(String value) {
+    if (value.length() > 512 || value.contains("@")) return false;
+    try {
+      URI uri = URI.create(value);
+      if (!"https".equals(uri.getScheme()) || uri.getHost() == null
+          || uri.getRawUserInfo() != null || uri.getRawQuery() != null
+          || uri.getRawFragment() != null
+          || !(uri.getPort() == -1 || uri.getPort() == 6443)
+          || !(uri.getPath().isEmpty() || uri.getPath().equals("/"))) return false;
+      String host = uri.getHost();
+      if (host.equalsIgnoreCase("localhost") || host.endsWith(".localhost")) return false;
+      if (host.matches("[0-9.]+") || host.contains(":")) {
+        java.net.InetAddress address = java.net.InetAddress.getByName(host);
+        return !address.isAnyLocalAddress() && !address.isLoopbackAddress()
+            && !address.isLinkLocalAddress() && !address.isMulticastAddress();
+      }
+      return true;
+    } catch (IllegalArgumentException | java.net.UnknownHostException invalid) {
+      return false;
+    }
+  }
+
   private boolean validHostPath(String target, boolean allowRoot) {
     if (target == null || target.length() > 4096 || !target.startsWith("/") ||
         target.chars().anyMatch(Character::isISOControl))
@@ -370,7 +433,8 @@ public class HostHelperOperationResource {
   }
 
   private int defaultTimeout(String capability) {
-    return "package.install".equals(capability) ? 300 : 60;
+    return Set.of("k3s.install", "k3s.upgrade").contains(capability) ? 600
+        : capability.equals("package.install") ? 300 : 60;
   }
 
   private String operationSelect() {

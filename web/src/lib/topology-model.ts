@@ -1,6 +1,29 @@
 import { createUuid } from './uuid.ts';
 import type { TopologyDraftWrite, TopologyLink, TopologyNode, TopologyNodeKind, TopologyPort } from './types';
 
+export type RouteNextHopHost = { id: string; hostname: string };
+export type RouteNextHopResolution =
+  | { kind: 'DIRECT' }
+  | { kind: 'MATCHED'; host: RouteNextHopHost }
+  | { kind: 'AMBIGUOUS' }
+  | { kind: 'UNMATCHED' }
+  | { kind: 'SELF' };
+
+/** Resolve a route gateway only when exactly one different Host asset owns its address. */
+export function resolveRouteNextHop(
+  gateway: string | null | undefined,
+  sourceHostId: string,
+  ownersByAddress: ReadonlyMap<string, readonly RouteNextHopHost[]>,
+): RouteNextHopResolution {
+  const address = gateway?.trim().toLowerCase();
+  if (!address) return { kind: 'DIRECT' };
+  const owners = [...new Map((ownersByAddress.get(address) ?? []).map(owner => [owner.id, owner])).values()];
+  if (owners.length > 1) return { kind: 'AMBIGUOUS' };
+  if (!owners.length) return { kind: 'UNMATCHED' };
+  if (owners[0].id === sourceHostId) return { kind: 'SELF' };
+  return { kind: 'MATCHED', host: owners[0] };
+}
+
 const defaultPort = (id: string, direction: TopologyPort['direction']): TopologyPort => ({ id, direction, layer: 'L4', protocols: ['TCP', 'UDP'] });
 const portsFor = (inputs: number, outputs: number): TopologyPort[] => [
   ...Array.from({ length: inputs }, (_, index) => defaultPort(`in-${index + 1}`, 'INPUT')),

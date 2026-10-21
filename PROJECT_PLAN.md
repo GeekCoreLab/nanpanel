@@ -481,13 +481,18 @@ hybrid-infrastructure-platform/
 
 ### P4｜K3s / KubeEdge
 
-- [x] 拓扑文件夹支持多层编辑；K3s 视图可按需只读浏览 Namespace、Ingress、Service、Pod 和容器端口/状态，并从已登记主机路由快照匹配已知下一跳。
-- [ ] K3s 多集群导入、节点映射、基础资源管理。
+- [x] 拓扑文件夹支持多层编辑（本机浏览器场景已覆盖）。
+- [x] 在目标 K3s 环境读取 Namespace、Ingress 路由、Service、Pod 及容器端口/状态；见 [真实 K3s API 与拓扑视图验收](tests/p4/runs/2026-10-21-k3s-target-api-smoke.md)。
+- [ ] 在目标 K3s 环境验收已映射主机路由的下一跳匹配；Mock/Kind UI 场景仅覆盖代码路径。
+- [x] 在目标 K3s 上完成单集群导入、Node UID 映射及 namespace 限定 Deployment 创建/列表/缩放/删除，见 [真实 K3s API 验收](tests/p4/runs/2026-10-21-k3s-target-api-smoke.md)。
+- [ ] 在目标 K3s 环境完成多集群隔离、跨集群资源拒绝、多节点映射冲突及 Node 移除/解除映射验收；本机 Kind 仅作为 API/CRUD 开发测试，不计入该项。
 - [ ] K3s 安装、升级前校验、健康监测、失败处理。
 - [ ] KubeEdge Provider 的 CloudCore/EdgeCore 状态与注册管理。
-- [ ] 普通 Linux Gateway 为 K3s Service 提供入口。
+- [x] 普通 Linux Gateway 为 Ready K3s Service 提供入口，并验证 TLS、访问控制及回滚；见 [目标 K3s Gateway 入口验收](tests/p4/runs/2026-10-21-linux-gateway-k3s-service-ingress.md)。拓扑到远程 Gateway 的自动协调仍未实现。
 
 **验收**：K3s API 故障时，Host Agent 仍能诊断宿主机；不会让 Agent 与 KubeEdge 双重管理容器。
+
+**当前实现边界**：Agent/Helper 提供类型化 `k3s.preflight` 只读检查、`k3s.install` 单主机首次安装和 `k3s.upgrade` 单主机升级能力。安装/升级都限定固定稳定版本并校验官方 release checksum；安装拒绝覆盖已有数据，并将令牌只写入 root 可读 systemd 环境文件。升级仅支持由 NaNPanel 固定 unit 管理的节点、拒绝降级和跨越一个 Kubernetes minor 以上的升级，并在节点健康检查失败时尝试恢复旧二进制。Server 操作等待本地 Ready Node，Agent 操作仍要求后续确认 Node Ready；当前没有持久化的多节点 rollout 协调器。KubeEdge 集群摘要可读 CloudCore Pod 就绪情况；Node 清单以 Edge 角色标签、Node 存在性和 Ready 条件派生 EdgeCore 注册状态，并将已映射 Host Agent 最近的 `edgecore.service` systemd 观测合并为独立进程状态，过期观测不会显示为健康。该状态来自缓存观测而非同步进程探测。持久化安装/升级计划、逐节点排序与集群级健康门槛、KubeEdge 安装注册流程和拓扑到远程 Gateway 的自动协调仍未完成；对应清单保持未勾选。
 
 ### P5｜高级发布
 

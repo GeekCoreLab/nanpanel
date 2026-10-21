@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import type { WheelEvent as ReactWheelEvent } from 'react';
 import { createPortal } from 'react-dom';
 import {
   ReactFlow, ReactFlowProvider, Background, Controls, Handle, Position, ConnectionMode,
@@ -8,7 +9,7 @@ import {
 import { api, isMock, isP0Lab, mockBusiness } from './lib/api';
 import { createUuid } from './lib/uuid.ts';
 import NetbirdProviderPanel from './NetbirdProviderPanel';
-import { connectionError, createTopologyNode, draftError, nodePresets, validNodeShape } from './lib/topology-model';
+import { connectionError, createTopologyNode, draftError, nodePresets, resolveRouteNextHop, validNodeShape } from './lib/topology-model';
 import './topology-status.css';
 import './topology-hierarchy.css';
 import './gateway-asset-picker.css';
@@ -77,9 +78,18 @@ function Device({ data, selected }: NodeProps<DeviceNode>) {
       window.removeEventListener('scroll', updatePosition, true);
     };
   }, [node.kind, data.gatewayAssetOpen, data.gatewayAssetChoices?.length, data.gatewayAssetLoading]);
+  const scrollGatewayAssetList = (event: ReactWheelEvent<HTMLDivElement>) => {
+    const list = event.currentTarget;
+    const deltaScale = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+      ? 16
+      : event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? list.clientHeight : 1;
+    list.scrollTop += event.deltaY * deltaScale;
+    event.preventDefault();
+    event.stopPropagation();
+    event.nativeEvent.stopImmediatePropagation();
+  };
   const height = Math.max(node.inputCount, node.outputCount, 1) * 26 + 16;
   const gatewayChoices = [...(data.gatewayAssetChoices ?? [])];
-  if (data.asset && !gatewayChoices.some(host => host.id === data.asset!.id)) gatewayChoices.unshift(data.asset);
   const search = data.gatewayAssetSearch?.trim().toLocaleLowerCase() ?? '';
   const filteredGatewayChoices = gatewayChoices.filter(host => !search || host.hostname.toLocaleLowerCase().includes(search));
   const gatewayListId = `gateway-asset-options-${node.id}`;
@@ -89,7 +99,7 @@ function Device({ data, selected }: NodeProps<DeviceNode>) {
     {node.kind === 'GATEWAY' && <div className="gateway-asset-control nodrag">
       <label htmlFor={`gateway-asset-search-${node.id}`}>绑定主机资产 <span className={`gateway-asset-source ${data.gatewayAssetMock ? 'is-mock' : ''}`}>{data.gatewayAssetMock ? 'Mock 演示数据' : '实时资产'}</span></label>
       <input ref={gatewaySearchInput} id={`gateway-asset-search-${node.id}`} className="nodrag" role="combobox" aria-label="搜索 Gateway 主机资产" aria-autocomplete="list" aria-expanded={!!data.gatewayAssetOpen} aria-controls={gatewayListId} placeholder={data.asset?.hostname ?? '输入主机名搜索…'} value={data.gatewayAssetSearch ?? ''} onFocus={() => data.onGatewayAssetFocus?.(node.id)} onBlur={() => data.onGatewayAssetClose?.(node.id)} onChange={event => data.onGatewayAssetSearch?.(node.id, event.target.value)} onKeyDown={event => { if (event.key === 'Escape') data.onGatewayAssetClose?.(node.id); }} />
-      {data.gatewayAssetOpen && gatewayDropdownPosition && createPortal(<div className="gateway-asset-dropdown nowheel" id={gatewayListId} role="listbox" aria-label="可绑定的主机资产" style={{ position: 'fixed', left: gatewayDropdownPosition.left, top: gatewayDropdownPosition.top, width: gatewayDropdownPosition.width, maxHeight: gatewayDropdownPosition.maxHeight }} onWheel={event => { event.currentTarget.scrollTop += event.deltaY; event.preventDefault(); event.stopPropagation(); }}>
+      {data.gatewayAssetOpen && gatewayDropdownPosition && createPortal(<div className="gateway-asset-dropdown nowheel" id={gatewayListId} role="listbox" aria-label="可绑定的主机资产" onWheelCapture={scrollGatewayAssetList} style={{ position: 'fixed', left: gatewayDropdownPosition.left, top: gatewayDropdownPosition.top, width: gatewayDropdownPosition.width, maxHeight: gatewayDropdownPosition.maxHeight }}>
         {filteredGatewayChoices.map(host => {
           const boundElsewhere = (data.gatewayBoundAssetIds ?? []).includes(host.id) && host.id !== node.assetId;
           return <button type="button" className="gateway-asset-option nodrag" role="option" aria-selected={node.assetId === host.id} disabled={boundElsewhere} key={host.id} onMouseDown={event => event.preventDefault()} onClick={() => data.onGatewayAssetSelect?.(node.id, host)}><span><strong>{host.hostname}</strong><small>{host.os ?? 'OS 未知'} · {host.arch ?? '架构未知'}</small></span><span className={`badge ${boundElsewhere ? '' : host.status === 'ONLINE' ? 'online' : host.status === 'OFFLINE' ? 'offline' : 'unknown'}`}>{boundElsewhere ? '已绑定' : host.status}</span></button>;
@@ -159,7 +169,7 @@ function Editor() {
   async function loadHostAssets() {
     setAssetPickerBusy(true); setError('');
     try {
-      const result = await api<HostPage>('/hosts?limit=100', 'GET', undefined, {}, true);
+      const result = await api<HostPage>('/hosts?limit=100');
       setAssetChoices(result.data.items); setAssetNextCursor(result.data.nextCursor); setAssetPickerOpen(true);
     } catch (e) { setError((e as Error).message); }
     finally { setAssetPickerBusy(false); }
@@ -168,7 +178,7 @@ function Editor() {
     if (!assetNextCursor) return;
     setAssetPickerBusy(true);
     try {
-      const result = await api<HostPage>(`/hosts?limit=100&cursor=${encodeURIComponent(assetNextCursor)}`, 'GET', undefined, {}, true);
+      const result = await api<HostPage>(`/hosts?limit=100&cursor=${encodeURIComponent(assetNextCursor)}`);
       setAssetChoices(current => [...current, ...result.data.items]); setAssetNextCursor(result.data.nextCursor);
     } catch (e) { setError((e as Error).message); }
     finally { setAssetPickerBusy(false); }
@@ -182,7 +192,7 @@ function Editor() {
       if (cursor) params.set('cursor', cursor);
       if (search.trim()) params.set('search', search.trim());
       const query = `?${params}`;
-      const result = await api<HostPage>(`/hosts${query}`, 'GET', undefined, {}, true);
+      const result = await api<HostPage>(`/hosts${query}`);
       if (gatewayAssetRequest.current[nodeId] === requestId) {
         setGatewayAssetPages(current => ({ ...current, [nodeId]: { choices: cursor ? [...(current[nodeId]?.choices ?? []), ...result.data.items] : result.data.items, nextCursor: result.data.nextCursor, loading: false } }));
       }
@@ -347,7 +357,7 @@ function Editor() {
           gatewayAssetOpen: gatewayAssetOpen[node.id] ?? false,
           gatewayAssetLoading: gatewayAssetPages[node.id]?.loading ?? false,
           gatewayAssetError: gatewayAssetPages[node.id]?.error,
-          gatewayAssetMock: isMock,
+          gatewayAssetMock: mockBusiness,
           gatewayAssetNextCursor: gatewayAssetPages[node.id]?.nextCursor,
           gatewayBoundAssetIds: nodes.map(item => item.data.model.assetId).filter((id): id is string => !!id),
           onGatewayAssetFocus: openGatewayAssetPicker,
@@ -386,9 +396,9 @@ function Editor() {
     const sourceAsset = hostAssets[source.data.model.assetId!];
     if (!sourceAsset) continue;
     for (const route of sourceAsset.inventory.routes) {
-      const owners = route.gateway ? hostByAddress.get(route.gateway.toLowerCase()) ?? [] : [];
-      if (owners.length !== 1 || owners[0].id === sourceAsset.host.id) continue;
-      const target = rootNodeByAssetId.get(owners[0].id);
+      const resolution = resolveRouteNextHop(route.gateway, sourceAsset.host.id, hostByAddress);
+      if (resolution.kind !== 'MATCHED') continue;
+      const target = rootNodeByAssetId.get(resolution.host.id);
       if (!target || target.data.model.inputCount < 1 || source.data.model.outputCount < 1) continue;
       const key = `${source.id}:${target.id}`;
       const observed = observedRouteCounts.get(key);
@@ -465,7 +475,7 @@ function Editor() {
         onPaneClick={() => setMenu(undefined)} onMoveStart={() => { setMenu(undefined); setGatewayAssetOpen({}); }}
         onNodesDelete={deleted => { deleted.forEach(node => removeNode(node.id)); }}
         nodesDraggable={!busy} nodesConnectable={loaded && !busy} elementsSelectable={!busy} deleteKeyCode={busy ? null : ['Backspace', 'Delete']}
-        fitView minZoom={.2} maxZoom={1.7} translateExtent={[[-11000, -11000], [11000, 11000]]} nodeExtent={[[-10000, -10000], [10000, 10000]]}>
+        fitView minZoom={.2} maxZoom={1.7} noWheelClassName="nowheel" translateExtent={[[-11000, -11000], [11000, 11000]]} nodeExtent={[[-10000, -10000], [10000, 10000]]}>
         <Background color="#dbe3ee" gap={24} /><Controls />
       </ReactFlow>
     </section>
@@ -477,10 +487,11 @@ function Editor() {
         return <article className="service-network-item" key={node.id}>
           <div className="service-network-title"><div><strong>{asset.host.hostname}</strong><small>{asset.inventory.observedAt ? `路由观测于 ${new Date(asset.inventory.observedAt).toLocaleString()}` : 'Agent 尚未上报网络快照'}</small></div><span className={`badge ${asset.host.status === 'ONLINE' ? 'online' : asset.host.status === 'OFFLINE' ? 'offline' : 'unknown'}`}>{asset.host.status}</span></div>
           {asset.inventory.routes.length ? <div className="host-route-list">{asset.inventory.routes.map((route, index) => {
-            const owners = route.gateway ? hostByAddress.get(route.gateway.toLowerCase()) ?? [] : [];
-            const nextHop = owners.length === 1 && owners[0].id !== asset.host.id ? owners[0] : undefined;
-            const unresolved = route.gateway && owners.length > 1 ? '（地址匹配到多个拓扑主机）' : '（未匹配拓扑主机）';
-            return <div className="host-route-row" key={`${route.destination}-${route.table}-${route.metric}-${index}`}><code>{route.destination}</code><span>{nextHop ? `${asset.host.hostname} → ${nextHop.hostname}` : route.gateway ? `via ${route.gateway}${unresolved}` : '直连路由'}</span><small>{route.interfaceName || '—'} · table {route.table} · metric {route.metric} · {route.routeType}</small></div>;
+            const nextHop = resolveRouteNextHop(route.gateway, asset.host.id, hostByAddress);
+            const summary = nextHop.kind === 'MATCHED' ? `${asset.host.hostname} → ${nextHop.host.hostname}`
+              : nextHop.kind === 'DIRECT' ? '直连路由'
+                : `via ${route.gateway}${nextHop.kind === 'AMBIGUOUS' ? '（地址匹配到多个拓扑主机）' : nextHop.kind === 'SELF' ? '（下一跳地址属于自身）' : '（未匹配拓扑主机）'}`;
+            return <div className="host-route-row" key={`${route.destination}-${route.table}-${route.metric}-${index}`}><code>{route.destination}</code><span>{summary}</span><small>{route.interfaceName || '—'} · table {route.table} · metric {route.metric} · {route.routeType}</small></div>;
           })}</div> : <div className="empty">暂无路由记录</div>}
         </article>;
       })}</div> : <div className="empty">先在主拓扑添加已登记的主机资产，系统会自动读取并匹配其路由表。</div>}

@@ -12,6 +12,7 @@ import { agentMaintenanceCommand, type AgentMaintenanceMode } from './lib/agent-
 import type { Host, HostPage, Agent, AgentInstallation, AgentUpdateOperation, SystemService, SystemServicePage, Operation, OperationPage, SessionContext, AdminOverview, AdminUser, AdminUserPage, PlatformSettings, AuditEventPage, WebSessionList, ApiKeyList, CreatedApiKey, BuiltinRoleList, AgentEnrollmentCreated, HostHelperOperationRequest, HostNetworkInventory, HostNetworkInterface, HostNetworkRoute, HostFileListing, SshProbeResult, SshSystemdStatusResult, SshSystemdJournalResult, HostSshConfig, SshHostKeyProbe, BastionSession, BastionSessionTicket, BastionCommand, BastionRecordingChunk, KubernetesClusterList, KubernetesClusterImportRequest, KubernetesClusterSummary, KubernetesClusterNodeList, KubernetesClusterNode, KubernetesManagedDeployment, KubernetesManagedDeploymentCreateRequest, KubernetesManagedDeploymentScaleRequest, KubernetesManagedDeploymentList, KubernetesTopologyNamespaceSnapshot } from './lib/types';
 import './api-keys.css';
 import './kubernetes-clusters.css';
+import './kubernetes-upgrade.css';
 import './style.css';
 const nav = [['overview', '◫', '总览'], ['hosts', '▤', '主机资产'], ['topology', '⌘', '网络拓扑'], ['clusters', '☸', 'Kubernetes 集群'], ['operations', '◷', '操作任务'], ['users', '♙', '管理员'], ['audit', '☷', '审计日志'], ['settings', '⚙', '平台设置'], ['account', '◎', '账号与会话']];
 const labels: Record<string, string> = { ONLINE: '在线', OFFLINE: '离线', UNKNOWN: '未知 / 结果未知', ACTIVE: '运行中', INACTIVE: '未运行', AVAILABLE: '可用', UNAVAILABLE: '不可用', SUCCEEDED: '成功', ACCEPTED: '已受理', FAILED: '失败', FORCE_TERMINATED: '已强制阻断', RUNNING: '执行中', PENDING: '等待中', CANCELLED: '已取消', DISABLED: '已禁用', DENIED: '已拒绝' };
@@ -706,30 +707,38 @@ function HelperOperationPanel({ host, agent, notify, refresh }: { host: Host; ag
   'package.install': '安装软件包', 'file.write.protected': '写入受保护目录文件',
   'container.list': '列出容器', 'container.logs': '读取容器日志',
   'container.start': '启动容器', 'container.stop': '停止容器',
-  'container.deploy': '部署容器', 'network.firewall.expose': '临时开放防火墙端口'
+  'container.deploy': '部署容器', 'network.firewall.expose': '临时开放防火墙端口',
+  'k3s.preflight': 'K3s 安装前置校验',
+  'k3s.install': 'K3s 安装节点', 'k3s.upgrade': 'K3s 升级节点'
  };
- const supported = (['package.install', 'file.write.protected', 'container.list', 'container.logs', 'container.start', 'container.stop', 'container.deploy', 'network.firewall.expose'] as const satisfies readonly StandardCapability[])
+ const supported = (['package.install', 'file.write.protected', 'container.list', 'container.logs', 'container.start', 'container.stop', 'container.deploy', 'network.firewall.expose', 'k3s.preflight', 'k3s.install', 'k3s.upgrade'] as const satisfies readonly StandardCapability[])
   .filter(capability => agent.capabilities.includes(capability));
  const helperReady = agent.status === 'ONLINE' && agent.helperStatus === 'AVAILABLE';
  const [capability, setCapability] = useState<StandardCapability>(supported[0] ?? 'container.list');
  const [target, setTarget] = useState(''); const [packages, setPackages] = useState(''); const [content, setContent] = useState(''); const [rollbackSeconds, setRollbackSeconds] = useState('90');
  const [image, setImage] = useState('nginx:1.27'); const [hostPort, setHostPort] = useState(''); const [containerPort, setContainerPort] = useState('');
+ const [k3sRole, setK3sRole] = useState<'server' | 'agent'>('server');
+ const [k3sVersion, setK3sVersion] = useState('v1.37.1+k3s1'); const [k3sServerUrl, setK3sServerUrl] = useState(''); const [k3sToken, setK3sToken] = useState('');
+ const [k3sUpgradeConfirmed, setK3sUpgradeConfirmed] = useState(false);
  const [firewallInterface, setFirewallInterface] = useState(''); const [firewallProtocol, setFirewallProtocol] = useState<'tcp' | 'udp'>('tcp'); const [firewallPort, setFirewallPort] = useState('');
  const [reason, setReason] = useState(''); const [busy, setBusy] = useState(false); const [error, setError] = useState(''); const [key, setKey] = useState(createUuid());
  useEffect(() => { if (!supported.includes(capability)) setCapability(supported[0] ?? 'container.list'); }, [agent.capabilities.join(','), capability]);
  const needsTarget = capability === 'file.write.protected' || capability === 'network.firewall.expose' || ['container.logs', 'container.start', 'container.stop', 'container.deploy'].includes(capability);
  async function submit(event: FormEvent) {
   event.preventDefault(); if (!supported.includes(capability) || !helperReady) return;
-  const payload = capability === 'package.install' ? { packages: packages.split(',').map(name => name.trim()).filter(Boolean) }
+  const payload = capability === 'k3s.preflight' ? { role: k3sRole }
+   : capability === 'k3s.install' ? { role: k3sRole, version: k3sVersion.trim(), serverUrl: k3sRole === 'agent' ? k3sServerUrl.trim() : null, token: k3sToken }
+   : capability === 'k3s.upgrade' ? { role: k3sRole, version: k3sVersion.trim() }
+   : capability === 'package.install' ? { packages: packages.split(',').map(name => name.trim()).filter(Boolean) }
    : capability === 'file.write.protected' ? { content }
    : capability === 'container.deploy' ? { image: image.trim(), hostPort: hostPort.trim() ? Number(hostPort) : null, containerPort: containerPort.trim() ? Number(containerPort) : null }
    : capability === 'network.firewall.expose' ? { interfaceName: firewallInterface.trim(), protocol: firewallProtocol, port: Number(firewallPort), rollbackSeconds: Number(rollbackSeconds) } : undefined;
-  const body: HostHelperOperationRequest = { capability, target: needsTarget ? target.trim() : '', reason, timeoutSeconds: capability === 'package.install' ? 300 : 60, expectedGeneration: host.generation, ...(payload ? { payload } : {}) };
+  const body: HostHelperOperationRequest = { capability, target: needsTarget ? target.trim() : '', reason, timeoutSeconds: ['k3s.install', 'k3s.upgrade'].includes(capability) ? 600 : capability === 'package.install' ? 300 : 60, expectedGeneration: host.generation, ...(payload ? { payload } : {}) };
   setBusy(true); setError('');
   try {
    await api<Operation>(`/hosts/${host.id}/operations`, 'POST', body, { 'Idempotency-Key': key }, true);
    notify(`${isMock ? '模拟' : ''}Helper 任务已接受，可在操作任务中查看结果`);
-   setReason(''); setTarget(''); setPackages(''); setContent(''); setRollbackSeconds('90'); setImage('nginx:1.27'); setHostPort(''); setContainerPort(''); setFirewallInterface(''); setFirewallProtocol('tcp'); setFirewallPort(''); setKey(createUuid()); refresh();
+   setReason(''); setTarget(''); setPackages(''); setContent(''); setRollbackSeconds('90'); setImage('nginx:1.27'); setHostPort(''); setContainerPort(''); setFirewallInterface(''); setFirewallProtocol('tcp'); setFirewallPort(''); setK3sToken(''); setKey(createUuid()); refresh();
   } catch (e) { setError((e as Error).message); }
   finally { setBusy(false); }
  }
@@ -742,12 +751,15 @@ function HelperOperationPanel({ host, agent, notify, refresh }: { host: Host; ag
   </select></Field>
   {needsTarget && <Field label={capability === 'file.write.protected' ? '文件名' : capability === 'network.firewall.expose' ? '规则名' : '容器名'}><input required maxLength={128} value={target} onChange={event => setTarget(event.target.value)} placeholder={capability === 'file.write.protected' ? '例如 app.conf' : capability === 'network.firewall.expose' ? '例如 ssh-test' : '例如 web-gateway'} /></Field>}
   {capability === 'package.install' && <Field label="软件包名（逗号分隔）"><input required maxLength={512} value={packages} onChange={event => setPackages(event.target.value)} placeholder="例如 curl, jq" /></Field>}
+  {capability === 'k3s.preflight' && <><Field label="K3s 节点角色"><select value={k3sRole} onChange={event => setK3sRole(event.target.value as 'server' | 'agent')}><option value="server">Server（控制面）</option><option value="agent">Agent（工作节点）</option></select></Field><small className="muted">只读检查主机资源、系统管理器、cgroup 和已有 K3s 安装；不会安装或修改主机。</small></>}
+  {capability === 'k3s.install' && <><Field label="K3s 节点角色"><select value={k3sRole} onChange={event => setK3sRole(event.target.value as 'server' | 'agent')}><option value="server">Server（初始化控制面）</option><option value="agent">Agent（加入现有集群）</option></select></Field><Field label="固定 K3s 版本"><input required maxLength={32} pattern="v[0-9]+\.[0-9]+\.[0-9]+\+k3s[0-9]+" value={k3sVersion} onChange={event => setK3sVersion(event.target.value)} placeholder="v1.37.1+k3s1" /></Field>{k3sRole === 'agent' && <Field label="K3s API 地址"><input required maxLength={512} type="url" value={k3sServerUrl} onChange={event => setK3sServerUrl(event.target.value)} placeholder="https://k3s.example.net:6443" /></Field>}<Field label="集群令牌"><input required type="password" autoComplete="new-password" minLength={16} maxLength={512} pattern="[A-Za-z0-9_.:-]+" value={k3sToken} onChange={event => setK3sToken(event.target.value)} /><small className="muted">Server 首次初始化使用短令牌；加入集群的 Agent 可使用 K3s 短令牌或 K10 安全令牌。令牌仅写入 root 可读文件，不会回显到结果。</small></Field><small className="muted">仅支持空白主机上的固定版本安装；不会覆盖已有 K3s 文件或数据。Agent 安装后仍须通过集群视图确认 Node Ready。</small></>}
+  {capability === 'k3s.upgrade' && <><Field label="现有 K3s 节点角色"><select value={k3sRole} onChange={event => setK3sRole(event.target.value as 'server' | 'agent')}><option value="server">Server</option><option value="agent">Agent</option></select></Field><Field label="目标 K3s 版本"><input required maxLength={32} pattern="v[0-9]+\.[0-9]+\.[0-9]+\+k3s[0-9]+" value={k3sVersion} onChange={event => setK3sVersion(event.target.value)} placeholder="v1.37.1+k3s1" /></Field><small className="muted">仅升级由 NaNPanel 固定 unit 管理的 K3s；只允许同一 Kubernetes minor 或向前一个 minor。健康检查失败时会恢复旧二进制。Agent 节点的 Kubernetes Ready 状态仍需在集群页复核。</small><label className="check-field"><input type="checkbox" checked={k3sUpgradeConfirmed} onChange={event => setK3sUpgradeConfirmed(event.target.checked)} /><span>我已确认当前节点处于维护窗口，并会按集群顺序逐台升级。</span></label></>}
   {capability === 'file.write.protected' && <Field label="文件内容"><textarea required maxLength={32768} value={content} onChange={event => setContent(event.target.value)} placeholder="最多 32 KiB；写入主机 root 管理的固定目录" /></Field>}
   {capability === 'container.deploy' && <><Field label="容器镜像"><input required maxLength={255} pattern="[A-Za-z0-9][A-Za-z0-9._:/@-]{0,254}" value={image} onChange={event => setImage(event.target.value)} placeholder="例如 nginx:1.27" /></Field><div className="ssh-form-grid"><Field label="Loopback 主机端口（可选）"><input type="number" min={1} max={65535} value={hostPort} onChange={event => setHostPort(event.target.value)} /></Field><Field label="容器端口（可选）"><input type="number" min={1} max={65535} value={containerPort} onChange={event => setContainerPort(event.target.value)} /></Field></div><small className="muted">两个端口必须同时填写或留空；端口发布仍仅绑定 127.0.0.1。镜像和端口受固定参数校验与容器资源限制约束。</small></>}
   {capability === 'network.firewall.expose' && <><div className="ssh-form-grid"><Field label="网络接口"><input required maxLength={15} pattern="[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}" value={firewallInterface} onChange={event => setFirewallInterface(event.target.value)} placeholder="例如 eth0" /></Field><Field label="协议"><select value={firewallProtocol} onChange={event => setFirewallProtocol(event.target.value as 'tcp' | 'udp')}><option value="tcp">TCP</option><option value="udp">UDP</option></select></Field></div><Field label="端口"><input required type="number" min={1} max={65535} step={1} value={firewallPort} onChange={event => setFirewallPort(event.target.value)} /></Field><Field label="自动回滚秒数"><input required type="number" min={30} max={300} step={1} value={rollbackSeconds} onChange={event => setRollbackSeconds(event.target.value)} /><small className="muted">临时添加接口/协议/端口规则，执行前先挂载 systemd 定时回滚；系统会在执行前校验参数，并自动回滚临时规则。</small></Field></>}
   <Field label="操作原因"><textarea required maxLength={500} value={reason} onChange={event => setReason(event.target.value)} placeholder="记录本次运维操作的原因" /></Field>
   {error && <div className="alert error" role="alert">{error}</div>}
-  <div className="form-actions"><span className="muted">主机版本 {host.generation} · 截止 60–300 秒</span><button className="primary" disabled={busy || !helperReady || !reason.trim() || (needsTarget && !target.trim()) || (capability === 'container.deploy' && (!image.trim() || deploymentPortsMismatch))}>{busy ? '正在下发…' : '提交 Helper 操作'}</button></div>
+  <div className="form-actions"><span className="muted">主机版本 {host.generation} · K3s 操作最长 600 秒</span><button className="primary" disabled={busy || !helperReady || !reason.trim() || (needsTarget && !target.trim()) || (capability === 'container.deploy' && (!image.trim() || deploymentPortsMismatch)) || (capability === 'k3s.install' && k3sRole === 'server' && k3sToken.startsWith('K10')) || (capability === 'k3s.upgrade' && !k3sUpgradeConfirmed)}>{busy ? '正在下发…' : '提交 Helper 操作'}</button></div>
  </form></>;
 }
 function AgentMaintenanceDialog({ agentId, mode, installation, installationError, selfUpdateSupported, selfUpdateReported, agentStatus, helperStatus, close }: { agentId: string; mode: AgentMaintenanceMode; installation?: AgentInstallation; installationError: string; selfUpdateSupported: boolean; selfUpdateReported: boolean; agentStatus?: Agent['status']; helperStatus?: Agent['helperStatus']; close: () => void }) {
@@ -835,7 +847,7 @@ function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
  async function refreshClusterStatus(clusterId: string) {
   try {
    const status = await api<KubernetesClusterSummary>(`/kubernetes/clusters/${encodeURIComponent(clusterId)}`, 'GET', undefined, {}, true);
-   setClusters(current => current.map(cluster => cluster.id === clusterId ? { ...cluster, healthStatus: status.data.healthStatus, cloudCoreStatus: status.data.cloudCoreStatus, cloudCoreObservedAt: status.data.cloudCoreObservedAt, observedAt: status.data.observedAt, lastErrorCode: status.data.lastErrorCode } : cluster));
+   setClusters(current => current.map(cluster => cluster.id === clusterId ? { ...cluster, healthStatus: status.data.healthStatus, cloudCoreStatus: status.data.cloudCoreStatus, cloudCoreObservedAt: status.data.cloudCoreObservedAt, observedAt: status.data.observedAt, observationsStale: status.data.observationsStale, lastErrorCode: status.data.lastErrorCode } : cluster));
   } catch { /* Keep the last successful status visible when the registry is also unavailable. */ }
  }
  async function refreshNodes(clusterId: string) {
@@ -843,7 +855,7 @@ function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
   try {
    const result = await api<KubernetesClusterNodeList>(`/kubernetes/clusters/${encodeURIComponent(clusterId)}/nodes`, 'GET', undefined, {}, true);
    setNodes(current => ({ ...current, [clusterId]: result.data.items }));
-   setClusters(current => current.map(cluster => cluster.id === clusterId ? { ...cluster, nodeCount: result.data.items.length, healthStatus: 'HEALTHY', observedAt: result.data.observedAt, lastErrorCode: null } : cluster));
+   setClusters(current => current.map(cluster => cluster.id === clusterId ? { ...cluster, nodeCount: result.data.items.filter(node => node.nodePresent).length, healthStatus: 'HEALTHY', observedAt: result.data.observedAt, observationsStale: false, lastErrorCode: null } : cluster));
    await refreshClusterStatus(clusterId);
   } catch (e) { setError((e as Error).message); await refreshClusterStatus(clusterId); }
   finally { setNodeLoading(current => ({ ...current, [clusterId]: false })); }
@@ -925,8 +937,12 @@ function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
   <div className="cluster-list">{clusters.map(cluster => {
    const clusterNodes = nodes[cluster.id] ?? [];
    return <section className="card cluster-card" key={cluster.id}>
-    <div className="card-title"><div><span className="eyebrow">{cluster.kind}</span><h2>{cluster.name}</h2><p className="mono">{cluster.endpoint} · context {cluster.contextName}</p><p className="muted">最近成功观测 {time(cluster.observedAt)}{cluster.lastErrorCode ? ` · ${cluster.lastErrorCode} · 清单可能已过期` : ''}</p>{cluster.kind === 'KUBEEDGE' && <p className="muted">CloudCore：{cluster.cloudCoreStatus} · 观测于 {time(cluster.cloudCoreObservedAt)}</p>}</div><div className="cluster-actions"><span className={`badge ${cluster.healthStatus === 'HEALTHY' ? 'online' : 'offline'}`}>{cluster.healthStatus === 'HEALTHY' ? '健康' : '不可用'}</span><button className="secondary" disabled={!!nodeLoading[cluster.id] || isMock} onClick={() => void refreshNodes(cluster.id)}>{nodeLoading[cluster.id] ? '读取中…' : `刷新 Node (${cluster.nodeCount})`}</button></div></div>
-    {clusterNodes.length > 0 && <div className="table-wrap"><table><thead><tr><th>Node</th><th>角色 / 运行状态</th><th>容器所有者</th><th>主机资产映射</th></tr></thead><tbody>{clusterNodes.map(node => <tr key={node.nodeUid}><td><strong>{node.nodeName}</strong><small className="mono">UID {node.nodeUid}</small></td><td>{node.roles.join(', ') || 'worker'} · {node.ready ? 'Ready' : 'NotReady'}{node.kubeedgeEdge ? node.ready ? ' · EdgeCore 已注册' : ' · EdgeCore 未就绪' : ''}</td><td>{node.containerOwner}</td><td><select aria-label={`映射 ${node.nodeName} 到主机资产`} value={node.hostId ?? ''} onChange={event => void mapHost(cluster.id, node, event.target.value)} disabled={!!nodeLoading[cluster.id] || isMock}><option value="">未映射</option>{hosts.map(host => <option value={host.id} key={host.id}>{host.hostname}</option>)}</select></td></tr>)}</tbody></table></div>}
+    <div className="card-title"><div><span className="eyebrow">{cluster.kind}</span><h2>{cluster.name}</h2><p className="mono">{cluster.endpoint} · context {cluster.contextName}</p><p className="muted">最近观测 {time(cluster.observedAt)}{cluster.observationsStale ? ' · 观测已过期' : ' · 观测新鲜'}{cluster.lastErrorCode ? ` · ${cluster.lastErrorCode}` : ''}</p>{cluster.kind === 'KUBEEDGE' && <p className="muted">CloudCore：{cluster.cloudCoreStatus} · 观测于 {time(cluster.cloudCoreObservedAt)}</p>}</div><div className="cluster-actions"><span className={`badge ${cluster.healthStatus === 'HEALTHY' ? 'online' : 'offline'}`}>{cluster.healthStatus === 'HEALTHY' ? '健康' : '不可用'}</span><button className="secondary" disabled={!!nodeLoading[cluster.id] || isMock} onClick={() => void refreshNodes(cluster.id)}>{nodeLoading[cluster.id] ? '读取中…' : `刷新 Node (${cluster.nodeCount})`}</button></div></div>
+    {clusterNodes.length > 0 && <div className="table-wrap"><table><thead><tr><th>Node</th><th>角色 / 运行状态</th><th>容器所有者</th><th>主机资产映射</th></tr></thead><tbody>{clusterNodes.map(node => {
+     const edgeStatus = { NOT_EDGE_NODE: '非 Edge 节点', NOT_PRESENT: 'Node 已移除', REGISTERED_NOT_READY: '已注册 · NotReady', REGISTERED_READY: '已注册 · Ready' }[node.edgeCoreRegistrationStatus];
+     const edgeProcessStatus = { NOT_APPLICABLE: '不适用', NOT_MAPPED: '未映射主机', NOT_OBSERVED: '尚无服务观测', STALE: '观测过期', ACTIVE: '运行中', INACTIVE: '未运行', UNKNOWN: '状态未知' }[node.edgeCoreProcessStatus];
+     return <tr key={node.nodeUid}><td><strong>{node.nodeName}</strong><small className="mono">UID {node.nodeUid}</small></td><td>{node.nodePresent ? `${node.roles.join(', ') || 'worker'} · ${node.ready ? 'Ready' : 'NotReady'}${cluster.kind === 'KUBEEDGE' ? ` · EdgeCore 注册 ${edgeStatus} · 进程 ${edgeProcessStatus}${node.edgeCoreProcessObservedAt ? `（${time(node.edgeCoreProcessObservedAt)}）` : ''}` : ''}` : '已从集群移除 · 映射保留'}</td><td>{node.containerOwner}</td><td><select aria-label={`映射 ${node.nodeName} 到主机资产`} value={node.hostId ?? ''} onChange={event => void mapHost(cluster.id, node, event.target.value)} disabled={!!nodeLoading[cluster.id] || isMock || (!node.nodePresent && !node.hostId)}><option value="">未映射</option>{hosts.map(host => <option value={host.id} key={host.id}>{host.hostname}</option>)}</select></td></tr>;
+    })}</tbody></table></div>}
     {!clusterNodes.length && <p className="muted">尚未读取 Node 清单。刷新后可以建立主机资产映射。</p>}
     <div className="cluster-resource-actions"><button className="secondary" disabled={!!deploymentLoading[`${cluster.id}:namespaces`] || isMock} onClick={() => void loadNamespaces(cluster.id)}>{deploymentLoading[`${cluster.id}:namespaces`] ? '读取中…' : namespaceSnapshots[cluster.id] ? '↻ 刷新 Namespace' : '读取 Namespace 与资源管理'}</button></div>
     {namespaceSnapshots[cluster.id] && (() => {

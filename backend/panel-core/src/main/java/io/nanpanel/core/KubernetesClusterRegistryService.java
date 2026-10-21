@@ -32,6 +32,7 @@ import org.jboss.logging.Logger;
 @ApplicationScoped
 public class KubernetesClusterRegistryService {
   private static final int MAX_NODES = 1_000;
+  private static final long OBSERVATION_STALE_AFTER_SECONDS = 120;
   private static final Logger LOG = Logger.getLogger(KubernetesClusterRegistryService.class);
   private static final Pattern CLUSTER_NAME = Pattern.compile("[A-Za-z0-9][A-Za-z0-9_. -]{0,79}");
   private static final Pattern NODE_UID = Pattern.compile("[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}");
@@ -49,21 +50,24 @@ public class KubernetesClusterRegistryService {
   public record ImportRequest(String name, String kind, String contextName, String kubeconfig) {}
   public record ClusterSummary(UUID id, String name, String kind, String endpoint,
       String contextName, String healthStatus, String cloudCoreStatus, Instant cloudCoreObservedAt,
-      Instant observedAt, String lastErrorCode, int nodeCount, Instant createdAt) {}
+      Instant observedAt, boolean observationsStale, String lastErrorCode, int nodeCount,
+      Instant createdAt) {}
   public record ClusterList(List<ClusterSummary> items) {}
   public record ClusterNode(UUID clusterId, String nodeUid, String nodeName, List<String> roles,
-      boolean kubeedgeEdge, boolean ready, String kubeletVersion, String internalIp,
-      String containerOwner, UUID hostId, Instant observedAt) {}
+      boolean nodePresent, boolean kubeedgeEdge, boolean ready, String kubeletVersion, String internalIp,
+      String edgeCoreRegistrationStatus, String edgeCoreProcessStatus,
+      Instant edgeCoreProcessObservedAt, String containerOwner, UUID hostId, Instant observedAt) {}
   public record ClusterNodeList(UUID clusterId, Instant observedAt, List<ClusterNode> items) {}
 
-  private record NodeObservation(String uid, String name, String roles, boolean kubeedgeEdge,
+  record NodeObservation(String uid, String name, String roles, boolean kubeedgeEdge,
       boolean ready, String kubeletVersion, String internalIp, String containerOwner) {}
   private record CloudCoreObservation(String status, Instant observedAt) {}
 
   public ClusterList list() {
     return store.transaction(connection -> {
       var rows = query(connection, "SELECT c." + CLUSTER_COLUMNS + ","
-          + "(SELECT COUNT(*) FROM kubernetes_cluster_node n WHERE n.cluster_id=c.id) AS node_count "
+          + "(SELECT COUNT(*) FROM kubernetes_cluster_node n WHERE n.cluster_id=c.id "
+          + "AND n.node_present=TRUE) AS node_count "
           + "FROM kubernetes_cluster c ORDER BY c.name,c.id");
       return new ClusterList(rows.stream().map(KubernetesClusterRegistryService::summary).toList());
     });
@@ -72,7 +76,8 @@ public class KubernetesClusterRegistryService {
   public ClusterSummary get(UUID clusterId) {
     return store.transaction(connection -> {
       var rows = query(connection, "SELECT c." + CLUSTER_COLUMNS + ","
-          + "(SELECT COUNT(*) FROM kubernetes_cluster_node n WHERE n.cluster_id=c.id) AS node_count "
+          + "(SELECT COUNT(*) FROM kubernetes_cluster_node n WHERE n.cluster_id=c.id "
+          + "AND n.node_present=TRUE) AS node_count "
           + "FROM kubernetes_cluster c WHERE c.id=?", clusterId);
       if (rows.isEmpty()) throw new ClusterNotFoundException();
       return summary(rows.getFirst());
@@ -150,7 +155,8 @@ public class KubernetesClusterRegistryService {
             clusterId.toString(), "SUCCEEDED", remoteAddress,
             "导入 Kubernetes 集群 " + name + "（类型 " + input.kind() + "，节点 " + nodes.size() + " 个）");
         return summary(query(connection, "SELECT c." + CLUSTER_COLUMNS + ","
-            + "(SELECT COUNT(*) FROM kubernetes_cluster_node n WHERE n.cluster_id=c.id) AS node_count "
+            + "(SELECT COUNT(*) FROM kubernetes_cluster_node n WHERE n.cluster_id=c.id "
+            + "AND n.node_present=TRUE) AS node_count "
             + "FROM kubernetes_cluster c WHERE c.id=?", clusterId).getFirst());
       });
     } finally {
@@ -200,10 +206,13 @@ public class KubernetesClusterRegistryService {
     validateNodeUid(nodeUid);
     return store.transaction(connection -> {
       var rows = query(connection, "SELECT n.cluster_id,n.node_uid,n.node_name,n.roles,"
-          + "n.kubeedge_edge,n.ready,n.kubelet_version,n.internal_ip,n.container_owner,n.host_id,"
+          + "n.node_present,n.kubeedge_edge,n.ready,n.kubelet_version,n.internal_ip,n.container_owner,n.host_id,"
           + "n.observed_at FROM kubernetes_cluster_node n JOIN kubernetes_cluster c "
           + "ON c.id=n.cluster_id WHERE c.id=? AND n.node_uid=? FOR UPDATE", clusterId, nodeUid);
       if (rows.isEmpty()) throw new ClusterNodeNotFoundException();
+      if (!Boolean.TRUE.equals(rows.getFirst().get("node_present"))) {
+        throw new ClusterNodeNotFoundException();
+      }
       if (query(connection, "SELECT id FROM host WHERE id=? FOR UPDATE", hostId).isEmpty()) {
         throw new HostNotFoundException();
       }
@@ -217,22 +226,48 @@ public class KubernetesClusterRegistryService {
           "将集群节点 " + String.valueOf(rows.getFirst().get("node_name")) + " 映射到主机资产");
       var mapped = new java.util.LinkedHashMap<>(rows.getFirst());
       mapped.put("host_id", hostId);
-      return node(mapped);
+      var hostObservation = query(connection,
+          "SELECT (SELECT s.active_state FROM system_service_observation s "
+              + "WHERE s.host_id=? AND LOWER(s.unit_name) IN ('edgecore.service','edgecore') "
+              + "ORDER BY s.observed_at DESC LIMIT 1) AS edgecore_active_state,"
+              + "(SELECT s.observed_at FROM system_service_observation s WHERE s.host_id=? "
+              + "AND LOWER(s.unit_name) IN ('edgecore.service','edgecore') "
+              + "ORDER BY s.observed_at DESC LIMIT 1) AS edgecore_observed_at,"
+              + "(SELECT MAX(a.last_seen) FROM agent a WHERE a.host_id=?) AS host_agent_last_seen",
+          hostId, hostId, hostId).getFirst();
+      mapped.putAll(hostObservation);
+      var settings = query(connection,
+          "SELECT host_offline_after_seconds FROM platform_settings WHERE id=1");
+      int staleAfterSeconds = settings.isEmpty() ? 90
+          : ((Number)settings.getFirst().get("host_offline_after_seconds")).intValue();
+      return node(mapped, Instant.now(), staleAfterSeconds);
     });
   }
 
   public void unmapNode(String actor, String remoteAddress, UUID clusterId, String nodeUid) {
     validateNodeUid(nodeUid);
     store.transaction(connection -> {
-      var rows = query(connection, "SELECT node_name,host_id,container_owner FROM kubernetes_cluster_node "
+      var rows = query(connection, "SELECT node_name,node_present,host_id,container_owner FROM kubernetes_cluster_node "
           + "WHERE cluster_id=? AND node_uid=? FOR UPDATE", clusterId, nodeUid);
       if (rows.isEmpty()) throw new ClusterNodeNotFoundException();
-      if (rows.getFirst().get("host_id") == null) return null;
-      if (Set.of("KUBERNETES", "KUBEEDGE").contains(rows.getFirst().get("container_owner"))) {
+      boolean nodePresent = Boolean.TRUE.equals(rows.getFirst().get("node_present"));
+      if (rows.getFirst().get("host_id") == null) {
+        if (!nodePresent) {
+          update(connection, "DELETE FROM kubernetes_cluster_node WHERE cluster_id=? AND node_uid=?",
+              clusterId, nodeUid);
+        }
+        return null;
+      }
+      if (nodePresent && Set.of("KUBERNETES", "KUBEEDGE").contains(rows.getFirst().get("container_owner"))) {
         throw new HostOwnershipManagedByKubernetesException();
       }
-      update(connection, "UPDATE kubernetes_cluster_node SET host_id=NULL "
-          + "WHERE cluster_id=? AND node_uid=?", clusterId, nodeUid);
+      if (nodePresent) {
+        update(connection, "UPDATE kubernetes_cluster_node SET host_id=NULL "
+            + "WHERE cluster_id=? AND node_uid=?", clusterId, nodeUid);
+      } else {
+        update(connection, "DELETE FROM kubernetes_cluster_node WHERE cluster_id=? AND node_uid=?",
+            clusterId, nodeUid);
+      }
       audit(connection, actor, "KUBERNETES_CLUSTER_NODE_UNMAPPED", "kubernetes_cluster_node",
           clusterId + ":" + nodeUid, "SUCCEEDED", remoteAddress,
           "移除集群节点 " + String.valueOf(rows.getFirst().get("node_name")) + " 的主机映射");
@@ -242,11 +277,25 @@ public class KubernetesClusterRegistryService {
 
   private ClusterNodeList readNodes(UUID clusterId, Instant observedAt) {
     return store.transaction(connection -> {
-      var rows = query(connection, "SELECT cluster_id,node_uid,node_name,roles,kubeedge_edge,ready,"
-          + "kubelet_version,internal_ip,container_owner,host_id,observed_at "
-          + "FROM kubernetes_cluster_node WHERE cluster_id=? ORDER BY node_name,node_uid", clusterId);
+      var settings = query(connection,
+          "SELECT host_offline_after_seconds FROM platform_settings WHERE id=1");
+      int staleAfterSeconds = settings.isEmpty() ? 90
+          : ((Number)settings.getFirst().get("host_offline_after_seconds")).intValue();
+      var rows = query(connection, "SELECT n.cluster_id,n.node_uid,n.node_name,n.roles,n.node_present,"
+          + "n.kubeedge_edge,n.ready,n.kubelet_version,n.internal_ip,n.container_owner,n.host_id,"
+          + "n.observed_at,(SELECT s.active_state FROM system_service_observation s "
+          + "WHERE s.host_id=n.host_id AND LOWER(s.unit_name) IN ('edgecore.service','edgecore') "
+          + "ORDER BY s.observed_at DESC LIMIT 1) AS edgecore_active_state,"
+          + "(SELECT s.observed_at FROM system_service_observation s WHERE s.host_id=n.host_id "
+          + "AND LOWER(s.unit_name) IN ('edgecore.service','edgecore') "
+          + "ORDER BY s.observed_at DESC LIMIT 1) AS edgecore_observed_at,"
+          + "(SELECT MAX(a.last_seen) FROM agent a WHERE a.host_id=n.host_id) AS host_agent_last_seen "
+          + "FROM kubernetes_cluster_node n WHERE n.cluster_id=? ORDER BY n.node_name,n.node_uid",
+          clusterId);
       Instant newest = observedAt;
-      List<ClusterNode> nodes = rows.stream().map(KubernetesClusterRegistryService::node).toList();
+      Instant now = Instant.now();
+      List<ClusterNode> nodes = rows.stream()
+          .map(row -> node(row, now, staleAfterSeconds)).toList();
       return new ClusterNodeList(clusterId, newest, nodes);
     });
   }
@@ -374,7 +423,7 @@ public class KubernetesClusterRegistryService {
         edge ? "KUBEEDGE" : "KUBERNETES");
   }
 
-  private static void replaceNodes(java.sql.Connection connection, UUID clusterId,
+  static void replaceNodes(java.sql.Connection connection, UUID clusterId,
                                    List<NodeObservation> nodes, Instant observedAt)
       throws java.sql.SQLException {
     boolean postgres = connection.getMetaData().getDatabaseProductName()
@@ -388,17 +437,18 @@ public class KubernetesClusterRegistryService {
           .orElse(node.containerOwner());
       if (postgres) {
         update(connection, "INSERT INTO kubernetes_cluster_node (cluster_id,node_uid,node_name,roles,"
-            + "kubeedge_edge,ready,kubelet_version,internal_ip,container_owner,observed_at) "
-            + "VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT (cluster_id,node_uid) DO UPDATE SET "
-            + "node_name=EXCLUDED.node_name,roles=EXCLUDED.roles,kubeedge_edge=EXCLUDED.kubeedge_edge,"
+            + "node_present,kubeedge_edge,ready,kubelet_version,internal_ip,container_owner,observed_at) "
+            + "VALUES (?,?,?,?,TRUE,?,?,?,?,?,?) ON CONFLICT (cluster_id,node_uid) DO UPDATE SET "
+            + "node_name=EXCLUDED.node_name,roles=EXCLUDED.roles,node_present=TRUE,"
+            + "kubeedge_edge=EXCLUDED.kubeedge_edge,"
             + "ready=EXCLUDED.ready,kubelet_version=EXCLUDED.kubelet_version,internal_ip=EXCLUDED.internal_ip,"
             + "container_owner=EXCLUDED.container_owner,observed_at=EXCLUDED.observed_at",
             clusterId, node.uid(), node.name(), node.roles(), node.kubeedgeEdge(), node.ready(),
             node.kubeletVersion(), node.internalIp(), containerOwner, Timestamp.from(observedAt));
       } else {
         update(connection, "MERGE INTO kubernetes_cluster_node (cluster_id,node_uid,node_name,roles,"
-            + "kubeedge_edge,ready,kubelet_version,internal_ip,container_owner,observed_at) "
-            + "KEY(cluster_id,node_uid) VALUES (?,?,?,?,?,?,?,?,?,?)", clusterId, node.uid(),
+            + "node_present,kubeedge_edge,ready,kubelet_version,internal_ip,container_owner,observed_at) "
+            + "KEY(cluster_id,node_uid) VALUES (?,?,?,?,TRUE,?,?,?,?,?,?)", clusterId, node.uid(),
             node.name(), node.roles(), node.kubeedgeEdge(), node.ready(), node.kubeletVersion(),
             node.internalIp(), containerOwner, Timestamp.from(observedAt));
       }
@@ -408,8 +458,8 @@ public class KubernetesClusterRegistryService {
     List<Object> missingParameters = new ArrayList<>();
     missingParameters.add(clusterId);
     nodes.stream().map(NodeObservation::uid).forEach(missingParameters::add);
-    update(connection, "UPDATE kubernetes_cluster_node SET ready=FALSE WHERE cluster_id=?"
-        + missingNodes + " AND container_owner='KUBEEDGE' AND host_id IS NOT NULL",
+    update(connection, "UPDATE kubernetes_cluster_node SET node_present=FALSE,ready=FALSE WHERE cluster_id=?"
+        + missingNodes + " AND host_id IS NOT NULL",
         missingParameters.toArray());
     String deleteSql = "DELETE FROM kubernetes_cluster_node WHERE cluster_id=?";
     List<Object> parameters = new ArrayList<>();
@@ -419,7 +469,7 @@ public class KubernetesClusterRegistryService {
           nodes.size(), "?")) + ")";
       nodes.stream().map(NodeObservation::uid).forEach(parameters::add);
     }
-    deleteSql += " AND (container_owner<>'KUBEEDGE' OR host_id IS NULL)";
+    deleteSql += " AND host_id IS NULL";
     update(connection, deleteSql, parameters.toArray());
     update(connection, "UPDATE kubernetes_cluster SET health_status='HEALTHY',observed_at=?,"
         + "last_error_code=NULL,updated_at=? WHERE id=?", Timestamp.from(observedAt),
@@ -438,23 +488,59 @@ public class KubernetesClusterRegistryService {
   }
 
   private static ClusterSummary summary(Map<String, Object> row) {
+    Instant observedAt = instant(row.get("observed_at"));
+    String healthStatus = String.valueOf(row.get("health_status"));
+    boolean observationsStale = "UNAVAILABLE".equals(healthStatus) || observedAt == null
+        || observedAt.isBefore(Instant.now().minusSeconds(OBSERVATION_STALE_AFTER_SECONDS));
     return new ClusterSummary((UUID)row.get("id"), String.valueOf(row.get("name")),
         String.valueOf(row.get("kind")), String.valueOf(row.get("endpoint")),
-        String.valueOf(row.get("context_name")), String.valueOf(row.get("health_status")),
+        String.valueOf(row.get("context_name")), healthStatus,
         String.valueOf(row.get("cloudcore_status")), instant(row.get("cloudcore_observed_at")),
-        instant(row.get("observed_at")), (String)row.get("last_error_code"),
+        observedAt, observationsStale, (String)row.get("last_error_code"),
         ((Number)row.get("node_count")).intValue(), instant(row.get("created_at")));
   }
 
-  private static ClusterNode node(Map<String, Object> row) {
+  private static ClusterNode node(Map<String, Object> row, Instant now, int staleAfterSeconds) {
     String roles = String.valueOf(row.get("roles"));
     List<String> roleList = roles.isBlank() ? List.of() : List.of(roles.split(","));
+    boolean nodePresent = Boolean.TRUE.equals(row.get("node_present"));
+    boolean edgeNode = Boolean.TRUE.equals(row.get("kubeedge_edge"));
+    boolean ready = Boolean.TRUE.equals(row.get("ready"));
+    String edgeCoreRegistrationStatus = edgeCoreRegistrationStatus(edgeNode, nodePresent, ready);
+    Instant edgeCoreObservedAt = instant(row.get("edgecore_observed_at"));
+    String edgeCoreProcessStatus = edgeCoreProcessStatus(edgeNode,
+        (UUID)row.get("host_id"), (String)row.get("edgecore_active_state"), edgeCoreObservedAt,
+        instant(row.get("host_agent_last_seen")), now, staleAfterSeconds);
     return new ClusterNode((UUID)row.get("cluster_id"), String.valueOf(row.get("node_uid")),
-        String.valueOf(row.get("node_name")), roleList,
-        Boolean.TRUE.equals(row.get("kubeedge_edge")), Boolean.TRUE.equals(row.get("ready")),
+        String.valueOf(row.get("node_name")), roleList, nodePresent,
+        edgeNode, ready,
         (String)row.get("kubelet_version"), (String)row.get("internal_ip"),
-        String.valueOf(row.get("container_owner")), (UUID)row.get("host_id"),
+        edgeCoreRegistrationStatus, edgeCoreProcessStatus, edgeCoreObservedAt,
+        String.valueOf(row.get("container_owner")),
+        (UUID)row.get("host_id"),
         instant(row.get("observed_at")));
+  }
+
+  static String edgeCoreProcessStatus(boolean edgeNode, UUID hostId, String activeState,
+                                      Instant serviceObservedAt, Instant agentLastSeen,
+                                      Instant now, int staleAfterSeconds) {
+    if (!edgeNode) return "NOT_APPLICABLE";
+    if (hostId == null) return "NOT_MAPPED";
+    if (serviceObservedAt == null || activeState == null) return "NOT_OBSERVED";
+    Instant staleBefore = now.minusSeconds(staleAfterSeconds);
+    if (serviceObservedAt.isBefore(staleBefore) || agentLastSeen == null
+        || agentLastSeen.isBefore(staleBefore)) return "STALE";
+    return switch (activeState) {
+      case "ACTIVE" -> "ACTIVE";
+      case "INACTIVE", "FAILED" -> "INACTIVE";
+      default -> "UNKNOWN";
+    };
+  }
+
+  static String edgeCoreRegistrationStatus(boolean edgeNode, boolean nodePresent, boolean ready) {
+    if (!edgeNode) return "NOT_EDGE_NODE";
+    if (!nodePresent) return "NOT_PRESENT";
+    return ready ? "REGISTERED_READY" : "REGISTERED_NOT_READY";
   }
 
   private static Instant instant(Object value) {

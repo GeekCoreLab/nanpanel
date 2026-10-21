@@ -99,4 +99,7 @@
     <changeSet id="kubernetes-managed-deployment-test" author="nanpanel">
         <sql>CREATE TABLE kubernetes_managed_deployment (cluster_id UUID NOT NULL REFERENCES kubernetes_cluster(id) ON DELETE CASCADE, namespace VARCHAR(63) NOT NULL, deployment_name VARCHAR(63) NOT NULL, deployment_uid VARCHAR(128) NOT NULL, ownership_token VARCHAR(36) NOT NULL UNIQUE, created_by VARCHAR(36) NOT NULL REFERENCES panel_user(id), created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (cluster_id,namespace,deployment_name));</sql>
     </changeSet>
+    <changeSet id="kubernetes-node-presence-test" author="nanpanel">
+        <sql>ALTER TABLE kubernetes_cluster_node ADD COLUMN node_present BOOLEAN NOT NULL DEFAULT TRUE;</sql>
+    </changeSet>
 </databaseChangeLog>

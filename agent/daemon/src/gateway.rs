@@ -666,6 +666,28 @@ struct ContainerDeployPayload {
     container_port: Option<u16>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct K3sPreflightPayload {
+    role: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct K3sInstallPayload {
+    role: String,
+    version: String,
+    server_url: Option<String>,
+    token: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct K3sUpgradePayload {
+    role: String,
+    version: String,
+}
+
 async fn dispatch_control(
     State(gateway): State<Gateway>,
     headers: HeaderMap,
@@ -749,7 +771,8 @@ async fn dispatch_control(
 
 fn valid_dispatch_target(capability: &str, target: &str) -> bool {
     match capability {
-        "agent.update" | "package.install" | "container.list" => target.is_empty(),
+        "agent.update" | "package.install" | "container.list" | "k3s.preflight" | "k3s.install"
+        | "k3s.upgrade" => target.is_empty(),
         "systemd.restart" | "systemd.journal.read" => valid_service_unit(target),
         "file.write.protected" => valid_file_target(target),
         "container.logs" | "container.start" | "container.stop" | "container.deploy" => {
@@ -762,6 +785,16 @@ fn valid_dispatch_target(capability: &str, target: &str) -> bool {
 
 fn valid_dispatch_payload(capability: &str, payload: Option<&str>) -> bool {
     match (capability, payload) {
+        ("k3s.preflight", Some(json)) => serde_json::from_str::<K3sPreflightPayload>(json)
+            .is_ok_and(|payload| matches!(payload.role.as_str(), "server" | "agent")),
+        ("k3s.install", Some(json)) => serde_json::from_str::<K3sInstallPayload>(json)
+            .is_ok_and(|payload| valid_k3s_install_payload(&payload)),
+        ("k3s.upgrade", Some(json)) => {
+            serde_json::from_str::<K3sUpgradePayload>(json).is_ok_and(|payload| {
+                matches!(payload.role.as_str(), "server" | "agent")
+                    && valid_k3s_version(&payload.version)
+            })
+        }
         ("package.install" | "file.write.protected", Some(json)) => {
             serde_json::from_str::<serde_json::Value>(json).is_ok_and(|value| value.is_object())
         }
@@ -792,6 +825,96 @@ fn valid_dispatch_payload(capability: &str, payload: Option<&str>) -> bool {
             None,
         ) => true,
         _ => false,
+    }
+}
+
+fn valid_k3s_install_payload(payload: &K3sInstallPayload) -> bool {
+    let valid_version = payload
+        .version
+        .strip_prefix('v')
+        .and_then(|release| release.split_once("+k3s"))
+        .is_some_and(|(version, revision)| {
+            let components = version.split('.').collect::<Vec<_>>();
+            components.len() == 3
+                && components
+                    .iter()
+                    .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+                && !revision.is_empty()
+                && revision.bytes().all(|b| b.is_ascii_digit())
+        });
+    let valid_token = valid_k3s_token(&payload.token);
+    let valid_server = payload
+        .server_url
+        .as_deref()
+        .is_some_and(valid_k3s_server_url);
+    valid_version
+        && valid_token
+        && match payload.role.as_str() {
+            "server" => payload.server_url.is_none() && !payload.token.starts_with("K10"),
+            "agent" => valid_server,
+            _ => false,
+        }
+}
+
+fn valid_k3s_version(version: &str) -> bool {
+    version
+        .strip_prefix('v')
+        .and_then(|release| release.split_once("+k3s"))
+        .is_some_and(|(version, revision)| {
+            let components = version.split('.').collect::<Vec<_>>();
+            components.len() == 3
+                && components
+                    .iter()
+                    .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+                && !revision.is_empty()
+                && revision.bytes().all(|b| b.is_ascii_digit())
+        })
+}
+
+fn valid_k3s_token(token: &str) -> bool {
+    (16..=512).contains(&token.len())
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+}
+
+fn valid_k3s_server_url(server_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(server_url) else {
+        return false;
+    };
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || !matches!(url.path(), "" | "/")
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.port().is_some_and(|port| port != 6443)
+        || server_url.len() > 512
+    {
+        return false;
+    }
+    match url.host_str() {
+        Some(host) if host.eq_ignore_ascii_case("localhost") || host.ends_with(".localhost") => {
+            false
+        }
+        Some(host) => host
+            .parse::<std::net::IpAddr>()
+            .map_or(true, |address| match address {
+                std::net::IpAddr::V4(address) => {
+                    !address.is_unspecified()
+                        && !address.is_loopback()
+                        && !address.is_link_local()
+                        && !address.is_multicast()
+                }
+                std::net::IpAddr::V6(address) => {
+                    !address.is_unspecified()
+                        && !address.is_loopback()
+                        && !address.is_multicast()
+                        && !address.is_unicast_link_local()
+                }
+            }),
+        None => false,
     }
 }
 
@@ -1278,6 +1401,26 @@ mod tests {
         assert!(!valid_dispatch_payload(
             "container.deploy",
             Some(r#"{"image":"./nginx","hostPort":8080,"containerPort":80}"#),
+        ));
+        assert!(valid_dispatch_payload(
+            "k3s.install",
+            Some(
+                r#"{"role":"agent","version":"v1.36.5+k3s1","serverUrl":"https://k3s.example.net:6443/","token":"K10aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa::server:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#
+            ),
+        ));
+        assert!(!valid_dispatch_payload(
+            "k3s.install",
+            Some(
+                r#"{"role":"agent","version":"v1.36.5+k3s1","serverUrl":"https://127.0.0.1:6443","token":"K10aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa::server:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#
+            ),
+        ));
+        assert!(valid_dispatch_payload(
+            "k3s.upgrade",
+            Some(r#"{"role":"server","version":"v1.37.1+k3s1"}"#),
+        ));
+        assert!(!valid_dispatch_payload(
+            "k3s.upgrade",
+            Some(r#"{"role":"server","version":"latest","command":"id"}"#),
         ));
     }
 

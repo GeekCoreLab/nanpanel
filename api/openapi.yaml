@@ -525,7 +525,7 @@ paths:
       tags: [KubernetesClusters]
       operationId: unmapKubernetesNodeFromHost
       summary: 移除 Kubernetes Node 的主机映射
-      description: Kubernetes API 中仍存在的节点不能解除映射，以免解除后 Host Agent 与 Kubelet/KubeEdge 双重管理容器。节点从集群移除并成功刷新后，非 KubeEdge 映射会随快照清理。
+      description: Kubernetes API 中仍存在的节点不能解除映射，以免解除后 Host Agent 与 Kubelet/KubeEdge 双重管理容器。成功完整刷新确认节点已移除后，仍映射的 Node UID 会作为 tombstone 保留；显式解除映射才释放 Host。
       x-implementation-status: implemented
       security:
       - cookieAuth: []
@@ -4401,7 +4401,7 @@ components:
     KubernetesClusterSummary:
       type: object
       additionalProperties: false
-      required: [id, name, kind, endpoint, contextName, healthStatus, cloudCoreStatus, cloudCoreObservedAt, observedAt, lastErrorCode, nodeCount, createdAt]
+      required: [id, name, kind, endpoint, contextName, healthStatus, cloudCoreStatus, cloudCoreObservedAt, observedAt, observationsStale, lastErrorCode, nodeCount, createdAt]
       properties:
         id:
           type: string
@@ -4430,6 +4430,9 @@ components:
         observedAt:
           type: [string, 'null']
           format: date-time
+        observationsStale:
+          type: boolean
+          description: True when no successful cluster observation is available within 120 seconds or the last cluster refresh failed.
         lastErrorCode:
           type: [string, 'null']
           maxLength: 64
@@ -4488,7 +4491,7 @@ components:
     KubernetesClusterNode:
       type: object
       additionalProperties: false
-      required: [clusterId, nodeUid, nodeName, roles, kubeedgeEdge, ready, kubeletVersion, internalIp, containerOwner, hostId, observedAt]
+      required: [clusterId, nodeUid, nodeName, roles, nodePresent, kubeedgeEdge, ready, kubeletVersion, internalIp, edgeCoreRegistrationStatus, edgeCoreProcessStatus, edgeCoreProcessObservedAt, containerOwner, hostId, observedAt]
       properties:
         clusterId:
           type: string
@@ -4505,6 +4508,9 @@ components:
           items:
             type: string
             maxLength: 80
+        nodePresent:
+          type: boolean
+          description: 最近一次成功完整 Node 清单是否包含此 UID；已移除但仍映射的 Node 作为 tombstone 保留。
         kubeedgeEdge:
           type: boolean
         ready:
@@ -4515,6 +4521,17 @@ components:
         internalIp:
           type: [string, 'null']
           maxLength: 45
+        edgeCoreRegistrationStatus:
+          type: string
+          enum: [NOT_EDGE_NODE, NOT_PRESENT, REGISTERED_NOT_READY, REGISTERED_READY]
+          description: KubeEdge 注册状态由 Kubernetes Node 的 Edge 角色标签及 Ready 条件推导；edgeCoreProcessStatus 单独反映映射主机上 Agent 采集的 systemd 观测。
+        edgeCoreProcessStatus:
+          type: string
+          enum: [NOT_APPLICABLE, NOT_MAPPED, NOT_OBSERVED, STALE, ACTIVE, INACTIVE, UNKNOWN]
+          description: 映射主机最近一次 edgecore.service systemd 观测；观测和 Agent 心跳均须在主机离线阈值内才标为 ACTIVE 或 INACTIVE。
+        edgeCoreProcessObservedAt:
+          type: [string, 'null']
+          format: date-time
         containerOwner:
           type: string
           maxLength: 32
@@ -5389,6 +5406,9 @@ components:
           - container.stop
           - container.deploy
           - network.firewall.expose
+          - k3s.preflight
+          - k3s.install
+          - k3s.upgrade
           - file.list
           - file.read
           - file.write
@@ -5404,6 +5424,9 @@ components:
           - $ref: '#/components/schemas/HostFileWritePayload'
           - $ref: '#/components/schemas/ContainerDeployPayload'
           - $ref: '#/components/schemas/NetworkFirewallPayload'
+          - $ref: '#/components/schemas/K3sPreflightPayload'
+          - $ref: '#/components/schemas/K3sInstallPayload'
+          - $ref: '#/components/schemas/K3sUpgradePayload'
           - type: 'null'
           description: 各类型化 Helper 操作接受对应参数对象。
         reason:
@@ -5413,13 +5436,58 @@ components:
         timeoutSeconds:
           type: integer
           minimum: 5
-          maximum: 300
+          maximum: 600
           default: 60
         expectedGeneration:
           type: integer
           format: int64
           minimum: 1
           description: 来自主机详情快照；变化时拒绝执行并要求刷新。
+    K3sPreflightPayload:
+      type: object
+      additionalProperties: false
+      required: [role]
+      properties:
+        role:
+          type: string
+          enum: [server, agent]
+          description: 按 K3s server 或 agent 节点最低资源要求执行只读校验。
+    K3sInstallPayload:
+      type: object
+      additionalProperties: false
+      required: [role, version, serverUrl, token]
+      properties:
+        role:
+          type: string
+          enum: [server, agent]
+        version:
+          type: string
+          pattern: '^v[0-9]+\.[0-9]+\.[0-9]+\+k3s[0-9]+$'
+          description: 固定的稳定 K3s 发布版本，不接受通道或 shell 参数。
+        serverUrl:
+          type: [string, 'null']
+          maxLength: 512
+          format: uri
+          description: Agent 节点必填，Server 节点必须为 null；只接受 HTTPS 6443 API origin。
+        token:
+          type: string
+          minLength: 16
+          maxLength: 512
+          pattern: '^[A-Za-z0-9_.:-]+$'
+          writeOnly: true
+          description: 仅在传输中使用，不写入操作结果、审计或日志。
+    K3sUpgradePayload:
+      type: object
+      additionalProperties: false
+      required: [role, version]
+      properties:
+        role:
+          type: string
+          enum: [server, agent]
+        version:
+          type: string
+          pattern: '^v[0-9]+\.[0-9]+\.[0-9]+\+k3s[0-9]+$'
+          description: 固定稳定 K3s 版本；仅允许同一 Kubernetes minor 或向前一个 minor 升级。
     SshProbeRequest:
       type: object
       additionalProperties: false

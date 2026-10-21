@@ -596,7 +596,9 @@ class SystemResourceTest {
         "host.inventory", "agent.heartbeat", "agent.self_update", "systemd.read",
         "systemd.restart", "systemd.journal.read", "package.install", "file.write.protected",
         "container.list", "container.logs", "container.start", "container.stop",
-        "container.deploy", "network.firewall.expose", "network.inventory",
+        "container.deploy", "network.firewall.expose", "k3s.preflight", "k3s.install",
+        "k3s.upgrade",
+        "network.inventory",
         "network.overlay.observe", "network.overlay.peer_paths.observe"));
     heartbeat.put("helperStatus", "AVAILABLE");
     heartbeat.put("systemdObservedAtEpochMs", System.currentTimeMillis());
@@ -645,7 +647,7 @@ class SystemResourceTest {
         "host.inventory", "agent.heartbeat", "agent.self_update", "systemd.read",
         "systemd.restart", "systemd.journal.read", "package.install", "file.write.protected",
         "container.list", "container.logs", "container.start", "container.stop",
-        "container.deploy", "network.firewall.expose", "network.inventory"));
+        "container.deploy", "network.firewall.expose", "k3s.preflight", "network.inventory"));
     given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
         .contentType("application/json")
         .body(unadvertisedOverlayHeartbeat)
@@ -719,6 +721,7 @@ class SystemResourceTest {
     given().cookie("nanpanel_session", restoredCookie)
         .get("/api/v1/kubernetes/clusters/" + kubeedgeClusterId)
         .then().statusCode(200).body("healthStatus", equalTo("UNAVAILABLE"))
+        .body("observationsStale", equalTo(true))
         .body("lastErrorCode", equalTo("API_UNAVAILABLE"))
         .body("cloudCoreStatus", equalTo("NOT_OBSERVED"))
         .body("cloudCoreObservedAt", nullValue()).body("observedAt", notNullValue());
@@ -729,7 +732,49 @@ class SystemResourceTest {
         .put("/api/v1/kubernetes/clusters/" + kubeedgeClusterId + "/nodes/"
             + kubeedgeNodeUid + "/host")
         .then().statusCode(200).body("containerOwner", equalTo("KUBEEDGE"))
+        .body("edgeCoreRegistrationStatus", equalTo("REGISTERED_READY"))
+        .body("edgeCoreProcessStatus", equalTo("NOT_OBSERVED"))
+        .body("edgeCoreProcessObservedAt", nullValue())
         .body("hostId", equalTo(hostId));
+    String conflictingNodeUid = "edge-node-system-test-conflict";
+    store.transaction(c -> {
+      AuthStore.update(c, "INSERT INTO kubernetes_cluster_node (cluster_id,node_uid,node_name,"
+          + "roles,kubeedge_edge,ready,kubelet_version,internal_ip,container_owner,host_id,observed_at) "
+          + "VALUES (?,?,?,'edge',TRUE,TRUE,?,'192.0.2.11','KUBEEDGE',NULL,?)",
+          kubeedgeClusterId, conflictingNodeUid, "edge-node-system-test-conflict",
+          "v1.31.0-kubeedge.1", java.sql.Timestamp.from(kubeedgeObservedAt));
+      return null;
+    });
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .contentType("application/json")
+        .body(Map.of("hostId", hostId))
+        .put("/api/v1/kubernetes/clusters/" + kubeedgeClusterId + "/nodes/"
+            + conflictingNodeUid + "/host")
+        .then().statusCode(409).body("code", equalTo("KUBERNETES_NODE_MAPPING_CONFLICT"));
+    Instant edgeCoreObservedAt = Instant.now();
+    UUID edgeCoreServiceId = UUID.randomUUID();
+    store.transaction(c -> {
+      AuthStore.update(c, "INSERT INTO system_service_observation (id,host_id,unit_name,"
+          + "display_name,active_state,sub_state,observed_at) VALUES (?,?,?,?,?,?,?)",
+          edgeCoreServiceId, hostId, "edgecore.service", "KubeEdge EdgeCore", "ACTIVE",
+          "running", java.sql.Timestamp.from(edgeCoreObservedAt));
+      return null;
+    });
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .contentType("application/json")
+        .body(Map.of("hostId", hostId))
+        .put("/api/v1/kubernetes/clusters/" + kubeedgeClusterId + "/nodes/"
+            + kubeedgeNodeUid + "/host")
+        .then().statusCode(200)
+        .body("edgeCoreRegistrationStatus", equalTo("REGISTERED_READY"))
+        .body("edgeCoreProcessStatus", equalTo("ACTIVE"))
+        .body("edgeCoreProcessObservedAt", notNullValue());
+    store.transaction(c -> {
+      AuthStore.update(c, "DELETE FROM system_service_observation WHERE id=?", edgeCoreServiceId);
+      return null;
+    });
     given().cookie("nanpanel_session", restoredCookie)
         .header("X-CSRF-Token", restored.path("csrfToken"))
         .header("Idempotency-Key", "helper-kubeedge-owned-01")
@@ -744,6 +789,39 @@ class SystemResourceTest {
         .delete("/api/v1/kubernetes/clusters/" + kubeedgeClusterId + "/nodes/"
             + kubeedgeNodeUid + "/host")
         .then().statusCode(409).body("code", equalTo("KUBERNETES_CONTAINER_OWNED"));
+    given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/hosts/" + hostId + "/network-inventory")
+        .then().statusCode(200).body("routes[0].gateway", equalTo("192.0.2.1"));
+    store.transaction(c -> {
+      KubernetesClusterRegistryService.replaceNodes(c, kubeedgeClusterId, java.util.List.of(),
+          Instant.now());
+      return null;
+    });
+    var removedNode = store.transaction(c -> AuthStore.query(c,
+        "SELECT node_present,ready,host_id,container_owner FROM kubernetes_cluster_node "
+            + "WHERE cluster_id=? AND node_uid=?", kubeedgeClusterId, kubeedgeNodeUid));
+    assertEquals(1, removedNode.size());
+    assertEquals(Boolean.FALSE, removedNode.getFirst().get("node_present"));
+    assertEquals(Boolean.FALSE, removedNode.getFirst().get("ready"));
+    assertEquals(hostId, String.valueOf(removedNode.getFirst().get("host_id")));
+    assertEquals("KUBEEDGE", removedNode.getFirst().get("container_owner"));
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .contentType("application/json")
+        .body(Map.of("hostId", hostId))
+        .put("/api/v1/kubernetes/clusters/" + kubeedgeClusterId + "/nodes/"
+            + kubeedgeNodeUid + "/host")
+        .then().statusCode(404).body("code", equalTo("KUBERNETES_NODE_NOT_FOUND"));
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .delete("/api/v1/kubernetes/clusters/" + kubeedgeClusterId + "/nodes/"
+            + kubeedgeNodeUid + "/host")
+        .then().statusCode(204);
+    assertEquals(0, store.transaction(c -> AuthStore.query(c,
+        "SELECT node_uid FROM kubernetes_cluster_node WHERE cluster_id=? AND node_uid=?",
+        kubeedgeClusterId, kubeedgeNodeUid)).size());
+    assertEquals(1, store.transaction(c -> AuthStore.query(c,
+        "SELECT id FROM host WHERE id=?", hostId)).size());
     given().cookie("nanpanel_session", restoredCookie)
         .header("X-CSRF-Token", restored.path("csrfToken"))
         .contentType("application/json")
@@ -827,6 +905,115 @@ class SystemResourceTest {
         .post("/api/v1/hosts/" + hostId + "/operations")
         .then().statusCode(200).header("Idempotency-Replayed", equalTo("true"))
         .body("id", equalTo(packageOperationId));
+    var invalidK3sPreflight = Map.of(
+        "capability", "k3s.preflight", "target", "",
+        "payload", Map.of("role", "control-plane", "command", "id"),
+        "reason", "Reject an invalid K3s preflight role", "expectedGeneration", 1);
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("Idempotency-Key", "helper-k3s-preflight-invalid-01")
+        .contentType("application/json").body(invalidK3sPreflight)
+        .post("/api/v1/hosts/" + hostId + "/operations")
+        .then().statusCode(422).body("code", equalTo("VALIDATION_FAILED"));
+    String k3sPreflightKey = "helper-k3s-preflight-valid-01";
+    var k3sPreflightRequest = Map.of(
+        "capability", "k3s.preflight", "target", "", "payload", Map.of("role", "server"),
+        "reason", "Check K3s server prerequisites without changing the host", "timeoutSeconds", 60,
+        "expectedGeneration", 1);
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("Idempotency-Key", k3sPreflightKey)
+        .contentType("application/json").body(k3sPreflightRequest)
+        .post("/api/v1/hosts/" + hostId + "/operations")
+        .then().statusCode(503).body("code", equalTo("EXECUTION_OUTCOME_UNKNOWN"));
+    var preflightOperations = given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/operations?hostId=" + hostId)
+        .then().statusCode(200).extract();
+    String preflightOperationId = preflightOperations.path(
+        "items.find { it.idempotencyKey == '" + k3sPreflightKey + "' }.id");
+    String preflightResult = "{\"schemaVersion\":1,\"role\":\"server\",\"status\":\"READY\",\"blockerCount\":0,\"warningCount\":0,\"checks\":[]}";
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json")
+        .body(Map.of("agentId", agentId, "operationId", preflightOperationId,
+            "idempotencyKey", k3sPreflightKey, "status", "SUCCEEDED", "detail", preflightResult))
+        .post("/internal/agent-control-results").then().statusCode(204)
+        .header("X-NanPanel-Result-Ack", equalTo("true"));
+    given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/operations/" + preflightOperationId)
+        .then().statusCode(200).body("capability", equalTo("k3s.preflight"))
+        .body("status", equalTo("SUCCEEDED"))
+        .body("result.output", equalTo(preflightResult));
+    var invalidK3sInstall = Map.of(
+        "capability", "k3s.install", "target", "",
+        "payload", Map.of("role", "agent", "version", "v1.36.5+k3s1",
+            "serverUrl", "https://k3s.example.test:6443",
+            "token", "K10" + "a".repeat(64) + "::server:" + "b".repeat(32) + "\nK3S_URL=evil"),
+        "reason", "Reject an injected K3s token", "timeoutSeconds", 300,
+        "expectedGeneration", 1);
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("Idempotency-Key", "helper-k3s-install-invalid-01")
+        .contentType("application/json").body(invalidK3sInstall)
+        .post("/api/v1/hosts/" + hostId + "/operations")
+        .then().statusCode(422).body("code", equalTo("VALIDATION_FAILED"));
+    var validK3sInstall = Map.of(
+        "capability", "k3s.install", "target", "",
+        "payload", Map.of("role", "agent", "version", "v1.36.5+k3s1",
+            "serverUrl", "https://k3s.example.test:6443/",
+            "token", "K10" + "a".repeat(64) + "::server:" + "b".repeat(32)),
+        "reason", "Validate secure-format K3s agent installation parameters",
+        "timeoutSeconds", 600, "expectedGeneration", 1);
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("Idempotency-Key", "helper-k3s-install-valid-01")
+        .contentType("application/json").body(validK3sInstall)
+        .post("/api/v1/hosts/" + hostId + "/operations")
+        .then().statusCode(503).body("code", equalTo("EXECUTION_OUTCOME_UNKNOWN"));
+    var installOperations = given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/operations?hostId=" + hostId).then().statusCode(200).extract();
+    String installOperationId = installOperations.path(
+        "items.find { it.idempotencyKey == 'helper-k3s-install-valid-01' }.id");
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json")
+        .body(Map.of("agentId", agentId, "operationId", installOperationId,
+            "idempotencyKey", "helper-k3s-install-valid-01", "status", "FAILED",
+            "detail", "FAILED: test fixture confirms the host has no live Agent session"))
+        .post("/internal/agent-control-results").then().statusCode(204)
+        .header("X-NanPanel-Result-Ack", equalTo("true"));
+    var invalidK3sUpgrade = Map.of(
+        "capability", "k3s.upgrade", "target", "",
+        "payload", Map.of("role", "server", "version", "latest", "command", "id"),
+        "reason", "Reject shell fields and floating K3s versions", "timeoutSeconds", 600,
+        "expectedGeneration", 1);
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("Idempotency-Key", "helper-k3s-upgrade-invalid-01")
+        .contentType("application/json").body(invalidK3sUpgrade)
+        .post("/api/v1/hosts/" + hostId + "/operations")
+        .then().statusCode(422).body("code", equalTo("VALIDATION_FAILED"));
+    String upgradeKey = "helper-k3s-upgrade-valid-01";
+    var validK3sUpgrade = Map.of(
+        "capability", "k3s.upgrade", "target", "",
+        "payload", Map.of("role", "server", "version", "v1.37.1+k3s1"),
+        "reason", "Validate fixed-version K3s upgrade request", "timeoutSeconds", 600,
+        "expectedGeneration", 1);
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("Idempotency-Key", upgradeKey)
+        .contentType("application/json").body(validK3sUpgrade)
+        .post("/api/v1/hosts/" + hostId + "/operations")
+        .then().statusCode(503).body("code", equalTo("EXECUTION_OUTCOME_UNKNOWN"));
+    var upgradeOperations = given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/operations?hostId=" + hostId).then().statusCode(200).extract();
+    String upgradeOperationId = upgradeOperations.path(
+        "items.find { it.idempotencyKey == '" + upgradeKey + "' }.id");
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json")
+        .body(Map.of("agentId", agentId, "operationId", upgradeOperationId,
+            "idempotencyKey", upgradeKey, "status", "FAILED",
+            "detail", "FAILED: test fixture confirms the host has no live Agent session"))
+        .post("/internal/agent-control-results").then().statusCode(204)
+        .header("X-NanPanel-Result-Ack", equalTo("true"));
     var invalidNetworkRequest = Map.of(
         "capability", "network.firewall.expose", "target", "ssh-test",
         "payload", Map.of("interfaceName", "eth0", "protocol", "tcp", "port", 2222,

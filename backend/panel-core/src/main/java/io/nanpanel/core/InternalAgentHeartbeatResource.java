@@ -72,6 +72,7 @@ public class InternalAgentHeartbeatResource {
                 "systemd.read", "systemd.restart", "systemd.journal.read", "package.install",
                 "file.write.protected", "container.list", "container.logs", "container.start",
                 "container.stop", "container.deploy", "network.firewall.expose",
+                "k3s.preflight", "k3s.install", "k3s.upgrade",
                 "network.inventory", "network.overlay.observe", "network.overlay.peer_paths.observe",
                 "file.list", "file.read", "file.write", "file.delete")
                 .contains(capability)) ||

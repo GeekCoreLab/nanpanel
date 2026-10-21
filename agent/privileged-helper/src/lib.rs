@@ -17,6 +17,7 @@ use anyhow::{Context, Result, bail};
 use futures_util::{SinkExt, StreamExt};
 use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio_util::codec::{Framed, LinesCodec};
@@ -112,6 +113,28 @@ struct ContainerDeployPayload {
 #[serde(deny_unknown_fields)]
 struct HostFileWritePayload {
     content: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct K3sPreflightPayload {
+    role: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct K3sInstallPayload {
+    role: String,
+    version: String,
+    server_url: Option<String>,
+    token: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct K3sUpgradePayload {
+    role: String,
+    version: String,
 }
 
 struct HelperRuntime {
@@ -417,6 +440,13 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                         )
                                         .await
                                     }
+                                    "k3s.preflight" => k3s_preflight(&request),
+                                    "k3s.install" => {
+                                        k3s_install(&request, &runtime.host_root).await
+                                    }
+                                    "k3s.upgrade" => {
+                                        k3s_upgrade(&request, &runtime.host_root).await
+                                    }
                                     _ => Err("unsupported capability".to_owned()),
                                 },
                             }
@@ -522,6 +552,7 @@ fn validate_capability_target(
         "network.overlay.peer_paths.read" if target.is_empty() && netbird_status_available => {
             Ok(())
         }
+        "k3s.preflight" | "k3s.install" | "k3s.upgrade" if target.is_empty() => Ok(()),
         "systemd.restart" | "systemd.journal.read" if valid_systemd_unit(target) => Ok(()),
         "file.read.managed" if !target.is_empty() => Ok(()),
         "package.install" if target.is_empty() => Ok(()),
@@ -545,6 +576,9 @@ fn validate_capability_target(
         | "helper.capabilities"
         | "agent.update"
         | "network.overlay.peer_paths.read"
+        | "k3s.preflight"
+        | "k3s.install"
+        | "k3s.upgrade"
         | "systemd.restart"
         | "systemd.journal.read"
         | "package.install"
@@ -566,7 +600,13 @@ fn validate_capability_target(
 fn validate_payload_presence(request: &Request) -> std::result::Result<(), String> {
     let required = matches!(
         request.capability.as_str(),
-        "package.install" | "file.write.protected" | "network.firewall.expose" | "file.write"
+        "package.install"
+            | "file.write.protected"
+            | "network.firewall.expose"
+            | "file.write"
+            | "k3s.preflight"
+            | "k3s.install"
+            | "k3s.upgrade"
     );
     if required != request.payload_json.is_some() {
         return Err("DENIED: payload presence does not match capability schema".to_owned());
@@ -593,6 +633,9 @@ fn available_capabilities(
         "systemd.restart",
         "systemd.journal.read",
         "helper.capabilities",
+        "k3s.preflight",
+        "k3s.install",
+        "k3s.upgrade",
         "package.install",
         "file.write.protected",
         "file.list",
@@ -642,6 +685,957 @@ struct NetbirdPeerPath {
     peer_name: String,
     status: String,
     connection_type: String,
+}
+
+fn k3s_preflight(request: &Request) -> std::result::Result<String, String> {
+    let payload = request
+        .payload_json
+        .as_deref()
+        .ok_or_else(|| "DENIED: K3s preflight role is required".to_owned())?;
+    let payload: K3sPreflightPayload = serde_json::from_str(payload)
+        .map_err(|_| "DENIED: K3s preflight payload is invalid".to_owned())?;
+    let role = payload.role.as_str();
+    let server = match role {
+        "server" => true,
+        "agent" => false,
+        _ => return Err("DENIED: K3s role must be server or agent".to_owned()),
+    };
+
+    let minimum_cpus = if server { 2 } else { 1 };
+    let minimum_memory_kib = if server { 2 * 1024 * 1024 } else { 512 * 1024 };
+    let cpu_count = std::thread::available_parallelism().map(usize::from).ok();
+    let memory_kib = std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|contents| {
+            contents.lines().find_map(|line| {
+                let rest = line.strip_prefix("MemTotal:")?;
+                rest.split_whitespace().next()?.parse::<u64>().ok()
+            })
+        });
+    let architecture = std::env::consts::ARCH;
+    let supported_architecture = matches!(architecture, "x86_64" | "aarch64" | "arm" | "s390x");
+    let systemd_available = Path::new("/run/systemd/system").is_dir()
+        && ["/usr/bin/systemctl", "/bin/systemctl"]
+            .iter()
+            .any(|path| Path::new(path).is_file());
+    let cgroup_v2 = Path::new("/sys/fs/cgroup/cgroup.controllers").is_file();
+    let k3s_binary = ["/usr/local/bin/k3s", "/usr/bin/k3s"]
+        .iter()
+        .any(|path| Path::new(path).is_file());
+    let k3s_unit = [
+        "/etc/systemd/system/k3s.service",
+        "/etc/systemd/system/k3s-agent.service",
+        "/usr/lib/systemd/system/k3s.service",
+        "/usr/lib/systemd/system/k3s-agent.service",
+    ]
+    .iter()
+    .any(|path| Path::new(path).is_file());
+    let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+    let os_id = os_release_value(&os_release, "ID").unwrap_or_else(|| "unknown".to_owned());
+    let os_version = os_release_value(&os_release, "VERSION_ID");
+    let mut checks = Vec::new();
+    let mut blockers = 0;
+    let mut warnings = 0;
+    let mut add_check = |id: &str, severity: &str, passed: Option<bool>, detail: String| {
+        if severity == "BLOCKER" && passed != Some(true) {
+            blockers += 1;
+        } else if severity == "WARNING" && passed != Some(true) {
+            warnings += 1;
+        }
+        checks.push(serde_json::json!({
+            "id": id,
+            "severity": severity,
+            "passed": passed,
+            "detail": detail
+        }));
+    };
+    add_check(
+        "linux-architecture",
+        "BLOCKER",
+        Some(supported_architecture),
+        format!("当前架构：{architecture}；支持 x86_64、aarch64、arm、s390x"),
+    );
+    add_check(
+        "cpu-cores",
+        "BLOCKER",
+        cpu_count.map(|count| count >= minimum_cpus),
+        format!(
+            "当前可用 CPU：{}；{role} 最低要求：{minimum_cpus}",
+            cpu_count.map_or_else(|| "未知".to_owned(), |count| count.to_string())
+        ),
+    );
+    add_check(
+        "memory",
+        "BLOCKER",
+        memory_kib.map(|value| value >= minimum_memory_kib),
+        format!(
+            "当前内存：{}；{role} 最低要求：{} KiB",
+            memory_kib.map_or_else(|| "未知".to_owned(), |value| format!("{value} KiB")),
+            minimum_memory_kib
+        ),
+    );
+    add_check(
+        "systemd",
+        "BLOCKER",
+        Some(systemd_available),
+        if systemd_available {
+            "检测到 systemd 管理环境".to_owned()
+        } else {
+            "未检测到运行中的 systemd；当前受控安装流程要求 systemd".to_owned()
+        },
+    );
+    add_check(
+        "cgroup-v2",
+        "WARNING",
+        Some(cgroup_v2),
+        if cgroup_v2 {
+            "检测到 cgroup v2".to_owned()
+        } else {
+            "未检测到 cgroup v2；需结合发行版和容器运行时确认 cgroup 配置".to_owned()
+        },
+    );
+    add_check(
+        "k3s-existing-installation",
+        "BLOCKER",
+        Some(!k3s_binary && !k3s_unit),
+        if k3s_binary || k3s_unit {
+            "已检测到 K3s 二进制或 systemd unit；应进入升级/修复流程，不能重复安装".to_owned()
+        } else {
+            "未检测到已有 K3s 二进制或 systemd unit".to_owned()
+        },
+    );
+    let selinux_active = std::fs::read_to_string("/sys/fs/selinux/enforce")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "0" | "1"));
+    add_check(
+        "selinux-policy",
+        "BLOCKER",
+        Some(!selinux_active),
+        if selinux_active {
+            "检测到启用的 SELinux；当前受控安装流程不会安装 K3s SELinux 策略包".to_owned()
+        } else {
+            "未检测到已启用的 SELinux".to_owned()
+        },
+    );
+    add_check(
+        "os-release",
+        "INFO",
+        Some(true),
+        format!(
+            "发行版：{}{}",
+            os_id,
+            os_version
+                .as_ref()
+                .map_or_else(String::new, |version| format!(" {version}"))
+        ),
+    );
+    let status = if blockers > 0 {
+        "BLOCKED"
+    } else if warnings > 0 {
+        "READY_WITH_WARNINGS"
+    } else {
+        "READY"
+    };
+    serde_json::to_string(&serde_json::json!({
+        "schemaVersion": 1,
+        "role": role,
+        "status": status,
+        "blockerCount": blockers,
+        "warningCount": warnings,
+        "architecture": architecture,
+        "cpuCores": cpu_count,
+        "memoryKib": memory_kib,
+        "osId": os_id,
+        "osVersion": os_version,
+        "k3sBinaryPresent": k3s_binary,
+        "k3sUnitPresent": k3s_unit,
+        "checks": checks
+    }))
+    .map_err(|_| "FAILED: unable to encode K3s preflight report".to_owned())
+}
+
+fn os_release_value(contents: &str, key: &str) -> Option<String> {
+    contents.lines().find_map(|line| {
+        let value = line.strip_prefix(key)?.strip_prefix('=')?;
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        (!value.is_empty() && value.len() <= 128).then(|| value.to_owned())
+    })
+}
+
+fn valid_k3s_version(version: &str) -> bool {
+    let Some(release) = version.strip_prefix('v') else {
+        return false;
+    };
+    let Some((kubernetes, k3s_revision)) = release.split_once("+k3s") else {
+        return false;
+    };
+    let components = kubernetes.split('.').collect::<Vec<_>>();
+    components.len() == 3
+        && components
+            .iter()
+            .all(|component| !component.is_empty() && component.bytes().all(|b| b.is_ascii_digit()))
+        && !k3s_revision.is_empty()
+        && k3s_revision.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn valid_k3s_upgrade_payload(payload: &K3sUpgradePayload) -> bool {
+    matches!(payload.role.as_str(), "server" | "agent") && valid_k3s_version(&payload.version)
+}
+
+fn validate_k3s_install_payload(payload: &K3sInstallPayload) -> std::result::Result<(), String> {
+    if !valid_k3s_version(&payload.version) {
+        return Err("DENIED: K3s version must be a pinned stable vX.Y.Z+k3sN release".to_owned());
+    }
+    if !valid_k3s_token(&payload.token) {
+        return Err("DENIED: K3s token is invalid".to_owned());
+    }
+    match payload.role.as_str() {
+        "server" if payload.server_url.is_none() && !payload.token.starts_with("K10") => Ok(()),
+        "agent" => {
+            let Some(server_url) = payload.server_url.as_deref() else {
+                return Err("DENIED: K3s agent requires a server URL".to_owned());
+            };
+            validate_k3s_server_url(server_url)
+        }
+        _ => Err("DENIED: K3s role or server URL is invalid".to_owned()),
+    }
+}
+
+fn valid_k3s_token(token: &str) -> bool {
+    (16..=512).contains(&token.len())
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+}
+
+fn validate_k3s_server_url(server_url: &str) -> std::result::Result<(), String> {
+    let url = reqwest::Url::parse(server_url)
+        .map_err(|_| "DENIED: K3s server URL is invalid".to_owned())?;
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || url.username() != ""
+        || url.password().is_some()
+        || !matches!(url.path(), "" | "/")
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.port().is_some_and(|port| port != 6443)
+    {
+        return Err("DENIED: K3s server URL must be an HTTPS API origin on port 6443".to_owned());
+    }
+    if let Some(host) = url.host_str()
+        && let Ok(address) = host.parse::<std::net::IpAddr>()
+    {
+        let forbidden = match address {
+            std::net::IpAddr::V4(address) => {
+                address.is_unspecified()
+                    || address.is_loopback()
+                    || address.is_link_local()
+                    || address.is_multicast()
+            }
+            std::net::IpAddr::V6(address) => {
+                address.is_unspecified()
+                    || address.is_loopback()
+                    || address.is_multicast()
+                    || address.is_unicast_link_local()
+            }
+        };
+        if forbidden {
+            return Err("DENIED: K3s server URL uses a non-routable address".to_owned());
+        }
+    }
+    Ok(())
+}
+
+async fn k3s_install(request: &Request, host_root: &File) -> std::result::Result<String, String> {
+    let payload = parse_payload::<K3sInstallPayload>(request)?;
+    validate_k3s_install_payload(&payload)?;
+    let preflight_request = Request {
+        operation_id: request.operation_id.clone(),
+        idempotency_key: request.idempotency_key.clone(),
+        capability: "k3s.preflight".to_owned(),
+        target: String::new(),
+        deadline_epoch_ms: request.deadline_epoch_ms,
+        payload_json: Some(format!("{{\"role\":\"{}\"}}", payload.role)),
+    };
+    let preflight = k3s_preflight(&preflight_request)?;
+    let preflight: serde_json::Value = serde_json::from_str(&preflight)
+        .map_err(|_| "FAILED: K3s preflight result is invalid".to_owned())?;
+    if preflight["status"] == "BLOCKED" {
+        return Err("DENIED: K3s host preflight reported one or more blockers".to_owned());
+    }
+    if !Path::new("/run/systemd/system").is_dir() {
+        return Err("DENIED: K3s installation requires a running systemd host".to_owned());
+    }
+    let systemctl = trusted_executable(&["/usr/bin/systemctl", "/bin/systemctl"])?;
+    let architecture = match std::env::consts::ARCH {
+        "x86_64" => ("amd64", ""),
+        "aarch64" => ("arm64", "-arm64"),
+        "arm" => ("arm", "-armhf"),
+        "s390x" => ("s390x", "-s390x"),
+        _ => return Err("DENIED: K3s binary is unavailable for this architecture".to_owned()),
+    };
+    let unit = if payload.role == "server" {
+        "k3s.service"
+    } else {
+        "k3s-agent.service"
+    };
+    let executable_parent = open_beneath(
+        host_root,
+        "usr/local/bin",
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        0,
+    )
+    .map_err(|_| "DENIED: /usr/local/bin is unavailable or unsafe".to_owned())?;
+    let unit_parent = open_beneath(
+        host_root,
+        "etc/systemd/system",
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        0,
+    )
+    .map_err(|_| "DENIED: /etc/systemd/system is unavailable or unsafe".to_owned())?;
+    let environment_file = "k3s.nanpanel.env";
+    let state_exists = match open_beneath(
+        host_root,
+        "var/lib/rancher/k3s",
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        0,
+    ) {
+        Ok(_) => true,
+        Err(error)
+            if error.chain().any(|source| {
+                source
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+            }) =>
+        {
+            false
+        }
+        Err(_) => return Err("DENIED: K3s data path could not be safely inspected".to_owned()),
+    };
+    if state_exists
+        || host_entry_exists(&executable_parent, "k3s")?
+        || host_entry_exists(&unit_parent, unit)?
+        || host_entry_exists(&unit_parent, "k3s.service")?
+        || host_entry_exists(&unit_parent, "k3s-agent.service")?
+        || host_entry_exists(&unit_parent, environment_file)?
+    {
+        return Err(
+            "DENIED: existing K3s files or data require the upgrade or repair workflow".to_owned(),
+        );
+    }
+
+    let base = format!(
+        "https://github.com/k3s-io/k3s/releases/download/{}/k3s",
+        payload.version.replace('+', "%2B")
+    );
+    let binary_url = format!("{base}{}", architecture.1);
+    let checksum_url = format!(
+        "https://github.com/k3s-io/k3s/releases/download/{}/sha256sum-{}.txt",
+        payload.version.replace('+', "%2B"),
+        architecture.0
+    );
+    let client = reqwest::Client::builder()
+        .https_only(true)
+        .timeout(Duration::from_secs(120))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            let host = attempt.url().host_str().unwrap_or_default();
+            if attempt.previous().len() >= 5
+                || attempt.url().scheme() != "https"
+                || !matches!(
+                    host,
+                    "github.com"
+                        | "release-assets.githubusercontent.com"
+                        | "objects.githubusercontent.com"
+                )
+            {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        }))
+        .user_agent("NaNPanel-K3s-Installer")
+        .build()
+        .map_err(|_| "FAILED: unable to initialize the pinned K3s download client".to_owned())?;
+    let (checksums, binary) = tokio::try_join!(
+        download_k3s_asset(&client, &checksum_url),
+        download_k3s_asset(&client, &binary_url)
+    )?;
+    let expected_name = format!("k3s{}", architecture.1);
+    let expected_digest = String::from_utf8(checksums)
+        .ok()
+        .and_then(|checksums| {
+            checksums.lines().find_map(|line| {
+                let mut columns = line.split_whitespace();
+                let digest = columns.next()?;
+                let name = columns.next()?.trim_start_matches('*');
+                (name == expected_name && digest.len() == 64).then(|| digest.to_ascii_lowercase())
+            })
+        })
+        .ok_or_else(|| {
+            "FAILED: release checksum does not contain the expected K3s binary".to_owned()
+        })?;
+    let actual_digest = hex_digest(&Sha256::digest(&binary));
+    if actual_digest != expected_digest {
+        return Err("FAILED: downloaded K3s binary does not match the release checksum".to_owned());
+    }
+
+    let environment = if payload.role == "server" {
+        format!("K3S_TOKEN={}\n", payload.token)
+    } else {
+        format!(
+            "K3S_URL={}\nK3S_TOKEN={}\n",
+            payload.server_url.as_deref().unwrap_or_default(),
+            payload.token
+        )
+    };
+    let unit_contents = format!(
+        "[Unit]\nDescription=Lightweight Kubernetes\nDocumentation=https://k3s.io\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=notify\nEnvironmentFile=/etc/systemd/system/k3s.nanpanel.env\nExecStart=/usr/local/bin/k3s {}\nKillMode=process\nDelegate=yes\nLimitNOFILE=1048576\nLimitNPROC=infinity\nLimitCORE=infinity\nTasksMax=infinity\nTimeoutStartSec=0\nRestart=always\nRestartSec=5s\n\n[Install]\nWantedBy=multi-user.target\n",
+        payload.role
+    );
+    write_new_beneath(
+        &unit_parent,
+        environment_file,
+        environment.as_bytes(),
+        0o600,
+    )
+    .map_err(|_| "FAILED: unable to install the private K3s environment file".to_owned())?;
+    if write_new_beneath(&unit_parent, unit, unit_contents.as_bytes(), 0o644).is_err() {
+        let _ = remove_entry_beneath(&unit_parent, environment_file);
+        return Err("FAILED: unable to install the K3s systemd unit".to_owned());
+    }
+    if write_new_beneath(&executable_parent, "k3s", &binary, 0o755).is_err() {
+        let _ = remove_entry_beneath(&unit_parent, unit);
+        let _ = remove_entry_beneath(&unit_parent, environment_file);
+        return Err("FAILED: unable to install the K3s executable".to_owned());
+    }
+    if run_fixed_command(
+        &systemctl,
+        &["daemon-reload".to_owned()],
+        Duration::from_secs(15),
+    )
+    .await
+    .is_err()
+    {
+        let _ = remove_entry_beneath(&executable_parent, "k3s");
+        let _ = remove_entry_beneath(&unit_parent, unit);
+        let _ = remove_entry_beneath(&unit_parent, environment_file);
+        let _ = run_fixed_command(
+            &systemctl,
+            &["daemon-reload".to_owned()],
+            Duration::from_secs(15),
+        )
+        .await;
+        return Err("FAILED: systemd rejected the K3s unit; staged files were removed".to_owned());
+    }
+    run_fixed_command(
+        &systemctl,
+        &["enable".to_owned(), "--now".to_owned(), unit.to_owned()],
+        Duration::from_secs(120),
+    )
+    .await
+    .map_err(|_| "FAILED: K3s service did not start; installed files and any created data are retained for repair".to_owned())?;
+
+    let registration = if payload.role == "server" {
+        wait_for_k3s_server(Path::new("/usr/local/bin/k3s"))
+            .await
+            .map_err(|_| "UNCERTAIN: K3s service started, but the server Node did not become Ready; files and data are retained for repair".to_owned())?
+    } else {
+        "PENDING_CLUSTER_NODE_HEALTH_CHECK".to_owned()
+    };
+    serde_json::to_string(&serde_json::json!({
+        "schemaVersion": 1,
+        "role": payload.role,
+        "version": payload.version,
+        "unit": unit,
+        "serviceState": "ACTIVE",
+        "clusterRegistration": registration,
+        "tokenReturned": false
+    }))
+    .map_err(|_| "FAILED: unable to encode K3s install result".to_owned())
+}
+
+async fn k3s_upgrade(request: &Request, host_root: &File) -> std::result::Result<String, String> {
+    use std::os::unix::fs::MetadataExt;
+
+    let payload: K3sUpgradePayload = parse_payload(request)?;
+    if !valid_k3s_upgrade_payload(&payload) {
+        return Err("DENIED: K3s upgrade role or pinned version is invalid".to_owned());
+    }
+    if !Path::new("/run/systemd/system").is_dir() {
+        return Err("DENIED: K3s upgrade requires a running systemd host".to_owned());
+    }
+    let systemctl = trusted_executable(&["/usr/bin/systemctl", "/bin/systemctl"])?;
+    let unit = if payload.role == "server" {
+        "k3s.service"
+    } else {
+        "k3s-agent.service"
+    };
+    let unit_contents = read_beneath(host_root, &format!("etc/systemd/system/{unit}"))
+        .map_err(|_| "DENIED: K3s unit is not managed by the NaNPanel installer".to_owned())?;
+    let expected_exec = format!("ExecStart=/usr/local/bin/k3s {}", payload.role);
+    if !unit_contents.lines().any(|line| line == expected_exec)
+        || !unit_contents
+            .lines()
+            .any(|line| line == "EnvironmentFile=/etc/systemd/system/k3s.nanpanel.env")
+        || !unit_contents.lines().any(|line| line == "Restart=always")
+    {
+        return Err("DENIED: K3s unit differs from the supported managed unit".to_owned());
+    }
+    let env_file = open_beneath(
+        host_root,
+        "etc/systemd/system/k3s.nanpanel.env",
+        libc::O_RDONLY | libc::O_CLOEXEC,
+        0,
+    )
+    .map_err(|_| "DENIED: managed K3s environment file is missing".to_owned())?;
+    let env_metadata = env_file
+        .metadata()
+        .map_err(|_| "DENIED: K3s environment file metadata is unavailable".to_owned())?;
+    if !env_metadata.is_file() || env_metadata.uid() != 0 || env_metadata.mode() & 0o077 != 0 {
+        return Err("DENIED: K3s environment file permissions are unsafe".to_owned());
+    }
+    let executable_parent = open_beneath(
+        host_root,
+        "usr/local/bin",
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        0,
+    )
+    .map_err(|_| "DENIED: /usr/local/bin is unavailable or unsafe".to_owned())?;
+    let current_binary = open_beneath(
+        &executable_parent,
+        "k3s",
+        libc::O_RDONLY | libc::O_CLOEXEC,
+        0,
+    )
+    .map_err(|_| "DENIED: managed K3s executable is missing".to_owned())?;
+    let metadata = current_binary
+        .metadata()
+        .map_err(|_| "DENIED: K3s executable metadata is unavailable".to_owned())?;
+    if !metadata.is_file() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+        return Err("DENIED: K3s executable ownership or permissions are unsafe".to_owned());
+    }
+    const MAX_K3S_BINARY_BYTES: u64 = 128 * 1024 * 1024;
+    if metadata.len() == 0 || metadata.len() > MAX_K3S_BINARY_BYTES {
+        return Err("DENIED: managed K3s executable size is invalid".to_owned());
+    }
+    let version_output = run_fixed_command(
+        Path::new("/usr/local/bin/k3s"),
+        &["--version".to_owned()],
+        Duration::from_secs(10),
+    )
+    .await?;
+    let current_version = version_output
+        .split_whitespace()
+        .find(|part| valid_k3s_version(part))
+        .ok_or_else(|| "DENIED: current K3s version could not be verified".to_owned())?;
+    if !valid_k3s_upgrade_path(current_version, &payload.version) {
+        return Err(
+            "DENIED: K3s upgrade must move forward by at most one Kubernetes minor version"
+                .to_owned(),
+        );
+    }
+    let architecture = match std::env::consts::ARCH {
+        "x86_64" => ("amd64", ""),
+        "aarch64" => ("arm64", "-arm64"),
+        "arm" => ("arm", "-armhf"),
+        "s390x" => ("s390x", "-s390x"),
+        _ => return Err("DENIED: K3s binary is unavailable for this architecture".to_owned()),
+    };
+    let base = format!(
+        "https://github.com/k3s-io/k3s/releases/download/{}/k3s",
+        payload.version.replace('+', "%2B")
+    );
+    let binary_url = format!("{base}{}", architecture.1);
+    let checksum_url = format!(
+        "https://github.com/k3s-io/k3s/releases/download/{}/sha256sum-{}.txt",
+        payload.version.replace('+', "%2B"),
+        architecture.0
+    );
+    let client = reqwest::Client::builder()
+        .https_only(true)
+        .timeout(Duration::from_secs(120))
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            let host = attempt.url().host_str().unwrap_or_default();
+            if attempt.previous().len() >= 5
+                || attempt.url().scheme() != "https"
+                || !matches!(
+                    host,
+                    "github.com"
+                        | "release-assets.githubusercontent.com"
+                        | "objects.githubusercontent.com"
+                )
+            {
+                attempt.stop()
+            } else {
+                attempt.follow()
+            }
+        }))
+        .user_agent("NaNPanel-K3s-Upgrader")
+        .build()
+        .map_err(|_| "FAILED: unable to initialize the pinned K3s download client".to_owned())?;
+    let (checksums, binary) = tokio::try_join!(
+        download_k3s_asset(&client, &checksum_url),
+        download_k3s_asset(&client, &binary_url)
+    )?;
+    let expected_name = format!("k3s{}", architecture.1);
+    let expected_digest = String::from_utf8(checksums)
+        .ok()
+        .and_then(|checksums| {
+            checksums.lines().find_map(|line| {
+                let mut columns = line.split_whitespace();
+                let digest = columns.next()?;
+                let name = columns.next()?.trim_start_matches('*');
+                (name == expected_name && digest.len() == 64).then(|| digest.to_ascii_lowercase())
+            })
+        })
+        .ok_or_else(|| {
+            "FAILED: release checksum does not contain the expected K3s binary".to_owned()
+        })?;
+    if hex_digest(&Sha256::digest(&binary)) != expected_digest {
+        return Err("FAILED: downloaded K3s binary does not match the release checksum".to_owned());
+    }
+
+    const NEXT_BINARY: &str = "k3s.nanpanel.next";
+    const ROLLBACK_BINARY: &str = "k3s.nanpanel.rollback";
+    if host_entry_exists(&executable_parent, NEXT_BINARY)?
+        || host_entry_exists(&executable_parent, ROLLBACK_BINARY)?
+    {
+        return Err("DENIED: previous K3s upgrade staging files require manual review".to_owned());
+    }
+    write_new_beneath(&executable_parent, NEXT_BINARY, &binary, 0o755)
+        .map_err(|_| "FAILED: unable to stage the verified K3s executable".to_owned())?;
+    if run_fixed_command(
+        &systemctl,
+        &["stop".to_owned(), unit.to_owned()],
+        Duration::from_secs(90),
+    )
+    .await
+    .is_err()
+    {
+        let _ = remove_entry_beneath(&executable_parent, NEXT_BINARY);
+        return Err(
+            "FAILED: K3s service did not stop; the current version is unchanged".to_owned(),
+        );
+    }
+    if rename_entry_beneath(&executable_parent, "k3s", ROLLBACK_BINARY, true).is_err() {
+        let _ = remove_entry_beneath(&executable_parent, NEXT_BINARY);
+        let _ = run_fixed_command(
+            &systemctl,
+            &["start".to_owned(), unit.to_owned()],
+            Duration::from_secs(90),
+        )
+        .await;
+        return Err("FAILED: unable to preserve the previous K3s executable".to_owned());
+    }
+    if rename_entry_beneath(&executable_parent, NEXT_BINARY, "k3s", true).is_err() {
+        let restored =
+            rename_entry_beneath(&executable_parent, ROLLBACK_BINARY, "k3s", true).is_ok();
+        let started = run_fixed_command(
+            &systemctl,
+            &["start".to_owned(), unit.to_owned()],
+            Duration::from_secs(90),
+        )
+        .await
+        .is_ok();
+        let _ = remove_entry_beneath(&executable_parent, NEXT_BINARY);
+        return Err(if restored && started {
+            "FAILED: upgrade publication failed; the previous K3s version was restored".to_owned()
+        } else {
+            "UNCERTAIN: upgrade publication failed and automatic recovery needs manual review"
+                .to_owned()
+        });
+    }
+    let started = run_fixed_command(
+        &systemctl,
+        &["start".to_owned(), unit.to_owned()],
+        Duration::from_secs(120),
+    )
+    .await;
+    let health = if started.is_ok() && payload.role == "server" {
+        wait_for_k3s_server(Path::new("/usr/local/bin/k3s"))
+            .await
+            .map(|_| ())
+    } else if started.is_ok() {
+        run_fixed_command(
+            &systemctl,
+            &["is-active".to_owned(), unit.to_owned()],
+            Duration::from_secs(10),
+        )
+        .await
+        .and_then(|state| {
+            (state == "active")
+                .then_some(())
+                .ok_or_else(|| "FAILED: K3s agent service is not active after upgrade".to_owned())
+        })
+    } else {
+        started.map(|_| ())
+    };
+    if let Err(failure) = health {
+        let _ = run_fixed_command(
+            &systemctl,
+            &["stop".to_owned(), unit.to_owned()],
+            Duration::from_secs(90),
+        )
+        .await;
+        let removed_new = remove_entry_beneath(&executable_parent, "k3s").is_ok();
+        let restored = removed_new
+            && rename_entry_beneath(&executable_parent, ROLLBACK_BINARY, "k3s", true).is_ok();
+        let recovered = restored
+            && run_fixed_command(
+                &systemctl,
+                &["start".to_owned(), unit.to_owned()],
+                Duration::from_secs(120),
+            )
+            .await
+            .is_ok();
+        return Err(if recovered {
+            format!("FAILED: K3s upgrade health gate failed; previous version restored ({failure})")
+        } else {
+            format!(
+                "UNCERTAIN: K3s upgrade health gate failed and rollback needs manual review ({failure})"
+            )
+        });
+    }
+    remove_entry_beneath(&executable_parent, ROLLBACK_BINARY).map_err(|_| {
+        "UNCERTAIN: K3s is healthy but rollback binary cleanup needs review".to_owned()
+    })?;
+    serde_json::to_string(&serde_json::json!({
+        "schemaVersion": 1,
+        "role": payload.role,
+        "previousVersion": current_version,
+        "version": payload.version,
+        "unit": unit,
+        "serviceState": "ACTIVE",
+        "clusterRegistration": if payload.role == "server" { "READY" } else { "PENDING_CLUSTER_NODE_HEALTH_CHECK" },
+        "rollbackOnHealthFailure": true
+    }))
+    .map_err(|_| "FAILED: unable to encode K3s upgrade result".to_owned())
+}
+
+fn valid_k3s_upgrade_path(current: &str, target: &str) -> bool {
+    fn parts(version: &str) -> Option<(u64, u64, u64, u64)> {
+        let release = version.strip_prefix('v')?;
+        let (kubernetes, revision) = release.split_once("+k3s")?;
+        let mut components = kubernetes.split('.');
+        Some((
+            components.next()?.parse().ok()?,
+            components.next()?.parse().ok()?,
+            components.next()?.parse().ok()?,
+            revision.parse().ok()?,
+        ))
+    }
+    let Some(current_parts) = parts(current) else {
+        return false;
+    };
+    let Some(target_parts) = parts(target) else {
+        return false;
+    };
+    target_parts.0 == 1
+        && target_parts.0 == current_parts.0
+        && target_parts.1 <= current_parts.1.saturating_add(1)
+        && target_parts > current_parts
+}
+
+async fn download_k3s_asset(
+    client: &reqwest::Client,
+    url: &str,
+) -> std::result::Result<Vec<u8>, String> {
+    const MAX_K3S_ASSET_BYTES: u64 = 128 * 1024 * 1024;
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|_| "FAILED: K3s release asset download failed".to_owned())?;
+    if !response.status().is_success()
+        || response
+            .content_length()
+            .is_some_and(|length| length > MAX_K3S_ASSET_BYTES)
+    {
+        return Err("FAILED: K3s release asset response is invalid or too large".to_owned());
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|_| "FAILED: K3s release asset body could not be read".to_owned())?;
+    if bytes.is_empty() || bytes.len() as u64 > MAX_K3S_ASSET_BYTES {
+        return Err("FAILED: K3s release asset is empty or too large".to_owned());
+    }
+    Ok(bytes.to_vec())
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut digest = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        digest.push(HEX[(byte >> 4) as usize] as char);
+        digest.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    digest
+}
+
+fn host_entry_exists(parent: &File, name: &str) -> std::result::Result<bool, String> {
+    match open_beneath(parent, name, libc::O_RDONLY | libc::O_CLOEXEC, 0) {
+        Ok(_) => Ok(true),
+        Err(error)
+            if error.chain().any(|source| {
+                source
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+            }) =>
+        {
+            Ok(false)
+        }
+        Err(_) => Err("DENIED: K3s installation target could not be safely inspected".to_owned()),
+    }
+}
+
+fn write_new_beneath(parent: &File, name: &str, bytes: &[u8], mode: u32) -> Result<()> {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    if name.is_empty() || name.contains('/') || name.contains('\0') {
+        bail!("K3s installation filename is invalid");
+    }
+    let temporary = format!(".nanpanel-{}.tmp", uuid::Uuid::new_v4());
+    let temporary_c = CString::new(temporary.as_str())?;
+    let target_c = CString::new(name)?;
+    // SAFETY: parent is a live directory FD and the temporary name is a
+    // generated single component. O_EXCL and O_NOFOLLOW prevent path reuse.
+    let fd = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            temporary_c.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("create K3s installation staging file");
+    }
+    // SAFETY: openat returned a unique, valid descriptor which is owned here.
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    let write_result = (|| -> Result<()> {
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        file.set_permissions(std::fs::Permissions::from_mode(mode))?;
+        // SAFETY: both names are NUL-terminated, parent is a live directory
+        // FD, and RENAME_NOREPLACE prevents replacing a file created in a race.
+        let renamed = unsafe {
+            libc::syscall(
+                libc::SYS_renameat2,
+                parent.as_raw_fd(),
+                temporary_c.as_ptr(),
+                parent.as_raw_fd(),
+                target_c.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            ) as i32
+        };
+        if renamed < 0 {
+            return Err(std::io::Error::last_os_error()).context("publish K3s installation file");
+        }
+        parent.sync_all()?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        // SAFETY: temporary_c identifies only the staging file created above.
+        unsafe { libc::unlinkat(parent.as_raw_fd(), temporary_c.as_ptr(), 0) };
+    }
+    write_result
+}
+
+fn remove_entry_beneath(parent: &File, name: &str) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    let name = CString::new(name)?;
+    // SAFETY: parent is a live directory FD and name is one path component.
+    let removed = unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) };
+    if removed < 0 {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(error).context("remove K3s installation file");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn rename_entry_beneath(parent: &File, source: &str, target: &str, no_replace: bool) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    if [source, target]
+        .iter()
+        .any(|name| name.is_empty() || name.contains('/') || name.contains('\0'))
+    {
+        bail!("K3s upgrade filenames must be single path components");
+    }
+    let source = CString::new(source)?;
+    let target = CString::new(target)?;
+    let flags = if no_replace {
+        libc::RENAME_NOREPLACE
+    } else {
+        0
+    };
+    // SAFETY: parent is a live directory FD and both names are validated single
+    // components; RENAME_NOREPLACE prevents replacing a file created in a race.
+    let renamed = unsafe {
+        libc::syscall(
+            libc::SYS_renameat2,
+            parent.as_raw_fd(),
+            source.as_ptr(),
+            parent.as_raw_fd(),
+            target.as_ptr(),
+            flags,
+        ) as i32
+    };
+    if renamed < 0 {
+        return Err(std::io::Error::last_os_error()).context("rename managed K3s file");
+    }
+    parent.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn rename_entry_beneath(
+    _parent: &File,
+    _source: &str,
+    _target: &str,
+    _no_replace: bool,
+) -> Result<()> {
+    bail!("this privileged-helper PoC requires Linux openat2")
+}
+
+async fn wait_for_k3s_server(binary: &Path) -> std::result::Result<String, String> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+    while tokio::time::Instant::now() < deadline {
+        let result = run_fixed_command(
+            binary,
+            &[
+                "kubectl".to_owned(),
+                "get".to_owned(),
+                "nodes".to_owned(),
+                "-o".to_owned(),
+                "json".to_owned(),
+            ],
+            Duration::from_secs(8),
+        )
+        .await;
+        if let Ok(output) = result
+            && let Ok(nodes) = serde_json::from_str::<serde_json::Value>(&output)
+            && nodes["items"].as_array().is_some_and(|items| {
+                items.iter().any(|node| {
+                    node["status"]["conditions"]
+                        .as_array()
+                        .is_some_and(|conditions| {
+                            conditions.iter().any(|condition| {
+                                condition["type"] == "Ready" && condition["status"] == "True"
+                            })
+                        })
+                })
+            })
+        {
+            return Ok("SERVER_NODE_READY".to_owned());
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
+    Err("UNCERTAIN: K3s service started but the server Node did not become Ready within 180 seconds".to_owned())
 }
 
 async fn collect_netbird_peer_paths(
@@ -2194,6 +3188,87 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    #[test]
+    fn k3s_install_accepts_secure_tokens_and_rejects_environment_injection() {
+        let secure_token = format!("K10{}::server:{}", "a".repeat(64), "b".repeat(32));
+        assert!(valid_k3s_token(&secure_token));
+        assert!(valid_k3s_token("abcdef.0123456789abcdef"));
+        assert!(!valid_k3s_token("short"));
+        assert!(!valid_k3s_token(&format!("{}$", "a".repeat(32))));
+        assert!(!valid_k3s_token(&format!(
+            "{}\nK3S_URL=evil",
+            "a".repeat(32)
+        )));
+
+        let mut server = K3sInstallPayload {
+            role: "server".to_owned(),
+            version: "v1.36.5+k3s1".to_owned(),
+            server_url: None,
+            token: "abcdef.0123456789abcdef".to_owned(),
+        };
+        assert!(validate_k3s_install_payload(&server).is_ok());
+        server.token = secure_token;
+        assert!(validate_k3s_install_payload(&server).is_err());
+        server.token = "abcdef.0123456789abcdef".to_owned();
+        let invalid_version = K3sInstallPayload {
+            version: "v1.36.5-rc1+k3s1".to_owned(),
+            ..server
+        };
+        assert!(validate_k3s_install_payload(&invalid_version).is_err());
+    }
+
+    #[test]
+    fn k3s_upgrade_allows_only_a_safe_forward_version_step() {
+        assert!(valid_k3s_upgrade_path("v1.36.5+k3s1", "v1.36.6+k3s1"));
+        assert!(valid_k3s_upgrade_path("v1.36.5+k3s1", "v1.37.1+k3s1"));
+        assert!(!valid_k3s_upgrade_path("v1.36.5+k3s1", "v1.38.0+k3s1"));
+        assert!(!valid_k3s_upgrade_path("v1.36.5+k3s2", "v1.36.5+k3s1"));
+        assert!(!valid_k3s_upgrade_path("invalid", "v1.37.1+k3s1"));
+        assert!(valid_k3s_upgrade_payload(&K3sUpgradePayload {
+            role: "server".to_owned(),
+            version: "v1.37.1+k3s1".to_owned(),
+        }));
+        assert!(!valid_k3s_upgrade_payload(&K3sUpgradePayload {
+            role: "worker".to_owned(),
+            version: "v1.37.1+k3s1".to_owned(),
+        }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn k3s_install_file_publication_is_private_and_never_overwrites() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir()?;
+        let parent = File::open(directory.path())?;
+        write_new_beneath(&parent, "k3s.nanpanel.env", b"K3S_TOKEN=fixture\n", 0o600)?;
+        let installed = directory.path().join("k3s.nanpanel.env");
+        assert_eq!(std::fs::read(&installed)?, b"K3S_TOKEN=fixture\n");
+        assert_eq!(
+            std::fs::metadata(&installed)?.permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(write_new_beneath(&parent, "k3s.nanpanel.env", b"replacement", 0o600).is_err());
+        assert_eq!(std::fs::read(installed)?, b"K3S_TOKEN=fixture\n");
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn k3s_upgrade_rename_preserves_the_old_binary_on_target_conflict() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let parent = File::open(directory.path())?;
+        std::fs::write(directory.path().join("k3s"), b"old")?;
+        std::fs::write(directory.path().join("k3s.nanpanel.rollback"), b"conflict")?;
+        assert!(rename_entry_beneath(&parent, "k3s", "k3s.nanpanel.rollback", true).is_err());
+        assert_eq!(std::fs::read(directory.path().join("k3s"))?, b"old");
+        assert_eq!(
+            std::fs::read(directory.path().join("k3s.nanpanel.rollback"))?,
+            b"conflict"
+        );
+        Ok(())
+    }
+
     fn request(capability: &str, target: &str, deadline: i64) -> Request {
         Request {
             operation_id: "op-1".into(),
@@ -2304,6 +3379,7 @@ mod tests {
             "file.delete",
             "container.deploy",
             "network.firewall.expose",
+            "k3s.preflight",
             "network.overlay.peer_paths.read",
         ] {
             assert!(capabilities.contains(&capability));
@@ -2316,6 +3392,33 @@ mod tests {
             validate_capability_target("network.overlay.peer_paths.read", "", false, false, false,)
                 .is_err()
         );
+        assert!(validate_capability_target("k3s.preflight", "", false, false, false).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn k3s_preflight_is_typed_read_only_and_returns_bounded_checks() -> Result<()> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .context("system clock is before Unix epoch")?
+            .as_millis() as i64;
+        let mut input = request("k3s.preflight", "", now + 30_000);
+        input.payload_json = Some(r#"{"role":"server"}"#.to_owned());
+        assert!(validate_payload_presence(&input).is_ok());
+        let report = k3s_preflight(&input).map_err(anyhow::Error::msg)?;
+        let value: serde_json::Value = serde_json::from_str(&report)?;
+        assert_eq!(value["schemaVersion"], 1);
+        assert_eq!(value["role"], "server");
+        assert!(
+            value["checks"]
+                .as_array()
+                .is_some_and(|checks| !checks.is_empty())
+        );
+
+        input.payload_json = Some(r#"{"role":"agent","command":"id"}"#.to_owned());
+        assert!(k3s_preflight(&input).is_err());
+        input.payload_json = Some(r#"{"role":"invalid"}"#.to_owned());
+        assert!(k3s_preflight(&input).is_err());
         Ok(())
     }
 

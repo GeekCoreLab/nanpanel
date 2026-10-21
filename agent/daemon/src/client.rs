@@ -110,6 +110,13 @@ struct ContainerDeployPayload {
     container_port: Option<u16>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct K3sUpgradePayload {
+    role: String,
+    version: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct AgentConfig {
     pub endpoints: Vec<String>,
@@ -609,6 +616,9 @@ async fn connect_once(
                                 | "container.stop"
                                 | "container.deploy"
                                 | "network.firewall.expose"
+                                | "k3s.preflight"
+                                | "k3s.install"
+                                | "k3s.upgrade"
                         )
                     {
                         capabilities.push(capability);
@@ -1480,8 +1490,123 @@ fn valid_control(capability: &str, target: &str, payload_json: &str) -> bool {
                     },
                 )
         }
+        "k3s.preflight" => {
+            target.is_empty()
+                && has_payload
+                && serde_json::from_str::<serde_json::Value>(payload_json).is_ok_and(|value| {
+                    value.as_object().is_some_and(|payload| {
+                        payload.len() == 1
+                            && matches!(
+                                payload.get("role").and_then(serde_json::Value::as_str),
+                                Some("server" | "agent")
+                            )
+                    })
+                })
+        }
+        "k3s.install" => {
+            target.is_empty()
+                && has_payload
+                && serde_json::from_str::<serde_json::Value>(payload_json).is_ok_and(|value| {
+                    let Some(payload) = value.as_object() else {
+                        return false;
+                    };
+                    let role = payload.get("role").and_then(serde_json::Value::as_str);
+                    let version = payload.get("version").and_then(serde_json::Value::as_str);
+                    let token = payload.get("token").and_then(serde_json::Value::as_str);
+                    let server_url = payload.get("serverUrl");
+                    let valid_version = version.is_some_and(valid_k3s_version);
+                    let valid_token = token.is_some_and(valid_k3s_token);
+                    match (role, server_url) {
+                        (Some("server"), Some(value)) => {
+                            payload.len() == 4
+                                && value.is_null()
+                                && valid_version
+                                && valid_token
+                                && !token.is_some_and(|token| token.starts_with("K10"))
+                        }
+                        (Some("agent"), Some(value)) => {
+                            payload.len() == 4
+                                && value.as_str().is_some_and(valid_k3s_server_url)
+                                && valid_version
+                                && valid_token
+                        }
+                        _ => false,
+                    }
+                })
+        }
+        "k3s.upgrade" => {
+            target.is_empty()
+                && has_payload
+                && serde_json::from_str::<K3sUpgradePayload>(payload_json).is_ok_and(|payload| {
+                    matches!(payload.role.as_str(), "server" | "agent")
+                        && valid_k3s_version(&payload.version)
+                })
+        }
         _ => false,
     }
+}
+
+fn valid_k3s_version(version: &str) -> bool {
+    let Some(release) = version.strip_prefix('v') else {
+        return false;
+    };
+    let Some((kubernetes, revision)) = release.split_once("+k3s") else {
+        return false;
+    };
+    let components = kubernetes.split('.').collect::<Vec<_>>();
+    components.len() == 3
+        && components
+            .iter()
+            .all(|component| !component.is_empty() && component.bytes().all(|b| b.is_ascii_digit()))
+        && !revision.is_empty()
+        && revision.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn valid_k3s_server_url(server_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(server_url) else {
+        return false;
+    };
+    if url.scheme() != "https"
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || !matches!(url.path(), "" | "/")
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.port().is_some_and(|port| port != 6443)
+        || server_url.len() > 512
+    {
+        return false;
+    }
+    match url.host_str() {
+        Some(host) if host.eq_ignore_ascii_case("localhost") || host.ends_with(".localhost") => {
+            false
+        }
+        Some(host) => host
+            .parse::<std::net::IpAddr>()
+            .map_or(true, |address| match address {
+                std::net::IpAddr::V4(address) => {
+                    !address.is_unspecified()
+                        && !address.is_loopback()
+                        && !address.is_link_local()
+                        && !address.is_multicast()
+                }
+                std::net::IpAddr::V6(address) => {
+                    !address.is_unspecified()
+                        && !address.is_loopback()
+                        && !address.is_multicast()
+                        && !address.is_unicast_link_local()
+                }
+            }),
+        None => false,
+    }
+}
+
+fn valid_k3s_token(token: &str) -> bool {
+    (16..=512).contains(&token.len())
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
 }
 
 fn valid_file_target(target: &str) -> bool {
@@ -1803,6 +1928,19 @@ mod tests {
 
     #[test]
     fn validates_temporary_firewall_control_payload_and_target_shape() {
+        assert!(valid_control("k3s.preflight", "", r#"{"role":"server"}"#));
+        assert!(valid_control("k3s.preflight", "", r#"{"role":"agent"}"#));
+        assert!(!valid_control(
+            "k3s.preflight",
+            "",
+            r#"{"role":"server","command":"id"}"#
+        ));
+        assert!(!valid_control(
+            "k3s.preflight",
+            "k3s.service",
+            r#"{"role":"server"}"#
+        ));
+        assert!(!valid_control("k3s.preflight", "", r#"{"role":"worker"}"#));
         assert!(valid_control(
             "network.firewall.expose",
             "ssh-test",
@@ -1842,6 +1980,31 @@ mod tests {
             "container.deploy",
             "web-app",
             r#"{"image":"./nginx","hostPort":8080,"containerPort":80}"#,
+        ));
+        assert!(valid_control(
+            "k3s.install",
+            "",
+            r#"{"role":"agent","version":"v1.36.5+k3s1","serverUrl":"https://k3s.example.net:6443/","token":"K10aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa::server:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#,
+        ));
+        assert!(!valid_control(
+            "k3s.install",
+            "",
+            r#"{"role":"agent","version":"v1.36.5+k3s1","serverUrl":"https://127.0.0.1:6443","token":"K10aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa::server:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#,
+        ));
+        assert!(!valid_control(
+            "k3s.install",
+            "",
+            r#"{"role":"server","version":"v1.36.5+k3s1","serverUrl":null,"token":"aaaaaaaaaaaaaaaa\nK3S_URL=evil"}"#,
+        ));
+        assert!(valid_control(
+            "k3s.upgrade",
+            "",
+            r#"{"role":"agent","version":"v1.37.1+k3s1"}"#,
+        ));
+        assert!(!valid_control(
+            "k3s.upgrade",
+            "",
+            r#"{"role":"agent","version":"v1.37.1+k3s1","shell":"id"}"#,
         ));
     }
 }
