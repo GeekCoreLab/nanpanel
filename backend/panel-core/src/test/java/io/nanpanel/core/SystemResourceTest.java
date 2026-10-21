@@ -16,6 +16,7 @@ import org.junit.jupiter.api.Test;
 @QuarkusTest
 class SystemResourceTest {
   @Inject AuthStore store;
+  @Inject KubernetesClusterRegistryService kubernetesClusters;
 
   private static final class EchoShellCommand implements org.apache.sshd.server.command.Command {
     private java.io.InputStream input;
@@ -324,6 +325,46 @@ class SystemResourceTest {
             .body("user.mustChangePassword", equalTo(false))
             .extract();
     String restoredCookie = restored.cookie("nanpanel_session");
+    UUID resourceClusterA = UUID.randomUUID(), resourceClusterB = UUID.randomUUID();
+    UUID managedDeploymentId = UUID.randomUUID();
+    Instant resourceFixtureAt = Instant.now();
+    String resourceActor = restored.path("user.id").toString();
+    store.transaction(c -> {
+      for (UUID clusterId : java.util.List.of(resourceClusterA, resourceClusterB)) {
+        AuthStore.update(c, "INSERT INTO kubernetes_cluster (id,name,kind,endpoint,context_name,"
+            + "encrypted_kubeconfig,health_status,observed_at,imported_by,created_at,updated_at) "
+            + "VALUES (?,?, 'K3S', ?, 'test-context', ?, 'HEALTHY', ?, ?, ?, ?)", clusterId,
+            "resource-scope-test-" + clusterId, "https://kubernetes.example.test",
+            new byte[] {1}, java.sql.Timestamp.from(resourceFixtureAt), resourceActor,
+            java.sql.Timestamp.from(resourceFixtureAt), java.sql.Timestamp.from(resourceFixtureAt));
+      }
+      AuthStore.update(c, "INSERT INTO kubernetes_managed_deployment (cluster_id,namespace,"
+          + "deployment_name,deployment_uid,ownership_token,created_by,created_at,updated_at) "
+          + "VALUES (?, 'default', 'web', ?, ?, ?, ?, ?)", resourceClusterA,
+          managedDeploymentId.toString(), UUID.randomUUID().toString(), resourceActor,
+          java.sql.Timestamp.from(resourceFixtureAt), java.sql.Timestamp.from(resourceFixtureAt));
+      return null;
+    });
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .contentType("application/json")
+        .body(Map.of("name", "web", "image", "nginx:1.27", "replicas", 21,
+            "containerPort", 8080))
+        .post("/api/v1/kubernetes/clusters/" + resourceClusterA
+            + "/namespaces/default/deployments")
+        .then().statusCode(422).body("code", equalTo("KUBERNETES_RESOURCE_INVALID"));
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .contentType("application/json")
+        .body(Map.of("replicas", 1))
+        .put("/api/v1/kubernetes/clusters/" + resourceClusterB
+            + "/namespaces/default/deployments/web/scale")
+        .then().statusCode(404).body("code", equalTo("KUBERNETES_RESOURCE_NOT_MANAGED"));
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .delete("/api/v1/kubernetes/clusters/" + resourceClusterB
+            + "/namespaces/default/deployments/web")
+        .then().statusCode(404).body("code", equalTo("KUBERNETES_RESOURCE_NOT_MANAGED"));
     var createdReadKey = given()
         .cookie("nanpanel_session", restoredCookie)
         .header("X-CSRF-Token", restored.path("csrfToken"))
@@ -625,6 +666,15 @@ class SystemResourceTest {
         .post("/internal/agent-heartbeats")
         .then().statusCode(204);
     given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/hosts?limit=20&search=PANEL-TEST-HOST-REAL")
+        .then().statusCode(200)
+        .body("items.size()", equalTo(1))
+        .body("items[0].hostname", equalTo("panel-test-host-real"))
+        .body("nextCursor", nullValue());
+    given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/hosts?search=" + "x".repeat(121))
+        .then().statusCode(400).body("code", equalTo("VALIDATION_FAILED"));
+    given().cookie("nanpanel_session", restoredCookie)
         .get("/api/v1/hosts/" + hostId)
         .then().statusCode(200)
         .body("hostname", equalTo("panel-test-host-real"))
@@ -646,6 +696,54 @@ class SystemResourceTest {
         .body("overlayPeers[0].connectionType", equalTo("P2P"))
         .body("overlayPeers[1].connectionType", equalTo("RELAY"))
         .body("overlayPeersObservedAt", notNullValue());
+    UUID kubeedgeClusterId = UUID.randomUUID();
+    String kubeedgeNodeUid = "edge-node-system-test";
+    Instant kubeedgeObservedAt = Instant.now();
+    store.transaction(c -> {
+      AuthStore.update(c, "INSERT INTO kubernetes_cluster (id,name,kind,endpoint,context_name,"
+          + "encrypted_kubeconfig,health_status,observed_at,imported_by,created_at,updated_at) "
+          + "VALUES (?,?,?,?,?,?,'HEALTHY',?,?,?,?)", kubeedgeClusterId,
+          "system-resource-kubeedge-test", "KUBEEDGE", "https://kubeedge.example.test",
+          "test-context", new byte[] {1}, java.sql.Timestamp.from(kubeedgeObservedAt),
+          restored.path("user.id").toString(), java.sql.Timestamp.from(kubeedgeObservedAt),
+          java.sql.Timestamp.from(kubeedgeObservedAt));
+      AuthStore.update(c, "INSERT INTO kubernetes_cluster_node (cluster_id,node_uid,node_name,"
+          + "roles,kubeedge_edge,ready,kubelet_version,internal_ip,container_owner,host_id,observed_at) "
+          + "VALUES (?,?,?,'edge',TRUE,TRUE,?,'192.0.2.10','KUBEEDGE',NULL,?)",
+          kubeedgeClusterId, kubeedgeNodeUid, "edge-node-system-test", "v1.31.0-kubeedge.1",
+          java.sql.Timestamp.from(kubeedgeObservedAt));
+      return null;
+    });
+    kubernetesClusters.reportApiFailure(kubeedgeClusterId,
+        new KubernetesClusterRegistryService.ClusterApiUnavailableException());
+    given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/kubernetes/clusters/" + kubeedgeClusterId)
+        .then().statusCode(200).body("healthStatus", equalTo("UNAVAILABLE"))
+        .body("lastErrorCode", equalTo("API_UNAVAILABLE"))
+        .body("cloudCoreStatus", equalTo("NOT_OBSERVED"))
+        .body("cloudCoreObservedAt", nullValue()).body("observedAt", notNullValue());
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .contentType("application/json")
+        .body(Map.of("hostId", hostId))
+        .put("/api/v1/kubernetes/clusters/" + kubeedgeClusterId + "/nodes/"
+            + kubeedgeNodeUid + "/host")
+        .then().statusCode(200).body("containerOwner", equalTo("KUBEEDGE"))
+        .body("hostId", equalTo(hostId));
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("Idempotency-Key", "helper-kubeedge-owned-01")
+        .contentType("application/json")
+        .body(Map.of("capability", "container.stop", "target", "edge-web",
+            "reason", "Verify KubeEdge remains the sole EdgeCore container owner",
+            "expectedGeneration", 1))
+        .post("/api/v1/hosts/" + hostId + "/operations")
+        .then().statusCode(409).body("code", equalTo("KUBERNETES_CONTAINER_OWNED"));
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .delete("/api/v1/kubernetes/clusters/" + kubeedgeClusterId + "/nodes/"
+            + kubeedgeNodeUid + "/host")
+        .then().statusCode(409).body("code", equalTo("KUBERNETES_CONTAINER_OWNED"));
     given().cookie("nanpanel_session", restoredCookie)
         .header("X-CSRF-Token", restored.path("csrfToken"))
         .contentType("application/json")
@@ -1131,10 +1229,11 @@ class SystemResourceTest {
           return null;
         }
       };
+      int testPort = io.restassured.RestAssured.port;
       java.net.URI terminalUri = java.net.URI.create(
-          "ws://localhost:8081/api/v1/bastion-sessions/" + sessionId + "/terminal");
+          "ws://localhost:" + testPort + "/api/v1/bastion-sessions/" + sessionId + "/terminal");
       var socket = java.net.http.HttpClient.newHttpClient().newWebSocketBuilder()
-          .header("Origin", "http://localhost:8081")
+          .header("Origin", "http://localhost:" + testPort)
           .buildAsync(terminalUri, listener).get(10, TimeUnit.SECONDS);
       socket.sendText("{\"type\":\"auth\",\"ticket\":\"" + ticket +
           "\",\"columns\":100,\"rows\":30}", true).join();

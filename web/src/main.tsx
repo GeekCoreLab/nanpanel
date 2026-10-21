@@ -9,10 +9,11 @@ import { api, ApiError, isMock, mockBusiness } from './lib/api';
 import { DEMO_PASSWORD } from './lib/mock';
 import { createUuid } from './lib/uuid.ts';
 import { agentMaintenanceCommand, type AgentMaintenanceMode } from './lib/agent-maintenance.ts';
-import type { Host, HostPage, Agent, AgentInstallation, AgentUpdateOperation, SystemService, SystemServicePage, Operation, OperationPage, SessionContext, AdminOverview, AdminUser, AdminUserPage, PlatformSettings, AuditEventPage, WebSessionList, ApiKeyList, CreatedApiKey, BuiltinRoleList, AgentEnrollmentCreated, HostHelperOperationRequest, HostNetworkInventory, HostNetworkInterface, HostNetworkRoute, HostFileListing, SshProbeResult, SshSystemdStatusResult, SshSystemdJournalResult, HostSshConfig, SshHostKeyProbe, BastionSession, BastionSessionTicket, BastionCommand, BastionRecordingChunk } from './lib/types';
+import type { Host, HostPage, Agent, AgentInstallation, AgentUpdateOperation, SystemService, SystemServicePage, Operation, OperationPage, SessionContext, AdminOverview, AdminUser, AdminUserPage, PlatformSettings, AuditEventPage, WebSessionList, ApiKeyList, CreatedApiKey, BuiltinRoleList, AgentEnrollmentCreated, HostHelperOperationRequest, HostNetworkInventory, HostNetworkInterface, HostNetworkRoute, HostFileListing, SshProbeResult, SshSystemdStatusResult, SshSystemdJournalResult, HostSshConfig, SshHostKeyProbe, BastionSession, BastionSessionTicket, BastionCommand, BastionRecordingChunk, KubernetesClusterList, KubernetesClusterImportRequest, KubernetesClusterSummary, KubernetesClusterNodeList, KubernetesClusterNode, KubernetesManagedDeployment, KubernetesManagedDeploymentCreateRequest, KubernetesManagedDeploymentScaleRequest, KubernetesManagedDeploymentList, KubernetesTopologyNamespaceSnapshot } from './lib/types';
 import './api-keys.css';
+import './kubernetes-clusters.css';
 import './style.css';
-const nav = [['overview', '◫', '总览'], ['hosts', '▤', '主机资产'], ['topology', '⌘', '网络拓扑'], ['operations', '◷', '操作任务'], ['users', '♙', '管理员'], ['audit', '☷', '审计日志'], ['settings', '⚙', '平台设置'], ['account', '◎', '账号与会话']];
+const nav = [['overview', '◫', '总览'], ['hosts', '▤', '主机资产'], ['topology', '⌘', '网络拓扑'], ['clusters', '☸', 'Kubernetes 集群'], ['operations', '◷', '操作任务'], ['users', '♙', '管理员'], ['audit', '☷', '审计日志'], ['settings', '⚙', '平台设置'], ['account', '◎', '账号与会话']];
 const labels: Record<string, string> = { ONLINE: '在线', OFFLINE: '离线', UNKNOWN: '未知 / 结果未知', ACTIVE: '运行中', INACTIVE: '未运行', AVAILABLE: '可用', UNAVAILABLE: '不可用', SUCCEEDED: '成功', ACCEPTED: '已受理', FAILED: '失败', FORCE_TERMINATED: '已强制阻断', RUNNING: '执行中', PENDING: '等待中', CANCELLED: '已取消', DISABLED: '已禁用', DENIED: '已拒绝' };
 function Badge({ value }: { value: string }) { return <span className={`badge ${value.toLowerCase()}`}><i />{labels[value] ?? value}</span>; }
 function Empty({ children = '暂无数据' }: { children?: ReactNode }) { return <div className="empty"><span>▧</span><p>{children}</p></div>; }
@@ -33,7 +34,7 @@ function App() {
  if (!ready) return <div className="boot">NaNPanel <span>正在初始化控制台…</span></div>;
  if (!session) return <Login onLogin={setSession} />;
  const forced = session.user.mustChangePassword;
- return <div className="app"><aside className="sidebar"><a className="brand" href="#overview"><b className="brand-icon">N</b><strong>NaNPanel<span>INFRASTRUCTURE CONSOLE</span></strong></a><div className="workspace"><span className="workspace-icon">⌂</span><div>我的基础设施<small>个人工作空间</small></div><span className="muted">⌄</span></div><p className="nav-label">工作空间</p><nav>{nav.slice(0, 4).map(n => <a aria-current={page === n[0] ? 'page' : undefined} className={page === n[0] ? 'selected' : ''} href={`#${n[0]}`} key={n[0]}><span>{n[1]}</span>{n[2]}{n[0] === 'topology' && <small>LAB</small>}</a>)}<p className="nav-label">平台管理</p>{nav.slice(4).map(n => <a aria-current={page === n[0] ? 'page' : undefined} className={page === n[0] ? 'selected' : ''} href={`#${n[0]}`} key={n[0]}><span>{n[1]}</span>{n[2]}</a>)}</nav><div className="sidebar-bottom"><div className="mode-dot" />{isMock ? 'Mock 演示环境' : mockBusiness ? '真实认证与主机服务 · 其他业务模拟' : '真实 API 模式'}<small>v0.1.0 · {isMock ? '数据仅保存在内存' : '同源 Cookie 会话'}</small></div><div className="profile"><div className="avatar">{session.user.displayName.slice(0, 1)}</div><div>{session.user.displayName}<small>ADMIN 管理员</small></div><button className="icon-button" title="退出登录" onClick={logout}>↪</button></div></aside><div className="shell"><header className="topbar"><div><span className="muted">工作空间</span><span className="slash">/</span>{nav.find(n => n[0] === page)?.[2] ?? '总览'}</div><div className="top-actions"><span className="environment">{isMock ? '◉ Mock 模式' : mockBusiness ? '◉ 真实认证与主机服务 / 其他业务 Mock' : '◉ Live API'}</span><span className="avatar small">{session.user.displayName.slice(0, 1)}</span></div></header><main><div className="demo-banner"><span>◇</span><div>{isMock ? '当前为独立演示环境，所有主机、服务与操作均为模拟数据。刷新页面后重置。' : mockBusiness ? '登录、主机、Agent、systemd 观测与重启任务使用真实后端；拓扑仍为模拟数据。' : '已连接真实 API。尚未实现的业务接口会返回错误。'}</div><span className="mono">{isMock ? 'MOCK' : 'LIVE'}</span></div>{forced ? <><div className="alert">请先修改初始密码，完成后重新登录。</div><Account onLogout={() => setSession(null)} allowApiKeys={false} /></> : <>{page === 'overview' && <Overview />}{page === 'hosts' && <Hosts notify={setMessage} />}{page === 'topology' && <Topology />}{page === 'operations' && <Operations />}{page === 'users' && <Users self={session.user.id} notify={setMessage} />}{page === 'audit' && <Audit />}{page === 'settings' && <Settings notify={setMessage} />}{page === 'account' && <Account onLogout={() => setSession(null)} />}{!nav.some(n => n[0] === page) && <Empty>页面不存在，请通过左侧导航访问。</Empty>}</>}<footer>NaNPanel <span>控制面与数据面分离 · 让基础设施清晰可见</span><span>API 0.1.0-draft.2</span></footer></main></div>{message && <div className="toast" role="status">{message}</div>}{reauth && <div className="modal-backdrop"><div className="modal"><h2>重新验证身份</h2><p>此操作需要最近 5 分钟内的密码验证。验证后请重新读取资源，并手动确认提交。</p><Login compact username={session.user.username} onLogin={s => { setSession(s); setReauth(false); setMessage('验证成功，请刷新资源后重新确认操作'); }} /><button className="secondary" onClick={() => setReauth(false)}>取消</button></div></div>}</div>;
+ return <div className="app"><aside className="sidebar"><a className="brand" href="#overview"><b className="brand-icon">N</b><strong>NaNPanel<span>INFRASTRUCTURE CONSOLE</span></strong></a><div className="workspace"><span className="workspace-icon">⌂</span><div>我的基础设施<small>个人工作空间</small></div><span className="muted">⌄</span></div><p className="nav-label">工作空间</p><nav>{nav.slice(0, 5).map(n => <a aria-current={page === n[0] ? 'page' : undefined} className={page === n[0] ? 'selected' : ''} href={`#${n[0]}`} key={n[0]}><span>{n[1]}</span>{n[2]}{n[0] === 'topology' && <small>LAB</small>}</a>)}<p className="nav-label">平台管理</p>{nav.slice(5).map(n => <a aria-current={page === n[0] ? 'page' : undefined} className={page === n[0] ? 'selected' : ''} href={`#${n[0]}`} key={n[0]}><span>{n[1]}</span>{n[2]}</a>)}</nav><div className="sidebar-bottom"><div className="mode-dot" />{isMock ? 'Mock 演示环境' : mockBusiness ? '真实认证与主机服务 · 其他业务模拟' : '真实 API 模式'}<small>v0.1.0 · {isMock ? '数据仅保存在内存' : '同源 Cookie 会话'}</small></div><div className="profile"><div className="avatar">{session.user.displayName.slice(0, 1)}</div><div>{session.user.displayName}<small>ADMIN 管理员</small></div><button className="icon-button" title="退出登录" onClick={logout}>↪</button></div></aside><div className="shell"><header className="topbar"><div><span className="muted">工作空间</span><span className="slash">/</span>{nav.find(n => n[0] === page)?.[2] ?? '总览'}</div><div className="top-actions"><span className="environment">{isMock ? '◉ Mock 模式' : mockBusiness ? '◉ 真实认证与主机服务 / 其他业务 Mock' : '◉ Live API'}</span><span className="avatar small">{session.user.displayName.slice(0, 1)}</span></div></header><main><div className="demo-banner"><span>◇</span><div>{isMock ? '当前为独立演示环境，所有主机、服务与操作均为模拟数据。刷新页面后重置。' : mockBusiness ? '登录、主机、Agent、systemd、拓扑草稿与 Kubernetes 集群使用真实后端；其他尚未接入的业务仍为模拟数据。' : '已连接真实 API。尚未实现的业务接口会返回错误。'}</div><span className="mono">{isMock ? 'MOCK' : 'LIVE'}</span></div>{forced ? <><div className="alert">请先修改初始密码，完成后重新登录。</div><Account onLogout={() => setSession(null)} allowApiKeys={false} /></> : <>{page === 'overview' && <Overview />}{page === 'hosts' && <Hosts notify={setMessage} />}{page === 'topology' && <Topology />}{page === 'clusters' && <KubernetesClusters notify={setMessage} />}{page === 'operations' && <Operations />}{page === 'users' && <Users self={session.user.id} notify={setMessage} />}{page === 'audit' && <Audit />}{page === 'settings' && <Settings notify={setMessage} />}{page === 'account' && <Account onLogout={() => setSession(null)} />}{!nav.some(n => n[0] === page) && <Empty>页面不存在，请通过左侧导航访问。</Empty>}</>}<footer>NaNPanel <span>控制面与数据面分离 · 让基础设施清晰可见</span><span>API 0.1.0-draft.2</span></footer></main></div>{message && <div className="toast" role="status">{message}</div>}{reauth && <div className="modal-backdrop"><div className="modal"><h2>重新验证身份</h2><p>此操作需要最近 5 分钟内的密码验证。验证后请重新读取资源，并手动确认提交。</p><Login compact username={session.user.username} onLogin={s => { setSession(s); setReauth(false); setMessage('验证成功，请刷新资源后重新确认操作'); }} /><button className="secondary" onClick={() => setReauth(false)}>取消</button></div></div>}</div>;
 }
 function Login({ onLogin, compact = false, username }: { onLogin: (s: SessionContext) => void; compact?: boolean; username?: string }) {
  const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
@@ -64,8 +65,8 @@ function enrollmentInstallCommand(enrollment: AgentEnrollmentCreated) {
  return `sudo bash -c ${shellQuote(inner)}`;
 }
 function Hosts({ notify }: { notify: (s: string) => void }) {
- const [status, setStatus] = useState(''); const [query, setQuery] = useState(''); const [selected, setSelected] = useState<Host>(); const [cursors, setCursors] = useState<(string | null)[]>([null]); const [adding, setAdding] = useState(false); const params = new URLSearchParams(); if (status) params.set('status', status); const cursor = cursors[cursors.length - 1]; if (cursor) params.set('cursor', cursor); const queryString = params.toString(); const r = useResource<HostPage>('/hosts' + (queryString ? `?${queryString}` : ''), 0, true); const visibleHosts = r.data?.items.filter(h => h.hostname.toLowerCase().includes(query.toLowerCase())) ?? [];
- return <><PageHeading title="主机资产" description="统一查看 Linux 主机、Agent 能力与系统服务。" action={<div className="host-heading-actions"><button className="primary" onClick={() => setAdding(true)}>＋ 添加主机</button><button className="secondary" onClick={r.refresh}>↻ 刷新</button></div>} /><section className="card"><div className="toolbar"><input aria-label="搜索主机" placeholder="⌕ 搜索当前页主机名称…" value={query} onChange={e => setQuery(e.target.value)} /><select aria-label="主机状态" value={status} onChange={e => { setStatus(e.target.value); setCursors([null]); }}><option value="">全部状态</option>{['ONLINE', 'OFFLINE', 'UNKNOWN'].map(s => <option key={s} value={s}>{labels[s]}</option>)}</select><span className="muted">本页 {visibleHosts.length} 台</span></div><ResourceState {...r} /><HostTable hosts={visibleHosts} onSelect={setSelected} /><div className="form-actions"><button className="secondary" disabled={cursors.length < 2} onClick={() => setCursors(value => value.slice(0, -1))}>上一页</button><span className="muted">第 {cursors.length} 页 · 默认每页 20 台</span><button className="secondary" disabled={!r.data?.nextCursor} onClick={() => { if (r.data?.nextCursor) setCursors(value => [...value, r.data!.nextCursor]); }}>下一页</button></div></section>{selected && <HostDetail host={selected} close={() => setSelected(undefined)} notify={notify} />}{adding && <HostEnrollmentDialog close={() => setAdding(false)} onCreated={() => { setStatus(''); setCursors([null]); r.refresh(); }} />}</>;
+ const [status, setStatus] = useState(''); const [query, setQuery] = useState(''); const [selected, setSelected] = useState<Host>(); const [cursors, setCursors] = useState<(string | null)[]>([null]); const [adding, setAdding] = useState(false); const params = new URLSearchParams(); if (status) params.set('status', status); if (query.trim()) params.set('search', query.trim()); const cursor = cursors[cursors.length - 1]; if (cursor) params.set('cursor', cursor); const queryString = params.toString(); const r = useResource<HostPage>('/hosts' + (queryString ? `?${queryString}` : ''), 0, true); const visibleHosts = r.data?.items ?? [];
+ return <><PageHeading title="主机资产" description="统一查看 Linux 主机、Agent 能力与系统服务。" action={<div className="host-heading-actions"><button className="primary" onClick={() => setAdding(true)}>＋ 添加主机</button><button className="secondary" onClick={r.refresh}>↻ 刷新</button></div>} /><section className="card"><div className="toolbar"><input aria-label="搜索主机" placeholder="⌕ 搜索全部主机名称…" value={query} onChange={e => { setQuery(e.target.value); setCursors([null]); }} /><select aria-label="主机状态" value={status} onChange={e => { setStatus(e.target.value); setCursors([null]); }}><option value="">全部状态</option>{['ONLINE', 'OFFLINE', 'UNKNOWN'].map(s => <option key={s} value={s}>{labels[s]}</option>)}</select><span className="muted">本页 {visibleHosts.length} 台</span></div><ResourceState {...r} /><HostTable hosts={visibleHosts} onSelect={setSelected} /><div className="form-actions"><button className="secondary" disabled={cursors.length < 2} onClick={() => setCursors(value => value.slice(0, -1))}>上一页</button><span className="muted">第 {cursors.length} 页 · 默认每页 20 台</span><button className="secondary" disabled={!r.data?.nextCursor} onClick={() => { if (r.data?.nextCursor) setCursors(value => [...value, r.data!.nextCursor]); }}>下一页</button></div></section>{selected && <HostDetail host={selected} close={() => setSelected(undefined)} notify={notify} />}{adding && <HostEnrollmentDialog close={() => setAdding(false)} onCreated={() => { setStatus(''); setCursors([null]); r.refresh(); }} />}</>;
 }
 function HostEnrollmentDialog({ close, onCreated }: { close: () => void; onCreated: () => void }) {
  const [hostname, setHostname] = useState(window.location.hostname);
@@ -801,6 +802,166 @@ function Operations() {
  const journal = op?.result && 'journal' in op.result ? op.result.journal : undefined;
  const helperOutput = op?.result && 'output' in op.result ? op.result.output : undefined;
  return <><PageHeading title="操作任务" description="跟踪已持久化任务的执行、验证与最终结果。" /><div className="alert">UNKNOWN 表示执行结果不确定，需要对账；不能视作失败或自动重新执行。</div><section className="card"><div className="toolbar"><select aria-label="任务状态" value={status} onChange={e => setStatus(e.target.value)}><option value="">全部状态</option>{['PENDING', 'RUNNING', 'SUCCEEDED', 'FAILED', 'UNKNOWN', 'CANCELLED'].map(s => <option key={s} value={s}>{labels[s]}</option>)}</select><span className="muted">每 1.5 秒自动更新</span></div><ResourceState {...r} /><div className="table-wrap"><table><thead><tr><th>任务 / 原因</th><th>主机</th><th>状态</th><th>阶段</th><th>创建时间</th><th /></tr></thead><tbody>{r.data?.items.map(o => <tr key={o.id}><td><b>{operationTitle(o)}</b><small>{o.target || o.reason}</small></td><td className="mono">{o.hostId.slice(0, 8)}</td><td><Badge value={o.status} /></td><td className="mono">{o.phase}</td><td>{time(o.createdAt)}</td><td><button className="link" onClick={() => setSelected(o.id)}>查看详情</button></td></tr>)}</tbody></table>{!r.data?.items.length && !r.loading && <Empty>暂无任务。前往主机资产查看服务操作。</Empty>}</div></section>{op && <div className="modal-backdrop"><div className="modal"><div className="card-title"><h2>任务详情</h2><button className="icon-button" aria-label="关闭任务详情" onClick={() => setSelected(undefined)}>×</button></div><Badge value={op.status} /><dl className="info-list">{[['任务 ID', op.id], ['执行阶段', op.phase], ['创建时间', time(op.createdAt)], ['结束时间', time(op.finishedAt)], ['执行依据', evidence ?? op.error?.message ?? '等待执行与验证结果']].map(([k, v]) => <div key={k}><dt>{k}</dt><dd>{v}</dd></div>)}</dl>{journal && <pre className="journal-output">{journal}</pre>}{helperOutput && <pre className="journal-output">{helperOutput}</pre>}<div className="alert">{op.status === 'UNKNOWN' ? '结果未知，保持互斥锁，等待 Agent 执行记录对账。' : op.kind === 'SYSTEMD_JOURNAL_READ' || op.kind === 'HOST_HELPER_OPERATION' ? '输出可能包含敏感信息，请按管理员权限保护操作记录。' : '任务成功仅确认服务状态，不代表业务端到端健康。'}</div></div></div>}</>;
+}
+function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
+ const [clusters, setClusters] = useState<KubernetesClusterSummary[]>([]); const [hosts, setHosts] = useState<Host[]>([]); const [nodes, setNodes] = useState<Record<string, KubernetesClusterNode[]>>({});
+ const [name, setName] = useState(''); const [kind, setKind] = useState<KubernetesClusterImportRequest['kind']>('K3S'); const [contextName, setContextName] = useState(''); const [kubeconfig, setKubeconfig] = useState('');
+ const [loading, setLoading] = useState(true); const [busy, setBusy] = useState(false); const [nodeLoading, setNodeLoading] = useState<Record<string, boolean>>({}); const [error, setError] = useState('');
+ const [namespaceSnapshots, setNamespaceSnapshots] = useState<Record<string, KubernetesTopologyNamespaceSnapshot>>({}); const [selectedNamespaces, setSelectedNamespaces] = useState<Record<string, string>>({});
+ const [managedDeployments, setManagedDeployments] = useState<Record<string, KubernetesManagedDeployment[]>>({}); const [deploymentLoading, setDeploymentLoading] = useState<Record<string, boolean>>({}); const [deploymentBusy, setDeploymentBusy] = useState<Record<string, boolean>>({}); const [scaleValues, setScaleValues] = useState<Record<string, string>>({});
+ async function load() {
+  if (isMock) { setLoading(false); return; }
+  setLoading(true); setError('');
+  try {
+   const [clusterResult, hostResult] = await Promise.all([
+    api<KubernetesClusterList>('/kubernetes/clusters', 'GET', undefined, {}, true),
+    api<HostPage>('/hosts?limit=100', 'GET', undefined, {}, true),
+   ]);
+   setClusters(clusterResult.data.items); setHosts(hostResult.data.items);
+  } catch (e) { setError((e as Error).message); }
+  finally { setLoading(false); }
+ }
+ useEffect(() => { void load(); }, []);
+ async function importCluster(event: FormEvent<HTMLFormElement>) {
+  event.preventDefault(); setBusy(true); setError('');
+  const request: KubernetesClusterImportRequest = { name: name.trim(), kind, contextName: contextName.trim(), kubeconfig };
+  try {
+   const result = await api<KubernetesClusterSummary>('/kubernetes/clusters', 'POST', request, {}, true);
+   setClusters(current => [...current, result.data].sort((a, b) => a.name.localeCompare(b.name)));
+   setName(''); setContextName(''); setKubeconfig(''); notify(`已导入 Kubernetes 集群 ${result.data.name}`);
+  } catch (e) { setError((e as Error).message); }
+  finally { setBusy(false); }
+ }
+ async function refreshClusterStatus(clusterId: string) {
+  try {
+   const status = await api<KubernetesClusterSummary>(`/kubernetes/clusters/${encodeURIComponent(clusterId)}`, 'GET', undefined, {}, true);
+   setClusters(current => current.map(cluster => cluster.id === clusterId ? { ...cluster, healthStatus: status.data.healthStatus, cloudCoreStatus: status.data.cloudCoreStatus, cloudCoreObservedAt: status.data.cloudCoreObservedAt, observedAt: status.data.observedAt, lastErrorCode: status.data.lastErrorCode } : cluster));
+  } catch { /* Keep the last successful status visible when the registry is also unavailable. */ }
+ }
+ async function refreshNodes(clusterId: string) {
+  setNodeLoading(current => ({ ...current, [clusterId]: true })); setError('');
+  try {
+   const result = await api<KubernetesClusterNodeList>(`/kubernetes/clusters/${encodeURIComponent(clusterId)}/nodes`, 'GET', undefined, {}, true);
+   setNodes(current => ({ ...current, [clusterId]: result.data.items }));
+   setClusters(current => current.map(cluster => cluster.id === clusterId ? { ...cluster, nodeCount: result.data.items.length, healthStatus: 'HEALTHY', observedAt: result.data.observedAt, lastErrorCode: null } : cluster));
+   await refreshClusterStatus(clusterId);
+  } catch (e) { setError((e as Error).message); await refreshClusterStatus(clusterId); }
+  finally { setNodeLoading(current => ({ ...current, [clusterId]: false })); }
+ }
+ async function mapHost(clusterId: string, node: KubernetesClusterNode, hostId: string) {
+  const path = `/kubernetes/clusters/${encodeURIComponent(clusterId)}/nodes/${encodeURIComponent(node.nodeUid)}/host`;
+  setError('');
+  try {
+   if (hostId) await api<KubernetesClusterNode>(path, 'PUT', { hostId }, {}, true);
+   else await api(path, 'DELETE', undefined, {}, true);
+   await refreshNodes(clusterId);
+  } catch (e) { setError((e as Error).message); await refreshClusterStatus(clusterId); }
+ }
+ async function loadNamespaces(clusterId: string) {
+  setDeploymentLoading(current => ({ ...current, [`${clusterId}:namespaces`]: true })); setError('');
+  try {
+   const result = await api<KubernetesTopologyNamespaceSnapshot>(`/kubernetes/clusters/${encodeURIComponent(clusterId)}/topology/namespaces`, 'GET', undefined, {}, true);
+   setNamespaceSnapshots(current => ({ ...current, [clusterId]: result.data }));
+   const namespace = selectedNamespaces[clusterId] || result.data.namespaces[0]?.name || '';
+   setSelectedNamespaces(current => ({ ...current, [clusterId]: namespace }));
+   if (namespace) await loadManagedDeployments(clusterId, namespace);
+  } catch (e) { setError((e as Error).message); await refreshClusterStatus(clusterId); }
+  finally { setDeploymentLoading(current => ({ ...current, [`${clusterId}:namespaces`]: false })); }
+ }
+ function managedDeploymentPath(clusterId: string, namespace: string) {
+  return `/kubernetes/clusters/${encodeURIComponent(clusterId)}/namespaces/${encodeURIComponent(namespace)}/deployments`;
+ }
+ async function loadManagedDeployments(clusterId: string, namespace = selectedNamespaces[clusterId] ?? '') {
+  if (!namespace) return;
+  const key = `${clusterId}:${namespace}`;
+  setDeploymentLoading(current => ({ ...current, [key]: true })); setError('');
+  try {
+   const result = await api<KubernetesManagedDeploymentList>(managedDeploymentPath(clusterId, namespace), 'GET', undefined, {}, true);
+   setManagedDeployments(current => ({ ...current, [key]: result.data.items }));
+  } catch (e) { setError((e as Error).message); await refreshClusterStatus(clusterId); }
+  finally { setDeploymentLoading(current => ({ ...current, [key]: false })); }
+ }
+ async function createManagedDeployment(event: FormEvent<HTMLFormElement>, clusterId: string, namespace: string) {
+  event.preventDefault(); const form = event.currentTarget; const values = new FormData(form);
+  const payload: KubernetesManagedDeploymentCreateRequest = { name: String(values.get('name') ?? ''), image: String(values.get('image') ?? ''), replicas: Number(values.get('replicas')), containerPort: Number(values.get('containerPort')) };
+  const key = `${clusterId}:${namespace}`; setDeploymentBusy(current => ({ ...current, [key]: true })); setError('');
+  try {
+   await api<KubernetesManagedDeployment>(managedDeploymentPath(clusterId, namespace), 'POST', payload, {}, true);
+   form.reset(); await loadManagedDeployments(clusterId, namespace); notify(`已创建 ${namespace}/${payload.name} Deployment`);
+  } catch (e) { setError((e as Error).message); await refreshClusterStatus(clusterId); }
+  finally { setDeploymentBusy(current => ({ ...current, [key]: false })); }
+ }
+ async function scaleManagedDeployment(clusterId: string, namespace: string, deployment: KubernetesManagedDeployment) {
+  const key = `${clusterId}:${namespace}`; const scaleKey = `${key}:${deployment.name}`; const replicas = Number(scaleValues[scaleKey] ?? deployment.replicas ?? 1);
+  setDeploymentBusy(current => ({ ...current, [key]: true })); setError('');
+  try {
+   await api<KubernetesManagedDeployment>(`${managedDeploymentPath(clusterId, namespace)}/${encodeURIComponent(deployment.name)}/scale`, 'PUT', { replicas } satisfies KubernetesManagedDeploymentScaleRequest, {}, true);
+   await loadManagedDeployments(clusterId, namespace); notify(`已调整 ${namespace}/${deployment.name} 的副本数`);
+  } catch (e) { setError((e as Error).message); await refreshClusterStatus(clusterId); }
+  finally { setDeploymentBusy(current => ({ ...current, [key]: false })); }
+ }
+ async function deleteManagedDeployment(clusterId: string, namespace: string, deployment: KubernetesManagedDeployment) {
+  if (!window.confirm(`删除由 NaNPanel 管理的 ${namespace}/${deployment.name}？`)) return;
+  const key = `${clusterId}:${namespace}`; setDeploymentBusy(current => ({ ...current, [key]: true })); setError('');
+  try {
+   await api(`${managedDeploymentPath(clusterId, namespace)}/${encodeURIComponent(deployment.name)}`, 'DELETE', undefined, {}, true);
+   await loadManagedDeployments(clusterId, namespace); notify(`已删除 ${namespace}/${deployment.name}`);
+  } catch (e) { setError((e as Error).message); await refreshClusterStatus(clusterId); }
+  finally { setDeploymentBusy(current => ({ ...current, [key]: false })); }
+ }
+ return <><PageHeading title="Kubernetes 集群" description="导入独立集群、刷新 Node 清单，并将 Kubernetes Node 映射到主机资产。" action={<button className="secondary" onClick={() => void load()} disabled={loading || isMock}>↻ 刷新</button>} />
+  {isMock && <div className="alert">当前是纯 Mock 演示模式，集群管理 API 已停用。切换到 hybrid 或 live 模式后可导入真实集群。</div>}
+  {error && <div className="alert error" role="alert">{error}</div>}
+  <section className="card"><div className="card-title"><div><h2>导入集群</h2><p>选择 kubeconfig 中的单一 context。凭据只发送到 Core 并加密保存，页面不会持久化副本。</p></div></div>
+   <form className="cluster-import-form" onSubmit={event => void importCluster(event)}>
+    <Field label="集群名称"><input required maxLength={80} value={name} onChange={event => setName(event.target.value)} placeholder="例如 production-k3s" /></Field>
+    <Field label="集群类型"><select value={kind} onChange={event => setKind(event.target.value as KubernetesClusterImportRequest['kind'])}><option value="K3S">K3s</option><option value="KUBERNETES">Kubernetes</option><option value="KUBEEDGE">KubeEdge</option></select></Field>
+    <Field label="kubeconfig context"><input required maxLength={128} value={contextName} onChange={event => setContextName(event.target.value)} placeholder="明确填写 context 名称" /></Field>
+    <Field label="kubeconfig"><textarea required maxLength={1048576} rows={10} value={kubeconfig} onChange={event => setKubeconfig(event.target.value)} autoComplete="off" spellCheck={false} placeholder="粘贴 kubeconfig YAML" /></Field>
+    <div className="form-actions"><button className="primary" disabled={busy || loading || isMock || !kubeconfig.trim()}>{busy ? '验证并导入…' : '验证并导入集群'}</button></div>
+   </form>
+  </section>
+  <ResourceState loading={loading} error="" />
+  <div className="cluster-list">{clusters.map(cluster => {
+   const clusterNodes = nodes[cluster.id] ?? [];
+   return <section className="card cluster-card" key={cluster.id}>
+    <div className="card-title"><div><span className="eyebrow">{cluster.kind}</span><h2>{cluster.name}</h2><p className="mono">{cluster.endpoint} · context {cluster.contextName}</p><p className="muted">最近成功观测 {time(cluster.observedAt)}{cluster.lastErrorCode ? ` · ${cluster.lastErrorCode} · 清单可能已过期` : ''}</p>{cluster.kind === 'KUBEEDGE' && <p className="muted">CloudCore：{cluster.cloudCoreStatus} · 观测于 {time(cluster.cloudCoreObservedAt)}</p>}</div><div className="cluster-actions"><span className={`badge ${cluster.healthStatus === 'HEALTHY' ? 'online' : 'offline'}`}>{cluster.healthStatus === 'HEALTHY' ? '健康' : '不可用'}</span><button className="secondary" disabled={!!nodeLoading[cluster.id] || isMock} onClick={() => void refreshNodes(cluster.id)}>{nodeLoading[cluster.id] ? '读取中…' : `刷新 Node (${cluster.nodeCount})`}</button></div></div>
+    {clusterNodes.length > 0 && <div className="table-wrap"><table><thead><tr><th>Node</th><th>角色 / 运行状态</th><th>容器所有者</th><th>主机资产映射</th></tr></thead><tbody>{clusterNodes.map(node => <tr key={node.nodeUid}><td><strong>{node.nodeName}</strong><small className="mono">UID {node.nodeUid}</small></td><td>{node.roles.join(', ') || 'worker'} · {node.ready ? 'Ready' : 'NotReady'}{node.kubeedgeEdge ? node.ready ? ' · EdgeCore 已注册' : ' · EdgeCore 未就绪' : ''}</td><td>{node.containerOwner}</td><td><select aria-label={`映射 ${node.nodeName} 到主机资产`} value={node.hostId ?? ''} onChange={event => void mapHost(cluster.id, node, event.target.value)} disabled={!!nodeLoading[cluster.id] || isMock}><option value="">未映射</option>{hosts.map(host => <option value={host.id} key={host.id}>{host.hostname}</option>)}</select></td></tr>)}</tbody></table></div>}
+    {!clusterNodes.length && <p className="muted">尚未读取 Node 清单。刷新后可以建立主机资产映射。</p>}
+    <div className="cluster-resource-actions"><button className="secondary" disabled={!!deploymentLoading[`${cluster.id}:namespaces`] || isMock} onClick={() => void loadNamespaces(cluster.id)}>{deploymentLoading[`${cluster.id}:namespaces`] ? '读取中…' : namespaceSnapshots[cluster.id] ? '↻ 刷新 Namespace' : '读取 Namespace 与资源管理'}</button></div>
+    {namespaceSnapshots[cluster.id] && (() => {
+      const snapshot = namespaceSnapshots[cluster.id];
+      const selectedNamespace = selectedNamespaces[cluster.id] ?? '';
+      const resourceKey = `${cluster.id}:${selectedNamespace}`;
+      const resources = managedDeployments[resourceKey] ?? [];
+      return <section className="managed-resource-panel">
+       <div className="resource-panel-heading"><div><h3>Namespace 资源</h3><p className="muted">Namespace 清单只读；只允许管理由 NaNPanel 创建并登记所有权的 Deployment。</p></div><span className="muted">观测于 {time(snapshot.observedAt)}</span></div>
+       <div className="namespace-toolbar"><label>Namespace<select aria-label={`${cluster.name} Namespace`} value={selectedNamespace} onChange={event => { const value = event.target.value; setSelectedNamespaces(current => ({ ...current, [cluster.id]: value })); if (value) void loadManagedDeployments(cluster.id, value); }}><option value="">选择 Namespace</option>{snapshot.namespaces.map(namespace => <option key={namespace.name} value={namespace.name}>{namespace.name}</option>)}</select></label><button className="secondary" disabled={!selectedNamespace || !!deploymentLoading[resourceKey] || isMock} onClick={() => void loadManagedDeployments(cluster.id)}>{deploymentLoading[resourceKey] ? '读取中…' : '刷新托管 Deployment'}</button></div>
+       {selectedNamespace && <>
+        <form className="managed-deployment-form" onSubmit={event => void createManagedDeployment(event, cluster.id, selectedNamespace)}>
+         <Field label="Deployment 名称"><input name="name" required maxLength={63} pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?" placeholder="例如 web" /></Field>
+         <Field label="镜像"><input name="image" required maxLength={512} placeholder="例如 nginx:1.27" /></Field>
+         <Field label="副本数"><input name="replicas" type="number" min={1} max={20} defaultValue={1} required /></Field>
+         <Field label="容器端口"><input name="containerPort" type="number" min={1} max={65535} defaultValue={8080} required /></Field>
+         <button className="primary" disabled={!!deploymentBusy[resourceKey] || isMock}>{deploymentBusy[resourceKey] ? '正在提交…' : '创建托管 Deployment'}</button>
+        </form>
+        <div className="managed-deployment-list">
+         {resources.map(deployment => {
+          const scaleKey = `${resourceKey}:${deployment.name}`;
+          return <article className="managed-deployment-row" key={deployment.name}>
+           <div><strong>{deployment.name}</strong><span className={`badge ${deployment.state === 'READY' ? 'online' : 'offline'}`}>{deployment.state}</span><small>{deployment.image ?? '镜像不可读'} · {deployment.readyReplicas ?? 0}/{deployment.replicas ?? 0} Ready · 端口 {deployment.containerPort ?? '—'}</small></div>
+           <div className="managed-deployment-actions"><label>副本数<input aria-label={`${deployment.name} 副本数`} type="number" min={0} max={20} value={scaleValues[scaleKey] ?? String(deployment.replicas ?? 1)} onChange={event => setScaleValues(current => ({ ...current, [scaleKey]: event.target.value }))} /></label><button className="secondary" disabled={!!deploymentBusy[resourceKey] || isMock} onClick={() => void scaleManagedDeployment(cluster.id, selectedNamespace, deployment)}>调整</button><button className="danger" disabled={!!deploymentBusy[resourceKey] || isMock || deployment.state === 'OWNERSHIP_CONFLICT'} onClick={() => void deleteManagedDeployment(cluster.id, selectedNamespace, deployment)}>删除</button></div>
+          </article>;
+         })}
+         {!resources.length && !deploymentLoading[resourceKey] && <p className="muted">暂无已登记的托管 Deployment。先刷新清单，或创建一个新的 Deployment。</p>}
+         {deploymentLoading[resourceKey] && <p className="muted">正在读取 Namespace Deployment…</p>}
+        </div>
+       </>}
+      </section>;
+    })()}
+   </section>;
+  })}{!loading && !clusters.length && !isMock && <Empty>尚未导入 Kubernetes 集群。</Empty>}</div>
+ </>;
 }
 function Users({ self, notify }: { self: string; notify: (s: string) => void }) {
  const r = useResource<AdminUserPage>('/admin/users'); const roles = useResource<BuiltinRoleList>('/admin/roles'); const [create, setCreate] = useState(false); const [error, setError] = useState(''); const [busy, setBusy] = useState(false); const [editing, setEditing] = useState<{ user: AdminUser; etag: string }>(); const [editMode, setEditMode] = useState<'profile' | 'password'>('profile');

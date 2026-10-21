@@ -22,7 +22,7 @@ export const nodePresets: Record<TopologyNodeKind, { name: string; inputs: numbe
 };
 export function createTopologyNode(kind: TopologyNodeKind, position: { x: number; y: number }): TopologyNode {
   const preset = nodePresets[kind];
-  return { id: createUuid(), kind, name: preset.name, position, inputCount: preset.inputs, outputCount: preset.outputs, ports: portsFor(preset.inputs, preset.outputs), parentId: null, assetId: null };
+  return { id: createUuid(), kind, name: preset.name, position, inputCount: preset.inputs, outputCount: preset.outputs, ports: portsFor(preset.inputs, preset.outputs), parentId: null, assetId: null, clusterId: null };
 }
 export function initialTopology(): TopologyDraftWrite {
   return { nodes: [createTopologyNode('GATEWAY', { x: 0, y: 100 }), createTopologyNode('HOST', { x: 350, y: 180 }), createTopologyNode('SERVICE', { x: 700, y: 100 })], links: [] };
@@ -71,7 +71,7 @@ export function draftError(value: unknown): string | null {
   const ids = new Set<string>();
   for (const n of value.nodes) {
     const requiredNodeKeys = ['id', 'kind', 'name', 'position', 'inputCount', 'outputCount', 'ports'];
-    const optionalNodeKeys = ['parentId', 'assetId'];
+    const optionalNodeKeys = ['parentId', 'assetId', 'clusterId'];
     if (!record(n) || requiredNodeKeys.some(key => !Object.hasOwn(n, key)) || Object.keys(n).some(key => !requiredNodeKeys.includes(key) && !optionalNodeKeys.includes(key)) || typeof n.id !== 'string' || !uuid.test(n.id) || ids.has(n.id)) return '节点 ID 必须为唯一 UUID，且不能包含未定义字段';
     ids.add(n.id);
     if (typeof n.name !== 'string' || !n.name.trim() || [...n.name].length > 100 || !record(n.position) || !keysAre(n.position, ['x', 'y']) || ![n.position.x, n.position.y].every(v => typeof v === 'number' && Number.isFinite(v) && Math.abs(v) <= 10000)) return '节点名称或坐标无效';
@@ -81,6 +81,8 @@ export function draftError(value: unknown): string | null {
     if (n.parentId !== undefined && n.parentId !== null && (typeof n.parentId !== 'string' || !uuid.test(n.parentId))) return '父文件夹 ID 无效';
     if (n.assetId !== undefined && n.assetId !== null && (typeof n.assetId !== 'string' || !uuid.test(n.assetId))) return '主机资产 ID 无效';
     if (n.assetId != null && n.kind !== 'HOST' && n.kind !== 'GATEWAY') return '只有主机或 Gateway 节点可以绑定主机资产';
+    if (n.clusterId !== undefined && n.clusterId !== null && (typeof n.clusterId !== 'string' || !uuid.test(n.clusterId))) return 'Kubernetes 集群 ID 无效';
+    if (n.clusterId != null && n.kind !== 'FOLDER') return '只有文件夹节点可以关联 Kubernetes 集群';
     if (parentId === n.id) return '文件夹不能包含自身';
   }
   const nodesById = new Map((value.nodes as TopologyNode[]).map(n => [n.id, n]));

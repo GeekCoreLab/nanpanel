@@ -181,6 +181,22 @@ EOF
     unset ssh_credentials_key ssh_credentials_key_encoded
 fi
 
+if ! ssh "$ssh_target" kubectl -n nanpanel get secret nanpanel-kubernetes-credential-key >/dev/null 2>&1; then
+    kubernetes_credential_key=$(openssl rand -base64 32)
+    kubernetes_credential_key_encoded=$(printf '%s' "$kubernetes_credential_key" | base64 | tr -d '\n')
+    cat <<EOF | ssh "$ssh_target" kubectl apply -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  name: nanpanel-kubernetes-credential-key
+  namespace: nanpanel
+type: Opaque
+data:
+  NANPANEL_KUBERNETES_CREDENTIAL_KEY: ${kubernetes_credential_key_encoded}
+EOF
+    unset kubernetes_credential_key kubernetes_credential_key_encoded
+fi
+
 apply_file "$script_dir/postgres.yaml"
 ssh "$ssh_target" kubectl -n nanpanel rollout status statefulset/nanpanel-postgres --timeout=180s
 apply_file "$script_dir/core.yaml"

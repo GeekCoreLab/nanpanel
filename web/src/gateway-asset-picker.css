@@ -1,6 +1,8 @@
 .topology .react-flow__node-device:has(.gateway-asset-dropdown){z-index:60!important}
 .gateway-asset-control{position:relative;padding:10px 12px;background:#fbfcff;border-bottom:1px solid #edf1f7}
-.gateway-asset-control>label{display:block;margin-bottom:6px;color:#788aa3;font-size:9px}
+.gateway-asset-control>label{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;color:#788aa3;font-size:9px}
+.gateway-asset-source{padding:2px 5px;border-radius:4px;background:#eaf6f0;color:#32845f;font-size:8px;font-weight:600}
+.gateway-asset-source.is-mock{background:#fff3dd;color:#a87418}
 .gateway-asset-control>input{width:100%;height:31px;padding:6px 8px;font-size:10px}
 .gateway-asset-dropdown{position:absolute;top:calc(100% - 1px);left:10px;right:10px;z-index:70;max-height:220px;overflow:auto;overscroll-behavior:contain;touch-action:pan-y;padding:4px;background:#fff;border:1px solid #dce5f2;border-radius:0 0 7px 7px;box-shadow:0 10px 24px #243b5926}
 .gateway-asset-option{display:flex;width:100%;align-items:center;justify-content:space-between;gap:8px;padding:8px;border:0;border-radius:5px;background:#fff;color:#435b79;text-align:left}
@@ -13,3 +15,4 @@
 .gateway-asset-empty{padding:12px 8px;color:#98a5b7;text-align:center;font-size:9px}
 .gateway-asset-more{width:100%;padding:8px;border:0;border-top:1px solid #edf1f7;background:#fff;color:#5780cb;font-size:9px}
 .gateway-asset-clear{margin-top:7px;padding:3px 0;border:0;background:none;color:#9a7180;font-size:8px}
+.folder-cluster-control{display:grid;gap:5px;padding:8px 12px;border-bottom:1px solid #e8edf6;background:#f8faff}.folder-cluster-control label{color:#788aa3;font-size:9px}.folder-cluster-control select{width:100%;min-width:0;height:29px;padding:4px 7px;font-size:9px}

@@ -25,7 +25,9 @@ These are desired logical nodes, not deployed devices. Their names do not imply 
 
 The outer topology can include registered Host assets. Their read-only Agent network snapshots are matched against other selected assets by interface address to display known route next hops. The route table is not changed by saving the topology; general host route deployment still needs a capable Provider and an explicit operation.
 
-Opening a folder allows editing its child topology and browsing the server-configured Kubernetes cluster. `GET /api/v1/kubernetes/topology/namespaces` returns bounded Namespace names; `GET /api/v1/kubernetes/topology/namespaces/{namespace}` fetches bounded Ingress, Service, Pod and container metadata on demand. These APIs use the Core's configured cluster identity, require corresponding Kubernetes `get/list` RBAC permissions, do not read Secrets, and do not accept a client-selected cluster. The resource view is read-only; K3s resource mutation and topology-to-provider reconciliation remain unimplemented.
+Opening a folder allows editing its child topology and browsing a selected registered Kubernetes cluster. A folder may be bound to a cluster UUID; an unbound folder uses the server-configured default cluster. Namespace, Ingress, Service, Pod and container metadata is fetched on demand, bounded, and never reads Secrets. Registered clusters have independent kubeconfig contexts and encrypted credentials. Cluster Node mappings use Kubernetes UIDs and explicit Host asset selection. KubeEdge cluster summaries include CloudCore status and observation time; the current observer covers CloudCore Pods in the `kubeedge` namespace and reports binary CloudCore as `NOT_OBSERVED`. EdgeNode status reflects its Kubernetes edge role and Ready condition; it does not imply that Core installed or manages EdgeCore.
+
+The cluster page also supports namespace-scoped Deployment management. It can create a Deployment with one container, one declared port and 1–20 replicas, scale a recorded Deployment to 0–20 replicas, or delete it. NaNPanel records the Deployment UID and ownership token at creation; list and mutation calls reject objects whose UID, labels or annotation no longer match. Other resources and Deployments that were not created and recorded by NaNPanel remain outside its management boundary. The imported kubeconfig must grant the required Kubernetes RBAC verbs for the specific action. These operations do not read Secrets and do not imply topology-to-provider reconciliation or Gateway routing.
 
 ## Endpoints
 
@@ -37,6 +39,13 @@ Opening a folder allows editing its child topology and browsing the server-confi
 | `GET` | `/api/v1/topology/revisions/{revisionId}` | Read an immutable historical graph. |
 | `GET` | `/api/v1/kubernetes/topology/namespaces` | Read bounded namespace inventory for the configured cluster. |
 | `GET` | `/api/v1/kubernetes/topology/namespaces/{namespace}` | Read bounded Ingress, Service, Pod and container observations for a namespace. |
+| `GET` | `/api/v1/kubernetes/clusters` | List imported independent clusters and their last health observation. |
+| `POST` | `/api/v1/kubernetes/clusters` | Validate and import one explicit kubeconfig context. |
+| `GET` | `/api/v1/kubernetes/clusters/{clusterId}/nodes` | Refresh bounded Nodes by UID; API failures retain stale observations and mark the cluster unavailable. |
+| `PUT/DELETE` | `/api/v1/kubernetes/clusters/{clusterId}/nodes/{nodeUid}/host` | Explicitly map or unmap one registered cluster Node and Host asset. |
+| `GET/POST` | `/api/v1/kubernetes/clusters/{clusterId}/namespaces/{namespace}/deployments` | List registered Deployment state or create a namespace-scoped managed Deployment. |
+| `PUT` | `/api/v1/kubernetes/clusters/{clusterId}/namespaces/{namespace}/deployments/{name}/scale` | Scale only a registered, ownership-matching Deployment. |
+| `DELETE` | `/api/v1/kubernetes/clusters/{clusterId}/namespaces/{namespace}/deployments/{name}` | Delete only a registered, ownership-matching Deployment. |
 
 All endpoints require an active administrator session with the initial password change completed. PUT also requires CSRF and the exact `If-Match` returned by GET. Missing ETag returns 428, stale ETag returns 412, and invalid topology returns 422 `INVALID_TOPOLOGY`. Wildcards and multiple ETags are rejected. Errors do not change the current graph or history.
 

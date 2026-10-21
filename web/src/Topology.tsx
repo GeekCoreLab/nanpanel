@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { createPortal } from 'react-dom';
 import {
   ReactFlow, ReactFlowProvider, Background, Controls, Handle, Position, ConnectionMode,
   BaseEdge, getBezierPath, MarkerType, useNodesState, useEdgesState, useReactFlow, useUpdateNodeInternals,
@@ -11,7 +12,7 @@ import { connectionError, createTopologyNode, draftError, nodePresets, validNode
 import './topology-status.css';
 import './topology-hierarchy.css';
 import './gateway-asset-picker.css';
-import type { Host, HostNetworkInventory, HostPage, KubernetesServiceInventorySnapshot, KubernetesServiceProbeSnapshot, KubernetesTopologyNamespaceDetail, KubernetesTopologyNamespaceSnapshot, TopologyDraft, TopologyDraftWrite, TopologyLink, TopologyNode, TopologyNodeKind } from './lib/types';
+import type { Host, HostNetworkInventory, HostPage, KubernetesClusterList, KubernetesClusterSummary, KubernetesServiceInventorySnapshot, KubernetesServiceProbeSnapshot, KubernetesTopologyNamespaceDetail, KubernetesTopologyNamespaceSnapshot, TopologyDraft, TopologyDraftWrite, TopologyLink, TopologyNode, TopologyNodeKind } from './lib/types';
 
 type DeviceNode = Node<{
   model: TopologyNode;
@@ -20,17 +21,21 @@ type DeviceNode = Node<{
   gatewayAssetSearch?: string;
   gatewayAssetOpen?: boolean;
   gatewayAssetLoading?: boolean;
+  gatewayAssetMock?: boolean;
   gatewayAssetNextCursor?: string | null;
+  gatewayAssetError?: string;
   gatewayBoundAssetIds?: string[];
+  clusterChoices?: KubernetesClusterSummary[];
   onGatewayAssetFocus?: (nodeId: string) => void;
   onGatewayAssetSearch?: (nodeId: string, value: string) => void;
   onGatewayAssetClose?: (nodeId: string) => void;
   onGatewayAssetSelect?: (nodeId: string, host: Host | null) => void;
-  onGatewayAssetLoadMore?: () => void;
+  onGatewayAssetLoadMore?: (nodeId: string) => void;
+  onFolderClusterSelect?: (nodeId: string, clusterId: string | null) => void;
 }, 'device'>;
 type P0RouteEvidence = { status: 'VERIFIED'; route: string; httpStatus: number; responseBody: string; configSha256: string; diff: string; verifiedAt: string };
 const virtualKinds: TopologyNodeKind[] = ['SWITCH', 'MERGE', 'SPLIT', 'FORWARDER'];
-const asNode = (model: TopologyNode, asset?: Host): DeviceNode => ({ id: model.id, type: 'device', position: model.position, data: { model: { ...model, parentId: model.parentId ?? null, assetId: model.assetId ?? null }, asset } });
+const asNode = (model: TopologyNode, asset?: Host): DeviceNode => ({ id: model.id, type: 'device', position: model.position, data: { model: { ...model, parentId: model.parentId ?? null, assetId: model.assetId ?? null, clusterId: model.clusterId ?? null }, asset } });
 const asEdge = (link: TopologyLink): Edge => ({ id: link.id, source: link.sourceNodeId, sourceHandle: link.sourcePort, target: link.targetNodeId, targetHandle: link.targetPort, type: 'directed', markerEnd: { type: MarkerType.ArrowClosed, color: '#4a86ed' }, data: { status: 'UNVERIFIED', state: link.state ?? 'PENDING', layer: link.layer, protocol: link.protocol }, ariaLabel: `期望连接，${link.state ?? 'PENDING'} · ${link.layer}/${link.protocol}` });
 const asLink = (edge: Edge): TopologyLink => ({ id: edge.id, sourceNodeId: edge.source, sourcePort: edge.sourceHandle ?? '', targetNodeId: edge.target, targetPort: edge.targetHandle ?? '', layer: (edge.data?.layer as TopologyLink['layer']) ?? 'L4', protocol: (edge.data?.protocol as TopologyLink['protocol']) ?? 'TCP', status: 'UNVERIFIED' });
 const linkStateLabels = { PENDING: '待部署', VERIFIED: '已验证', ERROR: '异常', UNSUPPORTED: '不可支持', OBSERVED: 'Agent 路由观测' } as const;
@@ -47,26 +52,51 @@ function p0RouteError(graph: TopologyDraftWrite): string | null {
 function Device({ data, selected }: NodeProps<DeviceNode>) {
   const node = data.model;
   const updateNodeInternals = useUpdateNodeInternals();
+  const gatewaySearchInput = useRef<HTMLInputElement>(null);
+  const [gatewayDropdownPosition, setGatewayDropdownPosition] = useState<{ left: number; top: number; width: number; maxHeight: number }>();
   useEffect(() => { updateNodeInternals(node.id); }, [node.id, node.inputCount, node.outputCount, updateNodeInternals]);
+  useEffect(() => {
+    if (node.kind !== 'GATEWAY' || !data.gatewayAssetOpen) { setGatewayDropdownPosition(undefined); return; }
+    const updatePosition = () => {
+      const rect = gatewaySearchInput.current?.getBoundingClientRect();
+      if (!rect) return;
+      const margin = 8;
+      const below = window.innerHeight - rect.bottom - margin;
+      const above = rect.top - margin;
+      const openBelow = below >= above;
+      const maxHeight = Math.max(0, Math.min(160, openBelow ? below : above));
+      const width = Math.min(rect.width, window.innerWidth - margin * 2);
+      const left = Math.max(margin, Math.min(rect.left, window.innerWidth - width - margin));
+      setGatewayDropdownPosition({ left, top: openBelow ? rect.bottom : Math.max(margin, rect.top - maxHeight), width, maxHeight });
+    };
+    updatePosition();
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition, true);
+    };
+  }, [node.kind, data.gatewayAssetOpen, data.gatewayAssetChoices?.length, data.gatewayAssetLoading]);
   const height = Math.max(node.inputCount, node.outputCount, 1) * 26 + 16;
   const gatewayChoices = [...(data.gatewayAssetChoices ?? [])];
   if (data.asset && !gatewayChoices.some(host => host.id === data.asset!.id)) gatewayChoices.unshift(data.asset);
   const search = data.gatewayAssetSearch?.trim().toLocaleLowerCase() ?? '';
-  const filteredGatewayChoices = gatewayChoices.filter(host => !search || `${host.hostname} ${host.os ?? ''} ${host.arch ?? ''} ${host.id}`.toLocaleLowerCase().includes(search));
+  const filteredGatewayChoices = gatewayChoices.filter(host => !search || host.hostname.toLocaleLowerCase().includes(search));
   const gatewayListId = `gateway-asset-options-${node.id}`;
   return <div className={`topology-device ${node.kind === 'FOLDER' ? 'is-folder' : ''} ${selected ? 'is-selected' : ''}`}>
     <div className="device-title"><span className="device-symbol">{node.kind === 'FOLDER' ? '▰' : node.kind === 'SWITCH' ? '▦' : virtualKinds.includes(node.kind) ? '⇄' : '▤'}</span><div><strong>{node.name}</strong><small>{node.assetId ? `主机资产 · ${data.asset?.status ?? '读取中'}` : nodePresets[node.kind].description}</small></div></div>
+    {node.kind === 'FOLDER' && <div className="folder-cluster-control nodrag"><label htmlFor={`folder-cluster-${node.id}`}>关联 Kubernetes 集群</label><select id={`folder-cluster-${node.id}`} className="nodrag nowheel" aria-label={`${node.name}关联 Kubernetes 集群`} value={node.clusterId ?? ''} onChange={event => data.onFolderClusterSelect?.(node.id, event.target.value || null)}><option value="">使用默认集群</option>{(data.clusterChoices ?? []).map(cluster => <option value={cluster.id} key={cluster.id}>{cluster.name} · {cluster.healthStatus === 'HEALTHY' ? '健康' : '不可用'}</option>)}</select></div>}
     {node.kind === 'GATEWAY' && <div className="gateway-asset-control nodrag">
-      <label htmlFor={`gateway-asset-search-${node.id}`}>绑定主机资产</label>
-      <input id={`gateway-asset-search-${node.id}`} className="nodrag" role="combobox" aria-label="搜索 Gateway 主机资产" aria-autocomplete="list" aria-expanded={!!data.gatewayAssetOpen} aria-controls={gatewayListId} placeholder={data.asset?.hostname ?? '输入主机名搜索…'} value={data.gatewayAssetSearch ?? ''} onFocus={() => data.onGatewayAssetFocus?.(node.id)} onBlur={() => data.onGatewayAssetClose?.(node.id)} onChange={event => data.onGatewayAssetSearch?.(node.id, event.target.value)} onKeyDown={event => { if (event.key === 'Escape') data.onGatewayAssetClose?.(node.id); }} />
-      {data.gatewayAssetOpen && <div className="gateway-asset-dropdown nowheel" id={gatewayListId} role="listbox" aria-label="可绑定的主机资产">
+      <label htmlFor={`gateway-asset-search-${node.id}`}>绑定主机资产 <span className={`gateway-asset-source ${data.gatewayAssetMock ? 'is-mock' : ''}`}>{data.gatewayAssetMock ? 'Mock 演示数据' : '实时资产'}</span></label>
+      <input ref={gatewaySearchInput} id={`gateway-asset-search-${node.id}`} className="nodrag" role="combobox" aria-label="搜索 Gateway 主机资产" aria-autocomplete="list" aria-expanded={!!data.gatewayAssetOpen} aria-controls={gatewayListId} placeholder={data.asset?.hostname ?? '输入主机名搜索…'} value={data.gatewayAssetSearch ?? ''} onFocus={() => data.onGatewayAssetFocus?.(node.id)} onBlur={() => data.onGatewayAssetClose?.(node.id)} onChange={event => data.onGatewayAssetSearch?.(node.id, event.target.value)} onKeyDown={event => { if (event.key === 'Escape') data.onGatewayAssetClose?.(node.id); }} />
+      {data.gatewayAssetOpen && gatewayDropdownPosition && createPortal(<div className="gateway-asset-dropdown nowheel" id={gatewayListId} role="listbox" aria-label="可绑定的主机资产" style={{ position: 'fixed', left: gatewayDropdownPosition.left, top: gatewayDropdownPosition.top, width: gatewayDropdownPosition.width, maxHeight: gatewayDropdownPosition.maxHeight }} onWheel={event => { event.currentTarget.scrollTop += event.deltaY; event.preventDefault(); event.stopPropagation(); }}>
         {filteredGatewayChoices.map(host => {
           const boundElsewhere = (data.gatewayBoundAssetIds ?? []).includes(host.id) && host.id !== node.assetId;
           return <button type="button" className="gateway-asset-option nodrag" role="option" aria-selected={node.assetId === host.id} disabled={boundElsewhere} key={host.id} onMouseDown={event => event.preventDefault()} onClick={() => data.onGatewayAssetSelect?.(node.id, host)}><span><strong>{host.hostname}</strong><small>{host.os ?? 'OS 未知'} · {host.arch ?? '架构未知'}</small></span><span className={`badge ${boundElsewhere ? '' : host.status === 'ONLINE' ? 'online' : host.status === 'OFFLINE' ? 'offline' : 'unknown'}`}>{boundElsewhere ? '已绑定' : host.status}</span></button>;
         })}
-        {!filteredGatewayChoices.length && <div className="gateway-asset-empty">{data.gatewayAssetLoading ? '读取主机资产…' : '没有匹配的主机资产'}</div>}
-        {data.gatewayAssetNextCursor && <button type="button" className="gateway-asset-more nodrag" disabled={data.gatewayAssetLoading} onMouseDown={event => event.preventDefault()} onClick={() => data.onGatewayAssetLoadMore?.()}>{data.gatewayAssetLoading ? '读取中…' : '加载更多主机'}</button>}
-      </div>}
+        {!filteredGatewayChoices.length && <div className="gateway-asset-empty">{data.gatewayAssetLoading ? '读取主机资产…' : data.gatewayAssetError ?? '没有匹配的主机资产'}</div>}
+        {data.gatewayAssetNextCursor && <button type="button" className="gateway-asset-more nodrag" disabled={data.gatewayAssetLoading} onMouseDown={event => event.preventDefault()} onClick={() => data.onGatewayAssetLoadMore?.(node.id)}>{data.gatewayAssetLoading ? '读取中…' : '加载更多主机'}</button>}
+      </div>, document.body)}
       {node.assetId && <button type="button" className="gateway-asset-clear nodrag" onClick={() => data.onGatewayAssetSelect?.(node.id, null)}>取消主机绑定</button>}
     </div>}
     <div className="device-ports" style={{ height }}>
@@ -97,17 +127,23 @@ function Editor() {
   const [folderId, setFolderId] = useState<string | null>(null);
   const [hostAssets, setHostAssets] = useState<Record<string, { host: Host; inventory: HostNetworkInventory }>>({});
   const [assetChoices, setAssetChoices] = useState<Host[]>([]); const [assetNextCursor, setAssetNextCursor] = useState<string | null>(null); const [assetPickerOpen, setAssetPickerOpen] = useState(false); const [assetPickerBusy, setAssetPickerBusy] = useState(false);
-  const [gatewayAssetChoices, setGatewayAssetChoices] = useState<Host[]>([]); const [gatewayAssetNextCursor, setGatewayAssetNextCursor] = useState<string | null>(null); const [gatewayAssetsLoaded, setGatewayAssetsLoaded] = useState(false); const [gatewayAssetLoading, setGatewayAssetLoading] = useState(false); const [gatewayAssetSearch, setGatewayAssetSearch] = useState<Record<string, string>>({}); const [gatewayAssetOpen, setGatewayAssetOpen] = useState<Record<string, boolean>>({});
+  const [gatewayAssetPages, setGatewayAssetPages] = useState<Record<string, { choices: Host[]; nextCursor: string | null; loading: boolean; error?: string }>>({}); const [gatewayAssetSearch, setGatewayAssetSearch] = useState<Record<string, string>>({}); const [gatewayAssetOpen, setGatewayAssetOpen] = useState<Record<string, boolean>>({});
+  const gatewayAssetRequest = useRef<Record<string, number>>({});
+  const [kubernetesClusters, setKubernetesClusters] = useState<KubernetesClusterSummary[]>([]);
   const [kubernetesNamespaces, setKubernetesNamespaces] = useState<KubernetesTopologyNamespaceSnapshot>();
   const [namespaceDetails, setNamespaceDetails] = useState<Record<string, KubernetesTopologyNamespaceDetail>>({});
   const [expandedNamespace, setExpandedNamespace] = useState<string>(); const [expandedPod, setExpandedPod] = useState<string>(); const [kubernetesError, setKubernetesError] = useState(''); const [kubernetesBusy, setKubernetesBusy] = useState(false);
   const [routeEvidence, setRouteEvidence] = useState<P0RouteEvidence>();
   const [menu, setMenu] = useState<Menu>(); const menuRef = useRef<HTMLDivElement>(null); const canvasRef = useRef<HTMLElement>(null);
   const { screenToFlowPosition, fitView } = useReactFlow<DeviceNode>();
-  const draft = (): TopologyDraftWrite => ({ nodes: nodes.map(n => ({ ...n.data.model, parentId: n.data.model.parentId ?? null, assetId: n.data.model.assetId ?? null, position: n.position })), links: edges.map(asLink) });
+  const activeFolderClusterId = nodes.find(node => node.id === folderId)?.data.model.clusterId ?? null;
+  const topologyNamespacesPath = (clusterId = activeFolderClusterId) => clusterId
+    ? `/kubernetes/clusters/${encodeURIComponent(clusterId)}/topology/namespaces`
+    : '/kubernetes/topology/namespaces';
+  const draft = (): TopologyDraftWrite => ({ nodes: nodes.map(n => ({ ...n.data.model, parentId: n.data.model.parentId ?? null, assetId: n.data.model.assetId ?? null, clusterId: n.data.model.clusterId ?? null, position: n.position })), links: edges.map(asLink) });
   async function load() {
     setBusy(true); setError(''); setMenu(undefined);
-    try { const r = await api<TopologyDraft>('/topology/draft'); const payload = { nodes: r.data.nodes.map(node => ({ ...node, parentId: node.parentId ?? null, assetId: node.assetId ?? null })), links: r.data.links.map(({ state: _state, ...link }) => link) }; const invalid = draftError(payload); if (invalid) throw new Error(invalid); setNodes(payload.nodes.map(node => asNode(node))); setEdges(r.data.links.map(asEdge)); setFolderId(null); setEtag(r.etag ?? ''); setDirty(false); setLoaded(true); setMessage(`已读取 Revision ${r.data.generation}；链路状态来自运行观测`); requestAnimationFrame(() => { void fitView({ padding: .2 }); }); }
+    try { const r = await api<TopologyDraft>('/topology/draft', 'GET', undefined, {}, true); const payload = { nodes: r.data.nodes.map(node => ({ ...node, parentId: node.parentId ?? null, assetId: node.assetId ?? null, clusterId: node.clusterId ?? null })), links: r.data.links.map(({ state: _state, ...link }) => link) }; const invalid = draftError(payload); if (invalid) throw new Error(invalid); setNodes(payload.nodes.map(node => asNode(node))); setEdges(r.data.links.map(asEdge)); setFolderId(null); setEtag(r.etag ?? ''); setDirty(false); setLoaded(true); setMessage(`已读取 Revision ${r.data.generation}；链路状态来自运行观测`); requestAnimationFrame(() => { void fitView({ padding: .2 }); }); }
     catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   }
   async function loadServiceInventory(refresh = false) {
@@ -137,24 +173,31 @@ function Editor() {
     } catch (e) { setError((e as Error).message); }
     finally { setAssetPickerBusy(false); }
   }
-  async function loadGatewayHostAssets(cursor?: string) {
-    setGatewayAssetLoading(true);
+  async function loadGatewayHostAssets(nodeId: string, cursor: string | undefined, search: string) {
+    const requestId = (gatewayAssetRequest.current[nodeId] ?? 0) + 1;
+    gatewayAssetRequest.current[nodeId] = requestId;
+    setGatewayAssetPages(current => ({ ...current, [nodeId]: { choices: cursor ? current[nodeId]?.choices ?? [] : [], nextCursor: cursor ? current[nodeId]?.nextCursor ?? null : null, loading: true } }));
     try {
-      const query = cursor ? `?limit=100&cursor=${encodeURIComponent(cursor)}` : '?limit=100';
+      const params = new URLSearchParams({ limit: '20' });
+      if (cursor) params.set('cursor', cursor);
+      if (search.trim()) params.set('search', search.trim());
+      const query = `?${params}`;
       const result = await api<HostPage>(`/hosts${query}`, 'GET', undefined, {}, true);
-      setGatewayAssetChoices(current => cursor ? [...current, ...result.data.items] : result.data.items);
-      setGatewayAssetNextCursor(result.data.nextCursor);
-      setGatewayAssetsLoaded(true);
-    } catch (e) { setError((e as Error).message); }
-    finally { setGatewayAssetLoading(false); }
+      if (gatewayAssetRequest.current[nodeId] === requestId) {
+        setGatewayAssetPages(current => ({ ...current, [nodeId]: { choices: cursor ? [...(current[nodeId]?.choices ?? []), ...result.data.items] : result.data.items, nextCursor: result.data.nextCursor, loading: false } }));
+      }
+    } catch (e) {
+      if (gatewayAssetRequest.current[nodeId] === requestId) setGatewayAssetPages(current => ({ ...current, [nodeId]: { choices: [], nextCursor: null, loading: false, error: (e as Error).message } }));
+    }
   }
   function openGatewayAssetPicker(nodeId: string) {
     setGatewayAssetOpen(current => ({ ...current, [nodeId]: true }));
-    if (!gatewayAssetsLoaded && !gatewayAssetLoading) void loadGatewayHostAssets();
+    void loadGatewayHostAssets(nodeId, undefined, gatewayAssetSearch[nodeId] ?? '');
   }
   function changeGatewayAssetSearch(nodeId: string, value: string) {
     setGatewayAssetSearch(current => ({ ...current, [nodeId]: value }));
     setGatewayAssetOpen(current => ({ ...current, [nodeId]: true }));
+    void loadGatewayHostAssets(nodeId, undefined, value);
   }
   function selectGatewayAsset(nodeId: string, host: Host | null) {
     if (host && nodes.some(node => node.id !== nodeId && node.data.model.assetId === host.id)) { setError('该主机资产已绑定到其他拓扑节点'); return; }
@@ -164,19 +207,35 @@ function Editor() {
     setDirty(true); setRouteEvidence(undefined); setError('');
     setMessage(host ? `公网 Gateway 已绑定主机资产 ${host.hostname}，将读取其网络接口和路由表` : '已取消公网 Gateway 的主机资产绑定');
   }
-  function loadMoreGatewayHostAssets() {
-    if (gatewayAssetNextCursor && !gatewayAssetLoading) void loadGatewayHostAssets(gatewayAssetNextCursor);
+  function selectFolderCluster(nodeId: string, clusterId: string | null) {
+    setNodes(current => current.map(node => node.id === nodeId ? { ...node, data: { ...node.data, model: { ...node.data.model, clusterId } } } : node));
+    if (folderId === nodeId) { setKubernetesNamespaces(undefined); setExpandedNamespace(undefined); setExpandedPod(undefined); }
+    setDirty(true); setKubernetesError(''); setMessage(clusterId ? '文件夹已关联独立 Kubernetes 集群' : '文件夹将使用默认 Kubernetes 集群');
+  }
+  function loadMoreGatewayHostAssets(nodeId: string) {
+    const page = gatewayAssetPages[nodeId];
+    if (page?.nextCursor && !page.loading) {
+      void loadGatewayHostAssets(nodeId, page.nextCursor, gatewayAssetSearch[nodeId] ?? '');
+    }
   }
   async function loadNamespace(namespace: string) {
     setExpandedNamespace(namespace); setKubernetesBusy(true); setKubernetesError('');
     try {
-      const result = await api<KubernetesTopologyNamespaceDetail>(`/kubernetes/topology/namespaces/${encodeURIComponent(namespace)}`);
-      setNamespaceDetails(current => ({ ...current, [`${folderId}:${namespace}`]: result.data }));
+      const result = await api<KubernetesTopologyNamespaceDetail>(`${topologyNamespacesPath()}/${encodeURIComponent(namespace)}`, 'GET', undefined, {}, !!activeFolderClusterId);
+      setNamespaceDetails(current => ({ ...current, [`${folderId}:${activeFolderClusterId ?? 'default'}:${namespace}`]: result.data }));
     } catch (e) { setKubernetesError((e as Error).message); }
     finally { setKubernetesBusy(false); }
   }
   useEffect(() => { void load(); }, []);
   useEffect(() => { void loadServiceInventory(); }, []);
+  useEffect(() => {
+    if (isMock) { setKubernetesClusters([]); return; }
+    let cancelled = false;
+    void api<KubernetesClusterList>('/kubernetes/clusters', 'GET', undefined, {}, true)
+      .then(result => { if (!cancelled) setKubernetesClusters(result.data.items); })
+      .catch(e => { if (!cancelled) setError((e as Error).message); });
+    return () => { cancelled = true; };
+  }, []);
   useEffect(() => {
     const known = new Set(Object.keys(hostAssets));
     const missing = [...new Set(nodes.map(node => node.data.model.assetId).filter((value): value is string => !!value))].filter(id => !known.has(id));
@@ -198,14 +257,14 @@ function Editor() {
     return () => { cancelled = true; };
   }, [nodes, hostAssets]);
   useEffect(() => {
-    if (!folderId) { setKubernetesNamespaces(undefined); setExpandedNamespace(undefined); return; }
-    let cancelled = false; setKubernetesBusy(true); setKubernetesError('');
-    void api<KubernetesTopologyNamespaceSnapshot>('/kubernetes/topology/namespaces')
+    if (!folderId) { setKubernetesNamespaces(undefined); setExpandedNamespace(undefined); setExpandedPod(undefined); return; }
+    let cancelled = false; setKubernetesNamespaces(undefined); setExpandedNamespace(undefined); setExpandedPod(undefined); setKubernetesBusy(true); setKubernetesError('');
+    void api<KubernetesTopologyNamespaceSnapshot>(topologyNamespacesPath(), 'GET', undefined, {}, !!activeFolderClusterId)
       .then(result => { if (!cancelled) setKubernetesNamespaces(result.data); })
       .catch(e => { if (!cancelled) setKubernetesError((e as Error).message); })
       .finally(() => { if (!cancelled) setKubernetesBusy(false); });
     return () => { cancelled = true; };
-  }, [folderId]);
+  }, [folderId, activeFolderClusterId]);
   useEffect(() => {
     if (!menu) return;
     const dismiss = (e: globalThis.MouseEvent) => { if (!menuRef.current?.contains(e.target as globalThis.Node)) setMenu(undefined); };
@@ -217,7 +276,7 @@ function Editor() {
   async function save() {
     const payload = draft(); const invalid = draftError(payload); if (invalid) { setError(invalid); return; }
     setBusy(true); setError('');
-    try { const r = await api<TopologyDraft>('/topology/draft', 'PUT', payload, { 'If-Match': etag }); setEtag(r.etag ?? ''); setDirty(false); setMessage(`${isMock ? 'Mock ' : ''}草稿已保存；未部署、未验证`); }
+    try { const r = await api<TopologyDraft>('/topology/draft', 'PUT', payload, { 'If-Match': etag }, true); setEtag(r.etag ?? ''); setDirty(false); setMessage(`${isMock ? 'Mock ' : ''}草稿已保存；未部署、未验证`); }
     catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   }
   async function applyP0Route() {
@@ -277,23 +336,33 @@ function Editor() {
     return path;
   }
   const activeNodes = nodes.filter(node => (node.data.model.parentId ?? null) === folderId);
-  const activeDisplayNodes = activeNodes.map(node => node.data.model.kind === 'GATEWAY' ? {
-    ...node,
-    data: {
-      ...node.data,
-      gatewayAssetChoices,
-      gatewayAssetSearch: gatewayAssetSearch[node.id] ?? '',
-      gatewayAssetOpen: gatewayAssetOpen[node.id] ?? false,
-      gatewayAssetLoading,
-      gatewayAssetNextCursor,
-      gatewayBoundAssetIds: nodes.map(item => item.data.model.assetId).filter((id): id is string => !!id),
-      onGatewayAssetFocus: openGatewayAssetPicker,
-      onGatewayAssetSearch: changeGatewayAssetSearch,
-      onGatewayAssetClose: (id: string) => setGatewayAssetOpen(current => ({ ...current, [id]: false })),
-      onGatewayAssetSelect: selectGatewayAsset,
-      onGatewayAssetLoadMore: loadMoreGatewayHostAssets,
-    },
-  } : node);
+  const activeDisplayNodes = activeNodes.map(node => {
+    if (node.data.model.kind === 'GATEWAY') {
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          gatewayAssetChoices: gatewayAssetPages[node.id]?.choices ?? [],
+          gatewayAssetSearch: gatewayAssetSearch[node.id] ?? '',
+          gatewayAssetOpen: gatewayAssetOpen[node.id] ?? false,
+          gatewayAssetLoading: gatewayAssetPages[node.id]?.loading ?? false,
+          gatewayAssetError: gatewayAssetPages[node.id]?.error,
+          gatewayAssetMock: isMock,
+          gatewayAssetNextCursor: gatewayAssetPages[node.id]?.nextCursor,
+          gatewayBoundAssetIds: nodes.map(item => item.data.model.assetId).filter((id): id is string => !!id),
+          onGatewayAssetFocus: openGatewayAssetPicker,
+          onGatewayAssetSearch: changeGatewayAssetSearch,
+          onGatewayAssetClose: (id: string) => setGatewayAssetOpen(current => ({ ...current, [id]: false })),
+          onGatewayAssetSelect: selectGatewayAsset,
+          onGatewayAssetLoadMore: loadMoreGatewayHostAssets,
+        },
+      };
+    }
+    if (node.data.model.kind === 'FOLDER') {
+      return { ...node, data: { ...node.data, clusterChoices: kubernetesClusters, onFolderClusterSelect: selectFolderCluster } };
+    }
+    return node;
+  });
   const activeEdges = edges.filter(edge => {
     const source = nodes.find(node => node.id === edge.source)?.data.model;
     return source && (source.parentId ?? null) === folderId;
@@ -393,7 +462,7 @@ function Editor() {
         onConnect={connect} isValidConnection={validConnection} connectionMode={ConnectionMode.Strict}
         onConnectEnd={(_, state) => { if (state.toHandle && !state.isValid) setError('连接无效：仅允许未占用的绿色出口 → 蓝色入口，且不能形成自连接或环路'); }}
         onPaneContextMenu={e => openMenu(e)} onNodeContextMenu={(e, node) => openMenu(e, node.id)} onNodeDoubleClick={(_, node) => { if (node.data.model.kind === 'FOLDER') enterFolder(node.id); }} onEdgeContextMenu={(e, edge) => { if (!edge.data?.observedRoute) openMenu(e, undefined, edge.id); }}
-        onPaneClick={() => setMenu(undefined)} onMoveStart={() => setMenu(undefined)}
+        onPaneClick={() => setMenu(undefined)} onMoveStart={() => { setMenu(undefined); setGatewayAssetOpen({}); }}
         onNodesDelete={deleted => { deleted.forEach(node => removeNode(node.id)); }}
         nodesDraggable={!busy} nodesConnectable={loaded && !busy} elementsSelectable={!busy} deleteKeyCode={busy ? null : ['Backspace', 'Delete']}
         fitView minZoom={.2} maxZoom={1.7} translateExtent={[[-11000, -11000], [11000, 11000]]} nodeExtent={[[-10000, -10000], [10000, 10000]]}>
@@ -418,11 +487,11 @@ function Editor() {
       <p className="service-network-empty">匹配结果是只读观测关联；当前 Provider 尚未实现通用主机路由下发。</p>
     </section>}
     {folderId && <section className="service-network card" aria-labelledby="kubernetes-hierarchy-title">
-      <div className="card-title"><div><h2 id="kubernetes-hierarchy-title">{folder?.name ?? 'K3s'} · Namespace 资源视图</h2><p>点击 Namespace 展开 Ingress、Service 与 Pod，再打开 Pod 查看容器、端口和重启计数。</p></div><button className="secondary" disabled={kubernetesBusy} onClick={() => { setKubernetesNamespaces(undefined); setKubernetesError(''); void api<KubernetesTopologyNamespaceSnapshot>('/kubernetes/topology/namespaces').then(result => setKubernetesNamespaces(result.data)).catch(e => setKubernetesError((e as Error).message)).finally(() => setKubernetesBusy(false)); setKubernetesBusy(true); }}>↻ 刷新 Namespace</button></div>
+      <div className="card-title"><div><h2 id="kubernetes-hierarchy-title">{folder?.name ?? 'K3s'} · Namespace 资源视图</h2><p>{folder?.clusterId ? `读取已登记集群 ${kubernetesClusters.find(cluster => cluster.id === folder.clusterId)?.name ?? folder.clusterId}。` : '读取默认 Kubernetes 集群。'}点击 Namespace 展开 Ingress、Service 与 Pod，再打开 Pod 查看容器、端口和重启计数。</p></div><button className="secondary" disabled={kubernetesBusy} onClick={() => { setKubernetesNamespaces(undefined); setKubernetesError(''); setKubernetesBusy(true); void api<KubernetesTopologyNamespaceSnapshot>(topologyNamespacesPath(), 'GET', undefined, {}, !!activeFolderClusterId).then(result => setKubernetesNamespaces(result.data)).catch(e => setKubernetesError((e as Error).message)).finally(() => setKubernetesBusy(false)); }}>↻ 刷新 Namespace</button></div>
       {kubernetesError && <div className="alert error" role="alert">{kubernetesError}{!isMock && ' · 请启用 Kubernetes 服务发现并为 Core 身份授予 Namespace、Pod、Service、Ingress 的 get/list 权限。'}</div>}
       {kubernetesNamespaces && <div className="service-network-meta"><span><b>{kubernetesNamespaces.sourceId}</b></span><span>观测于 {new Date(kubernetesNamespaces.observedAt).toLocaleString()}</span>{mockBusiness && <span className="badge pending">Mock 示例</span>}</div>}
       {kubernetesBusy && !kubernetesNamespaces ? <div className="empty">读取集群 Namespace…</div> : kubernetesNamespaces?.namespaces.length ? <div className="kubernetes-namespace-list">{kubernetesNamespaces.namespaces.map(namespace => {
-        const detail = namespaceDetails[`${folderId}:${namespace.name}`];
+        const detail = namespaceDetails[`${folderId}:${activeFolderClusterId ?? 'default'}:${namespace.name}`];
         const expanded = expandedNamespace === namespace.name;
         return <article className="kubernetes-namespace" key={namespace.name}>
           <button className="kubernetes-namespace-heading" aria-expanded={expanded} onClick={() => { if (expanded) setExpandedNamespace(undefined); else if (detail) setExpandedNamespace(namespace.name); else void loadNamespace(namespace.name); }}><span><strong>▰ {namespace.name}</strong><small>Namespace · {namespace.phase}</small></span><span>{expanded ? '收起 ↑' : '展开资源 ↓'}</span></button>

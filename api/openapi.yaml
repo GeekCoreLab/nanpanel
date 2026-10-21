@@ -2,7 +2,7 @@ openapi: 3.1.1
 info:
   title: NaNPanel 管理 API
   version: 0.1.0-draft.2
-  description: 契约优先的 Web 平台 API。管理操作使用 HttpOnly Cookie 会话和写请求 CSRF；短期 API 密钥仅授权明确列出的 Kubernetes 服务网络接口。Agent 使用独立的一次性接入码、客户端证书和 mTLS/gRPC。主机资产保存 AES-GCM 加密的 SSH 密码或私钥，确认 host key 后可固定安装 Agent，并可开启经一次性 WebSocket 票据授权的交互式 SSH 堡垒 Shell；会话、命令行和有界终端录像独立持久化。Helper 暴露固定类型操作并校验输入参数、目标路径和运行条件；Core 使用用户权限、主机身份校验、审计及幂等任务管理控制操作。不接收任意 Helper 命令。Agent 安装时签名的故障切换端点清单已实现；真实 DNS/故障验收仍待完成。
+  description: 契约优先的 Web 平台 API。管理操作使用 HttpOnly Cookie 会话和写请求 CSRF；短期 API 密钥仅授权明确列出的 Kubernetes 服务网络接口。Kubernetes 集群由管理员显式导入单一 kubeconfig context，集群凭据按 AES-GCM 加密存储且不在 API 响应中回显。Agent 使用独立的一次性接入码、客户端证书和 mTLS/gRPC。主机资产保存 AES-GCM 加密的 SSH 密码或私钥，确认 host key 后可固定安装 Agent，并可开启经一次性 WebSocket 票据授权的交互式 SSH 堡垒 Shell；会话、命令行和有界终端录像独立持久化。Helper 暴露固定类型操作并校验输入参数、目标路径和运行条件；Core 使用用户权限、主机身份校验、审计及幂等任务管理控制操作。不接收任意 Helper 命令。Agent 安装时签名的故障切换端点清单已实现；真实 DNS/故障验收仍待完成。
   x-status: draft
 servers:
 - url: http://127.0.0.1:8080
@@ -40,9 +40,511 @@ tags:
   description: 拓扑期望草稿，不部署网络
 - name: ServiceNetwork
   description: Kubernetes Service 与 EndpointSlice 只读清单
+- name: KubernetesClusters
+  description: 独立 Kubernetes 集群登记、健康观测和节点资产映射
 - name: NetworkProviders
   description: 管理端网络 Provider 计划、变更、验证与补偿
 paths:
+  /api/v1/kubernetes/clusters:
+    get:
+      tags: [KubernetesClusters]
+      operationId: listKubernetesClusters
+      summary: 查询已登记 Kubernetes 集群
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 集群元数据和最近一次健康观测，不含集群凭据。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KubernetesClusterList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [KubernetesClusters]
+      operationId: importKubernetesCluster
+      summary: 使用单一 kubeconfig context 导入集群
+      description: 仅管理员 Cookie 会话可调用；写请求需要 CSRF。拒绝 exec/auth-provider、外部凭据文件、跳过 TLS 校验和非 HTTPS API。导入前验证 Namespace 与 Node 列表权限；凭据加密后存储，响应不回显 kubeconfig。Bearer API 密钥不可调用。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KubernetesClusterImportRequest'
+      responses:
+        '201':
+          description: 集群已验证并登记。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KubernetesClusterSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 所选 context 没有读取 Namespace 与 Node 清单的 RBAC 权限。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: 集群名称已登记。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: kubeconfig/context 无效，或 Kubernetes API 拒绝所选凭据。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '502':
+          description: Kubernetes API 不可达。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          description: 集群凭据加密密钥未配置。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /api/v1/kubernetes/clusters/{clusterId}:
+    parameters:
+    - name: clusterId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    get:
+      tags: [KubernetesClusters]
+      operationId: getKubernetesCluster
+      summary: 查询已登记集群状态
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 集群元数据和最近一次健康观测。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KubernetesClusterSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/kubernetes/clusters/{clusterId}/topology/namespaces:
+    parameters:
+    - name: clusterId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    get:
+      tags: [KubernetesClusters]
+      operationId: listImportedClusterTopologyNamespaces
+      summary: 读取已登记集群的 Namespace 清单
+      description: 使用该集群加密保存的 kubeconfig 只读查询 Namespace；读取失败不会阻止 Host Agent 诊断。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 该集群的 Namespace 清单。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KubernetesTopologyNamespaceSnapshot'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '403':
+          description: 集群凭据缺少读取 Namespace 的权限。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '502':
+          description: 集群 API 不可用或已保存的凭据被拒绝。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /api/v1/kubernetes/clusters/{clusterId}/topology/namespaces/{namespace}:
+    parameters:
+    - name: clusterId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    - name: namespace
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 63
+        pattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
+    get:
+      tags: [KubernetesClusters]
+      operationId: getImportedClusterTopologyNamespace
+      summary: 读取已登记集群的 Namespace 资源
+      description: 返回只读 Ingress、Service、Pod 和容器快照；不执行 Kubernetes 写操作。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: Namespace 工作负载快照。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KubernetesTopologyNamespaceDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '403':
+          description: 集群凭据缺少读取 Namespace 资源的权限。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '502':
+          description: 集群 API 不可用或已保存的凭据被拒绝。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /api/v1/kubernetes/clusters/{clusterId}/namespaces/{namespace}/deployments:
+    parameters:
+    - name: clusterId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    - name: namespace
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 63
+        pattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
+    get:
+      tags: [KubernetesClusters]
+      operationId: listManagedKubernetesDeployments
+      summary: 列出 Namespace 中由 NaNPanel 管理的 Deployment
+      description: 仅读取控制面记录的 Deployment，并按 Kubernetes UID 和所有权标记校验；不管理其他对象。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 托管 Deployment 当前状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KubernetesManagedDeploymentList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 集群凭据缺少 Namespace 内 Deployment get 权限。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '502':
+          description: 集群 API 不可用或已保存的凭据被拒绝。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+    post:
+      tags: [KubernetesClusters]
+      operationId: createManagedKubernetesDeployment
+      summary: 创建受限参数的托管 Deployment
+      description: 只接受镜像、单容器端口和 1–20 个副本；写入集群前后均限定在路径中的 Namespace。其他 Deployment 不可被接管。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/KubernetesManagedDeploymentCreateRequest' }
+      responses:
+        '201':
+          description: Deployment 已创建并记录所有权。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesManagedDeployment' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 集群凭据缺少 Namespace 内 Deployment create 权限。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: Deployment 名称已被使用或控制面已有相同资源记录。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: 请求字段或资源上限无效。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '502':
+          description: 集群 API 不可用或已保存的凭据被拒绝。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          description: 集群已创建资源，但控制面未能持久化其所有权记录。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /api/v1/kubernetes/clusters/{clusterId}/namespaces/{namespace}/deployments/{name}/scale:
+    parameters:
+    - name: clusterId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    - name: namespace
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 63
+        pattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
+    - name: name
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 63
+        pattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
+    put:
+      tags: [KubernetesClusters]
+      operationId: scaleManagedKubernetesDeployment
+      summary: 调整托管 Deployment 副本数
+      description: 只允许更新数据库登记且 UID、所有权标记均匹配的 Deployment；副本数限制为 0–20。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/KubernetesManagedDeploymentScaleRequest' }
+      responses:
+        '200':
+          description: 更新后的 Deployment 状态。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesManagedDeployment' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 集群凭据缺少 Deployment scale 子资源 update 权限。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 当前 Deployment 的身份或所有权标记已变化。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: 副本数无效。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '502':
+          description: 集群 API 不可用或已保存的凭据被拒绝。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /api/v1/kubernetes/clusters/{clusterId}/namespaces/{namespace}/deployments/{name}:
+    parameters:
+    - name: clusterId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    - name: namespace
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 63
+        pattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
+    - name: name
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 63
+        pattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
+    delete:
+      tags: [KubernetesClusters]
+      operationId: deleteManagedKubernetesDeployment
+      summary: 删除托管 Deployment
+      description: 先校验数据库所有权记录、Kubernetes UID 与所有权标记，并以 resourceVersion 前置条件删除；拒绝删除任何非托管或已替换对象。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      responses:
+        '204':
+          description: Deployment 已删除，或缺失对象的托管记录已清理。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 集群凭据缺少 Deployment delete 权限。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Deployment 的 UID 或所有权标记已变化，拒绝删除。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '502':
+          description: 集群 API 不可用或已保存的凭据被拒绝。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /api/v1/kubernetes/clusters/{clusterId}/nodes:
+    parameters:
+    - name: clusterId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    get:
+      tags: [KubernetesClusters]
+      operationId: refreshKubernetesClusterNodes
+      summary: 刷新集群节点和主机资产映射
+      description: 使用该集群登记凭据读取有界 Node 快照并按 Kubernetes UID 对账。API 不可用时返回 502，同时将集群标记为不可用，保留 Host Agent 通道。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 最近一次已成功刷新的节点状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KubernetesClusterNodeList'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '403':
+          description: 集群凭据缺少读取 Node 的权限。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '502':
+          description: 集群 API 不可用、已保存的凭据被拒绝；最近成功快照保留为过期状态。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /api/v1/kubernetes/clusters/{clusterId}/nodes/{nodeUid}/host:
+    parameters:
+    - name: clusterId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    - name: nodeUid
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+    put:
+      tags: [KubernetesClusters]
+      operationId: mapKubernetesNodeToHost
+      summary: 将 Kubernetes Node 映射到已登记主机
+      description: 映射按 ClusterNode UID 保存并审计；同一 Host 不能映射到多个集群节点。映射不会安装 Agent、删除 Host 或修改 Kubernetes Node；已映射节点的容器操作由 Kubernetes/Kubelet 所有，Host Agent 仍可执行 OS 与网络诊断。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/KubernetesNodeHostMappingRequest'
+      responses:
+        '200':
+          description: 已映射的节点。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KubernetesClusterNode'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 主机已映射到另一 ClusterNode。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+    delete:
+      tags: [KubernetesClusters]
+      operationId: unmapKubernetesNodeFromHost
+      summary: 移除 Kubernetes Node 的主机映射
+      description: Kubernetes API 中仍存在的节点不能解除映射，以免解除后 Host Agent 与 Kubelet/KubeEdge 双重管理容器。节点从集群移除并成功刷新后，非 KubeEdge 映射会随快照清理。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      responses:
+        '204':
+          description: 映射已移除；Host 与 Kubernetes Node 均保留。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Kubernetes Node 仍存在且所有 Pod/容器操作归 Kubernetes 所有。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
   /api/v1/network-providers:
     get:
       tags: [NetworkProviders]
@@ -445,7 +947,7 @@ paths:
       - Hosts
       operationId: listHosts
       summary: 列出主机
-      description: 返回已注册主机，不触发扫描或 Agent 接入。无数据返回空 items；在线状态按最近 Agent 心跳和平台离线阈值计算，没有心跳为 UNKNOWN。分页游标与 status 筛选绑定。登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回 401 或 403
+      description: 返回已注册主机，不触发扫描或 Agent 接入。无数据返回空 items；在线状态按最近 Agent 心跳和平台离线阈值计算，没有心跳为 UNKNOWN。分页游标与 status/search 筛选绑定；search 在全量主机名称中执行不区分大小写的包含搜索。登录会话要求账号 ACTIVE 且已完成临时密码修改，否则返回 401 或 403
         PASSWORD_CHANGE_REQUIRED。
       x-implementation-status: implemented
       responses:
@@ -494,6 +996,12 @@ paths:
           - UNKNOWN
           - ONLINE
           - OFFLINE
+      - name: search
+        in: query
+        description: 在全部已登记主机名称中不区分大小写地搜索；最大 120 个字符。
+        schema:
+          type: string
+          maxLength: 120
   /api/v1/hosts/{hostId}:
     parameters:
     - $ref: '#/components/parameters/HostId'
@@ -1677,7 +2185,7 @@ paths:
       tags: [Operations]
       operationId: submitHostHelperOperation
       summary: 提交类型化主机 Helper 操作
-      description: 支持软件包安装、受保护文件写入、Docker/Podman 容器操作、临时防火墙规则和主机文件浏览/读写/删除。Helper 校验固定操作类型和参数；不提供任意 Shell。文件管理拒绝 .、.. 和符号链接路径组件，只读取 UTF-8 普通文件（最多 64 KiB），写入最多 32 KiB，删除仅针对普通文件；目录列表最多 200 项。读取的文件内容会出现在 Operation 结果中并留在持久化任务记录里。Core 检查主机版本、Agent 能力、在线状态和 Helper 状态；结果通过 durable Operation 回传。
+      description: 支持软件包安装、受保护文件写入、Docker/Podman 容器操作、临时防火墙规则和主机文件浏览/读写/删除。Helper 校验固定操作类型和参数；不提供任意 Shell。映射到 Kubernetes Node 的主机拒绝 Agent 容器操作，容器生命周期归 Kubernetes/Kubelet/KubeEdge 管理，但 OS 与网络诊断仍可用。文件管理拒绝 .、.. 和符号链接路径组件，只读取 UTF-8 普通文件（最多 64 KiB），写入最多 32 KiB，删除仅针对普通文件；目录列表最多 200 项。读取的文件内容会出现在 Operation 结果中并留在持久化任务记录里。Core 检查主机版本、Agent 能力、在线状态和 Helper 状态；结果通过 durable Operation 回传。
       x-implementation-status: implemented
       parameters:
       - $ref: '#/components/parameters/IdempotencyKey'
@@ -1762,7 +2270,11 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          $ref: '#/components/responses/Conflict'
+          description: 操作仍在进行、幂等键冲突，或容器操作目标归 Kubernetes Node 所有（KUBERNETES_CONTAINER_OWNED）。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
         '412':
           $ref: '#/components/responses/PreconditionFailed'
         '422':
@@ -3489,6 +4001,10 @@ components:
           type: [string, 'null']
           format: uuid
           description: Registered host ID for HOST or GATEWAY nodes linked to a host asset.
+        clusterId:
+          type: [string, 'null']
+          format: uuid
+          description: Registered Kubernetes cluster ID for a FOLDER node.
     TopologyLink:
       type: object
       additionalProperties: false
@@ -3872,6 +4388,221 @@ components:
         updatedAt:
           type: string
           format: date-time
+    KubernetesClusterList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/KubernetesClusterSummary'
+    KubernetesClusterSummary:
+      type: object
+      additionalProperties: false
+      required: [id, name, kind, endpoint, contextName, healthStatus, cloudCoreStatus, cloudCoreObservedAt, observedAt, lastErrorCode, nodeCount, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          maxLength: 80
+        kind:
+          type: string
+          enum: [K3S, KUBEEDGE, KUBERNETES]
+        endpoint:
+          type: string
+          format: uri
+        contextName:
+          type: string
+          maxLength: 253
+        healthStatus:
+          type: string
+          enum: [UNKNOWN, HEALTHY, DEGRADED, UNAVAILABLE]
+        cloudCoreStatus:
+          type: string
+          enum: [HEALTHY, DEGRADED, UNAVAILABLE, NOT_OBSERVED, UNKNOWN]
+        cloudCoreObservedAt:
+          type: [string, 'null']
+          format: date-time
+        observedAt:
+          type: [string, 'null']
+          format: date-time
+        lastErrorCode:
+          type: [string, 'null']
+          maxLength: 64
+        nodeCount:
+          type: integer
+          minimum: 0
+          maximum: 1000
+        createdAt:
+          type: string
+          format: date-time
+    KubernetesClusterImportRequest:
+      type: object
+      additionalProperties: false
+      required: [name, kind, contextName, kubeconfig]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+        kind:
+          type: string
+          enum: [K3S, KUBEEDGE, KUBERNETES]
+        contextName:
+          type: string
+          minLength: 1
+          maxLength: 253
+        kubeconfig:
+          type: string
+          minLength: 1
+          maxLength: 1048576
+          writeOnly: true
+    KubernetesNodeHostMappingRequest:
+      type: object
+      additionalProperties: false
+      required: [hostId]
+      properties:
+        hostId:
+          type: string
+          format: uuid
+    KubernetesClusterNodeList:
+      type: object
+      additionalProperties: false
+      required: [clusterId, observedAt, items]
+      properties:
+        clusterId:
+          type: string
+          format: uuid
+        observedAt:
+          type: string
+          format: date-time
+        items:
+          type: array
+          maxItems: 1000
+          items:
+            $ref: '#/components/schemas/KubernetesClusterNode'
+    KubernetesClusterNode:
+      type: object
+      additionalProperties: false
+      required: [clusterId, nodeUid, nodeName, roles, kubeedgeEdge, ready, kubeletVersion, internalIp, containerOwner, hostId, observedAt]
+      properties:
+        clusterId:
+          type: string
+          format: uuid
+        nodeUid:
+          type: string
+          maxLength: 128
+        nodeName:
+          type: string
+          maxLength: 253
+        roles:
+          type: array
+          maxItems: 32
+          items:
+            type: string
+            maxLength: 80
+        kubeedgeEdge:
+          type: boolean
+        ready:
+          type: boolean
+        kubeletVersion:
+          type: [string, 'null']
+          maxLength: 128
+        internalIp:
+          type: [string, 'null']
+          maxLength: 45
+        containerOwner:
+          type: string
+          maxLength: 32
+        hostId:
+          type: [string, 'null']
+          format: uuid
+        observedAt:
+          type: string
+          format: date-time
+    KubernetesManagedDeploymentList:
+      type: object
+      additionalProperties: false
+      required: [clusterId, namespace, observedAt, items]
+      properties:
+        clusterId:
+          type: string
+          format: uuid
+        namespace:
+          type: string
+          maxLength: 63
+        observedAt:
+          type: string
+          format: date-time
+        items:
+          type: array
+          maxItems: 256
+          items:
+            $ref: '#/components/schemas/KubernetesManagedDeployment'
+    KubernetesManagedDeploymentCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [name, image, replicas, containerPort]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 63
+          pattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
+        image:
+          type: string
+          minLength: 1
+          maxLength: 512
+        replicas:
+          type: integer
+          minimum: 1
+          maximum: 20
+        containerPort:
+          type: integer
+          minimum: 1
+          maximum: 65535
+    KubernetesManagedDeploymentScaleRequest:
+      type: object
+      additionalProperties: false
+      required: [replicas]
+      properties:
+        replicas:
+          type: integer
+          minimum: 0
+          maximum: 20
+    KubernetesManagedDeployment:
+      type: object
+      additionalProperties: false
+      required: [name, uid, image, replicas, readyReplicas, containerPort, state]
+      properties:
+        name:
+          type: string
+          maxLength: 63
+        uid:
+          type: string
+          maxLength: 128
+        image:
+          type: [string, 'null']
+          maxLength: 512
+        replicas:
+          type: [integer, 'null']
+          minimum: 0
+          maximum: 20
+        readyReplicas:
+          type: [integer, 'null']
+          minimum: 0
+          maximum: 20
+        containerPort:
+          type: [integer, 'null']
+          minimum: 1
+          maximum: 65535
+        state:
+          type: string
+          enum: [READY, PROGRESSING, MISSING, OWNERSHIP_CONFLICT]
     KubernetesServiceInventorySnapshot:
       type: object
       additionalProperties: false

@@ -81,8 +81,36 @@ try {
   await page.keyboard.press('Escape');
   if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw new Error('Mobile overflow');
   await page.setViewportSize({ width: 1600, height: 1200 });
-  await gateway.getByRole('combobox', { name: '搜索 Gateway 主机资产' }).fill('gateway-sg');
-  await gateway.getByRole('option', { name: /gateway-sg-01/ }).click();
+  const gatewayPicker = gateway.getByRole('combobox', { name: '搜索 Gateway 主机资产' });
+  await gatewayPicker.focus();
+  const gatewayOptions = page.getByRole('listbox', { name: '可绑定的主机资产' });
+  await expect(gateway.getByText('Mock 演示数据')).toBeVisible();
+  await expect(gatewayOptions.locator('.gateway-asset-option')).toHaveCount(6);
+  const listBounds = await gatewayOptions.boundingBox();
+  if (!listBounds) throw new Error('Gateway asset list is not visible');
+  const scrollPoint = await gatewayOptions.evaluate(element => {
+    const rect = element.getBoundingClientRect();
+    const x = rect.left + rect.width / 2;
+    for (let y = rect.top + 2; y < rect.bottom - 2; y += 4) {
+      const target = document.elementFromPoint(x, y);
+      if (target && (target === element || element.contains(target))) return { x, y };
+    }
+    return null;
+  });
+  if (!scrollPoint) throw new Error('Gateway asset options are clipped outside the visible topology area');
+  const viewportBeforeListScroll = await page.locator('.react-flow__viewport').getAttribute('style');
+  await page.mouse.move(scrollPoint.x, scrollPoint.y);
+  await page.mouse.wheel(0, 120);
+  const scrollMetrics = await gatewayOptions.evaluate(element => ({
+    scrollTop: element.scrollTop,
+    scrollHeight: element.scrollHeight,
+    clientHeight: element.clientHeight,
+  }));
+  if (scrollMetrics.scrollTop <= 0) throw new Error('Gateway asset options did not scroll inside the dropdown');
+  const viewportAfterListScroll = await page.locator('.react-flow__viewport').getAttribute('style');
+  if (viewportBeforeListScroll !== viewportAfterListScroll) throw new Error('Scrolling Gateway assets zoomed the topology canvas');
+  await gatewayPicker.fill('gateway-sg');
+  await page.getByRole('option', { name: /gateway-sg-01/ }).click();
   await expect(gateway.locator('.device-status')).toContainText('gateway-sg-01');
   await page.getByRole('button', { name: '＋ 添加主机资产' }).click();
   await page.locator('.topology-asset-option').filter({ hasText: 'homelab-node-01' }).click();

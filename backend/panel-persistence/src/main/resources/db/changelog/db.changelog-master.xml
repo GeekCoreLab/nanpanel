@@ -27,4 +27,5 @@
 <changeSet id="025-network-provider-operations" author="nanpanel"><sqlFile path="025-network-provider-operations.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE network_provider_operation;</sql></rollback></changeSet>
 <changeSet id="026-api-keys" author="nanpanel"><sqlFile path="026-api-keys.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE api_key;</sql></rollback></changeSet>
 <changeSet id="027-topology-revisions" author="nanpanel"><sqlFile path="027-topology-revisions.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE topology_head; DROP TABLE topology_revision;</sql></rollback></changeSet>
+<changeSet id="028-kubernetes-clusters" author="nanpanel"><sqlFile path="028-kubernetes-clusters.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE kubernetes_managed_deployment; DROP TABLE kubernetes_cluster_node; DROP TABLE kubernetes_cluster;</sql></rollback></changeSet>
 </databaseChangeLog>

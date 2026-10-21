@@ -149,6 +149,14 @@ public class HostHelperOperationResource {
       }
 
       query(c, "SELECT id FROM host WHERE id=? FOR UPDATE", hostId);
+      if (input.capability().startsWith("container.")) {
+        var owners = query(c, "SELECT cluster_id,node_uid FROM kubernetes_cluster_node "
+            + "WHERE host_id=? AND container_owner IN ('KUBERNETES','KUBEEDGE') FOR UPDATE", hostId);
+        if (!owners.isEmpty()) {
+          throw fail(409, "KUBERNETES_CONTAINER_OWNED",
+              "此主机映射到 Kubernetes Node，Pod 和容器由 Kubelet/KubeEdge 管理");
+        }
+      }
       String capabilitiesColumn = c.getMetaData().getDatabaseProductName()
           .equalsIgnoreCase("PostgreSQL") ? "h.capabilities::text" : "h.capabilities";
       var hosts = query(c,

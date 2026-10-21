@@ -131,21 +131,28 @@ public class InventoryResource {
   @Path("hosts")
   public Response listHosts(@QueryParam("limit") Integer requestedLimit,
                             @QueryParam("cursor") String cursor,
-                            @QueryParam("status") String filter) {
+                            @QueryParam("status") String filter,
+                            @QueryParam("search") String requestedSearch) {
     authenticated();
     int limit = requestedLimit == null ? 20 : requestedLimit;
     if (limit < 1 || limit > 100)
       throw fail(400, "VALIDATION_FAILED", "limit 须为 1–100");
     if (filter != null && !Set.of("UNKNOWN", "ONLINE", "OFFLINE").contains(filter))
       throw fail(400, "VALIDATION_FAILED", "无效主机状态筛选");
+    String search = requestedSearch == null ? "" : requestedSearch.trim().toLowerCase(java.util.Locale.ROOT);
+    if (search.length() > 120 || search.chars().anyMatch(Character::isISOControl))
+      throw fail(400, "VALIDATION_FAILED", "主机搜索条件无效或超过 120 个字符");
     UUID after = null;
     if (cursor != null) {
       try {
         String decoded = new String(Base64.getUrlDecoder().decode(cursor),
                                     java.nio.charset.StandardCharsets.UTF_8);
-        String[] parts = decoded.split("\\|", -1);
-        if (parts.length != 2 ||
-            !Objects.equals(parts[1], filter == null ? "" : filter))
+        String[] parts = decoded.split("\\|", 3);
+        boolean legacyCursor = parts.length == 2 && search.isEmpty();
+        boolean currentCursor = parts.length == 3
+            && Objects.equals(parts[2], search);
+        if ((!legacyCursor && !currentCursor)
+            || !Objects.equals(parts[1], filter == null ? "" : filter))
           throw new IllegalArgumentException();
         after = UUID.fromString(parts[0]);
         if (!after.toString().equalsIgnoreCase(parts[0]))
@@ -171,6 +178,10 @@ public class InventoryResource {
         clauses.add("a.last_seen<?");
         values.add(java.sql.Timestamp.from(now.minusSeconds(threshold)));
       }
+      if (!search.isEmpty()) {
+        clauses.add("POSITION(LOWER(?) IN LOWER(h.hostname)) > 0");
+        values.add(search);
+      }
       if (afterId != null) {
         clauses.add("h.id>?");
         values.add(afterId);
@@ -185,7 +196,8 @@ public class InventoryResource {
       String next = null;
       if (more) {
         String lastId = String.valueOf(selected.getLast().get("id"));
-        String payload = lastId + "|" + (statusFilter == null ? "" : statusFilter);
+        String payload = lastId + "|" + (statusFilter == null ? "" : statusFilter)
+            + "|" + search;
         next = Base64.getUrlEncoder().withoutPadding().encodeToString(
             payload.getBytes(java.nio.charset.StandardCharsets.UTF_8));
       }

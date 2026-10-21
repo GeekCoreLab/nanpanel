@@ -176,7 +176,10 @@ export async function mockRequest(path: string, options: RequestInit, authentica
    { serviceName: 'catalog-canary', address: '10.42.1.46', port: 8080, protocol: 'TCP', outcome: 'TIMED_OUT', observedAt: now() },
   ],
  });
- if (p === '/hosts') return ok(page(hosts.filter(h => !url.searchParams.get('status') || h.status === url.searchParams.get('status'))));
+ if (p === '/hosts') {
+  const status = url.searchParams.get('status'); const search = (url.searchParams.get('search') ?? '').trim().toLocaleLowerCase();
+  return ok(page(hosts.filter(host => (!status || host.status === status) && (!search || host.hostname.toLocaleLowerCase().includes(search)))));
+ }
  if (p === '/agent-enrollments' && method === 'POST') {
   const name = String(b.hostname ?? '').trim(); if (!name || name.length > 255) return fail(422, 'VALIDATION_FAILED', '主机名称无效');
   const hostId = id(); const agentId = id(); const expiresAt = new Date(Date.now() + 900000).toISOString();

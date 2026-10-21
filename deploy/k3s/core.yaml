@@ -94,6 +94,11 @@ spec:
                 secretKeyRef:
                   name: nanpanel-ssh-credentials-key
                   key: NANPANEL_SSH_CREDENTIAL_KEY
+            - name: NANPANEL_KUBERNETES_CREDENTIAL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: nanpanel-kubernetes-credential-key
+                  key: NANPANEL_KUBERNETES_CREDENTIAL_KEY
             - name: NANPANEL_AGENT_CA_CERT
               value: /etc/nanpanel/agent-ca/ca.crt
             - name: NANPANEL_PROVIDERS_ENABLED

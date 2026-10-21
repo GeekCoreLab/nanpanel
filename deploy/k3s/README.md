@@ -71,11 +71,13 @@ the `nanpanel-web-tls` Secret and run the deploy script again. Keep this
 self-signed certificate on the test network; public access needs a trusted
 certificate and a matching origin.
 
-The `nanpanel-ssh-credentials-key` Secret encrypts per-host SSH passwords and
-private keys, plus bastion command/terminal recordings. The script creates it
-only once and preserves it during redeployments. Protect and back up this Secret
-with the PostgreSQL volume: losing it makes saved credentials and recordings
-unreadable. Never print its data or commit an exported copy.
+The `nanpanel-ssh-credentials-key` Secret encrypts per-host SSH passwords,
+private keys, and bastion command/terminal recordings. The separate
+`nanpanel-kubernetes-credential-key` Secret encrypts imported Kubernetes
+kubeconfigs. The script creates each Secret only once and preserves it during
+redeployments. Protect and back up both Secrets with the PostgreSQL volume:
+losing either key makes its saved credentials unreadable. Never print their
+data or commit exported copies.
 
 ## Add the controller host as an asset
 

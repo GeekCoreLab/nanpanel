@@ -58,7 +58,7 @@ public class TopologyResource {
   public record PortView(String id, String direction, String layer, List<String> protocols) {}
   public record NodeView(String id, String kind, String name, Position position,
                          int inputCount, int outputCount, List<PortView> ports,
-                         String parentId, String assetId) {}
+                         String parentId, String assetId, String clusterId) {}
   public record LinkView(String id, String sourceNodeId, String sourcePort, String targetNodeId,
                          String targetPort, String layer, String protocol, String status,
                          String state) {}
@@ -123,6 +123,16 @@ public class TopologyResource {
         }
         if (query(c, "SELECT id FROM host WHERE id=?", assetId.toString()).isEmpty()) {
           throw fail(422, "INVALID_TOPOLOGY", "拓扑引用的主机资产不存在");
+        }
+      }
+      for (NodeView node : payload.nodes()) {
+        if (node.clusterId() == null) continue;
+        UUID clusterId = uuid(node.clusterId());
+        if (!"FOLDER".equals(node.kind())) {
+          throw fail(422, "INVALID_TOPOLOGY", "只有文件夹节点可以关联 Kubernetes 集群");
+        }
+        if (query(c, "SELECT id FROM kubernetes_cluster WHERE id=?", clusterId).isEmpty()) {
+          throw fail(422, "INVALID_TOPOLOGY", "拓扑引用的 Kubernetes 集群不存在");
         }
       }
       Map<String, Object> head = query(c, "SELECT * FROM topology_head WHERE id=1").getFirst();
@@ -265,7 +275,7 @@ public class TopologyResource {
       }).toList();
       return new NodeView(node.id(), node.kind(), node.name() == null ? null : node.name().strip(),
           node.position(), node.inputCount(), node.outputCount(), ports, node.parentId(),
-          node.assetId());
+          node.assetId(), node.clusterId());
     }).toList();
     List<LinkInput> links = input.links().stream().map(link -> {
       if (link == null) {
@@ -301,6 +311,16 @@ public class TopologyResource {
         }
         if (!("HOST".equals(node.kind()) || "GATEWAY".equals(node.kind()))) {
           return "只有主机或 Gateway 节点可以绑定主机资产";
+        }
+      }
+      if (node.clusterId() != null) {
+        try {
+          uuid(node.clusterId());
+        } catch (RuntimeException failure) {
+          return "Kubernetes 集群 ID 无效";
+        }
+        if (!"FOLDER".equals(node.kind())) {
+          return "只有文件夹节点可以关联 Kubernetes 集群";
         }
       }
     }
@@ -425,7 +445,7 @@ public class TopologyResource {
 
   private boolean objectWithNodeKeys(JsonNode value) {
     Set<String> allowed = Set.of("id", "kind", "name", "position", "inputCount",
-        "outputCount", "ports", "parentId", "assetId");
+        "outputCount", "ports", "parentId", "assetId", "clusterId");
     Set<String> required = Set.of("id", "kind", "name", "position", "inputCount",
         "outputCount", "ports");
     if (value == null || !value.isObject() || value.size() < required.size()
