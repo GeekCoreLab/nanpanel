@@ -9,6 +9,8 @@ export type RouteNextHopResolution =
   | { kind: 'UNMATCHED' }
   | { kind: 'SELF' };
 
+export type ObservedRoute = { sourceHostId: string; gateway?: string | null };
+
 /** Resolve a route gateway only when exactly one different Host or Router node owns its address. */
 export function resolveRouteNextHop(
   gateway: string | null | undefined,
@@ -22,6 +24,24 @@ export function resolveRouteNextHop(
   if (!owners.length) return { kind: 'UNMATCHED' };
   if (owners[0].id === sourceHostId) return { kind: 'SELF' };
   return { kind: 'MATCHED', host: owners[0] };
+}
+
+/** Return distinct gateways that have no modeled Host or Router owner yet. */
+export function unmatchedRouteGateways(
+  routes: readonly ObservedRoute[],
+  sourceHostIds: ReadonlyMap<string, string>,
+  ownersByAddress: ReadonlyMap<string, readonly RouteNextHopHost[]>,
+): string[] {
+  const unmatched = new Set<string>();
+  for (const route of routes) {
+    const address = route.gateway?.trim().toLowerCase();
+    const sourceHostId = sourceHostIds.get(route.sourceHostId);
+    if (!address || !sourceHostId) continue;
+    if (resolveRouteNextHop(address, sourceHostId, ownersByAddress).kind === 'UNMATCHED') {
+      unmatched.add(address);
+    }
+  }
+  return [...unmatched].sort((left, right) => left.localeCompare(right));
 }
 
 const defaultPort = (id: string, direction: TopologyPort['direction']): TopologyPort => ({ id, direction, layer: 'L4', protocols: ['TCP', 'UDP'] });

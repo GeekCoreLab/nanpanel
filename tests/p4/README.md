@@ -54,12 +54,15 @@ disposable cluster, never the production `k3s-1` cluster.
   The separate live
   K3s report below covers only one-cluster import/mapping and scoped Deployment
   CRUD; target multi-cluster acceptance remains open.
-- Agent runtime discovery currently stores a per-Host Kubelet/K3s observation
-  and displays it in the Kubernetes UI, but it does not automatically register
-  that cluster or transfer API credentials. This does not satisfy the user's
-  requested automatic managed-cluster enrollment. The new P4 gate above stays
-  open until credential acquisition, minimum permissions, deduplication,
-  unreachable API behavior, and live enrollment are implemented and verified.
+- Agent runtime discovery stores per-Host Kubelet/K3s observations. A new
+  opt-in enrollment path is limited to a K3s API server node in the same cluster
+  as Core: Core verifies a Ready Node with the reported hostname and uses its
+  existing read-only in-cluster ServiceAccount instead of exporting or storing
+  an admin kubeconfig/token. Kube-system Namespace UID identifies matching
+  clusters; the Kubernetes Service IP narrows candidates among older imported
+  records without a stored fingerprint. The gate remains open until this path is verified on `k3s-1` and
+  unreachable/retry behavior is exercised; agents on remote hosts still need a
+  safe credential issuance and refresh protocol before they can be auto-enrolled.
 - A separate isolated K3s API-only integration run is recorded at
   `tests/p4/runs/2026-10-21-k3s-multi-cluster-api-only.md`. It used two actual
   K3s `v1.33.5+k3s1` API servers with independent endpoints and exercised the

@@ -9,7 +9,7 @@ import {
 import { api, isMock, isP0Lab, mockBusiness } from './lib/api';
 import { createUuid } from './lib/uuid.ts';
 import NetbirdProviderPanel from './NetbirdProviderPanel';
-import { connectionError, createTopologyNode, draftError, nodePresets, resolveRouteNextHop, validNodeShape } from './lib/topology-model';
+import { connectionError, createTopologyNode, draftError, nodePresets, resolveRouteNextHop, unmatchedRouteGateways, validNodeShape } from './lib/topology-model';
 import './topology-status.css';
 import './topology-hierarchy.css';
 import './gateway-asset-picker.css';
@@ -18,6 +18,7 @@ import type { Host, HostNetworkInventory, HostPage, KubernetesClusterList, Kuber
 type DeviceNode = Node<{
   model: TopologyNode;
   asset?: Host;
+  observedOnly?: boolean;
   gatewayAssetChoices?: Host[];
   gatewayAssetSearch?: string;
   gatewayAssetOpen?: boolean;
@@ -94,10 +95,12 @@ function Device({ data, selected }: NodeProps<DeviceNode>) {
   const search = data.gatewayAssetSearch?.trim().toLocaleLowerCase() ?? '';
   const filteredGatewayChoices = gatewayChoices.filter(host => !search || host.hostname.toLocaleLowerCase().includes(search));
   const gatewayListId = `gateway-asset-options-${node.id}`;
-  return <div className={`topology-device ${node.kind === 'FOLDER' ? 'is-folder' : ''} ${selected ? 'is-selected' : ''}`}>
-    <div className="device-title"><span className="device-symbol">{node.kind === 'FOLDER' ? '▰' : node.kind === 'SWITCH' ? '▦' : virtualKinds.includes(node.kind) ? '⇄' : '▤'}</span><div><strong>{node.name}</strong><small>{node.assetId ? `主机资产 · ${data.asset?.status ?? '读取中'}` : nodePresets[node.kind].description}</small></div></div>
+  return <div className={`topology-device ${node.kind === 'FOLDER' ? 'is-folder' : ''} ${data.observedOnly ? 'is-observed' : ''} ${selected ? 'is-selected' : ''}`}>
+    <div className="device-title"><span className="device-symbol">{node.kind === 'FOLDER' ? '▰' : node.kind === 'SWITCH' ? '▦' : virtualKinds.includes(node.kind) ? '⇄' : '▤'}</span><div><strong>{node.name}</strong><small>{data.observedOnly ? 'Agent 自动发现 · 只读观测' : node.assetId ? `主机资产 · ${data.asset?.status ?? '读取中'}` : nodePresets[node.kind].description}</small></div></div>
     {node.kind === 'FOLDER' && <div className="folder-cluster-control nodrag"><label htmlFor={`folder-cluster-${node.id}`}>关联 Kubernetes 集群</label><select id={`folder-cluster-${node.id}`} className="nodrag nowheel" aria-label={`${node.name}关联 Kubernetes 集群`} value={node.clusterId ?? ''} onChange={event => data.onFolderClusterSelect?.(node.id, event.target.value || null)}><option value="">使用默认集群</option>{(data.clusterChoices ?? []).map(cluster => <option value={cluster.id} key={cluster.id}>{cluster.name} · {cluster.healthStatus === 'HEALTHY' ? '健康' : '不可用'}</option>)}</select></div>}
-    {node.kind === 'ROUTER' && <div className="router-address-control nodrag"><label htmlFor={`router-address-${node.id}`}>下一跳 IP 地址</label><input id={`router-address-${node.id}`} className="nodrag" inputMode="text" maxLength={45} placeholder="例如 10.0.0.1" value={node.ipAddress ?? ''} onChange={event => data.onRouterAddressChange?.(node.id, event.target.value)} /></div>}
+    {node.kind === 'ROUTER' && (data.observedOnly
+      ? <div className="router-address-control"><label>Agent 观察到的下一跳</label><code>{node.ipAddress}</code></div>
+      : <div className="router-address-control nodrag"><label htmlFor={`router-address-${node.id}`}>下一跳 IP 地址</label><input id={`router-address-${node.id}`} className="nodrag" inputMode="text" maxLength={45} placeholder="例如 10.0.0.1" value={node.ipAddress ?? ''} onChange={event => data.onRouterAddressChange?.(node.id, event.target.value)} /></div>)}
     {node.kind === 'GATEWAY' && <div className="gateway-asset-control nodrag">
       <label htmlFor={`gateway-asset-search-${node.id}`}>绑定主机资产 <span className={`gateway-asset-source ${data.gatewayAssetMock ? 'is-mock' : ''}`}>{data.gatewayAssetMock ? 'Mock 演示数据' : '实时资产'}</span></label>
       <input ref={gatewaySearchInput} id={`gateway-asset-search-${node.id}`} className="nodrag" role="combobox" aria-label="搜索 Gateway 主机资产" aria-autocomplete="list" aria-expanded={!!data.gatewayAssetOpen} aria-controls={gatewayListId} placeholder={data.asset?.hostname ?? '输入主机名搜索…'} value={data.gatewayAssetSearch ?? ''} onFocus={() => data.onGatewayAssetFocus?.(node.id)} onBlur={() => data.onGatewayAssetClose?.(node.id)} onChange={event => data.onGatewayAssetSearch?.(node.id, event.target.value)} onKeyDown={event => { if (event.key === 'Escape') data.onGatewayAssetClose?.(node.id); }} />
@@ -147,6 +150,7 @@ function Editor() {
   const [expandedNamespace, setExpandedNamespace] = useState<string>(); const [expandedPod, setExpandedPod] = useState<string>(); const [kubernetesError, setKubernetesError] = useState(''); const [kubernetesBusy, setKubernetesBusy] = useState(false);
   const [routeEvidence, setRouteEvidence] = useState<P0RouteEvidence>();
   const [menu, setMenu] = useState<Menu>(); const menuRef = useRef<HTMLDivElement>(null); const canvasRef = useRef<HTMLElement>(null);
+  const observedRouterSignatureRef = useRef('');
   const { screenToFlowPosition, fitView } = useReactFlow<DeviceNode>();
   const activeFolderClusterId = nodes.find(node => node.id === folderId)?.data.model.clusterId ?? null;
   const topologyNamespacesPath = (clusterId = activeFolderClusterId) => clusterId
@@ -402,6 +406,44 @@ function Editor() {
       }
     }
   }
+  const observedRoutes = rootAssetNodes.flatMap(node => {
+    const asset = hostAssets[node.data.model.assetId!];
+    return asset?.inventory.routes.map(route => ({ sourceHostId: asset.host.id, gateway: route.gateway })) ?? [];
+  });
+  const routeSourceHostIds = new Map(rootAssetNodes.flatMap(node => {
+    const asset = hostAssets[node.data.model.assetId!];
+    return asset ? [[asset.host.id, asset.host.id] as const] : [];
+  }));
+  const autoRouterNodes = folderId ? [] : unmatchedRouteGateways(observedRoutes, routeSourceHostIds, hostByAddress)
+    .map((address, index) => {
+      const model = createTopologyNode('ROUTER', {
+        x: Math.max(0, ...rootAssetNodes.map(node => node.position.x)) + 360,
+        y: 80 + index * 150,
+      });
+      model.id = `observed-router-${encodeURIComponent(address)}`;
+      model.name = `自动发现 Router ${address}`;
+      model.ipAddress = address;
+      const node = asNode(model);
+      node.data.observedOnly = true;
+      node.width = 230;
+      node.height = 180;
+      node.selectable = false;
+      node.draggable = false;
+      node.deletable = false;
+      const owners = hostByAddress.get(address) ?? [];
+      owners.push({ id: node.id, hostname: model.name, kind: 'ROUTER' });
+      hostByAddress.set(address, owners);
+      return node;
+    });
+  const observedRouterSignature = autoRouterNodes.map(node => node.id).join('|');
+  useEffect(() => {
+    if (!loaded || folderId || observedRouterSignatureRef.current === observedRouterSignature) return;
+    observedRouterSignatureRef.current = observedRouterSignature;
+    const fitTimer = window.setTimeout(() => {
+      void fitView({ padding: .2, includeHiddenNodes: true });
+    }, 120);
+    return () => window.clearTimeout(fitTimer);
+  }, [fitView, folderId, loaded, observedRouterSignature]);
   const rootNodeByNextHopId = new Map(rootAssetNodes.map(node => [node.data.model.assetId!, node]));
   for (const node of nodes.filter(item => !item.data.model.parentId && item.data.model.kind === 'ROUTER')) {
     const address = node.data.model.ipAddress?.trim().toLowerCase();
@@ -411,6 +453,7 @@ function Editor() {
     hostByAddress.set(address, owners);
     rootNodeByNextHopId.set(node.id, node);
   }
+  for (const node of autoRouterNodes) rootNodeByNextHopId.set(node.id, node);
   const observedRouteCounts = new Map<string, { source: DeviceNode; target: DeviceNode; count: number }>();
   for (const source of rootAssetNodes) {
     const sourceAsset = hostAssets[source.data.model.assetId!];
@@ -486,12 +529,12 @@ function Editor() {
     {routeEvidence && <div className="alert" role="status"><strong>实际路由已验证</strong> · {routeEvidence.route} · HTTP {routeEvidence.httpStatus} · 响应 {routeEvidence.responseBody} · SHA-256 {routeEvidence.configSha256}<pre className="p0-route-diff">{routeEvidence.diff}</pre></div>}
     <div className="topology-tools"><div className="port-legend"><span><i className="input-dot" />蓝色：入口</span><span><i className="output-dot" />绿色：出口</span>{Object.entries(linkStateLabels).map(([state, label]) => <span key={state}><i className={`state-dot ${state.toLowerCase()}`} />{label}</span>)}</div><div className="topology-actions"><button className="secondary" disabled={!loaded || busy} onClick={e => { const rect = e.currentTarget.getBoundingClientRect(); const canvas = canvasRef.current?.getBoundingClientRect(); openMenu({ preventDefault() {}, clientX: rect.left, clientY: rect.bottom + 8 }, undefined, undefined, canvas ? { x: canvas.left + canvas.width / 2, y: canvas.top + canvas.height / 2 } : undefined); }}>＋ 添加节点</button><button className="secondary" disabled={busy || !activeEdges.length} onClick={() => { setEdges(current => current.filter(edge => !activeEdges.some(active => active.id === edge.id))); setDirty(true); setRouteEvidence(undefined); }}>清空本层连接</button></div></div>
     <section className="topology card" aria-label="拓扑编辑器" ref={canvasRef}>
-      <ReactFlow<DeviceNode> nodes={activeDisplayNodes} edges={folderId ? activeEdges : [...activeEdges, ...observedRouteEdges]} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
+      <ReactFlow<DeviceNode> nodes={folderId ? activeDisplayNodes : [...activeDisplayNodes, ...autoRouterNodes]} edges={folderId ? activeEdges : [...activeEdges, ...observedRouteEdges]} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
         onNodesChange={changes => { onNodesChange(changes); if (changes.some(c => c.type === 'position' && c.position || c.type === 'remove')) { setDirty(true); setRouteEvidence(undefined); } }}
         onEdgesChange={changes => { onEdgesChange(changes); if (changes.some(c => c.type === 'remove')) { setDirty(true); setRouteEvidence(undefined); } }}
         onConnect={connect} isValidConnection={validConnection} connectionMode={ConnectionMode.Strict}
         onConnectEnd={(_, state) => { if (state.toHandle && !state.isValid) setError('连接无效：仅允许未占用的绿色出口 → 蓝色入口，且不能形成自连接或环路'); }}
-        onPaneContextMenu={e => openMenu(e)} onNodeContextMenu={(e, node) => openMenu(e, node.id)} onNodeDoubleClick={(_, node) => { if (node.data.model.kind === 'FOLDER') enterFolder(node.id); }} onEdgeContextMenu={(e, edge) => { if (!edge.data?.observedRoute) openMenu(e, undefined, edge.id); }}
+        onPaneContextMenu={e => openMenu(e)} onNodeContextMenu={(e, node) => { if (!node.data.observedOnly) openMenu(e, node.id); }} onNodeDoubleClick={(_, node) => { if (!node.data.observedOnly && node.data.model.kind === 'FOLDER') enterFolder(node.id); }} onEdgeContextMenu={(e, edge) => { if (!edge.data?.observedRoute) openMenu(e, undefined, edge.id); }}
         onPaneClick={() => setMenu(undefined)} onMoveStart={() => { setMenu(undefined); setGatewayAssetOpen({}); }}
         onNodesDelete={deleted => { deleted.forEach(node => removeNode(node.id)); }}
         nodesDraggable={!busy} nodesConnectable={loaded && !busy} elementsSelectable={!busy} deleteKeyCode={busy ? null : ['Backspace', 'Delete']}
@@ -500,7 +543,7 @@ function Editor() {
       </ReactFlow>
     </section>
     {!folderId && <section className="service-network card" aria-labelledby="host-routes-title">
-      <div className="card-title"><div><h2 id="host-routes-title">主机路由观测与自动下一跳匹配</h2><p>读取已绑定主机的 Agent 路由快照，并按网卡地址关联主拓扑中的 Host 或配置了 IP 的 Router</p></div></div>
+      <div className="card-title"><div><h2 id="host-routes-title">主机路由观测与自动下一跳匹配</h2><p>读取已绑定主机的 Agent 路由快照；未建模的唯一下一跳会自动显示为只读 Router</p></div></div>
       {rootAssetNodes.length ? <div className="service-network-list">{rootAssetNodes.map(node => {
         const asset = hostAssets[node.data.model.assetId!];
         if (!asset) return <article className="service-network-item" key={node.id}><strong>{node.data.model.name}</strong><p>正在读取主机和路由快照，或当前会话无权读取。</p></article>;
@@ -556,7 +599,7 @@ function Editor() {
       </>}
     </section>}
     <NetbirdProviderPanel />
-    <div className="topology-caption"><span>全拓扑 {nodes.length} 个节点 · {edges.length} 条连接；当前层 {activeNodes.length} 个节点 · {activeEdges.length} 条连接 · {dirty ? '有未保存的修改' : '草稿未修改'}</span><span role="status">{message || (busy ? '正在读取草稿…' : '')}</span></div>
+    <div className="topology-caption"><span>全拓扑 {nodes.length} 个配置节点 · Agent 自动发现 {autoRouterNodes.length} 个 Router；期望连接 {edges.length} 条 · 当前层 {activeNodes.length} 个节点 · {activeEdges.length} 条期望连接 · {dirty ? '有未保存的修改' : '草稿未修改'}</span><span role="status">{message || (busy ? '正在读取草稿…' : '')}</span></div>
     {menu && <div className="topology-menu" role="menu" aria-label="拓扑右键菜单" ref={menuRef} style={{ left: menu.x, top: menu.y } as CSSProperties}>
       {contextNode ? <><strong>{contextNode.name} · {contextNode.inputCount} 入 / {contextNode.outputCount} 出</strong>{contextNode.kind === 'FOLDER' && <button role="menuitem" onClick={() => enterFolder(contextNode.id)}>打开层级视图</button>}{(['inputCount', 'outputCount'] as const).map(direction => <div key={direction} className="menu-port-actions">{[1, -1].map(delta => <button role="menuitem" key={delta} disabled={!portChangeCandidate(contextNode, direction, delta)} onClick={() => changePorts(contextNode, direction, delta)}>{delta > 0 ? '增加' : '减少'}{direction === 'inputCount' ? '入口' : '出口'}</button>)}</div>)}<button role="menuitem" className="danger" onClick={() => removeNode(contextNode.id)}>删除节点及关联连接</button></> : menu.edgeId ? <><strong>期望连接 · {linkStateLabels[(contextEdge?.data?.state ?? 'PENDING') as keyof typeof linkStateLabels]} · L4/{(contextEdge?.data?.protocol ?? 'TCP') as string}</strong><button role="menuitem" className="danger" onClick={() => { setEdges(current => current.filter(e => e.id !== menu.edgeId)); setDirty(true); setRouteEvidence(undefined); setMenu(undefined); }}>删除连接</button></> : <><strong>添加节点</strong>{(Object.keys(nodePresets) as TopologyNodeKind[]).map(kind => <button role="menuitem" key={kind} onClick={() => addNode(kind)}><span>{nodePresets[kind].name}</span><small>{nodePresets[kind].inputs} 入 / {nodePresets[kind].outputs} 出</small></button>)}</>}
       <button role="menuitem" className="menu-cancel" onClick={() => setMenu(undefined)}>关闭菜单 · Esc</button>

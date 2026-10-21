@@ -56,9 +56,13 @@ configuration are retained.
 
 The deployment also binds the Core ServiceAccount to the read-only
 `nanpanel-topology-inventory` ClusterRole. It grants `get/list` for Namespace,
-Pod, Service, and Ingress metadata across the cluster so the topology editor can
-drill into each namespace and Pod. It grants no Secret access and no write
-verbs. The hierarchical topology discovery is enabled for this test cluster;
+Node, Pod, Service, and Ingress metadata across the cluster so the topology
+editor can drill into each namespace and Pod and verify a detected K3s host
+against a Ready Node. It grants no Secret access and no write verbs. When the
+Agent reports a local K3s API and its host is a Ready member of the same cluster,
+Core automatically registers the cluster using its in-cluster ServiceAccount;
+no kubeconfig or token is persisted. The hierarchical topology discovery is
+enabled for this test cluster;
 the periodic service inventory remains limited to the configured
 `nanpanel-mesh` namespace. The separate Istio fixture Role remains
 namespace-scoped for its isolated tests.

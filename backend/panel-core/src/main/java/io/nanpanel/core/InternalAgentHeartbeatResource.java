@@ -34,6 +34,7 @@ public class InternalAgentHeartbeatResource {
   private static final Pattern NETWORK_DESTINATION = Pattern.compile("[A-Za-z0-9:./-]{1,128}");
   @Inject AuthStore store;
   @Inject ObjectMapper mapper;
+  @Inject KubernetesClusterRegistryService kubernetesClusters;
 
   @Inject
   @ConfigProperty(name = "nanpanel.agent.gateway-token")
@@ -100,7 +101,7 @@ public class InternalAgentHeartbeatResource {
       throw fail(400, "INVALID_HEARTBEAT", "Agent ID 无效");
     }
 
-    return store.transaction(c -> {
+    UUID discoveredHostId = store.transaction(c -> {
       var rows = query(c,
           "SELECT host_id,cert_fingerprint FROM agent WHERE id=?", agentId);
       if (rows.isEmpty() || rows.getFirst().get("cert_fingerprint") == null ||
@@ -217,8 +218,14 @@ public class InternalAgentHeartbeatResource {
               runtime.runtimeKind(), java.sql.Timestamp.from(observedAt), hostId);
         }
       }
-      return Response.noContent().build();
+      return hostId;
     });
+    var runtime = report.kubernetesRuntime();
+    if (runtime != null && runtime.detected() && runtime.kubeletRunning()
+        && runtime.apiServerLocal() && "K3S".equals(runtime.runtimeKind())) {
+      kubernetesClusters.autoEnrollLocalCluster(discoveredHostId, report.hostname());
+    }
+    return Response.noContent().build();
   }
 
   private boolean validKubernetesRuntime(AgentEnrollmentResource.HeartbeatReport report) {

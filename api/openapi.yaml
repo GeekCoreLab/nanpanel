@@ -4878,7 +4878,7 @@ components:
     KubernetesClusterSummary:
       type: object
       additionalProperties: false
-      required: [id, name, kind, endpoint, contextName, healthStatus, cloudCoreStatus, cloudCoreObservedAt, observedAt, observationsStale, lastErrorCode, nodeCount, createdAt]
+      required: [id, name, kind, endpoint, contextName, healthStatus, cloudCoreStatus, cloudCoreObservedAt, observedAt, observationsStale, lastErrorCode, nodeCount, createdAt, credentialSource, discoveredHostId]
       properties:
         id:
           type: string
@@ -4920,6 +4920,13 @@ components:
         createdAt:
           type: string
           format: date-time
+        credentialSource:
+          type: string
+          enum: [KUBECONFIG, IN_CLUSTER]
+          description: KUBECONFIG is an encrypted imported context; IN_CLUSTER uses the Core ServiceAccount without persisting a token.
+        discoveredHostId:
+          type: [string, 'null']
+          format: uuid
     KubernetesClusterImportRequest:
       type: object
       additionalProperties: false

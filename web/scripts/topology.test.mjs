@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { connectionError, createTopologyNode, draftError, initialTopology, resolveRouteNextHop, validNodeShape } from '../src/lib/topology-model.ts';
+import { connectionError, createTopologyNode, draftError, initialTopology, resolveRouteNextHop, unmatchedRouteGateways, validNodeShape } from '../src/lib/topology-model.ts';
 import { mockRequest, DEMO_PASSWORD } from '../src/lib/mock.ts';
 const node = kind => createTopologyNode(kind, { x: 0, y: 0 });
 const link = (source, target, out = 'out-1', input = 'in-1', layer = 'L4', protocol = 'TCP') => ({ id: crypto.randomUUID(), sourceNodeId: source.id, sourcePort: out, targetNodeId: target.id, targetPort: input, layer, protocol, status: 'UNVERIFIED' });
@@ -71,6 +71,24 @@ test('route next-hop matching accepts one distinct Host asset or Router owner', 
   assert.deepEqual(resolveRouteNextHop('10.0.0.5', source.id, addressOwners), { kind: 'MATCHED', host: router });
   assert.deepEqual(resolveRouteNextHop('10.0.0.6', source.id, addressOwners), { kind: 'AMBIGUOUS' });
   assert.deepEqual(resolveRouteNextHop('10.0.0.9', source.id, addressOwners), { kind: 'UNMATCHED' });
+});
+
+test('unmodeled unique route gateways are deduplicated for observed Router nodes', () => {
+  const owners = new Map([
+    ['10.0.0.1', [{ id: 'known-router', hostname: 'router', kind: 'ROUTER' }]],
+    ['10.0.0.2', [{ id: 'other-host', hostname: 'other' }]],
+    ['10.0.0.3', [{ id: 'one', hostname: 'one' }, { id: 'two', hostname: 'two' }]],
+  ]);
+  const sourceHostIds = new Map([['source', 'source']]);
+  assert.deepEqual(unmatchedRouteGateways([
+    { sourceHostId: 'source', gateway: '10.0.0.1' },
+    { sourceHostId: 'source', gateway: '10.0.0.2' },
+    { sourceHostId: 'source', gateway: ' 10.0.0.8 ' },
+    { sourceHostId: 'source', gateway: '10.0.0.8' },
+    { sourceHostId: 'source', gateway: '10.0.0.3' },
+    { sourceHostId: 'source', gateway: null },
+    { sourceHostId: 'source', gateway: '10.0.0.9' },
+  ], sourceHostIds, owners), ['10.0.0.8', '10.0.0.9']);
 });
 
 test('Mock cluster hierarchy exposes namespaces, ingress routes, pods and container details', async () => {

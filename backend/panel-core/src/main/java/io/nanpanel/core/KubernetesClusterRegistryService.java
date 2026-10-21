@@ -6,6 +6,7 @@ import static io.nanpanel.core.AuthStore.update;
 
 import io.fabric8.kubernetes.api.model.Node;
 import io.fabric8.kubernetes.api.model.NodeList;
+import io.fabric8.kubernetes.api.model.Namespace;
 import io.fabric8.kubernetes.api.model.Pod;
 import io.fabric8.kubernetes.api.model.ListOptionsBuilder;
 import io.fabric8.kubernetes.client.KubernetesClient;
@@ -16,6 +17,7 @@ import jakarta.inject.Inject;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.OffsetDateTime;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashSet;
@@ -37,7 +39,8 @@ public class KubernetesClusterRegistryService {
   private static final Pattern CLUSTER_NAME = Pattern.compile("[A-Za-z0-9][A-Za-z0-9_. -]{0,79}");
   private static final Pattern NODE_UID = Pattern.compile("[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}");
   private static final String CLUSTER_COLUMNS = "id,name,kind,endpoint,context_name,health_status,"
-      + "cloudcore_status,cloudcore_observed_at,observed_at,last_error_code,imported_by,created_at,updated_at";
+      + "cloudcore_status,cloudcore_observed_at,observed_at,last_error_code,imported_by,created_at,"
+      + "updated_at,credential_source,cluster_fingerprint,discovered_host_id";
 
   @Inject AuthStore store;
   @Inject KubernetesClusterCredentialVault vault;
@@ -47,11 +50,14 @@ public class KubernetesClusterRegistryService {
   @ConfigProperty(name = "nanpanel.kubernetes.credential-key", defaultValue = "")
   String credentialKey;
 
+  @ConfigProperty(name = "nanpanel.kubernetes.auto-enroll-local.enabled", defaultValue = "false")
+  boolean autoEnrollLocalEnabled;
+
   public record ImportRequest(String name, String kind, String contextName, String kubeconfig) {}
   public record ClusterSummary(UUID id, String name, String kind, String endpoint,
       String contextName, String healthStatus, String cloudCoreStatus, Instant cloudCoreObservedAt,
       Instant observedAt, boolean observationsStale, String lastErrorCode, int nodeCount,
-      Instant createdAt) {}
+      Instant createdAt, String credentialSource, UUID discoveredHostId) {}
   public record ClusterList(List<ClusterSummary> items) {}
   public record ClusterNode(UUID clusterId, String nodeUid, String nodeName, List<String> roles,
       boolean nodePresent, boolean kubeedgeEdge, boolean ready, String kubeletVersion, String internalIp,
@@ -125,11 +131,13 @@ public class KubernetesClusterRegistryService {
     UUID clusterId = UUID.randomUUID();
     List<NodeObservation> nodes;
     CloudCoreObservation cloudCore;
+    String fingerprint;
     try (KubernetesClient client = clients.open(selected)) {
       var namespaceList = client.namespaces().list(new ListOptionsBuilder().withLimit(1L).build());
       if (namespaceList == null || namespaceList.getItems() == null) {
         throw new IllegalStateException("Kubernetes Namespace response is incomplete");
       }
+      fingerprint = clusterFingerprint(client);
       nodes = discoverNodes(client, input.kind());
       cloudCore = observeCloudCore(client, input.kind());
     } catch (RuntimeException failure) {
@@ -142,16 +150,21 @@ public class KubernetesClusterRegistryService {
     String name = input.name().trim();
     try {
       return store.transaction(connection -> {
+        if (!query(connection, "SELECT id FROM kubernetes_cluster WHERE cluster_fingerprint=?",
+            fingerprint).isEmpty()) {
+          throw new ClusterAlreadyExistsException();
+        }
         if (!query(connection, "SELECT id FROM kubernetes_cluster WHERE name=?", name).isEmpty()) {
           throw new ClusterAlreadyExistsException();
         }
         update(connection, "INSERT INTO kubernetes_cluster (id,name,kind,endpoint,context_name,"
             + "encrypted_kubeconfig,health_status,cloudcore_status,cloudcore_observed_at,observed_at,"
-            + "last_error_code,imported_by,created_at,updated_at) "
-            + "VALUES (?,?,?,?,?,?,'HEALTHY',?,?,?,NULL,?,?,?)", clusterId, name, input.kind(),
+            + "last_error_code,imported_by,created_at,updated_at,credential_source,cluster_fingerprint) "
+            + "VALUES (?,?,?,?,?,?,'HEALTHY',?,?,?,NULL,?,?,?,'KUBECONFIG',?)", clusterId, name, input.kind(),
             selected.endpoint().toString(), selected.contextName(), encrypted, cloudCore.status(),
             cloudCore.observedAt() == null ? null : Timestamp.from(cloudCore.observedAt()),
-            Timestamp.from(observedAt), actor, Timestamp.from(observedAt), Timestamp.from(observedAt));
+            Timestamp.from(observedAt), actor, Timestamp.from(observedAt), Timestamp.from(observedAt),
+            fingerprint);
         replaceNodes(connection, clusterId, nodes, observedAt);
         audit(connection, actor, "KUBERNETES_CLUSTER_IMPORTED", "kubernetes_cluster",
             clusterId.toString(), "SUCCEEDED", remoteAddress,
@@ -170,14 +183,17 @@ public class KubernetesClusterRegistryService {
     Map<String, Object> cluster = requireCluster(clusterId);
     List<NodeObservation> nodes;
     CloudCoreObservation cloudCore;
+    String fingerprint;
     try (KubernetesClient client = openClusterClient(clusterId, cluster)) {
       nodes = discoverNodes(client, String.valueOf(cluster.get("kind")));
       cloudCore = observeCloudCore(client, String.valueOf(cluster.get("kind")));
+      fingerprint = clusterFingerprint(client);
     } catch (RuntimeException failure) {
       throw reportApiFailure(clusterId, failure);
     }
     Instant observedAt = Instant.now();
     store.transaction(connection -> {
+      claimFingerprint(connection, clusterId, fingerprint);
       replaceNodes(connection, clusterId, nodes, observedAt);
       update(connection, "UPDATE kubernetes_cluster SET health_status='HEALTHY',cloudcore_status=?,"
           + "cloudcore_observed_at=?,observed_at=?,last_error_code=NULL,updated_at=? WHERE id=?",
@@ -186,6 +202,60 @@ public class KubernetesClusterRegistryService {
       return null;
     });
     return readNodes(clusterId, observedAt);
+  }
+
+  /** Automatically enrolls only a K3s API server node that is part of this Core's in-cluster API. */
+  public void autoEnrollLocalCluster(UUID hostId, String hostname) {
+    if (!autoEnrollLocalEnabled || hostId == null || hostname == null
+        || !hostname.matches("[A-Za-z0-9][A-Za-z0-9_.-]{0,252}")) return;
+    boolean alreadyDiscovered = store.transaction(connection -> !query(connection,
+        "SELECT id FROM kubernetes_cluster WHERE discovered_host_id=?", hostId).isEmpty());
+    if (alreadyDiscovered) return;
+    try (KubernetesClient client = clients.openInCluster()) {
+      Node localNode = client.nodes().withName(hostname).get();
+      if (localNode == null || localNode.getMetadata() == null
+          || localNode.getMetadata().getUid() == null || !nodeReady(localNode)) return;
+      String fingerprint = clusterFingerprint(client);
+      String serviceIp = kubernetesServiceIp(client);
+      UUID existingClusterId = findLocalCluster(fingerprint, serviceIp);
+      List<NodeObservation> nodes = discoverNodes(client, "K3S");
+      Instant observedAt = Instant.now();
+      store.transaction(connection -> {
+        UUID existingId = existingClusterId;
+        if (existingId == null) {
+          var identified = query(connection,
+              "SELECT id FROM kubernetes_cluster WHERE cluster_fingerprint=?", fingerprint);
+          if (!identified.isEmpty()) existingId = (UUID)identified.getFirst().get("id");
+        }
+        boolean created = existingId == null;
+        UUID clusterId = created ? UUID.randomUUID() : existingId;
+        if (created) {
+          String name = "auto-k3s-" + hostId.toString().substring(0, 8);
+          update(connection, "INSERT INTO kubernetes_cluster (id,name,kind,endpoint,context_name,"
+              + "encrypted_kubeconfig,health_status,cloudcore_status,cloudcore_observed_at,observed_at,"
+              + "last_error_code,imported_by,created_at,updated_at,credential_source,cluster_fingerprint,"
+              + "discovered_host_id) VALUES (?,?,'K3S','https://kubernetes.default.svc','in-cluster',"
+              + "NULL,'HEALTHY','NOT_OBSERVED',NULL,?,NULL,NULL,?,?,'IN_CLUSTER',?,?)",
+              clusterId, name, Timestamp.from(observedAt), Timestamp.from(observedAt),
+              Timestamp.from(observedAt), fingerprint, hostId);
+          audit(connection, null, "KUBERNETES_CLUSTER_AUTO_ENROLLED", "kubernetes_cluster",
+              clusterId.toString(), "SUCCEEDED", null,
+              "Agent 在主机 " + hostname + " 检测到本地 K3s API，并通过 Core 的集群内只读身份自动纳管");
+        } else {
+          claimFingerprint(connection, clusterId, fingerprint);
+          update(connection, "UPDATE kubernetes_cluster SET health_status='HEALTHY',"
+              + "observed_at=?,last_error_code=NULL,updated_at=?,discovered_host_id=? "
+              + "WHERE id=? AND discovered_host_id IS NULL",
+              Timestamp.from(observedAt), Timestamp.from(observedAt), hostId, clusterId);
+        }
+        replaceNodes(connection, clusterId, nodes, observedAt);
+        mapDiscoveredNode(connection, clusterId, localNode.getMetadata().getUid(), hostId);
+        return null;
+      });
+    } catch (RuntimeException failure) {
+      LOG.warnf("Automatic local K3s enrollment deferred for host %s (%s)", hostname,
+          failure.getClass().getSimpleName());
+    }
   }
 
   @Scheduled(every = "60s", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
@@ -312,6 +382,9 @@ public class KubernetesClusterRegistryService {
   }
 
   private KubernetesClient openClusterClient(UUID clusterId, Map<String, Object> cluster) {
+    if ("IN_CLUSTER".equals(cluster.get("credential_source"))) {
+      return clients.openInCluster();
+    }
     byte[] encrypted = (byte[])cluster.get("encrypted_kubeconfig");
     String kubeconfig;
     try {
@@ -489,6 +562,81 @@ public class KubernetesClusterRegistryService {
     }
   }
 
+  private static String clusterFingerprint(KubernetesClient client) {
+    Namespace namespace = client.namespaces().withName("kube-system").get();
+    if (namespace == null || namespace.getMetadata() == null
+        || namespace.getMetadata().getUid() == null
+        || namespace.getMetadata().getUid().isBlank()
+        || namespace.getMetadata().getUid().length() > 128) {
+      throw new IllegalStateException("Kubernetes cluster identity is unavailable");
+    }
+    return namespace.getMetadata().getUid();
+  }
+
+  private static String kubernetesServiceIp(KubernetesClient client) {
+    var service = client.services().inNamespace("default").withName("kubernetes").get();
+    if (service == null || service.getSpec() == null || service.getSpec().getClusterIP() == null
+        || service.getSpec().getClusterIP().isBlank()
+        || "None".equalsIgnoreCase(service.getSpec().getClusterIP())) return null;
+    return service.getSpec().getClusterIP();
+  }
+
+  private UUID findLocalCluster(String fingerprint, String serviceIp) {
+    var identified = store.transaction(connection -> query(connection,
+        "SELECT id FROM kubernetes_cluster WHERE cluster_fingerprint=?", fingerprint));
+    if (!identified.isEmpty()) return (UUID)identified.getFirst().get("id");
+    var candidates = store.transaction(connection -> query(connection,
+        "SELECT id,endpoint,context_name,encrypted_kubeconfig,credential_source "
+            + "FROM kubernetes_cluster WHERE kind='K3S' AND cluster_fingerprint IS NULL"));
+    for (var candidate : candidates) {
+      if (!"KUBECONFIG".equals(candidate.get("credential_source"))) continue;
+      UUID candidateId = (UUID)candidate.get("id");
+      try (KubernetesClient client = openClusterClient(candidateId, candidate)) {
+        if (fingerprint.equals(clusterFingerprint(client))) {
+          store.transaction(connection -> {
+            claimFingerprint(connection, candidateId, fingerprint);
+            return null;
+          });
+          return candidateId;
+        }
+      } catch (RuntimeException unavailable) {
+        if (serviceIp != null && serviceIp.equals(endpointHost(
+            String.valueOf(candidate.get("endpoint"))))) throw unavailable;
+      }
+    }
+    return null;
+  }
+
+  private static String endpointHost(String endpoint) {
+    try { return URI.create(endpoint).getHost(); }
+    catch (IllegalArgumentException invalid) { return null; }
+  }
+
+  private static void claimFingerprint(java.sql.Connection connection, UUID clusterId,
+                                       String fingerprint) throws java.sql.SQLException {
+    if (query(connection,
+        "SELECT id FROM kubernetes_cluster WHERE cluster_fingerprint=? AND id<>?",
+        fingerprint, clusterId).isEmpty()) {
+      update(connection, "UPDATE kubernetes_cluster SET cluster_fingerprint=? "
+          + "WHERE id=? AND cluster_fingerprint IS NULL", fingerprint, clusterId);
+    }
+  }
+
+  private static void mapDiscoveredNode(java.sql.Connection connection, UUID clusterId,
+                                        String nodeUid, UUID hostId) throws java.sql.SQLException {
+    if (nodeUid == null || query(connection,
+        "SELECT node_uid FROM kubernetes_cluster_node WHERE host_id=?", hostId).isEmpty()) {
+      update(connection, "UPDATE kubernetes_cluster_node SET host_id=? "
+          + "WHERE cluster_id=? AND node_uid=? AND host_id IS NULL", hostId, clusterId, nodeUid);
+    }
+  }
+
+  private static boolean nodeReady(Node node) {
+    return node.getStatus() != null && node.getStatus().getConditions() != null
+        && node.getStatus().getConditions().stream().anyMatch(condition -> condition != null
+        && "Ready".equals(condition.getType()) && "True".equals(condition.getStatus()));
+  }
+
   private static ClusterSummary summary(Map<String, Object> row) {
     Instant observedAt = instant(row.get("observed_at"));
     String healthStatus = String.valueOf(row.get("health_status"));
@@ -499,7 +647,8 @@ public class KubernetesClusterRegistryService {
         String.valueOf(row.get("context_name")), healthStatus,
         String.valueOf(row.get("cloudcore_status")), instant(row.get("cloudcore_observed_at")),
         observedAt, observationsStale, (String)row.get("last_error_code"),
-        ((Number)row.get("node_count")).intValue(), instant(row.get("created_at")));
+        ((Number)row.get("node_count")).intValue(), instant(row.get("created_at")),
+        String.valueOf(row.get("credential_source")), (UUID)row.get("discovered_host_id"));
   }
 
   private static ClusterNode node(Map<String, Object> row, Instant now, int staleAfterSeconds) {

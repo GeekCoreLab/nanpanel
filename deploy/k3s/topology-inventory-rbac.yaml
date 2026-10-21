@@ -4,7 +4,7 @@ metadata:
   name: nanpanel-topology-inventory
 rules:
   - apiGroups: [""]
-    resources: ["namespaces", "pods", "services"]
+    resources: ["namespaces", "nodes", "pods", "services"]
     verbs: ["get", "list"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["ingresses"]
