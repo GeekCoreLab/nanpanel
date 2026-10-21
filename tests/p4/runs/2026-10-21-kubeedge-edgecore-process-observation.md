@@ -33,6 +33,15 @@ responses verify both that a Ready Node without a Host service observation
 remains `NOT_OBSERVED` and that a fresh mapped `edgecore.service` observation
 is returned as `ACTIVE` with its timestamp.
 
+The same Core integration scenario now marks the KubeEdge API unavailable,
+maps the Edge Host, reads its fresh `edgecore.service` through
+`GET /hosts/{hostId}/services` and its route inventory, then submits
+`container.stop`. The request is rejected with `409 KUBERNETES_CONTAINER_OWNED`
+and the test verifies that no `operation` row was created for its idempotency
+key. This verifies the independent cached Host diagnostic and ownership guard
+paths together; it does not simulate a live Agent response during a real
+Kubernetes API outage.
+
 ## Limits
 
 No live KubeEdge cluster or EdgeCore process was queried. KubeEdge install,

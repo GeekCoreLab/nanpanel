@@ -94,8 +94,11 @@ disposable cluster, never the production `k3s-1` cluster.
   is older than 120 seconds or a refresh fails. Core integration coverage marks
   a cluster unavailable after an API failure while retaining the last
   observation, and confirms the independent Host inventory API still responds.
-  This is code-level evidence only; live Host Agent diagnostics during a K3s
-  control-plane outage remain unverified.
+  The KubeEdge slice also reads the mapped Host's cached `edgecore.service`
+  observation and network inventory while the cluster is unavailable, rejects
+  `container.stop` with `KUBERNETES_CONTAINER_OWNED`, and confirms no Helper
+  operation was persisted. This is code-level evidence only; a live Host Agent
+  diagnostic during a real K3s control-plane outage remains unverified.
 - Fixed `k3s.preflight` and `k3s.install` Agent/Helper capabilities are available.
   Preflight reports CPU, memory, architecture, systemd, cgroup mode, SELinux
   policy applicability, distribution identity, and existing K3s files. Install

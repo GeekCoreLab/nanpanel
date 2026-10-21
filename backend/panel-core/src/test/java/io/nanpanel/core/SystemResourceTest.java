@@ -807,6 +807,13 @@ class SystemResourceTest {
       return null;
     });
     given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/hosts/" + hostId + "/services?limit=20")
+        .then().statusCode(200)
+        .body("items.find { it.unitName == 'edgecore.service' }.activeState",
+            equalTo("ACTIVE"))
+        .body("items.find { it.unitName == 'edgecore.service' }.observationStale",
+            equalTo(false));
+    given().cookie("nanpanel_session", restoredCookie)
         .header("X-CSRF-Token", restored.path("csrfToken"))
         .contentType("application/json")
         .body(Map.of("hostId", hostId))
@@ -829,6 +836,8 @@ class SystemResourceTest {
             "expectedGeneration", 1))
         .post("/api/v1/hosts/" + hostId + "/operations")
         .then().statusCode(409).body("code", equalTo("KUBERNETES_CONTAINER_OWNED"));
+    assertEquals(0, store.transaction(c -> AuthStore.query(c,
+        "SELECT id FROM operation WHERE idempotency_key=?", "helper-kubeedge-owned-01")).size());
     given().cookie("nanpanel_session", restoredCookie)
         .header("X-CSRF-Token", restored.path("csrfToken"))
         .delete("/api/v1/kubernetes/clusters/" + kubeedgeClusterId + "/nodes/"
