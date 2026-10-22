@@ -39,8 +39,9 @@ seconds while the page is visible, prevents overlapping requests, and marks
 Service inventory and Istio telemetry separately when either observation is
 older than two minutes. `npm run build` and `npm test` passed (13 tests), and
 the targeted Core run passed `SystemResourceTest` and
-`KubernetesIstioTelemetryCollectorTest` (7 tests total). The live target image
-has not been updated with these local UI changes yet.
+`KubernetesIstioTelemetryCollectorTest` (7 tests total). The Web image was
+later published and deployed to `k3s-1`; the post-deployment live UI check is
+recorded in [`topology-istio-freshness-deployment.md`](2026-10-22-topology-istio-freshness-deployment.md).
 
 This is a local UI/mock API regression, not a target data-persistence run. The
 Mock service network showed the explicit live-Istio-required state with no
