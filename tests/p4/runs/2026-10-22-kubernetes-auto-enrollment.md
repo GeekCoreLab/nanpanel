@@ -90,3 +90,31 @@ inventory or API outage recovery.
 - Command:
   `./mvnw -pl backend/panel-core -am -Dtest=KubernetesAutoEnrollmentTest -Dsurefire.failIfNoSpecifiedTests=false test`
 - Result: all five `KubernetesAutoEnrollmentTest` tests passed.
+
+## Remote Agent mapping to an already managed K3s cluster
+
+- Source commit: `3a3627cd43654c2f05e0a398797ca57e8419d527`
+  (`Auto-map remote agents to managed K3s nodes`).
+- When a registered Agent reports a running remote K3s kubelet and no local API
+  server, Core now considers only its cached K3S clusters with an existing
+  `KUBECONFIG` or `IN_CLUSTER` credential source. A mapping is written only
+  when exactly one matching hostname exists across fresh (120-second),
+  HEALTHY cluster snapshots and that Node is present, Ready,
+  Kubernetes-owned, and unmapped; the Agent Host must also be unmapped.
+- The operation is idempotent and emits a mapping audit event. It does not
+  accept or persist credentials from the Agent, create a cluster, map KubeEdge
+  Nodes, or override an existing Host/Node association.
+- Focused command:
+  `./mvnw -pl backend/panel-core -am -Dtest=KubernetesAutoEnrollmentTest -Dsurefire.failIfNoSpecifiedTests=false test`
+  — all 12 tests passed. Cases cover unique match, repeated heartbeat,
+  ambiguous names, stale observations, NotReady Nodes, existing Node/Host
+  mappings, KubeEdge exclusion, and invalid Agent certificate rejection.
+- `./mvnw verify` also passed after this change: Core 54 tests passed and all
+  reactor modules succeeded. Two optional external-provider live tests were
+  skipped because their external environments are not configured.
+
+This is Core integration coverage with isolated Kubernetes API/DB fixtures.
+There is no separate remote Agent host in the available environment, so the
+remote mapping has not been exercised against a real second Node. Automatic
+credential issuance/rotation and import of a previously unknown remote cluster
+remain open P4 work.

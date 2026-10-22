@@ -80,8 +80,12 @@ are in [`runs/2026-10-22-p4-regression-recheck.md`](runs/2026-10-22-p4-regressio
   first enrollment, matching imported-cluster adoption, NotReady retry, and
   duplicate-heartbeat idempotence. The gate remains open until fresh-cluster
   enrollment and API-unreachable recovery are demonstrated end to end on a
-  real K3s fixture; remote hosts still need safe credential issuance and
-  refresh before they can be auto-enrolled. See
+  real K3s fixture. Remote K3s Agents can now associate to a single fresh,
+  Ready Node in an already managed cluster without sending credentials;
+  ambiguous names, stale snapshots, pre-existing mappings, and KubeEdge Nodes
+  are rejected. This does not auto-import an unknown remote cluster: remote
+  least-privilege credential issuance/refresh and live remote-host acceptance
+  remain open. See
   [`kubernetes-auto-enrollment.md`](runs/2026-10-22-kubernetes-auto-enrollment.md).
 - A separate isolated K3s API-only integration run is recorded at
   `tests/p4/runs/2026-10-21-k3s-multi-cluster-api-only.md`. It used two actual
