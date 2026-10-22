@@ -42,3 +42,25 @@ This is isolated code acceptance for an EdgeCore join plan only. No KubeEdge
 target is available. The plan cannot be executed; secret opening, Helper
 dispatch, `keadm` execution, post-join verification, compensation, restart
 reconciliation, and live lifecycle acceptance remain open P4 work.
+
+## Core deployment on `k3s-1`
+
+- Commit `1f1a16c95d63e025e1f362303dcfd10582ac4441` passed GitHub Actions run
+  `39771560521`; the validate job and Core/Web GHCR publications succeeded.
+- Only `deployment/nanpanel-core` was updated. Its `core` and `agent-gateway`
+  containers now use
+  `ghcr.io/geekcorelab/nanpanel-core:sha-1f1a16c95d63e025e1f362303dcfd10582ac4441`.
+  The new Pod is 2/2 Ready with zero restarts and image digest
+  `sha256:1b6536b5b4c2d37c695da7461e46c27405a92f3267f0fa6074633ad5709e04a5`.
+  `/q/health/ready` returned `UP`, including the database health check. The old
+  Pod terminated after rollout. Web stayed on `sha-8722235...`; PostgreSQL
+  remained Running and its existing 5 GiB PVC stayed Bound.
+- `node web/scripts/k3s-route-live-browser.mjs` passed after deployment at
+  `2026-10-22T11:41:52.164+00:00`: the page showed the observed Host route,
+  `Istio LIVE`, 3/3 sidecars, and live Envoy HTTP 200/403 mTLS flow rows. It
+  reported `topologyWrites: 0`.
+- The user chose to skip live `k3s.preflight`; no preflight or production
+  topology write was performed.
+
+This deployment proves Core startup and no regression in the real Istio UI. It
+does not provide KubeEdge target or lifecycle execution acceptance.
