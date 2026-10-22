@@ -26,8 +26,11 @@ ownership-safe Host mapping:
 These Core paths have unit and integration coverage documented in
 [`tests/p4/runs/2026-10-21-kubeedge-edgecore-process-observation.md`](../../tests/p4/runs/2026-10-21-kubeedge-edgecore-process-observation.md).
 They do not install, join, upgrade, rotate credentials for, or remove
-CloudCore/EdgeCore. No live KubeEdge target is available, so they are not live
-KubeEdge acceptance.
+CloudCore/EdgeCore. The provider JAR is packaged in the deployed Core image
+`sha-fb6ee0a1ebded95039cbd2834830dcce18b13351` and present in `/work/providers`
+on `k3s-1`; the authenticated provider-list route could not be checked because
+the current admin login was rejected. No live KubeEdge target is available, so
+this is not live KubeEdge acceptance.
 
 ## Provider boundary
 

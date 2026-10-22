@@ -147,7 +147,8 @@ recorded in
   restore and validation paths re-read the Core-owned snapshot and reject
   changed generation, unhealthy/stale inventory, or a CloudCore that is now
   observed. It has no Kubernetes client and does not execute writes. Four
-  Provider unit tests pass; this code has not yet been deployed and there is no
+  Provider unit tests pass; the jar is present in the deployed `k3s-1` Core
+  image, but authenticated API discovery could not be confirmed and there is no
   live KubeEdge target. Credential custody, execution, compensation, and live
   acceptance remain open. See
   [`kubeedge-cloudcore-plan-provider.md`](runs/2026-10-22-kubeedge-cloudcore-plan-provider.md).
