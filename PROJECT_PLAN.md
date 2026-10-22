@@ -485,7 +485,7 @@ hybrid-infrastructure-platform/
 
 - [x] 拓扑文件夹支持多层编辑（本机浏览器场景已覆盖）。
 - [x] 在目标 K3s 环境读取 Namespace、Ingress 路由、Service、Pod 及容器端口/状态；见 [真实 K3s API 与拓扑视图验收](tests/p4/runs/2026-10-21-k3s-target-api-smoke.md)。
-- [ ] 服务网络只显示真实 Kubernetes 与 Istio 数据：Service/EndpointSlice、Envoy sidecar 就绪状态、Envoy 请求计数/HTTP 响应/mTLS 标签；Mock 模式不生成网络数据，服务和端点按需展开。等待本次实现部署后在 `k3s-1` 做 UI/API 实测。
+- [x] 服务网络只显示真实 Kubernetes 与 Istio 数据：Service/EndpointSlice、Envoy sidecar 就绪状态、Envoy 请求计数/HTTP 响应/mTLS 标签；Mock 模式不生成网络数据，服务和端点按需展开。已部署并完成 `k3s-1` UI/API 实测，证据与认证边界见 [Istio 服务网络实测](tests/p4/runs/2026-10-22-k3s-istio-service-network-live.md)。
 - [x] Agent 自动探测安装主机上的 kubelet/K3s 并按 Host 保存发现记录；目标 `k3s-1` 实时记录与当前部署复核见[部署记录](tests/p4/runs/2026-10-21-agent-kubernetes-runtime-discovery-deployment.md)。
 - [ ] Agent 发现后自动纳入集群管理：已实现 Core 与 Agent 同处目标 K3s 时的自动登记路径，使用 Core 集群内只读 ServiceAccount、不导出或持久化 kubeconfig/token，并按 `kube-system` UID 和 Kubernetes Service IP 对已有导入去重；仍需 `k3s-1` 部署后验证新集群与既有集群两条路径。Core 不在目标集群内时，远程 Agent 的安全凭据签发/更新流程、不可达重试及通用 Kubernetes 实机验收仍未完成。
 - [ ] 在目标 K3s 环境验收已映射主机路由的下一跳匹配；Mock/Kind UI 场景仅覆盖代码路径。

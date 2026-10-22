@@ -21,6 +21,11 @@ Evidence must name the exact image/commit, cluster fixture, commands, result,
 and limitations. Destructive upgrade and ingress experiments belong in a
 disposable cluster, never the production `k3s-1` cluster.
 
+The target `k3s-1` live Istio service-network UI/API acceptance passed on
+2026-10-22; exact image, GHCR mirror retrieval, real traffic values, and the
+test-session limitation are recorded in
+[`runs/2026-10-22-k3s-istio-service-network-live.md`](runs/2026-10-22-k3s-istio-service-network-live.md).
+
 ## Current source boundary
 
 - Cluster import, per-cluster credentials, Kubernetes UID node reconciliation,
