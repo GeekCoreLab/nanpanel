@@ -113,6 +113,14 @@ class KubernetesAutoEnrollmentTest {
   }
 
   @Test
+  void rejectsRuntimeDiscoveryFromAnUnregisteredCertificateBeforePersistingIt() {
+    assertEquals(403, postRuntimeDiscoveryHeartbeat(hostname(), "b".repeat(64)));
+    assertEquals(0, enrolledClusterCount());
+    assertEquals(0, mappedNodeCount());
+    assertEquals(0, runtimeDiscoveryCount());
+  }
+
+  @Test
   void defersNotReadyNodeAndRetriesEnrollmentAfterItBecomesReady() {
     String hostname = hostname();
     expectNodeLookup(hostname, node(hostname, false));
@@ -212,13 +220,17 @@ class KubernetesAutoEnrollmentTest {
   }
 
   private void postRuntimeDiscoveryHeartbeat(String hostname) {
+    assertEquals(204, postRuntimeDiscoveryHeartbeat(hostname, certificateFingerprint));
+  }
+
+  private int postRuntimeDiscoveryHeartbeat(String hostname, String fingerprint) {
     long observedAt = Instant.now().toEpochMilli();
-    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+    return given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
         .contentType("application/json")
         .body(Map.of(
             "agentId", agentId.toString(),
             "version", "test",
-            "certificateFingerprint", certificateFingerprint,
+            "certificateFingerprint", fingerprint,
             "hostname", hostname,
             "os", "Linux",
             "arch", "x86_64",
@@ -232,7 +244,7 @@ class KubernetesAutoEnrollmentTest {
                 "runtimeKind", "K3S",
                 "observedAtEpochMs", observedAt)))
         .post("/internal/agent-heartbeats")
-        .then().statusCode(204);
+        .statusCode();
   }
 
   private void expectNodeLookup(String hostname, Node localNode) {
@@ -253,6 +265,11 @@ class KubernetesAutoEnrollmentTest {
     return store.transaction(connection -> AuthStore.query(connection,
         "SELECT COUNT(*) AS count FROM kubernetes_cluster WHERE discovered_host_id=?", hostId)
         .getFirst().get("count") instanceof Number count ? count.intValue() : 0);
+  }
+
+  private int runtimeDiscoveryCount() {
+    return store.transaction(connection -> AuthStore.query(connection,
+        "SELECT host_id FROM host_kubernetes_runtime_discovery WHERE host_id=?", hostId).size());
   }
 
   private int mappedNodeCount() {

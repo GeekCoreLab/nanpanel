@@ -70,7 +70,8 @@ recorded in
   records without a stored fingerprint. Isolated new-cluster, imported-cluster,
   NotReady, and API-recovery cases now enter through `/internal/agent-heartbeats`
   with a registered certificate fingerprint, verifying runtime discovery is
-  persisted and triggers auto-enrollment. On 2026-10-22, `k3s-1` live state
+  persisted and triggers auto-enrollment. A mismatched certificate is rejected
+  before discovery state is persisted. On 2026-10-22, `k3s-1` live state
   confirmed a fresh Agent discovery and an existing KUBECONFIG cluster that
   had been claimed with its Ready Node mapped. Isolated Core/API tests cover
   first enrollment, matching imported-cluster adoption, NotReady retry, and

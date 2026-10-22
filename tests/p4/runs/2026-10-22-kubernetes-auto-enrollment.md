@@ -85,6 +85,8 @@ inventory or API outage recovery.
   Kubernetes API remains an isolated Fabric8 fixture, so these tests prove the
   Core integration path but do not replace live `k3s-1` fresh-cluster or outage
   acceptance.
+- A mismatched Agent certificate fingerprint is rejected with HTTP 403 before
+  the runtime discovery row, cluster record, or Host mapping is written.
 - Command:
   `./mvnw -pl backend/panel-core -am -Dtest=KubernetesAutoEnrollmentTest -Dsurefire.failIfNoSpecifiedTests=false test`
-- Result: all four `KubernetesAutoEnrollmentTest` tests passed.
+- Result: all five `KubernetesAutoEnrollmentTest` tests passed.
