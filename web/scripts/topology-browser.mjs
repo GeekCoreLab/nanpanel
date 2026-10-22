@@ -17,6 +17,7 @@ try {
   await expect(page.getByRole('button', { name: '↻ 重新读取', exact: true })).toHaveCount(0);
   await expect(page.getByText('实时 Istio 数据尚未连接')).toBeVisible();
   await expect(page.locator('.service-network-item')).toHaveCount(0);
+  await expect(page.locator('.service-network-flow')).toHaveCount(0);
   await page.getByRole('button', { name: /拓扑编辑/ }).click();
   await page.getByLabel('拓扑编辑器').scrollIntoViewIfNeeded();
   await expect(gateway.locator('[data-handleid="out-1"]')).toHaveCSS('background-color', 'rgb(46, 175, 131)');

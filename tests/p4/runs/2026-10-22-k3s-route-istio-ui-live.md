@@ -211,3 +211,20 @@ No Core, database, PVC, host route, or `k3s.preflight` state was changed.
   Router read-only and shows the matched Host route without overlapping cards.
 - This remains a single-node read-only UI/data-path recheck. The production
   topology draft was not written, and no `k3s.preflight` operation ran.
+
+## Mock and live UI pair recheck at 2026-10-22 11:57 UTC
+
+- Added a Playwright assertion that Mock mode renders neither Service cards nor
+  Istio traffic rows. `npm test` passed all 13 Node tests; the Mock browser
+  topology workflow passed against a dedicated `VITE_API_MODE=mock` Vite
+  server, including the explicit “real Istio data is not connected” message.
+- Re-ran `node web/scripts/k3s-route-live-browser.mjs` against `k3s-1`: `PASS`,
+  route gateway `10.0.0.1`, route observation
+  `2026-10-22T11:57:52.449+00:00`, `topologyWrites: 0`, and no page errors. The
+  browser test forwards Service inventory and Envoy requests to the deployed
+  Core using the restricted read-only API key; it asserted `Istio LIVE`, 3/3
+  ready sidecars, and HTTP 200/403 mTLS flows.
+- The refreshed screenshot again shows two distinct columns for Kubernetes
+  Services and Istio traffic, with per-Service endpoint details collapsed until
+  expanded. This is a read-only single-node recheck; production topology and
+  `k3s.preflight` state remain untouched.
