@@ -51,12 +51,21 @@ public interface ClusterProvider extends ExtensionPoint {
 
     /** References are opaque IDs into Core-owned credential storage; they never contain secret bytes. */
     record LifecycleRequest(String operation, String component, UUID hostId, String targetVersion,
-                            UUID credentialReference) {
+                            UUID credentialReference, String targetEndpoint) {
+        public LifecycleRequest(String operation, String component, UUID hostId, String targetVersion,
+                UUID credentialReference) {
+            this(operation, component, hostId, targetVersion, credentialReference, null);
+        }
+
         public LifecycleRequest {
             requireName(operation, "operation");
             requireName(component, "component");
             if (targetVersion != null && targetVersion.isBlank()) {
                 throw new IllegalArgumentException("targetVersion must be null or nonblank");
+            }
+            if (targetEndpoint != null && (targetEndpoint.isBlank() || targetEndpoint.length() > 260
+                    || targetEndpoint.chars().anyMatch(Character::isISOControl))) {
+                throw new IllegalArgumentException("targetEndpoint must be null or a bounded endpoint");
             }
         }
     }
@@ -133,7 +142,9 @@ public interface ClusterProvider extends ExtensionPoint {
                 throw new IllegalArgumentException("only Agent Helper steps must identify a Host");
             }
             parameters = Map.copyOf(parameters);
-            if (parameters.keySet().stream().anyMatch(ClusterProvider::looksSecretLike)) {
+            // This allowlisted enum describes the opaque reference's purpose, never its material.
+            if (parameters.keySet().stream().anyMatch(key ->
+                    !"credentialPurpose".equals(key) && looksSecretLike(key))) {
                 throw new IllegalArgumentException("secret material must be represented by a credential reference");
             }
             credentialReferences = List.copyOf(credentialReferences);

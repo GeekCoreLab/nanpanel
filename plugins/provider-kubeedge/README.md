@@ -1,12 +1,19 @@
 # KubeEdge Provider status
 
-The PF4J `kubeedge-core` provider is a planning-only implementation for
-CloudCore installation. It plans `install_cloudcore` only for a registered
-KUBEEDGE cluster when the Core snapshot reports CloudCore as `NOT_OBSERVED`.
-The plan contains one `kubeedge.cloudcore.install` Kubernetes API step with a
-version, namespace, and release name. Restore and validation re-read the
-Core-owned snapshot and reject a changed generation or observed CloudCore.
-The provider has no Kubernetes client and performs no cluster writes.
+The PF4J `kubeedge-core` provider is planning-only. It plans
+`install_cloudcore` only for a registered KUBEEDGE cluster when the Core
+snapshot reports CloudCore as `NOT_OBSERVED`. That plan contains one
+`kubeedge.cloudcore.install` Kubernetes API step with a version, namespace,
+and release name. It also describes `join_edgecore` only when CloudCore is
+healthy, the request names a Host, and it supplies a CloudCore `host:port`
+endpoint and an opaque credential reference. The resulting single
+`kubeedge.edgecore.join` Agent Helper step stores the endpoint and the
+`EDGECORE_BOOTSTRAP_TOKEN` purpose, while Core checks that the Host exists and
+is not already mapped to a present Node in this cluster. Restore and validation
+re-read the Core-owned snapshot and reject changed generation, unhealthy
+CloudCore, or a Host that became registered. The provider has no Kubernetes
+client, never receives credential material, and performs no cluster writes or
+Helper dispatch.
 
 The current KubeEdge support in Core also provides bounded observation and
 ownership-safe Host mapping:
@@ -56,7 +63,7 @@ Core integration tests. The deployment ran its database migration and passed
 readiness checks; an authenticated production plan request has not been
 accepted yet. Core now has encrypted, cluster/provider-scoped KubeEdge credential
 storage with metadata-only list/create responses, recent reauthentication for
-write/revoke, and one-way revocation. Core accepts a credential reference only when the Provider returns the same opaque UUID in its persisted plan and rechecks its scope, expiry and revocation during restoration. The current CloudCore installation plan rejects an EdgeCore bootstrap-token reference because that step does not consume it; no EdgeCore join plan or execution path opens a stored secret. The API does
+write/revoke, and one-way revocation. Core accepts a credential reference only when the Provider returns the same opaque UUID in its persisted plan and rechecks its provider/cluster scope, purpose, expiry and revocation during restoration. The EdgeCore join plan references (but does not open) an `EDGECORE_BOOTSTRAP_TOKEN`; no plan execution path opens a stored secret. The API does
 not execute plan steps. The snapshot and planning provider do not install CloudCore/EdgeCore,
 register/remove an Edge node, upgrade components, rotate certificates, or
 coordinate an ingress. Registration, version, certificate, component-health,

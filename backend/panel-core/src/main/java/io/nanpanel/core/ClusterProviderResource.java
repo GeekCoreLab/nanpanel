@@ -34,7 +34,7 @@ import java.util.concurrent.TimeoutException;
 public class ClusterProviderResource {
   private static final Set<String> PLAN_PARAMETER_KEYS = Set.of(
       "version", "namespace", "releaseName", "nodeName", "nodeUid", "component",
-      "clusterId", "hostId", "role");
+      "clusterId", "hostId", "role", "cloudCoreEndpoint", "credentialPurpose");
   @Inject NetworkProviderRegistry registry;
   @Inject KubernetesClusterRegistryService clusters;
   @Inject AuthStore store;
@@ -43,7 +43,8 @@ public class ClusterProviderResource {
   @Context io.vertx.core.http.HttpServerRequest http;
 
   public record PlanRequest(String operation, String component, String hostId,
-                            String targetVersion, String credentialReference, String reason) {}
+                            String targetVersion, String credentialReference,
+                            String targetEndpoint, String reason) {}
 
   @GET
   public List<Map<String, Object>> providers() {
@@ -122,14 +123,16 @@ public class ClusterProviderResource {
     ClusterProvider.LifecycleRequest lifecycle;
     try {
       lifecycle = new ClusterProvider.LifecycleRequest(input.operation(), input.component(),
-          input.hostId() == null ? null : uuid(input.hostId()), input.targetVersion(), credentialReference);
+          input.hostId() == null ? null : uuid(input.hostId()), input.targetVersion(),
+          credentialReference, input.targetEndpoint());
     } catch (IllegalArgumentException invalid) {
       throw fail(422, "VALIDATION_FAILED", "生命周期操作参数无效");
     }
     String requestFingerprint = digest(String.join("\n", String.valueOf(actor.get("user_id")),
         clusterId.toString(), lifecycle.operation(), lifecycle.component(),
         String.valueOf(lifecycle.hostId()), String.valueOf(lifecycle.targetVersion()),
-        String.valueOf(lifecycle.credentialReference()), input.reason()));
+        String.valueOf(lifecycle.credentialReference()), String.valueOf(lifecycle.targetEndpoint()),
+        input.reason()));
     String storedIdempotencyKey = digest(providerId + "\n" + idempotencyKey);
     ClusterProvider provider = provider(providerId);
     if (!provider.operations().contains(lifecycle.operation().toUpperCase(java.util.Locale.ROOT))) {
@@ -160,6 +163,13 @@ public class ClusterProviderResource {
     } catch (RuntimeException rejected) {
       throw fail(409, "CLUSTER_PROVIDER_PLAN_REJECTED", "集群 Provider 拒绝了生命周期计划");
     }
+    if (plan != null && plan.steps().stream().anyMatch(step ->
+        step.target() == ClusterProvider.ExecutionTarget.AGENT_HELPER
+            && snapshot.nodes().stream().anyMatch(node -> node.present()
+                && step.hostId().equals(node.hostId())))) {
+      throw fail(409, "CLUSTER_PROVIDER_TARGET_ALREADY_REGISTERED",
+          "目标主机已映射到此集群中的 Node");
+    }
     validatePlan(plan, providerId, clusterId, lifecycle.operation(), snapshot.generation(),
         credentialReference);
     String configuration = serialize(plan);
@@ -177,9 +187,14 @@ public class ClusterProviderResource {
         return row;
       }
       if (credentialReference != null
-          && !credentialAvailable(connection, providerId, clusterId, credentialReference)) {
+          && !credentialAvailable(connection, providerId, clusterId, credentialReference,
+              credentialPurpose(plan, credentialReference))) {
         throw fail(409, "CLUSTER_CREDENTIAL_UNAVAILABLE",
             "计划持久化前凭据已撤销或过期");
+      }
+      if (!planHostsAvailable(connection, plan)) {
+        throw fail(409, "CLUSTER_PROVIDER_TARGET_UNAVAILABLE",
+            "计划目标主机在持久化前已不可用");
       }
       update(connection, "INSERT INTO cluster_provider_operation "
           + "(id,provider_id,cluster_id,idempotency_key,request_fingerprint,generation,operation,"
@@ -226,6 +241,9 @@ public class ClusterProviderResource {
     }
     if (!credentialReferencesAvailable(plan, providerId, current.clusterId())) {
       return transition(row, actor, "DRIFTED", "A referenced Provider credential is unavailable");
+    }
+    if (!planHostsAvailable(plan)) {
+      return transition(row, actor, "DRIFTED", "A referenced Agent Helper Host is unavailable");
     }
     ClusterProvider.ClusterReference reference = reference(current, provider);
     ClusterProvider.ClusterAccess access = access(current);
@@ -297,16 +315,22 @@ public class ClusterProviderResource {
       String operation, long generation, UUID requestedCredentialReference) {
     List<UUID> credentialReferences = plan == null ? List.of() : plan.steps().stream()
         .flatMap(step -> step.credentialReferences().stream()).distinct().toList();
+    String requestedCredentialPurpose = plan == null || requestedCredentialReference == null
+        ? null : credentialPurpose(plan, requestedCredentialReference);
     boolean credentialsMatch = requestedCredentialReference == null
         ? credentialReferences.isEmpty()
         : !credentialReferences.isEmpty()
             && credentialReferences.stream().allMatch(requestedCredentialReference::equals)
-            && credentialAvailable(providerId, clusterId, requestedCredentialReference);
+            && requestedCredentialPurpose != null
+            && credentialAvailable(providerId, clusterId, requestedCredentialReference,
+                requestedCredentialPurpose);
     if (plan == null || plan.id() == null || !clusterId.equals(plan.clusterId())
         || generation != plan.generation() || !operation.equals(plan.operation())
         || !plan.idempotencyKey().matches("[A-Za-z0-9_.:-]{1,128}")
         || plan.steps().isEmpty() || plan.steps().size() > 128
         || !credentialsMatch
+        || plan.steps().stream().anyMatch(step -> step.target() == ClusterProvider.ExecutionTarget.AGENT_HELPER
+            && !hostExists(step.hostId()))
         || plan.steps().stream().anyMatch(step -> !(step.capability().startsWith("kubeedge.")
             || step.capability().startsWith("k3s."))
             || !safeParameters(step.parameters()))) {
@@ -322,22 +346,70 @@ public class ClusterProviderResource {
       String providerId, UUID clusterId) {
     List<UUID> references = plan.steps().stream()
         .flatMap(step -> step.credentialReferences().stream()).distinct().toList();
-    return references.stream().allMatch(reference -> credentialAvailable(providerId, clusterId, reference));
+    return references.stream().allMatch(reference -> {
+      String purpose = credentialPurpose(plan, reference);
+      return purpose != null && credentialAvailable(providerId, clusterId, reference, purpose);
+    });
   }
 
   private boolean credentialAvailable(String providerId, UUID clusterId, UUID credentialId) {
-    return store.transaction(connection -> credentialAvailable(connection, providerId, clusterId, credentialId));
+    return credentialAvailable(providerId, clusterId, credentialId, null);
+  }
+
+  private boolean credentialAvailable(String providerId, UUID clusterId, UUID credentialId,
+      String expectedPurpose) {
+    return store.transaction(connection -> credentialAvailable(connection, providerId, clusterId,
+        credentialId, expectedPurpose));
   }
 
   private static boolean credentialAvailable(java.sql.Connection connection, String providerId,
       UUID clusterId, UUID credentialId) throws java.sql.SQLException {
-    var rows = query(connection, "SELECT expires_at,revoked_at FROM cluster_provider_credential "
+    return credentialAvailable(connection, providerId, clusterId, credentialId, null);
+  }
+
+  private static boolean credentialAvailable(java.sql.Connection connection, String providerId,
+      UUID clusterId, UUID credentialId, String expectedPurpose) throws java.sql.SQLException {
+    var rows = query(connection, "SELECT purpose,expires_at,revoked_at FROM cluster_provider_credential "
         + "WHERE id=? AND provider_id=? AND cluster_id=?", credentialId, providerId, clusterId);
     if (rows.isEmpty()) return false;
     Map<String, Object> row = rows.getFirst();
-    return row.get("revoked_at") == null
+    return (expectedPurpose == null || expectedPurpose.equals(row.get("purpose")))
+        && row.get("revoked_at") == null
         && (row.get("expires_at") == null
             || ((Number)row.get("expires_at")).longValue() > System.currentTimeMillis());
+  }
+
+  private boolean hostExists(UUID hostId) {
+    return store.transaction(connection -> !query(connection,
+        "SELECT id FROM host WHERE id=?", hostId).isEmpty());
+  }
+
+  private static boolean planHostsAvailable(java.sql.Connection connection,
+      ClusterProvider.ClusterPlan plan) throws java.sql.SQLException {
+    for (ClusterProvider.PlanStep step : plan.steps()) {
+      if (step.target() == ClusterProvider.ExecutionTarget.AGENT_HELPER
+          && query(connection, "SELECT id FROM host WHERE id=?", step.hostId()).isEmpty()) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private boolean planHostsAvailable(ClusterProvider.ClusterPlan plan) {
+    return plan.steps().stream()
+        .filter(step -> step.target() == ClusterProvider.ExecutionTarget.AGENT_HELPER)
+        .allMatch(step -> hostExists(step.hostId()));
+  }
+
+  private static String credentialPurpose(ClusterProvider.ClusterPlan plan, UUID credentialId) {
+    List<ClusterProvider.PlanStep> referencingSteps = plan.steps().stream()
+        .filter(step -> step.credentialReferences().contains(credentialId))
+        .toList();
+    if (referencingSteps.isEmpty() || referencingSteps.stream()
+        .anyMatch(step -> step.parameters().get("credentialPurpose") == null)) return null;
+    List<String> purposes = referencingSteps.stream()
+        .map(step -> step.parameters().get("credentialPurpose")).distinct().toList();
+    return purposes.size() == 1 ? purposes.getFirst() : null;
   }
 
   private static boolean safeParameters(Map<String, String> parameters) {
@@ -345,7 +417,8 @@ public class ClusterProviderResource {
     for (var entry : parameters.entrySet()) {
       String key = entry.getKey();
       String value = entry.getValue();
-      if (!PLAN_PARAMETER_KEYS.contains(key) || value == null || value.length() > 128
+      int maximumLength = "cloudCoreEndpoint".equals(key) ? 260 : 128;
+      if (!PLAN_PARAMETER_KEYS.contains(key) || value == null || value.length() > maximumLength
           || value.isBlank() || value.chars().anyMatch(Character::isISOControl)) return false;
       boolean valid = switch (key) {
         case "version" -> value.matches("[vV]?[0-9][A-Za-z0-9.+_-]{0,63}");
@@ -356,11 +429,27 @@ public class ClusterProviderResource {
         case "clusterId", "hostId" -> value.matches(
             "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
         case "role" -> Set.of("server", "agent", "cloudcore", "edgecore").contains(value);
+        case "credentialPurpose" -> Set.of("CLOUDCORE_BOOTSTRAP_TOKEN",
+            "EDGECORE_BOOTSTRAP_TOKEN", "KUBEEDGE_CERTIFICATE_AUTHORITY").contains(value);
+        case "cloudCoreEndpoint" -> validCloudCoreEndpoint(value);
         default -> false;
       };
       if (!valid) return false;
     }
     return true;
+  }
+
+  private static boolean validCloudCoreEndpoint(String endpoint) {
+    var matcher = java.util.regex.Pattern.compile(
+        "^(?:[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?|\\[[0-9A-Fa-f:]+]):([0-9]{1,5})$")
+        .matcher(endpoint);
+    if (!matcher.matches()) return false;
+    try {
+      int port = Integer.parseInt(matcher.group(1));
+      return port >= 1 && port <= 65535;
+    } catch (NumberFormatException invalid) {
+      return false;
+    }
   }
 
   private Map<String, Object> operation(String providerId, String operationId,

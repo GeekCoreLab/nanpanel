@@ -32,10 +32,13 @@ public final class P3FixtureClusterProvider implements ClusterProvider {
     }
     List<UUID> credentials = request.credentialReference() == null
         ? List.of() : List.of(request.credentialReference());
+    Map<String, String> parameters = new java.util.HashMap<>();
+    parameters.put("version", request.targetVersion());
+    if (!credentials.isEmpty()) parameters.put("credentialPurpose", "EDGECORE_BOOTSTRAP_TOKEN");
     return CompletableFuture.completedFuture(new ClusterPlan(UUID.randomUUID(), cluster.id(),
         cluster.generation(), request.operation(), cluster.id() + "-" + request.targetVersion(),
         List.of(new PlanStep(0, ExecutionTarget.KUBERNETES_API, null, "kubeedge.cloudcore.install",
-            Map.of("version", request.targetVersion()), credentials))));
+            Map.copyOf(parameters), credentials))));
   }
 
   @Override

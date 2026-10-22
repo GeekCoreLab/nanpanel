@@ -591,7 +591,7 @@ paths:
       tags: [KubernetesClusters]
       operationId: createClusterProviderPlan
       summary: 创建并持久化集群生命周期计划
-      description: Core 先读取注册集群的凭据隔离快照，再让匹配类型的 Provider 生成计划。此 API 只保存和校验计划，不执行 Kubernetes 或 Agent Helper 步骤。若提供凭据引用，Provider 必须把同一 opaque UUID 放入计划步骤；Core 校验其 Provider/集群作用域、撤销和到期状态，但不会向 Provider 暴露秘密材料。
+      description: Core 先读取注册集群的凭据隔离快照，再让匹配类型的 Provider 生成计划。此 API 只保存和校验计划，不执行 Kubernetes 或 Agent Helper 步骤。若提供凭据引用，Provider 必须把同一 opaque UUID 和所需 purpose 放入计划步骤；Core 校验其 Provider/集群作用域、purpose、撤销和到期状态，但不会向 Provider 暴露秘密材料。
       x-implementation-status: implemented
       security:
       - cookieAuth: []
@@ -617,7 +617,11 @@ paths:
                 credentialReference:
                   type: [string, 'null']
                   format: uuid
-                  description: 可选的 Core 托管凭据 UUID。Provider 必须把该 UUID 原样放入至少一个计划步骤，Core 验证作用域和有效状态。
+                  description: 可选的 Core 托管凭据 UUID。Provider 必须把该 UUID 原样放入至少一个计划步骤，并标明所需 purpose；Core 验证作用域、purpose 和有效状态。
+                targetEndpoint:
+                  type: [string, 'null']
+                  maxLength: 260
+                  description: Provider 特定的目标端点。KubeEdge EdgeCore 注册使用 CloudCore 可达地址 host:port；计划会校验格式并持久化非秘密参数。
                 reason: { type: string, minLength: 1, maxLength: 500 }
       responses:
         '201':
