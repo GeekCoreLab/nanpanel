@@ -38,9 +38,12 @@ key names. Core still owns durable operation state, audit redaction, typed
 Agent/Helper dispatch, and reconciliation after restart.
 
 Core now exposes an authenticated read-only Provider observation route that
-uses cached inventory; it does not refresh the cluster. Core also has a local
-durable plan and validation API with idempotency, generation drift checks, and
-Provider state restoration. It does not execute plan steps. The extension
+uses cached inventory; it does not refresh the cluster. Core also has a
+durable plan and validation API deployed to `k3s-1`, with idempotency,
+generation drift checks, and Provider state restoration covered by isolated
+Core integration tests. The deployment ran its database migration and passed
+readiness checks; an authenticated production plan request has not been
+accepted yet. The API does not execute plan steps. The extension
 contract and loader still have no KubeEdge implementation or Core lifecycle
 execution API. The v2 snapshot contract does not install CloudCore/EdgeCore,
 register/remove an Edge node, upgrade components, rotate certificates, or
