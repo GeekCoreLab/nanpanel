@@ -57,6 +57,18 @@ does not prove an interactive administrator login. Mock-mode behavior is
 covered by the Web test `Mock mode refuses to fabricate service inventory and
 Istio traffic`; `npm run build` and `npm test` passed before deployment.
 
+## Read-only live recheck
+
+At 2026-10-22 01:38 UTC, a GET of the deployed
+`/api/v1/kubernetes/service-inventory` endpoint returned HTTP 200 using the
+existing read-only API key and the target's trusted serving certificate. The
+persisted response identified `kubernetes:k3s-1` / `nanpanel-mesh`, reported
+Istio `LIVE`, and showed 3/3 discovered sidecars ready and scraped. Envoy's
+real counters still showed `mesh-client -> mesh-http` HTTP 200 and
+`mesh-denied-client -> mesh-http` HTTP 403, both labeled `MUTUAL_TLS`, with 13
+requests each. This was a read-only GET; no refresh or cluster mutation was
+issued.
+
 ## Boundary
 
 This run closes only the live Istio service-network P4 gate. It uses the
