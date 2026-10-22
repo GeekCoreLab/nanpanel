@@ -23,6 +23,13 @@
   `sha256:7f65bab01fbaba3dc82ded249850ed3cdd415116dba3fc3261e663b4372aec3b`.
   Web remained at `sha-fbf151f1bf7eb4dd87899a61d8a34cb0d639a4f1`, `1/1` Ready;
   PostgreSQL remained Running.
+- After deployment, `node web/scripts/k3s-route-live-browser.mjs` passed at
+  `2026-10-22T06:08:34Z`. It read the current Host route from `k3s-1`, fetched
+  service inventory and probes from the real Core API, and blocked every
+  topology draft write (`topologyWrites: 0`). The rendered Istio workspace
+  showed 2 Services, 2/2 Ready endpoints, 3/3 sidecars, and 26 real Envoy
+  requests: 13 HTTP 200 and 13 HTTP 403, both labeled mTLS. The screenshot at
+  `/tmp/nanpanel-k3s-istio-service-network-ui.png` was visually inspected.
 - This deploys the SPI and plugin status enumeration only. There is still no
   concrete KubeEdge Provider, Core lifecycle API, typed execution/recovery
   flow, or live KubeEdge target; it does not close the P4 KubeEdge lifecycle
