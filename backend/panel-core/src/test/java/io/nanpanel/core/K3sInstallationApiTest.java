@@ -239,6 +239,71 @@ class K3sInstallationApiTest {
   }
 
   @Test
+  void singleNodePlanInstallsOnlyServerAndWaitsForClusterMapping() throws Exception {
+    UUID serverId = insertInstallCapableHost("p4-single-node-server");
+    String token = "test-single-node-token-0123456789";
+    var dispatchBody = new AtomicReference<String>();
+    var dispatchCount = new AtomicInteger();
+    HttpServer fakeGateway = HttpServer.create(new InetSocketAddress("127.0.0.1", 59999), 0);
+    fakeGateway.createContext("/control", exchange -> {
+      dispatchCount.incrementAndGet();
+      dispatchBody.set(new String(exchange.getRequestBody().readAllBytes(),
+          java.nio.charset.StandardCharsets.UTF_8));
+      exchange.sendResponseHeaders(202, -1);
+      exchange.close();
+    });
+    fakeGateway.start();
+    try {
+      String planId = given().cookie("nanpanel_session", sessionCookie)
+          .header("X-CSRF-Token", csrfToken)
+          .contentType("application/json")
+          .body(Map.of("serverHostId", serverId.toString(), "agentHostIds", new String[0],
+              "targetVersion", "v1.33.5+k3s1", "serverUrl", "https://k3s.example.net:6443",
+              "token", token, "reason", "Verify the supported single-node installation path"))
+          .post("/api/v1/kubernetes/installations")
+          .then().statusCode(201).body("steps.size()", equalTo(1))
+          .body("steps[0].role", equalTo("server"))
+          .body(not(containsString(token))).extract().path("id");
+      given().cookie("nanpanel_session", sessionCookie)
+          .header("X-CSRF-Token", csrfToken)
+          .contentType("application/json").body(Map.of())
+          .post("/api/v1/kubernetes/installations/" + planId + "/start")
+          .then().statusCode(202).body("state", equalTo("RUNNING"));
+
+      installations.advancePlans();
+      assertNotNull(dispatchBody.get());
+      JsonNode dispatch = mapper.readTree(dispatchBody.get());
+      assertEquals("server", mapper.readTree(dispatch.path("payloadJson").asText())
+          .path("role").asText());
+      UUID operationId = UUID.fromString(dispatch.path("operationId").asText());
+      store.transaction(connection -> {
+        AuthStore.update(connection,
+            "UPDATE operation SET status='SUCCEEDED',phase='COMMIT',result_json=?,finished_at=?,updated_at=? WHERE id=?",
+            "{\"serviceState\":\"ACTIVE\",\"clusterRegistration\":\"NODE_READY\"}",
+            new java.sql.Timestamp(System.currentTimeMillis()),
+            new java.sql.Timestamp(System.currentTimeMillis()), operationId);
+        return null;
+      });
+
+      installations.advancePlans();
+      given().cookie("nanpanel_session", sessionCookie)
+          .get("/api/v1/kubernetes/installations/" + planId)
+          .then().statusCode(200)
+          .body("state", equalTo("AWAITING_CLUSTER_REGISTRATION"))
+          .body("steps.size()", equalTo(1))
+          .body("steps[0].state", equalTo("SUCCEEDED"))
+          .body(not(containsString(token)));
+      installations.advancePlans();
+      assertEquals(1, dispatchCount.get(), "Single-node plans must never dispatch an Agent install");
+      int agentOperationCount = store.transaction(connection -> AuthStore.query(connection,
+          "SELECT id FROM operation WHERE idempotency_key=?", "k3s-install:" + planId + ":1").size());
+      assertEquals(0, agentOperationCount);
+    } finally {
+      fakeGateway.stop(0);
+    }
+  }
+
+  @Test
   void unknownServerOperationStopsPlanAndPreventsAgentDispatch() throws Exception {
     UUID serverId = insertInstallCapableHost("p4-unknown-server");
     UUID agentId = insertInstallCapableHost("p4-unknown-agent");

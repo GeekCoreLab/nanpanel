@@ -82,3 +82,22 @@ Core restart recovery, and Kubernetes API interruption still need an isolated
 multi-node integration run. Do not use production `k3s-1` for first-install or
 failure-injection tests. The broader P4 K3s lifecycle gate remains open until
 that run and the separate upgrade-plan fault-recovery run pass.
+
+## 2026-10-22 single-node path follow-up
+
+- The target environment is a single already-managed K3s node, so no
+  multi-node fixture is available. Added a dedicated server-only plan regression
+  for the supported single-node shape; it uses isolated Core/H2 and a fake
+  Agent Gateway and does not run against `k3s-1`.
+- The case creates a plan with an empty Agent list, verifies the response has
+  exactly one Server step and does not echo the short token, starts the plan,
+  and advances one fake successful Server operation. The persisted plan then
+  waits in `AWAITING_CLUSTER_REGISTRATION`; another scheduler pass creates no
+  Agent dispatch or step.
+- Command:
+  `./mvnw -pl backend/panel-core -am -Dtest=K3sInstallationApiTest -Dsurefire.failIfNoSpecifiedTests=false test`
+- Result: 7 `K3sInstallationApiTest` tests passed.
+- This closes only the single-node plan-shape/state-machine code regression.
+  It does not run `k3s.preflight`, install or upgrade the target, simulate a
+  real Core process restart, or prove target-cluster failure recovery. The P4
+  lifecycle gate remains open.

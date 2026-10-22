@@ -10,7 +10,7 @@ view alone does not complete the stage.
 | Agent runtime auto-enrollment | A Host Agent that detects a local Kubernetes runtime automatically adds the corresponding cluster to managed inventory without manual kubeconfig import; define least-privilege credential acquisition and idempotent handling for unreachable or already-imported clusters. |
 | Node mapping | Reconcile ClusterNodes by Kubernetes UID, explicitly map/unmap Hosts, reject conflicting mappings, and preserve both identities after either side is removed. |
 | Basic resource management | Exercise only documented, namespace-scoped operations using the imported cluster's RBAC; reject cross-cluster IDs, unsupported kinds, unowned destructive changes, and missing permissions. |
-| K3s install and upgrade | Exercise Agent-mediated server/agent installation and upgrade plans, preflight blockers, one-node-at-a-time ordering, health gates, timeout/failure reporting, and recovery without arbitrary shell access. |
+| K3s install and upgrade | Exercise Agent-mediated single-node Server installation and server/agent plans, upgrade plans, preflight blockers, ordered steps, health gates, timeout/failure reporting, and recovery without arbitrary shell access. |
 | KubeEdge ownership | Verify CloudCore/EdgeCore status and registration state; prove an explicitly mapped EdgeCore Host still supports OS diagnostics while Agent container operations are denied. |
 | K3s Service ingress | From a normal Linux Gateway, route through an explicit ingress/Service mapping to a Ready K3s endpoint; prove health, authorization, and rollback/failure reporting. |
 | Live Istio service network | In the target cluster, show real Kubernetes Service/EndpointSlice state, injected/Ready Envoy sidecars, destination request counters, HTTP results, and mTLS labels; Mock mode must not fabricate this view and the UI must expand details on demand. |
@@ -164,7 +164,11 @@ recorded in
   operation is dispatched, and the encrypted join token is cleared. This is
   state-machine coverage, not an Agent or K3s failure run. Sequential multi-node
   execution, end-to-end restart recovery, and K3s-specific live validation
-  remain open. Code evidence is recorded in
+  remain open. A 2026-10-22 server-only plan regression now verifies a single
+  Server step, successful fake operation, transition to
+  `AWAITING_CLUSTER_REGISTRATION`, and no Agent dispatch. This is the supported
+  single-node plan shape for the currently available environment, not a live
+  install. Code evidence is recorded in
   [`k3s-preflight-agent-helper.md`](runs/2026-10-21-k3s-preflight-agent-helper.md),
   [`k3s-install-helper-capability.md`](runs/2026-10-21-k3s-install-helper-capability.md),
   and [`k3s-installation-plan-code.md`](runs/k3s-installation-plan-code.md).
@@ -203,15 +207,18 @@ recorded in
   its stable idempotency key without dispatching twice through a fake Gateway.
   This remains code-level evidence: successful auto-advance, uncertain
   remote-action reconciliation, actual Core process restart, and multi-node
-  behavior still need an isolated multi-node K3s integration run. The upgrade plan was initially
+  behavior still need K3s lifecycle acceptance. The only available target is
+  the already-managed single-node `k3s-1`; it will not be repurposed for first
+  installation or destructive upgrade. The upgrade plan was initially
   deployed at commit `6f146e3`; current `k3s-1` runs commit
   `f6c373c2fbf2f45bf88dcfec17c1a5249495e6e4`, which also includes the persistent
   installation-plan API/UI. Current image, migration, Agent, and health evidence
   is recorded in
   [`k3s-installation-plan-deploy.md`](runs/2026-10-21-k3s-installation-plan-deploy.md).
   No upgrade or installation plan was created or run on production `k3s-1`.
-  The installation plan still needs the disposable multi-node run in
-  [`k3s-installation-plan-code.md`](runs/k3s-installation-plan-code.md); upgrade
+  The single-node installation plan shape is covered in isolation, but no
+  target install or preflight was run. Multi-node installation and upgrade
+  behavior remain open because no multi-node fixture is available. Upgrade
   recovery still needs the separate acceptance in
   [`k3s-rollout-plan-code.md`](runs/k3s-rollout-plan-code.md).
   A local rootless Podman K3s fixture was attempted on 2026-10-22 but could not

@@ -491,7 +491,7 @@ hybrid-infrastructure-platform/
 - [ ] 在目标 K3s 环境验收已映射主机路由的下一跳匹配：2026-10-22 浏览器验收通过正常“添加主机资产”流程读取真实 `k3s-1` Agent 路由，并显示 `k3s-1 → 自动发现 Router 10.0.0.1`、React Flow 观测边及 Gateway 主机资产绑定；生产草稿仍为空且未写入。本地浏览器回归现在会保存并重新加载 Gateway/Host 资产，再确认只读 Router 与观测边重建；Mock API 回归不替代目标持久化验收。见[路由与 Istio UI 实测](tests/p4/runs/2026-10-22-k3s-route-istio-ui-live.md)、[路由保存 UI 回归](tests/p4/runs/2026-10-22-topology-route-save-ui.md)和[路由下一跳验收记录](tests/p4/runs/2026-10-21-k3s-route-router-matching.md)。
 - [x] 在目标 K3s 上完成单集群导入、Node UID 映射及 namespace 限定 Deployment 创建/列表/缩放/删除，见 [真实 K3s API 验收](tests/p4/runs/2026-10-21-k3s-target-api-smoke.md)。
 - [ ] 在目标 K3s 环境完成多集群隔离、跨集群资源拒绝、多节点映射冲突及 Node 移除/解除映射验收；目标 `k3s-1` 与隔离 K3s API 的跨集群拒绝已通过，但多节点映射/移除仍未在目标环境完成，见[混合集群 API 验收](tests/p4/runs/2026-10-21-k3s-target-multi-cluster-api.md)。本机 Kind 仅作为 API/CRUD 开发测试，不计入该项。
-- [ ] K3s 安装、升级前校验、健康监测、失败处理。单主机 Helper 能力、持久化逐节点升级计划及持久化多节点首次安装计划已有代码；仍缺隔离多节点安装/升级故障注入、进程重启恢复和 K3s 实机报告。本机 rootless Podman 的 K3s fixture 预检因 cpuset cgroup 未委派而未启动，详见 [fixture 预检记录](tests/p4/runs/2026-10-22-rootless-k3s-fixture-preflight.md)。
+- [ ] K3s 安装、升级前校验、健康监测、失败处理。单主机 Helper 能力、持久化逐节点升级计划及持久化多节点首次安装计划已有代码；隔离 Core 测试现覆盖零 Agent 的单节点 Server 安装计划，并确认 Server 成功后等待导入和 Ready Node 主机映射，不会派发 Agent。目标环境目前只有已管理的单节点 `k3s-1`，不在其上执行首次安装或破坏性升级；仍缺真实安装/升级故障恢复、Core 进程重启及适用的 K3s 实机报告。本机 rootless Podman 的 K3s fixture 预检因 cpuset cgroup 未委派而未启动，详见 [fixture 预检记录](tests/p4/runs/2026-10-22-rootless-k3s-fixture-preflight.md)及[安装计划代码验收](tests/p4/runs/k3s-installation-plan-code.md)。
 - [ ] KubeEdge Provider 的 CloudCore/EdgeCore 状态与注册管理。
 - [x] 普通 Linux Gateway 为 Ready K3s Service 提供入口，并验证 TLS、访问控制及回滚；见 [目标 K3s Gateway 入口验收](tests/p4/runs/2026-10-21-linux-gateway-k3s-service-ingress.md)。拓扑到远程 Gateway 的自动协调仍未实现。
 
