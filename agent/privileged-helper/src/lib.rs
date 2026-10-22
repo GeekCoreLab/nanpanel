@@ -137,6 +137,14 @@ struct K3sUpgradePayload {
     version: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct KubeEdgeJoinPayload {
+    version: String,
+    cloud_core_endpoint: String,
+    token: String,
+}
+
 struct HelperRuntime {
     allowed_uid: u32,
     read_root: Arc<File>,
@@ -147,6 +155,7 @@ struct HelperRuntime {
     agent_binary: std::path::PathBuf,
     container_runtime: Option<Arc<std::path::PathBuf>>,
     network_operations_available: bool,
+    kubeedge_available: bool,
     netbird_binary: Option<Arc<std::path::PathBuf>>,
     network_lock: tokio::sync::Mutex<()>,
 }
@@ -262,6 +271,8 @@ pub async fn serve(config: HelperConfig) -> Result<()> {
         let _ = std::fs::remove_file(&config.socket_path);
         return Err(error).context("set helper socket group");
     }
+    let kubeedge_available =
+        trusted_executable(&["/usr/local/bin/keadm", "/usr/bin/keadm"]).is_ok();
     let runtime = Arc::new(HelperRuntime {
         allowed_uid: config.allowed_agent_uid,
         read_root: Arc::new(config.allowed_read_root),
@@ -272,6 +283,7 @@ pub async fn serve(config: HelperConfig) -> Result<()> {
         agent_binary: config.agent_binary,
         container_runtime: config.container_runtime.map(Arc::new),
         network_operations_available: config.network_operations_available,
+        kubeedge_available,
         netbird_binary: config.netbird_binary.map(Arc::new),
         network_lock: tokio::sync::Mutex::new(()),
     });
@@ -374,6 +386,7 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                             runtime.container_runtime.is_some(),
                                             runtime.network_operations_available,
                                             runtime.netbird_binary.is_some(),
+                                            runtime.kubeedge_available,
                                         ))
                                         .to_string())
                                     }
@@ -446,6 +459,9 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                     }
                                     "k3s.upgrade" => {
                                         k3s_upgrade(&request, &runtime.host_root).await
+                                    }
+                                    "kubeedge.edgecore.join" => {
+                                        kubeedge_edgecore_join(&request, &runtime.host_root).await
                                     }
                                     _ => Err("unsupported capability".to_owned()),
                                 },
@@ -552,7 +568,11 @@ fn validate_capability_target(
         "network.overlay.peer_paths.read" if target.is_empty() && netbird_status_available => {
             Ok(())
         }
-        "k3s.preflight" | "k3s.install" | "k3s.upgrade" if target.is_empty() => Ok(()),
+        "k3s.preflight" | "k3s.install" | "k3s.upgrade" | "kubeedge.edgecore.join"
+            if target.is_empty() =>
+        {
+            Ok(())
+        }
         "systemd.restart" | "systemd.journal.read" if valid_systemd_unit(target) => Ok(()),
         "file.read.managed" if !target.is_empty() => Ok(()),
         "package.install" if target.is_empty() => Ok(()),
@@ -579,6 +599,7 @@ fn validate_capability_target(
         | "k3s.preflight"
         | "k3s.install"
         | "k3s.upgrade"
+        | "kubeedge.edgecore.join"
         | "systemd.restart"
         | "systemd.journal.read"
         | "package.install"
@@ -607,6 +628,7 @@ fn validate_payload_presence(request: &Request) -> std::result::Result<(), Strin
             | "k3s.preflight"
             | "k3s.install"
             | "k3s.upgrade"
+            | "kubeedge.edgecore.join"
     );
     if required != request.payload_json.is_some() {
         return Err("DENIED: payload presence does not match capability schema".to_owned());
@@ -628,6 +650,7 @@ fn available_capabilities(
     has_container_runtime: bool,
     network_operations_available: bool,
     netbird_status_available: bool,
+    kubeedge_available: bool,
 ) -> Vec<&'static str> {
     let mut capabilities = vec![
         "systemd.restart",
@@ -657,6 +680,9 @@ fn available_capabilities(
     }
     if netbird_status_available {
         capabilities.push("network.overlay.peer_paths.read");
+    }
+    if kubeedge_available {
+        capabilities.push("kubeedge.edgecore.join");
     }
     capabilities
 }
@@ -1410,6 +1436,107 @@ async fn k3s_upgrade(request: &Request, host_root: &File) -> std::result::Result
         "rollbackOnHealthFailure": true
     }))
     .map_err(|_| "FAILED: unable to encode K3s upgrade result".to_owned())
+}
+
+async fn kubeedge_edgecore_join(
+    request: &Request,
+    host_root: &File,
+) -> std::result::Result<String, String> {
+    let payload: KubeEdgeJoinPayload = parse_payload(request)?;
+    if !valid_kubeedge_join_payload(&payload) {
+        return Err("DENIED: KubeEdge EdgeCore join parameters are invalid".to_owned());
+    }
+    if !Path::new("/run/systemd/system").is_dir() {
+        return Err("DENIED: EdgeCore join requires a running systemd host".to_owned());
+    }
+
+    let systemd_directory = open_beneath(
+        host_root,
+        "etc/systemd/system",
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        0,
+    )
+    .map_err(|_| "DENIED: host systemd unit directory is unavailable or unsafe".to_owned())?;
+    if host_entry_exists(&systemd_directory, "edgecore.service")? {
+        return Err("DENIED: an EdgeCore service already exists on this host".to_owned());
+    }
+
+    let keadm = trusted_executable(&["/usr/local/bin/keadm", "/usr/bin/keadm"])?;
+    let systemctl = trusted_executable(&["/usr/bin/systemctl", "/bin/systemctl"])?;
+    let args = vec![
+        "join".to_owned(),
+        format!("--cloudcore-ipport={}", payload.cloud_core_endpoint),
+        format!("--token={}", payload.token),
+        format!("--kubeedge-version={}", payload.version),
+    ];
+    if run_fixed_command(&keadm, &args, Duration::from_secs(600))
+        .await
+        .is_err()
+    {
+        return Err(
+            "UNCERTAIN: keadm join did not complete; inspect EdgeCore service and cluster registration before retrying"
+                .to_owned(),
+        );
+    }
+    let service_state = run_fixed_command(
+        &systemctl,
+        &["is-active".to_owned(), "edgecore.service".to_owned()],
+        Duration::from_secs(10),
+    )
+    .await
+    .map_err(|_| "UNCERTAIN: keadm completed but EdgeCore service is not active".to_owned())?;
+    if service_state != "active" {
+        return Err("UNCERTAIN: keadm completed but EdgeCore service is not active".to_owned());
+    }
+    serde_json::to_string(&serde_json::json!({
+        "schemaVersion": 1,
+        "component": "edgecore",
+        "version": payload.version,
+        "service": "edgecore.service",
+        "serviceState": "ACTIVE",
+        "bootstrapTokenReturned": false
+    }))
+    .map_err(|_| "FAILED: unable to encode EdgeCore join result".to_owned())
+}
+
+fn valid_kubeedge_join_payload(payload: &KubeEdgeJoinPayload) -> bool {
+    let version = payload.version.strip_prefix('v').unwrap_or_default();
+    let version_parts = version.split('.').collect::<Vec<_>>();
+    let stable_version = version_parts.len() == 3
+        && version_parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()));
+    let endpoint = payload.cloud_core_endpoint.as_str();
+    let endpoint_valid = endpoint.len() <= 260
+        && endpoint.rsplit_once(':').is_some_and(|(host, port)| {
+            let host = if host.starts_with('[') && host.ends_with(']') {
+                &host[1..host.len() - 1]
+            } else {
+                host
+            };
+            let valid_host = host.parse::<std::net::IpAddr>().is_ok()
+                || (host.len() <= 253
+                    && host.split('.').all(|label| {
+                        !label.is_empty()
+                            && label.len() <= 63
+                            && label.as_bytes()[0].is_ascii_alphanumeric()
+                            && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                            && label
+                                .bytes()
+                                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                    }));
+            valid_host
+                && port.parse::<u16>().is_ok_and(|value| value > 0)
+                && (host.contains(':') == endpoint.starts_with('['))
+        });
+    let token = payload.token.as_str();
+    let token_valid = (32..=4096).contains(&token.len())
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        && token.split('.').count() == 3
+        && token.split('.').all(|part| !part.is_empty());
+    stable_version && endpoint_valid && token_valid
 }
 
 fn valid_k3s_upgrade_path(current: &str, target: &str) -> bool {
@@ -3234,6 +3361,84 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn kubeedge_join_accepts_only_bounded_stable_version_endpoint_and_token() {
+        let valid = KubeEdgeJoinPayload {
+            version: "v1.23.1".to_owned(),
+            cloud_core_endpoint: "cloud.example.test:10000".to_owned(),
+            token: format!("{}.{}.{}", "a".repeat(48), "b".repeat(48), "c".repeat(48)),
+        };
+        assert!(valid_kubeedge_join_payload(&valid));
+        assert!(valid_kubeedge_join_payload(&KubeEdgeJoinPayload {
+            cloud_core_endpoint: "[2001:db8::5]:10000".to_owned(),
+            ..valid.clone()
+        }));
+
+        assert!(!valid_kubeedge_join_payload(&KubeEdgeJoinPayload {
+            version: "v1.23.1-rc1".to_owned(),
+            ..valid.clone()
+        }));
+        assert!(!valid_kubeedge_join_payload(&KubeEdgeJoinPayload {
+            cloud_core_endpoint: "https://cloud.example.test:10000".to_owned(),
+            ..valid.clone()
+        }));
+        assert!(!valid_kubeedge_join_payload(&KubeEdgeJoinPayload {
+            cloud_core_endpoint: "cloud.example.test:10000;id".to_owned(),
+            ..valid.clone()
+        }));
+        assert!(!valid_kubeedge_join_payload(&KubeEdgeJoinPayload {
+            cloud_core_endpoint: "cloud.example.test:0".to_owned(),
+            ..valid.clone()
+        }));
+        assert!(!valid_kubeedge_join_payload(&KubeEdgeJoinPayload {
+            token: format!("{}\n--image-repository=evil", "d".repeat(48)),
+            ..valid
+        }));
+    }
+
+    #[test]
+    fn kubeedge_join_is_a_typed_empty_target_helper_capability() {
+        let request = Request {
+            operation_id: "operation-1".to_owned(),
+            idempotency_key: "kubeedge-join-1".to_owned(),
+            capability: "kubeedge.edgecore.join".to_owned(),
+            target: String::new(),
+            deadline_epoch_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64
+                + 10 * 60 * 1000,
+            payload_json: Some(
+                r#"{"version":"v1.23.1","cloudCoreEndpoint":"cloud.example.test:10000","token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.cccccccccccccccccccccccccccccccccccccccc"}"#
+                    .to_owned(),
+            ),
+        };
+        assert!(validate_envelope(&request).is_ok());
+        assert!(validate_payload_presence(&request).is_ok());
+        assert!(
+            validate_capability_target(&request.capability, &request.target, false, false, false,)
+                .is_ok()
+        );
+        assert!(
+            serde_json::from_str::<KubeEdgeJoinPayload>(
+                request.payload_json.as_deref().unwrap_or_default()
+            )
+            .is_ok_and(|payload| valid_kubeedge_join_payload(&payload))
+        );
+
+        let mut injected = request;
+        injected.payload_json = Some(
+            r#"{"version":"v1.23.1","cloudCoreEndpoint":"cloud.example.test:10000","token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.cccccccccccccccccccccccccccccccccccccccc","command":"id"}"#
+                .to_owned(),
+        );
+        assert!(
+            serde_json::from_str::<KubeEdgeJoinPayload>(
+                injected.payload_json.as_deref().unwrap_or_default()
+            )
+            .is_err()
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn k3s_install_file_publication_is_private_and_never_overwrites() -> Result<()> {
@@ -3367,7 +3572,7 @@ mod tests {
         assert!(!valid_container_image("./nginx"));
         assert!(valid_network_interface("br-0"));
         assert!(!valid_network_interface("-eth0"));
-        let capabilities = available_capabilities(true, true, true);
+        let capabilities = available_capabilities(true, true, true, true);
         for capability in [
             "systemd.restart",
             "systemd.journal.read",
@@ -3380,6 +3585,7 @@ mod tests {
             "container.deploy",
             "network.firewall.expose",
             "k3s.preflight",
+            "kubeedge.edgecore.join",
             "network.overlay.peer_paths.read",
         ] {
             assert!(capabilities.contains(&capability));
@@ -3432,10 +3638,21 @@ mod tests {
             validate_capability_target("network.firewall.expose", "ssh-temp", false, true, false)
                 .is_ok()
         );
-        assert!(!available_capabilities(false, false, false).contains(&"network.firewall.expose"));
-        assert!(available_capabilities(false, true, false).contains(&"network.firewall.expose"));
         assert!(
-            !available_capabilities(false, false, false)
+            available_capabilities(false, false, false, true).contains(&"kubeedge.edgecore.join")
+        );
+        assert!(
+            !available_capabilities(false, false, false, false).contains(&"kubeedge.edgecore.join")
+        );
+        assert!(
+            !available_capabilities(false, false, false, false)
+                .contains(&"network.firewall.expose")
+        );
+        assert!(
+            available_capabilities(false, true, false, false).contains(&"network.firewall.expose")
+        );
+        assert!(
+            !available_capabilities(false, false, false, false)
                 .contains(&"network.overlay.peer_paths.read")
         );
     }

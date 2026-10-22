@@ -717,6 +717,56 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
+  /api/v1/cluster-providers/{providerId}/operations/{operationId}/execute:
+    parameters:
+    - name: providerId
+      in: path
+      required: true
+      schema: { type: string }
+    - name: operationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    post:
+      tags: [KubernetesClusters]
+      operationId: executeClusterProviderOperation
+      summary: 执行已校验的集群生命周期计划
+      description: 需要近期管理员重新认证。仅将当前 kubeedge-core join_edgecore 单步计划安全派发至计划指定主机的 Agent Helper；Core 再次检查集群 generation、Provider 计划与一次性 EdgeCore token 凭据。异步结果通过返回的 Host Operation 查询。当前其他 Provider 操作不支持执行。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      responses:
+        '202':
+          description: Helper 操作已接受，后续通过 Operation API 查询。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Operation' }
+          headers:
+            Location: { $ref: '#/components/headers/Location' }
+            Retry-After: { $ref: '#/components/headers/RetryAfter' }
+            Idempotency-Replayed: { $ref: '#/components/headers/IdempotencyReplayed' }
+        '200':
+          description: 对应幂等 Helper 操作已完成并返回原结果。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Operation' }
+          headers:
+            Idempotency-Replayed: { $ref: '#/components/headers/IdempotencyReplayed' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 管理会话需要近期重新认证或 CSRF 校验失败。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 计划、集群快照、凭据或目标主机不满足执行条件。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
   /api/v1/kubernetes/clusters/{clusterId}/topology/namespaces:
     parameters:
     - name: clusterId

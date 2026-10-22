@@ -37,6 +37,8 @@ public class ClusterProviderResource {
       "clusterId", "hostId", "role", "cloudCoreEndpoint", "credentialPurpose");
   @Inject NetworkProviderRegistry registry;
   @Inject KubernetesClusterRegistryService clusters;
+  @Inject ClusterProviderCredentialStore credentialStore;
+  @Inject HostHelperOperationResource helperOperations;
   @Inject AuthStore store;
   @Inject ObjectMapper mapper;
   @Context jakarta.ws.rs.container.ContainerRequestContext request;
@@ -266,6 +268,89 @@ public class ClusterProviderResource {
     return transition(row, actor, result.successful() ? "VALIDATED" : "DRIFTED", detail);
   }
 
+  @POST
+  @Path("{providerId}/operations/{operationId}/execute")
+  public Response execute(@PathParam("providerId") String providerId,
+      @PathParam("operationId") String operationId) {
+    Map<String, Object> actor = session();
+    recent(actor);
+    Map<String, Object> row = validatedOperation(providerId, operationId, actor);
+    ClusterProvider.ClusterPlan plan = deserialize(row.get("plan_configuration"));
+    if (!"kubeedge-core".equals(providerId) || !"join_edgecore".equals(plan.operation())
+        || plan.steps().size() != 1) {
+      throw fail(409, "CLUSTER_PROVIDER_EXECUTION_UNSUPPORTED",
+          "该集群 Provider 计划没有受支持的 Helper 执行器");
+    }
+    ClusterProvider.PlanStep step = plan.steps().getFirst();
+    if (step.target() != ClusterProvider.ExecutionTarget.AGENT_HELPER
+        || !"kubeedge.edgecore.join".equals(step.capability())
+        || step.hostId() == null || step.credentialReferences().size() != 1) {
+      throw fail(409, "CLUSTER_PROVIDER_PLAN_UNSAFE", "EdgeCore 计划无法安全派发");
+    }
+    UUID clusterId = (UUID)row.get("cluster_id");
+    UUID credentialId = step.credentialReferences().getFirst();
+    String purpose = credentialPurpose(plan, credentialId);
+    if (!"EDGECORE_BOOTSTRAP_TOKEN".equals(purpose)
+        || !credentialAvailable(providerId, clusterId, credentialId, purpose)) {
+      throw fail(409, "CLUSTER_CREDENTIAL_UNAVAILABLE", "EdgeCore 加入凭据不可用");
+    }
+    if (!planHostsAvailable(plan)) {
+      throw fail(409, "CLUSTER_PROVIDER_TARGET_UNAVAILABLE", "计划目标主机不可用");
+    }
+
+    ClusterProvider.ClusterSnapshot current = snapshot(clusterId);
+    ClusterProvider provider = provider(providerId);
+    if (current.generation() != plan.generation()
+        || !provider.clusterKinds().contains(current.kind())) {
+      transition(row, actor, "DRIFTED", "Cluster inventory changed before execution");
+      throw fail(409, "CLUSTER_PROVIDER_PLAN_DRIFTED", "集群状态已变化，请重新生成生命周期计划");
+    }
+    var reference = reference(current, provider);
+    var access = access(current);
+    ClusterProvider.ValidationResult restored;
+    ClusterProvider.ValidationResult result;
+    try {
+      restored = await(provider.restorePlan(reference, plan, access));
+      result = restored.successful() ? await(provider.validate(reference, plan, access)) : restored;
+    } catch (RuntimeException invalid) {
+      result = new ClusterProvider.ValidationResult(false, "VALIDATION_FAILED",
+          "Provider plan could not be safely restored or revalidated");
+    }
+    if (result == null || !result.successful()) {
+      String detail = result == null ? "Provider plan validation returned no result"
+          : "Provider plan validation failed (" + result.code() + ")";
+      transition(row, actor, "DRIFTED", detail);
+      throw fail(409, "CLUSTER_PROVIDER_PLAN_DRIFTED", "EdgeCore 加入条件已变化，请重新生成计划");
+    }
+
+    String token;
+    try {
+      token = credentialStore.open(credentialId, clusterId, providerId, purpose);
+    } catch (RuntimeException unavailable) {
+      throw fail(409, "CLUSTER_CREDENTIAL_UNAVAILABLE", "EdgeCore 加入凭据不可用");
+    }
+    String executionKey = digest("cluster-provider-execution\n" + plan.id() + "\n"
+        + step.ordinal());
+    Response submitted = helperOperations.submitPlannedKubeEdgeJoin(step.hostId(), executionKey,
+        step.parameters().get("version"), step.parameters().get("cloudCoreEndpoint"), token,
+        "Execute validated KubeEdge EdgeCore join plan " + plan.id(),
+        String.valueOf(actor.get("user_id")));
+    @SuppressWarnings("unchecked")
+    Map<String, Object> operation = (Map<String, Object>)submitted.getEntity();
+    store.transaction(connection -> {
+      update(connection, "UPDATE cluster_provider_operation SET detail=?,updated_at=? "
+          + "WHERE provider_id=? AND id=? AND state='VALIDATED'",
+          bounded("EdgeCore join dispatched as host operation " + operation.get("id")
+              + "; inspect the host operation for completion"), System.currentTimeMillis(),
+          providerId, plan.id());
+      audit(connection, String.valueOf(actor.get("user_id")), "cluster-provider.execute",
+          "cluster-provider-operation", plan.id().toString(), "ACCEPTED", remoteAddress(),
+          "Dispatched EdgeCore join as host operation " + operation.get("id"));
+      return null;
+    });
+    return submitted;
+  }
+
   private ClusterProvider provider(String providerId) {
     return registry.clusterProviders().stream().filter(value -> value.id().equals(providerId))
         .findFirst().orElseThrow(
@@ -461,6 +546,20 @@ public class ClusterProviderResource {
       if (rows.isEmpty()) throw fail(404, "NOT_FOUND", "集群 Provider 操作不存在");
       if (!"PLANNED".equals(rows.getFirst().get("state"))) {
         throw fail(409, "INVALID_OPERATION_STATE", "当前集群 Provider 操作不能校验");
+      }
+      return rows.getFirst();
+    });
+  }
+
+  private Map<String, Object> validatedOperation(String providerId, String operationId,
+      Map<String, Object> actor) {
+    return store.transaction(connection -> {
+      var rows = query(connection,
+          "SELECT * FROM cluster_provider_operation WHERE provider_id=? AND id=? AND requested_by=?",
+          providerId, uuid(operationId), actor.get("user_id"));
+      if (rows.isEmpty()) throw fail(404, "NOT_FOUND", "集群 Provider 操作不存在");
+      if (!"VALIDATED".equals(rows.getFirst().get("state"))) {
+        throw fail(409, "INVALID_OPERATION_STATE", "只有已验证的集群 Provider 操作可以执行");
       }
       return rows.getFirst();
     });

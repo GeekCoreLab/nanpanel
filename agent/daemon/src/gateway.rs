@@ -708,6 +708,14 @@ struct K3sUpgradePayload {
     version: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct KubeEdgeJoinPayload {
+    version: String,
+    cloud_core_endpoint: String,
+    token: String,
+}
+
 async fn dispatch_control(
     State(gateway): State<Gateway>,
     headers: HeaderMap,
@@ -791,8 +799,13 @@ async fn dispatch_control(
 
 fn valid_dispatch_target(capability: &str, target: &str) -> bool {
     match capability {
-        "agent.update" | "package.install" | "container.list" | "k3s.preflight" | "k3s.install"
-        | "k3s.upgrade" => target.is_empty(),
+        "agent.update"
+        | "package.install"
+        | "container.list"
+        | "k3s.preflight"
+        | "k3s.install"
+        | "k3s.upgrade"
+        | "kubeedge.edgecore.join" => target.is_empty(),
         "systemd.restart" | "systemd.journal.read" => valid_service_unit(target),
         "file.write.protected" => valid_file_target(target),
         "container.logs" | "container.start" | "container.stop" | "container.deploy" => {
@@ -815,6 +828,12 @@ fn valid_dispatch_payload(capability: &str, payload: Option<&str>) -> bool {
                     && valid_k3s_version(&payload.version)
             })
         }
+        ("kubeedge.edgecore.join", Some(json)) => serde_json::from_str::<KubeEdgeJoinPayload>(json)
+            .is_ok_and(|payload| {
+                valid_kubeedge_version(&payload.version)
+                    && valid_cloud_core_endpoint(&payload.cloud_core_endpoint)
+                    && valid_kubeedge_token(&payload.token)
+            }),
         ("package.install" | "file.write.protected", Some(json)) => {
             serde_json::from_str::<serde_json::Value>(json).is_ok_and(|value| value.is_object())
         }
@@ -889,6 +908,51 @@ fn valid_k3s_version(version: &str) -> bool {
                 && !revision.is_empty()
                 && revision.bytes().all(|b| b.is_ascii_digit())
         })
+}
+
+fn valid_kubeedge_version(version: &str) -> bool {
+    let Some(version) = version.strip_prefix('v') else {
+        return false;
+    };
+    let components = version.split('.').collect::<Vec<_>>();
+    components.len() == 3
+        && components
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn valid_cloud_core_endpoint(endpoint: &str) -> bool {
+    endpoint.len() <= 260
+        && endpoint.rsplit_once(':').is_some_and(|(host, port)| {
+            let host = if host.starts_with('[') && host.ends_with(']') {
+                &host[1..host.len() - 1]
+            } else {
+                host
+            };
+            let valid_host = host.parse::<std::net::IpAddr>().is_ok()
+                || (host.len() <= 253
+                    && host.split('.').all(|label| {
+                        !label.is_empty()
+                            && label.len() <= 63
+                            && label.as_bytes()[0].is_ascii_alphanumeric()
+                            && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                            && label
+                                .bytes()
+                                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                    }));
+            valid_host
+                && port.parse::<u16>().is_ok_and(|value| value > 0)
+                && (host.contains(':') == endpoint.starts_with('['))
+        })
+}
+
+fn valid_kubeedge_token(token: &str) -> bool {
+    (32..=4096).contains(&token.len())
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        && token.split('.').count() == 3
+        && token.split('.').all(|part| !part.is_empty())
 }
 
 fn valid_k3s_token(token: &str) -> bool {
@@ -1450,6 +1514,25 @@ mod tests {
         assert!(!valid_dispatch_payload(
             "k3s.upgrade",
             Some(r#"{"role":"server","version":"latest","command":"id"}"#),
+        ));
+        assert!(valid_dispatch_target("kubeedge.edgecore.join", ""));
+        assert!(valid_dispatch_payload(
+            "kubeedge.edgecore.join",
+            Some(
+                r#"{"version":"v1.23.1","cloudCoreEndpoint":"cloud.example.test:10000","token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.cccccccccccccccccccccccccccccccccccccccc"}"#
+            ),
+        ));
+        assert!(!valid_dispatch_payload(
+            "kubeedge.edgecore.join",
+            Some(
+                r#"{"version":"v1.23.1","cloudCoreEndpoint":"cloud.example.test:10000","token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.cccccccccccccccccccccccccccccccccccccccc","command":"id"}"#
+            ),
+        ));
+        assert!(!valid_dispatch_payload(
+            "kubeedge.edgecore.join",
+            Some(
+                r#"{"version":"v1.23.1","cloudCoreEndpoint":"cloud.example.test:10000;id","token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.cccccccccccccccccccccccccccccccccccccccc"}"#
+            ),
         ));
     }
 

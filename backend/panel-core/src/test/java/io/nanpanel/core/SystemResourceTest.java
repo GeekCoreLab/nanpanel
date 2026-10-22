@@ -860,6 +860,18 @@ class SystemResourceTest {
         "SELECT id FROM operation WHERE idempotency_key=?", "helper-kubeedge-owned-01")).size());
     given().cookie("nanpanel_session", restoredCookie)
         .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("Idempotency-Key", "helper-kubeedge-direct-01")
+        .contentType("application/json")
+        .body(Map.of("capability", "kubeedge.edgecore.join", "target", "",
+            "payload", Map.of("version", "v1.23.1",
+                "cloudCoreEndpoint", "cloud.example.test:10000", "token", "a.b.c"),
+            "reason", "Verify KubeEdge joins require a lifecycle plan", "expectedGeneration", 1))
+        .post("/api/v1/hosts/" + hostId + "/operations")
+        .then().statusCode(403).body("code", equalTo("CLUSTER_PROVIDER_PLAN_REQUIRED"));
+    assertEquals(0, store.transaction(c -> AuthStore.query(c,
+        "SELECT id FROM operation WHERE idempotency_key=?", "helper-kubeedge-direct-01")).size());
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
         .delete("/api/v1/kubernetes/clusters/" + kubeedgeClusterId + "/nodes/"
             + kubeedgeNodeUid + "/host")
         .then().statusCode(409).body("code", equalTo("KUBERNETES_CONTAINER_OWNED"));

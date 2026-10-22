@@ -44,7 +44,7 @@ public class HostHelperOperationResource {
       "package.install", "file.write.protected", "container.list", "container.logs",
       "container.start", "container.stop", "container.deploy", "network.firewall.expose",
       "file.list", "file.read", "file.write", "file.delete", "k3s.preflight", "k3s.install",
-      "k3s.upgrade");
+      "k3s.upgrade", "kubeedge.edgecore.join");
   private static final java.util.regex.Pattern PACKAGE_NAME =
       java.util.regex.Pattern.compile("[A-Za-z0-9][A-Za-z0-9+_.:-]{0,127}");
   private static final java.util.regex.Pattern FILE_NAME =
@@ -103,6 +103,10 @@ public class HostHelperOperationResource {
       @PathParam("hostId") String hostValue,
       @HeaderParam("Idempotency-Key") String idempotencyKey,
       HelperOperationRequest input) {
+    if (input != null && "kubeedge.edgecore.join".equals(input.capability())) {
+      throw fail(403, "CLUSTER_PROVIDER_PLAN_REQUIRED",
+          "EdgeCore 加入必须通过已验证的 KubeEdge 生命周期计划提交");
+    }
     return submitAs(uuid(hostValue, "hostId"), idempotencyKey, input, actorId(), clientIp());
   }
 
@@ -126,6 +130,20 @@ public class HostHelperOperationResource {
             expectedGeneration), actor, null);
   }
 
+  Response submitPlannedKubeEdgeJoin(UUID hostId, String idempotencyKey, String version,
+      String cloudCoreEndpoint, String token, String reason, String actor) {
+    long expectedGeneration = store.transaction(connection -> {
+      var rows = query(connection, "SELECT generation FROM host WHERE id=?", hostId);
+      if (rows.isEmpty()) throw fail(404, "NOT_FOUND", "计划中的主机资产不存在");
+      return ((Number)rows.getFirst().get("generation")).longValue();
+    });
+    var payload = mapper.createObjectNode().put("version", version)
+        .put("cloudCoreEndpoint", cloudCoreEndpoint).put("token", token);
+    return submitAs(hostId, idempotencyKey,
+        new HelperOperationRequest("kubeedge.edgecore.join", "", payload, reason, 600,
+            expectedGeneration), actor, null);
+  }
+
   private Response submitAs(UUID hostId, String idempotencyKey, HelperOperationRequest input,
                             String actor, String remoteAddress) {
     String key = validateIdempotencyKey(idempotencyKey);
@@ -136,7 +154,8 @@ public class HostHelperOperationResource {
     String reason = input.reason() == null ? "" : input.reason().trim();
     int timeoutSeconds = input.timeoutSeconds() == null ? defaultTimeout(input.capability())
         : input.timeoutSeconds();
-    int maximumTimeoutSeconds = Set.of("k3s.install", "k3s.upgrade").contains(input.capability())
+    int maximumTimeoutSeconds = Set.of("k3s.install", "k3s.upgrade", "kubeedge.edgecore.join")
+        .contains(input.capability())
         ? 600 : 300;
     if (reason.isEmpty() || reason.length() > 500 ||
         reason.chars().anyMatch(Character::isISOControl) ||
@@ -379,7 +398,8 @@ public class HostHelperOperationResource {
 
   private void validateTargetAndPayload(String capability, String target, JsonNode payload) {
     boolean validTarget = switch (capability) {
-      case "package.install", "container.list", "k3s.preflight", "k3s.install", "k3s.upgrade" -> target.isEmpty();
+      case "package.install", "container.list", "k3s.preflight", "k3s.install", "k3s.upgrade",
+          "kubeedge.edgecore.join" -> target.isEmpty();
       case "file.write.protected" -> FILE_NAME.matcher(target).matches();
       case "file.list" -> validHostPath(target, true);
       case "file.read", "file.write", "file.delete" -> validHostPath(target, false);
@@ -438,6 +458,23 @@ public class HostHelperOperationResource {
           version == null || !version.isTextual() ||
           !version.asText().matches("v[0-9]+\\.[0-9]+\\.[0-9]+\\+k3s[0-9]+"))
         throw fail(422, "VALIDATION_FAILED", "K3s 升级角色或固定版本无效");
+      return;
+    }
+    if (capability.equals("kubeedge.edgecore.join")) {
+      JsonNode version = payload == null ? null : payload.get("version");
+      JsonNode endpoint = payload == null ? null : payload.get("cloudCoreEndpoint");
+      JsonNode token = payload == null ? null : payload.get("token");
+      boolean validVersion = version != null && version.isTextual()
+          && version.asText().matches("v[0-9]+\\.[0-9]+\\.[0-9]+");
+      boolean validEndpoint = endpoint != null && endpoint.isTextual()
+          && validCloudCoreEndpoint(endpoint.asText());
+      boolean validToken = token != null && token.isTextual()
+          && token.asText().matches("[A-Za-z0-9_.-]{32,4096}")
+          && token.asText().split("\\.").length == 3;
+      if (payload == null || !payload.isObject() || payload.size() != 3
+          || !validVersion || !validEndpoint || !validToken) {
+        throw fail(422, "VALIDATION_FAILED", "KubeEdge EdgeCore 加入参数无效");
+      }
       return;
     }
     if (capability.equals("file.write.protected")) {
@@ -508,6 +545,19 @@ public class HostHelperOperationResource {
       }
       return true;
     } catch (IllegalArgumentException | java.net.UnknownHostException invalid) {
+      return false;
+    }
+  }
+
+  private static boolean validCloudCoreEndpoint(String endpoint) {
+    var matcher = java.util.regex.Pattern.compile(
+        "^(?:[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?|\\[[0-9A-Fa-f:]+]):([0-9]{1,5})$")
+        .matcher(endpoint);
+    if (!matcher.matches()) return false;
+    try {
+      int port = Integer.parseInt(matcher.group(1));
+      return port >= 1 && port <= 65535;
+    } catch (NumberFormatException invalid) {
       return false;
     }
   }

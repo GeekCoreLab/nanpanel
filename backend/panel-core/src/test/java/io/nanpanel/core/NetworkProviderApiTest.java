@@ -233,6 +233,10 @@ class NetworkProviderApiTest {
         .post("/api/v1/cluster-providers/p3-fixture-cluster-provider/operations/"
             + edgeOperationId + "/validate")
         .then().statusCode(200).body("state", equalTo("VALIDATED"));
+    given().cookie("nanpanel_session", session.cookie()).header("X-CSRF-Token", session.csrf())
+        .post("/api/v1/cluster-providers/p3-fixture-cluster-provider/operations/"
+            + edgeOperationId + "/execute")
+        .then().statusCode(409).body("code", equalTo("CLUSTER_PROVIDER_EXECUTION_UNSUPPORTED"));
     store.transaction(connection -> {
       AuthStore.update(connection,
           "UPDATE kubernetes_cluster_node SET host_id=? WHERE cluster_id=? AND node_uid=?",
