@@ -68,3 +68,24 @@ Rechecked on 2026-10-22 from the current `main` worktree:
 
 This is read-only route and Istio UI revalidation. It does not perform the
 separately skipped `k3s.preflight` operation or save production topology.
+
+## Current-state revalidation at 2026-10-22 05:13 UTC
+
+- `ssh k3s-1 kubectl get nodes -o wide` confirmed the target is still exactly
+  one Ready node, `k3s-1`, running K3s `v1.33.5+k3s1`. Core and Web remained
+  `1/1` available. The four `nanpanel-mesh` workloads were Running; the three
+  application workloads each had a Ready Envoy sidecar, while the TCP probe
+  target remained un-injected by design.
+- `node web/scripts/k3s-route-live-browser.mjs` returned `PASS` against the
+  deployed UI and live Core inventory. The route observation was timestamped
+  `2026-10-22T05:13:10.838+00:00`; the page displayed the matched Router and
+  the Istio `LIVE`/`3/3` sidecar summary. The rendered traffic panel showed
+  real HTTP 200 and HTTP 403 rows with mTLS labels. `topologyWrites` was `0`.
+- Inspected screenshots at `/tmp/nanpanel-k3s-route-live-ui.png` and
+  `/tmp/nanpanel-k3s-gateway-asset-live-ui.png`: the topology canvas, Host
+  route diagnostics, Istio Service/traffic view, and NetBird controls remain
+  distinct sections rather than one undifferentiated graph panel.
+
+This recheck did not run `k3s.preflight`, update `.env`, or persist a
+production topology revision. It refreshes the live evidence for real Istio
+data and the UI layout only.
