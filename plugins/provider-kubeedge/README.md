@@ -27,7 +27,7 @@ These Core paths have unit and integration coverage documented in
 [`tests/p4/runs/2026-10-21-kubeedge-edgecore-process-observation.md`](../../tests/p4/runs/2026-10-21-kubeedge-edgecore-process-observation.md).
 They do not install, join, upgrade, rotate credentials for, or remove
 CloudCore/EdgeCore. The provider JAR is packaged in the deployed Core image
-`sha-fb6ee0a1ebded95039cbd2834830dcce18b13351` and present in `/work/providers`
+`sha-3ae2c2345bbddb932c343b1f19e64662c252172a` and present in `/work/providers`
 on `k3s-1`; the authenticated provider-list route could not be checked because
 the current admin login was rejected. No live KubeEdge target is available, so
 this is not live KubeEdge acceptance.
