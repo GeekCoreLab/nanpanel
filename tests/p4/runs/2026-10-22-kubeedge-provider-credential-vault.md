@@ -95,3 +95,21 @@ lifecycle acceptance.
 This deployment proves schema startup, readiness, the authentication boundary,
 and no regression in the real Istio UI. It does not prove authenticated
 credential CRUD on the target or any KubeEdge lifecycle execution.
+
+## Opaque plan reference deployment on `k3s-1`
+
+- Commit `77abd70ce8ad12f7720656e60cb72a2470229f00` passed GitHub Actions run
+  `39768717507`; Rust formatting/check/lint/tests, Maven verify, Web build, and
+  both GHCR image publications succeeded.
+- Only `deployment/nanpanel-core` was updated to
+  `ghcr.io/geekcorelab/nanpanel-core:sha-77abd70ce8ad12f7720656e60cb72a2470229f00`.
+  Both `core` and `agent-gateway` containers are Ready with zero restarts and
+  digest `sha256:a4e08e72139c774ca26a7af2f2a90a300291c49949ce24a57c620ec10ffbf782`.
+  The old Pod exited; Web stayed on `sha-8722235...` and PostgreSQL kept its
+  existing Pod/PVC.
+- Core `/q/health/ready` returned `UP` and its database check returned `UP`.
+  `node web/scripts/k3s-route-live-browser.mjs` passed against the deployment,
+  showing the real route gateway `10.0.0.1`; the acceptance script also asserts
+  the live Istio HTTP 200/403 flow rows and reported `topologyWrites: 0`.
+- This deploy adds opaque UUID plan persistence and restoration-time credential
+  status checks only. No KubeEdge target or lifecycle executor was introduced.
