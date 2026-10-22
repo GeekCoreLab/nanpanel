@@ -634,19 +634,10 @@ public class ClusterProviderResource {
         detail = "EdgeCore join Helper operation ended with status " + helperStatus;
       }
       case "SUCCEEDED" -> {
-        boolean registered = !query(connection,
-            "SELECT n.node_uid FROM kubernetes_cluster_node n "
-                + "JOIN host h ON h.id=n.host_id "
-                + "WHERE n.cluster_id=? AND n.host_id=? AND n.node_present=TRUE "
-                + "AND n.kubeedge_edge=TRUE AND n.ready=TRUE "
-                + "AND LOWER(n.node_name)=LOWER(h.hostname) "
-                + "AND n.observed_at >= ? LIMIT 1",
-            row.get("cluster_id"), plan.steps().getFirst().hostId(),
-            hostOperation.get("finished_at")).isEmpty();
-        nextState = registered ? "SUCCEEDED" : "AWAITING_NODE_REGISTRATION";
-        detail = registered
-            ? "EdgeCore Helper succeeded and a fresh Ready Edge Node matching the Host is mapped"
-            : "EdgeCore service is active; waiting for a fresh Ready Edge Node to be mapped to the Host";
+        EdgeNodeMapping mapping = mapFreshEdgeNode(connection, row, plan,
+            hostOperation.get("finished_at"), actor);
+        nextState = mapping.mapped() ? "SUCCEEDED" : "AWAITING_NODE_REGISTRATION";
+        detail = mapping.detail();
       }
       default -> { return view(row); }
     }
@@ -673,6 +664,81 @@ public class ClusterProviderResource {
         row.get("provider_id"), row.get("id"));
     return current.isEmpty() ? view(row) : view(current.getFirst());
   }
+
+  private EdgeNodeMapping mapFreshEdgeNode(java.sql.Connection connection,
+      Map<String, Object> planRow, ClusterProvider.ClusterPlan plan, Object finishedAt,
+      Map<String, Object> actor) throws java.sql.SQLException {
+    UUID clusterId = (UUID)planRow.get("cluster_id");
+    UUID hostId = plan.steps().getFirst().hostId();
+    var hosts = query(connection, "SELECT hostname FROM host WHERE id=?", hostId);
+    if (hosts.isEmpty()) {
+      return new EdgeNodeMapping(false,
+          "EdgeCore Helper succeeded; planned Host asset no longer exists");
+    }
+    String hostname = String.valueOf(hosts.getFirst().get("hostname"));
+    var nodes = query(connection,
+        "SELECT node_uid FROM kubernetes_cluster_node "
+            + "WHERE cluster_id=? AND node_present=TRUE AND kubeedge_edge=TRUE AND ready=TRUE "
+            + "AND LOWER(node_name)=LOWER(?) AND observed_at >= ? ORDER BY node_uid LIMIT 2",
+        clusterId, hostname, finishedAt);
+    if (nodes.size() != 1) {
+      return new EdgeNodeMapping(false, nodes.isEmpty()
+          ? "EdgeCore Helper succeeded; waiting for a fresh Ready Edge Node matching the Host"
+          : "EdgeCore Helper succeeded; multiple fresh Ready Edge Nodes match the Host hostname");
+    }
+    String nodeUid = String.valueOf(nodes.getFirst().get("node_uid"));
+    var lockedNodes = query(connection,
+        "SELECT node_uid,host_id,node_name FROM kubernetes_cluster_node WHERE cluster_id=? "
+            + "AND node_uid=? AND node_present=TRUE AND kubeedge_edge=TRUE AND ready=TRUE "
+            + "AND observed_at >= ? FOR UPDATE",
+        clusterId, nodeUid, finishedAt);
+    if (lockedNodes.isEmpty()) {
+      return new EdgeNodeMapping(false,
+          "EdgeCore Helper succeeded; matching Edge Node changed during reconciliation");
+    }
+    Map<String, Object> node = lockedNodes.getFirst();
+    var lockedHosts = query(connection, "SELECT hostname FROM host WHERE id=? FOR UPDATE", hostId);
+    if (lockedHosts.isEmpty()
+        || !hostname.equalsIgnoreCase(String.valueOf(lockedHosts.getFirst().get("hostname")))
+        || !hostname.equalsIgnoreCase(String.valueOf(node.get("node_name")))) {
+      return new EdgeNodeMapping(false,
+          "EdgeCore Helper succeeded; Host or Node hostname changed during reconciliation");
+    }
+    Object mappedHost = node.get("host_id");
+    if (hostId.equals(mappedHost)) {
+      return new EdgeNodeMapping(true,
+          "EdgeCore Helper succeeded and the fresh Ready Edge Node is mapped to the Host");
+    }
+    if (mappedHost != null) {
+      return new EdgeNodeMapping(false,
+          "EdgeCore Helper succeeded; matching Edge Node is already mapped to another Host");
+    }
+    var hostConflicts = query(connection,
+        "SELECT cluster_id,node_uid FROM kubernetes_cluster_node WHERE host_id=? LIMIT 1 FOR UPDATE",
+        hostId);
+    if (!hostConflicts.isEmpty()) {
+      return new EdgeNodeMapping(false,
+          "EdgeCore Helper succeeded; target Host is already mapped to another Kubernetes Node");
+    }
+    int mapped = update(connection,
+        "UPDATE kubernetes_cluster_node SET host_id=? WHERE cluster_id=? AND node_uid=? "
+            + "AND host_id IS NULL AND node_present=TRUE AND kubeedge_edge=TRUE AND ready=TRUE "
+            + "AND observed_at >= ?",
+        hostId, clusterId, nodeUid, finishedAt);
+    if (mapped != 1) {
+      return new EdgeNodeMapping(false,
+          "EdgeCore Helper succeeded; Edge Node mapping changed concurrently and needs review");
+    }
+    String auditDetail = "Automatically mapped fresh Ready Edge Node " + nodeUid
+        + " to the Host after the validated EdgeCore join operation";
+    audit(connection, String.valueOf(actor.get("user_id")),
+        "KUBERNETES_CLUSTER_NODE_MAPPED", "kubernetes_cluster_node",
+        clusterId + ":" + nodeUid, "SUCCEEDED", remoteAddress(), auditDetail);
+    return new EdgeNodeMapping(true,
+        "EdgeCore Helper succeeded and the fresh Ready Edge Node was mapped to the Host");
+  }
+
+  private record EdgeNodeMapping(boolean mapped, String detail) {}
 
   private Map<String, Object> transition(Map<String, Object> row, Map<String, Object> actor,
       String state, String detail) {

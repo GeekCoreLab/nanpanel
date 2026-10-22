@@ -238,9 +238,14 @@ class NetworkProviderApiTest {
             + edgeOperationId + "/execute")
         .then().statusCode(409).body("code", equalTo("CLUSTER_PROVIDER_EXECUTION_UNSUPPORTED"));
     UUID hostOperationId = UUID.randomUUID();
+    UUID competingHostId = UUID.randomUUID();
     String edgeHostname = "provider-edge-fixture-" + edgeHostId.toString().substring(0, 8);
     Instant helperFinishedAt = Instant.now();
     store.transaction(connection -> {
+      AuthStore.update(connection,
+          "INSERT INTO host (id,hostname,capabilities,generation,observed_generation,status) "
+              + "VALUES (?,?, '[]',1,1,'ONLINE')",
+          competingHostId, "provider-edge-conflict-" + competingHostId.toString().substring(0, 8));
       AuthStore.update(connection,
           "INSERT INTO operation (id,idempotency_key,phase,status,error,created_at,updated_at,"
               + "kind,host_id,requested_by,reason,capability,target,finished_at) "
@@ -271,18 +276,27 @@ class NetworkProviderApiTest {
       AuthStore.update(connection,
           "UPDATE kubernetes_cluster_node SET node_name=?,host_id=?,observed_at=? "
               + "WHERE cluster_id=? AND node_uid=?",
-          edgeHostname, edgeHostId, Timestamp.from(helperFinishedAt.plusMillis(1)), clusterId,
+          edgeHostname, competingHostId, Timestamp.from(helperFinishedAt.plusMillis(1)), clusterId,
           "fixture-node-uid");
       return null;
     });
     given().cookie("nanpanel_session", session.cookie()).get(reconciledPlan)
-        .then().statusCode(200).body("state", equalTo("SUCCEEDED"));
+        .then().statusCode(200).body("state", equalTo("AWAITING_NODE_REGISTRATION"));
+    assertEquals(competingHostId, store.transaction(connection -> AuthStore.query(connection,
+        "SELECT host_id FROM kubernetes_cluster_node WHERE cluster_id=? AND node_uid=?",
+        clusterId, "fixture-node-uid").getFirst().get("host_id")));
     store.transaction(connection -> {
       AuthStore.update(connection,
-          "UPDATE kubernetes_cluster_node SET host_id=? WHERE cluster_id=? AND node_uid=?",
-          edgeHostId, clusterId, "fixture-node-uid");
+          "UPDATE kubernetes_cluster_node SET host_id=NULL,observed_at=? "
+              + "WHERE cluster_id=? AND node_uid=?",
+          Timestamp.from(helperFinishedAt.plusMillis(2)), clusterId, "fixture-node-uid");
       return null;
     });
+    given().cookie("nanpanel_session", session.cookie()).get(reconciledPlan)
+        .then().statusCode(200).body("state", equalTo("SUCCEEDED"));
+    assertEquals(edgeHostId, store.transaction(connection -> AuthStore.query(connection,
+        "SELECT host_id FROM kubernetes_cluster_node WHERE cluster_id=? AND node_uid=?",
+        clusterId, "fixture-node-uid").getFirst().get("host_id")));
     given().cookie("nanpanel_session", session.cookie())
         .header("X-CSRF-Token", session.csrf()).header("Idempotency-Key", "edgecore-plan-0002")
         .contentType("application/json").body(edgeLifecycleRequest).post(clusterOperations)
