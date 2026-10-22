@@ -2,7 +2,7 @@
 
 Date: 2026-10-22
 
-Base source revision: `ad0c702` plus the test changes described below.
+Source revision with replay coverage: `28d6678`.
 
 ## Implemented
 

@@ -58,3 +58,15 @@ recovery retry, and idempotence. A fresh live K3s cluster with no imported
 kubeconfig has not yet been auto-enrolled end to end. The live API-unreachable
 recovery path and remote Agent credential issuance/rotation are also
 unverified or unimplemented, so the P4 auto-enrollment gate remains open.
+
+## Read-only target recheck after rollout-plan work
+
+At 2026-10-22 03:13 UTC, `ssh k3s-1` showed the Core Deployment still using
+`sha-12a7b33d269218be412e59ccd07fb55c859a0b9a` with one Ready replica. The
+`nanpanel-config` ConfigMap still has discovery and local auto-enrollment
+enabled. A read-only PostgreSQL query observed Host `k3s-1` reporting a running
+local K3s API server at `2026-10-22T03:13:55.83Z`; cluster `k3s-1-k3s` was
+HEALTHY with one Ready Node mapped to that Host and credential source
+`KUBECONFIG`. This reconfirms live discovery and adoption of the existing
+imported cluster. It does not prove new-cluster auto-enrollment from an empty
+inventory or API outage recovery.
