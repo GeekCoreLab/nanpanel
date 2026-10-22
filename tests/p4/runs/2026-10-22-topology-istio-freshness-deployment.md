@@ -89,3 +89,28 @@ separately skipped `k3s.preflight` operation or save production topology.
 This recheck did not run `k3s.preflight`, update `.env`, or persist a
 production topology revision. It refreshes the live evidence for real Istio
 data and the UI layout only.
+
+## Workspace separation deployment at 2026-10-22 05:36 UTC
+
+- Source commit `fbf151f1bf7eb4dd87899a61d8a34cb0d639a4f1` passed GitHub
+  Actions run `39727274033`; Rust formatting/check/Clippy/tests, Maven
+  verification, Web build, and Core/Web GHCR publication all succeeded.
+- Only `deployment/nanpanel-web` was changed to the immutable GHCR image
+  `ghcr.io/geekcorelab/nanpanel-web:sha-fbf151f1bf7eb4dd87899a61d8a34cb0d639a4f1`.
+  Kubernetes pulled the image using the existing `ghcr-pull` Secret; no image
+  was built or uploaded from this workstation. The rollout completed with the
+  new Web Pod `1/1` Ready, zero restarts, and image digest
+  `sha256:cc8c170af53d82361c21e9b2d6aec887f54dee822e26b4b1f6ab92eff95eca57`.
+- Core stayed on `sha-12a7b33...` with both containers Ready and zero restarts;
+  PostgreSQL and the four `nanpanel-mesh` Pods remained running. The Web HTTPS
+  origin returned HTTP 200.
+- The browser acceptance script passed against the deployed Web and live Core.
+  It confirmed the Host route `k3s-1 → 自动发现 Router 10.0.0.1`, then switched
+  to the separate Istio workspace and displayed `LIVE`, 3/3 sidecars, two
+  Services, and real HTTP 200/403 mTLS traffic. `topologyWrites` remained `0`.
+  Screenshots were inspected at `/tmp/nanpanel-k3s-route-live-ui.png`,
+  `/tmp/nanpanel-k3s-istio-service-network-ui.png`, and
+  `/tmp/nanpanel-k3s-gateway-asset-live-ui.png`.
+
+This deployment changes the Web presentation only. It did not update Core,
+save a production topology revision, or run `k3s.preflight`.
