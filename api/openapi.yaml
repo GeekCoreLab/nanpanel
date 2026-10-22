@@ -4523,7 +4523,7 @@ components:
     PluginStatus:
       type: object
       additionalProperties: false
-      required: [id, version, state, providerIds, translatorIds]
+      required: [id, version, state, providerIds, translatorIds, clusterProviderIds]
       properties:
         id: {type: string, maxLength: 80}
         version: {type: string, maxLength: 40}
@@ -4532,6 +4532,9 @@ components:
           type: array
           items: {type: string, maxLength: 80}
         translatorIds:
+          type: array
+          items: {type: string, maxLength: 80}
+        clusterProviderIds:
           type: array
           items: {type: string, maxLength: 80}
     ConfigTranslationRequest:

@@ -24,11 +24,21 @@ KubeEdge acceptance.
 ## Provider boundary
 
 `NetworkProvider` is the PF4J contract for network reconciliation; it is not a
-Kubernetes node lifecycle API. A KubeEdge Provider must use a dedicated,
-cluster-scoped contract and the existing Core cluster registry. It must keep
-Kubernetes workload ownership in the Kubernetes API, use typed Agent/Helper
-operations for host-side work, and never pass join credentials through durable
-operation output or audit details. Registration, version, certificate,
-component-health, offline-autonomy, and reachable-ingress lifecycle operations
-remain unimplemented. The P4 gate stays open until those paths have rejection,
-recovery, and live KubeEdge evidence.
+Kubernetes node lifecycle API. `panel-plugin-api` now defines a dedicated
+`ClusterProvider` extension point, and `ProviderRuntime` loads it independently
+from network providers and reports its ID in plugin status. The contract is
+cluster-scoped and identifies a cluster by the Core registry UUID, kind, and
+generation. A plan can describe ordered Kubernetes API or Agent Helper steps;
+Helper steps must name a Host, and credentials are represented only by opaque
+Core-owned UUID references. Plan parameters reject secret-like key names. Core
+still owns durable operation state, audit redaction, typed Agent/Helper
+dispatch, and reconciliation after restart.
+
+This is an extension contract and loader only; no KubeEdge implementation or
+Core lifecycle API is installed yet. It does not install CloudCore/EdgeCore,
+register/remove an Edge node, upgrade components, rotate certificates, or
+coordinate an ingress. Registration, version, certificate, component-health,
+offline-autonomy, and reachable-ingress operations remain unimplemented. No
+live KubeEdge target is available, so this change is not live KubeEdge
+acceptance. The P4 gate stays open until the concrete provider, safe Core
+execution/recovery paths, rejection coverage, and live KubeEdge evidence exist.

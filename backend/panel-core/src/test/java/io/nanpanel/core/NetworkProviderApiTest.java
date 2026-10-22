@@ -34,7 +34,8 @@ class NetworkProviderApiTest {
     given().cookie("nanpanel_session", session.cookie())
         .get("/api/v1/plugins")
         .then().statusCode(200).body("[0].id", equalTo("p3-api-fixture"))
-        .body("[0].state", equalTo("STARTED"));
+        .body("[0].state", equalTo("STARTED"))
+        .body("[0].clusterProviderIds.size()", equalTo(0));
     given().cookie("nanpanel_session", session.cookie())
         .get("/api/v1/config-translators")
         .then().statusCode(200).body("[0].id", equalTo("p3-fixture-translator"))

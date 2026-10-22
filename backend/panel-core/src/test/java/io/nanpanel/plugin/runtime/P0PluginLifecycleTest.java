@@ -2,6 +2,7 @@ package io.nanpanel.plugin.runtime;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.nanpanel.plugin.api.ClusterProvider;
 import io.nanpanel.plugin.api.NetworkProvider;
 import io.quarkus.test.junit.QuarkusTest;
 import java.io.File;
@@ -10,6 +11,7 @@ import java.lang.ref.WeakReference;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.UUID;
 import java.util.jar.Attributes;
 import java.util.jar.JarEntry;
 import java.util.jar.JarOutputStream;
@@ -53,14 +55,38 @@ class P0PluginLifecycleTest {
     var providers = runtime.providers();
     assertEquals(1, providers.size());
     assertEquals("p0-lifecycle-provider", providers.getFirst().id());
+    var clusterProviders = runtime.clusterProviders();
+    assertEquals(1, clusterProviders.size());
+    assertEquals("p0-lifecycle-cluster-provider", clusterProviders.getFirst().id());
+    assertEquals(java.util.Set.of("KUBEEDGE"), clusterProviders.getFirst().clusterKinds());
+    assertEquals(java.util.Set.of("REGISTER_EDGE"), clusterProviders.getFirst().operations());
+    assertEquals(java.util.List.of("p0-lifecycle-cluster-provider"),
+        runtime.pluginStatuses().getFirst().clusterProviderIds());
+    var cluster = new ClusterProvider.ClusterReference(UUID.randomUUID(), "KUBEEDGE", 3);
+    var hostId = UUID.randomUUID();
+    var credentialReference = UUID.randomUUID();
+    var request = new ClusterProvider.LifecycleRequest(
+        "register_edge", "edgecore", hostId, "1.31.1", credentialReference);
+    var observed = clusterProviders.getFirst().observe(cluster).toCompletableFuture().join();
+    var plan = clusterProviders.getFirst().plan(cluster, request, observed).toCompletableFuture().join();
+    assertEquals(cluster.id(), plan.clusterId());
+    assertEquals(credentialReference, plan.steps().getFirst().credentialReferences().getFirst());
+    assertEquals(hostId, plan.steps().getFirst().hostId());
+    assertTrue(clusterProviders.getFirst().validate(cluster, plan).toCompletableFuture()
+        .join().successful());
+    assertThrows(IllegalArgumentException.class, () -> new ClusterProvider.PlanStep(0,
+        ClusterProvider.ExecutionTarget.AGENT_HELPER, hostId, "kubeedge.join",
+        java.util.Map.of("joinToken", "must-not-be-persisted"), java.util.List.of()));
     assertTrue(Files.exists(marker));
 
     var evidence = runtime.unloadAndObserve("p0-lifecycle");
     providers = java.util.List.of();
+    clusterProviders = java.util.List.of();
     assertTrue(evidence.unloaded());
     assertTrue(evidence.classLoaderClosed(), "PF4J should close the plugin URLClassLoader");
     assertTrue(runtime.pluginIds().isEmpty());
     assertTrue(runtime.providers().isEmpty());
+    assertTrue(runtime.clusterProviders().isEmpty());
     assertTrue(Files.exists(marker.resolveSibling(marker.getFileName() + ".stopped")));
     long stoppedSize = Files.size(marker);
     Thread.sleep(250);
@@ -83,6 +109,7 @@ class P0PluginLifecycleTest {
     Path classes = Files.createDirectories(fixture.resolve("classes"));
     compileFixture(sourceRoot, classes, "io/nanpanel/plugin/runtime/poc/PocPlugin.java");
     compileFixture(sourceRoot, classes, "io/nanpanel/plugin/runtime/poc/PocNetworkProvider.java");
+    compileFixture(sourceRoot, classes, "io/nanpanel/plugin/runtime/poc/PocClusterProvider.java");
     Manifest manifest = new Manifest();
     Attributes attributes = manifest.getMainAttributes();
     attributes.put(Attributes.Name.MANIFEST_VERSION, "1.0");
@@ -100,7 +127,9 @@ class P0PluginLifecycleTest {
         }
       }
       output.putNextEntry(new JarEntry("META-INF/extensions.idx"));
-      output.write("io.nanpanel.plugin.runtime.poc.PocNetworkProvider\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+      output.write(("io.nanpanel.plugin.runtime.poc.PocNetworkProvider\n"
+          + "io.nanpanel.plugin.runtime.poc.PocClusterProvider\n")
+          .getBytes(java.nio.charset.StandardCharsets.UTF_8));
       output.closeEntry();
     }
   }
@@ -115,7 +144,8 @@ class P0PluginLifecycleTest {
     var compiler = ToolProvider.getSystemJavaCompiler();
     assertNotNull(compiler, "P0 lifecycle PoC requires a JDK");
     String classpath = String.join(File.pathSeparator,
-        classLocation(NetworkProvider.class), classLocation(Plugin.class), classLocation(Extension.class));
+        classLocation(NetworkProvider.class), classLocation(ClusterProvider.class),
+        classLocation(Plugin.class), classLocation(Extension.class));
     int result = compiler.run(null, null, null, "--release", "21", "-proc:none", "-classpath", classpath,
         "-d", classes.toString(), source.toString());
     assertEquals(0, result, "failed to compile isolated PF4J fixture");

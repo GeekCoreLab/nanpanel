@@ -14,6 +14,7 @@ import org.pf4j.PluginState;
 import org.pf4j.DevelopmentPluginLoader;
 import org.pf4j.JarPluginLoader;
 import io.nanpanel.plugin.api.NetworkProvider;
+import io.nanpanel.plugin.api.ClusterProvider;
 import io.nanpanel.plugin.api.ConfigTranslator;
 /** Trusted plugin lifecycle only; permission enforcement belongs to Core/Gateway. */
 public final class ProviderRuntime implements AutoCloseable {
@@ -55,6 +56,11 @@ public final class ProviderRuntime implements AutoCloseable {
                 .flatMap(plugin -> manager.getExtensions(NetworkProvider.class, plugin.getPluginId()).stream())
                 .toList();
     }
+    public List<ClusterProvider> clusterProviders() {
+        return manager.getStartedPlugins().stream()
+                .flatMap(plugin -> manager.getExtensions(ClusterProvider.class, plugin.getPluginId()).stream())
+                .toList();
+    }
     public List<ConfigTranslator> translators() {
         return manager.getStartedPlugins().stream()
                 .flatMap(plugin -> manager.getExtensions(ConfigTranslator.class, plugin.getPluginId()).stream())
@@ -69,8 +75,11 @@ public final class ProviderRuntime implements AutoCloseable {
             List<String> translatorIds = started
                     ? manager.getExtensions(ConfigTranslator.class, plugin.getPluginId()).stream()
                             .map(ConfigTranslator::id).toList() : List.of();
+            List<String> clusterProviderIds = started
+                    ? manager.getExtensions(ClusterProvider.class, plugin.getPluginId()).stream()
+                            .map(ClusterProvider::id).toList() : List.of();
             return new PluginStatus(plugin.getPluginId(), plugin.getDescriptor().getVersion(),
-                    plugin.getPluginState().toString(), providerIds, translatorIds);
+                    plugin.getPluginState().toString(), providerIds, translatorIds, clusterProviderIds);
         }).toList();
     }
     public boolean disable(String pluginId) {
@@ -94,7 +103,8 @@ public final class ProviderRuntime implements AutoCloseable {
 
     record UnloadEvidence(boolean unloaded, boolean classLoaderClosed, WeakReference<ClassLoader> classLoaderReference) {}
     public record PluginStatus(String id, String version, String state,
-                               List<String> providerIds, List<String> translatorIds) {}
+                               List<String> providerIds, List<String> translatorIds,
+                               List<String> clusterProviderIds) {}
 
     @Override public void close() {
         RuntimeException failure = null;

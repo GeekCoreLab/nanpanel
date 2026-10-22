@@ -1,6 +1,7 @@
 package io.nanpanel.core;
 
 import io.nanpanel.plugin.api.NetworkProvider;
+import io.nanpanel.plugin.api.ClusterProvider;
 import io.nanpanel.plugin.api.ConfigTranslator;
 import io.nanpanel.plugin.runtime.ProviderRuntime;
 import jakarta.annotation.PostConstruct;
@@ -37,6 +38,10 @@ public class NetworkProviderRegistry {
 
   public List<NetworkProvider> providers() {
     return runtime == null ? List.of() : runtime.providers();
+  }
+
+  public List<ClusterProvider> clusterProviders() {
+    return runtime == null ? List.of() : runtime.clusterProviders();
   }
 
   public List<ConfigTranslator> translators() {
