@@ -246,3 +246,23 @@ No Core, database, PVC, host route, or `k3s.preflight` state was changed.
 - This is a read-only, single-node UI/data-path recheck. It does not establish
   saved production topology, multi-node behavior, K3s lifecycle recovery, or
   KubeEdge lifecycle acceptance. No `k3s.preflight` was run.
+
+## Post-deployment visual recheck at 2026-10-22 13:41 UTC
+
+- Re-ran `node web/scripts/k3s-route-live-browser.mjs` against deployed
+  `k3s-1`: `PASS`, Host `k3s-1`, observed route gateway `10.0.0.1`, route
+  observation `2026-10-22T13:41:36.652+00:00`, no browser errors, and
+  `topologyWrites: 0`.
+- The live Istio workspace rendered 2 Kubernetes Services with 2/2 Ready
+  endpoints, 3/3 Envoy sidecars, and 26 real Envoy requests. The traffic panel
+  showed HTTP 200 and HTTP 403 flows, both labeled mTLS. Service inventory and
+  Envoy telemetry came from the deployed Core; the accompanying browser
+  screenshot shows Services and traffic in separate columns with per-Service
+  endpoint details collapsed until expanded.
+- Visually inspected `/tmp/nanpanel-k3s-istio-service-network-ui.png` and
+  confirmed the deployed layout and live status badge. The route and Gateway
+  asset screenshots were also produced by the run.
+
+This remains read-only single-node UI and data-path evidence. It does not
+establish production topology persistence, multi-node behavior, K3s lifecycle
+recovery, or KubeEdge lifecycle acceptance. No `k3s.preflight` ran.
