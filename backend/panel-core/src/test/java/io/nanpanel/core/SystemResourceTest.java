@@ -561,6 +561,17 @@ class SystemResourceTest {
         .contentType("application/json").body(gatewayAssetTopology)
         .put("/api/v1/topology/draft").then().statusCode(200).extract();
     assertEquals(hostId, gatewayAssetSaved.path("nodes[0].assetId"));
+    String gatewayAssetRevisionId = gatewayAssetSaved.path("revisionId");
+    given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/topology/draft")
+        .then().statusCode(200)
+        .body("nodes[0].assetId", equalTo(hostId))
+        .body("nodes[4].ipAddress", equalTo("10.0.0.1"));
+    given().cookie("nanpanel_session", restoredCookie)
+        .get("/api/v1/topology/revisions/" + gatewayAssetRevisionId)
+        .then().statusCode(200)
+        .body("nodes[0].assetId", equalTo(hostId))
+        .body("nodes[4].ipAddress", equalTo("10.0.0.1"));
     verifyBastionTerminal(hostId, restoredCookie, restored.path("csrfToken"));
     assertEquals(controllerFingerprint, enrollment.path("controllerFingerprint"));
     assertEquals(30444, (int)enrollment.path("gatewayPort"));
