@@ -32,6 +32,12 @@ continues to reject unrelated endpoint and credential input.
   revocation drift, and the existing Provider contract fixture. Core validation
   also enforces credential-purpose matching before persisting any Provider
   plan.
+- The Core API fixture now exercises the EdgeCore plan through HTTP: an
+  existing Host and healthy CloudCore produce a persisted plan, validation
+  succeeds while the Host is unmapped, and the serialized plan contains only
+  the opaque credential UUID (not its material). Core rejects a credential
+  purpose mismatch and rejects a second plan after that Host maps to a present
+  cluster Node.
 - Repository-wide `./mvnw -B -ntp verify` passed: Core ran 47 tests and the
   KubeEdge Provider ran 6 tests, all with zero failures or errors; the remaining
   Maven modules also passed.

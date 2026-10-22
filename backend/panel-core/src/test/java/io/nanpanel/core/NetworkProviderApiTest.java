@@ -148,6 +148,18 @@ class NetworkProviderApiTest {
         "reason", "Create an isolated provider plan fixture");
     String clusterOperations = "/api/v1/cluster-providers/p3-fixture-cluster-provider/clusters/"
         + clusterId + "/plans";
+    var wrongPurposeCredential = given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.csrf()).contentType("application/json")
+        .body(Map.of("purpose", "CLOUDCORE_BOOTSTRAP_TOKEN", "material", secretMaterial))
+        .post(credentialPath).then().statusCode(201).extract();
+    given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.csrf()).header("Idempotency-Key", "cloudcore-plan-wrong-purpose")
+        .contentType("application/json").body(Map.of("operation", "install_cloudcore",
+            "component", "cloudcore", "targetVersion", "v1.21.0",
+            "credentialReference", wrongPurposeCredential.path("id"),
+            "reason", "Reject a provider plan with the wrong credential purpose"))
+        .post(clusterOperations).then().statusCode(502)
+        .body("code", equalTo("CLUSTER_PROVIDER_PLAN_INVALID"));
     var clusterPlan = given().cookie("nanpanel_session", session.cookie())
         .header("X-CSRF-Token", session.csrf()).header("Idempotency-Key", "cloudcore-plan-0001")
         .contentType("application/json").body(lifecycleRequest)
@@ -181,6 +193,56 @@ class NetworkProviderApiTest {
         .then().statusCode(200).body("state", equalTo("VALIDATED"));
     assertTrue(persistedPlan.contains("kubeedge.cloudcore.install"));
     assertTrue(!persistedPlan.contains("token"));
+    UUID edgeHostId = UUID.randomUUID();
+    var edgeCredential = given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.csrf()).contentType("application/json")
+        .body(Map.of("purpose", "EDGECORE_BOOTSTRAP_TOKEN", "material", secretMaterial))
+        .post(credentialPath).then().statusCode(201).extract();
+    store.transaction(connection -> {
+      AuthStore.update(connection,
+          "INSERT INTO host (id,hostname,capabilities,generation,observed_generation,status) "
+              + "VALUES (?,?, '[]',1,1,'ONLINE')",
+          edgeHostId, "provider-edge-fixture-" + edgeHostId.toString().substring(0, 8));
+      AuthStore.update(connection, "UPDATE kubernetes_cluster SET cloudcore_status='HEALTHY' "
+          + "WHERE id=?", clusterId);
+      return null;
+    });
+    Map<String, String> edgeLifecycleRequest = Map.of("operation", "join_edgecore",
+        "component", "edgecore", "hostId", edgeHostId.toString(), "targetVersion", "v1.21.0",
+        "targetEndpoint", "cloudcore.example.com:10000",
+        "credentialReference", edgeCredential.path("id"),
+        "reason", "Persist an isolated EdgeCore join plan fixture");
+    var edgePlanResponse = given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.csrf()).header("Idempotency-Key", "edgecore-plan-0001")
+        .contentType("application/json").body(edgeLifecycleRequest).post(clusterOperations)
+        .then().statusCode(201).body("operation", equalTo("join_edgecore"))
+        .body("state", equalTo("PLANNED")).extract();
+    String edgeOperationId = edgePlanResponse.path("id");
+    String persistedEdgePlan = store.transaction(connection -> {
+      Object stored = AuthStore.query(connection,
+          "SELECT plan_configuration FROM cluster_provider_operation WHERE id=?",
+          UUID.fromString(edgeOperationId)).getFirst().get("plan_configuration");
+      return stored instanceof java.sql.Clob clob
+          ? clob.getSubString(1, Math.toIntExact(clob.length())) : stored.toString();
+    });
+    assertTrue(persistedEdgePlan.contains(edgeHostId.toString()));
+    assertTrue(persistedEdgePlan.contains("cloudcore.example.com:10000"));
+    assertTrue(persistedEdgePlan.contains(edgeCredential.path("id")));
+    assertFalse(persistedEdgePlan.contains(secretMaterial));
+    given().cookie("nanpanel_session", session.cookie()).header("X-CSRF-Token", session.csrf())
+        .post("/api/v1/cluster-providers/p3-fixture-cluster-provider/operations/"
+            + edgeOperationId + "/validate")
+        .then().statusCode(200).body("state", equalTo("VALIDATED"));
+    store.transaction(connection -> {
+      AuthStore.update(connection,
+          "UPDATE kubernetes_cluster_node SET host_id=? WHERE cluster_id=? AND node_uid=?",
+          edgeHostId, clusterId, "fixture-node-uid");
+      return null;
+    });
+    given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.csrf()).header("Idempotency-Key", "edgecore-plan-0002")
+        .contentType("application/json").body(edgeLifecycleRequest).post(clusterOperations)
+        .then().statusCode(409).body("code", equalTo("CLUSTER_PROVIDER_TARGET_ALREADY_REGISTERED"));
     var revocationCredential = given().cookie("nanpanel_session", session.cookie())
         .header("X-CSRF-Token", session.csrf()).contentType("application/json")
         .body(Map.of("purpose", "EDGECORE_BOOTSTRAP_TOKEN", "material", secretMaterial))

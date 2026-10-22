@@ -13,7 +13,9 @@ import org.pf4j.Extension;
 public final class P3FixtureClusterProvider implements ClusterProvider {
   @Override public String id() { return "p3-fixture-cluster-provider"; }
   @Override public Set<String> clusterKinds() { return Set.of("KUBEEDGE"); }
-  @Override public Set<String> operations() { return Set.of("OBSERVE", "INSTALL_CLOUDCORE"); }
+  @Override public Set<String> operations() {
+    return Set.of("OBSERVE", "INSTALL_CLOUDCORE", "JOIN_EDGECORE");
+  }
 
   @Override
   public CompletionStage<ClusterObservation> observe(ClusterReference cluster, ClusterAccess access) {
@@ -26,6 +28,19 @@ public final class P3FixtureClusterProvider implements ClusterProvider {
   @Override
   public CompletionStage<ClusterPlan> plan(
       ClusterReference cluster, LifecycleRequest request, ClusterObservation observed) {
+    if ("join_edgecore".equals(request.operation())
+        && "edgecore".equals(request.component()) && request.hostId() != null
+        && request.targetEndpoint() != null && request.credentialReference() != null
+        && observed != null && "HEALTHY".equals(observed.status())) {
+      return CompletableFuture.completedFuture(new ClusterPlan(UUID.randomUUID(), cluster.id(),
+          cluster.generation(), request.operation(), cluster.id() + "-edgecore-" + request.hostId(),
+          List.of(new PlanStep(0, ExecutionTarget.AGENT_HELPER, request.hostId(),
+              "kubeedge.edgecore.join", Map.of("component", "edgecore", "role", "edgecore",
+                  "version", request.targetVersion(), "clusterId", cluster.id().toString(),
+                  "cloudCoreEndpoint", request.targetEndpoint(),
+                  "credentialPurpose", "EDGECORE_BOOTSTRAP_TOKEN"),
+              List.of(request.credentialReference())))));
+    }
     if (!"install_cloudcore".equals(request.operation())
         || !"cloudcore".equals(request.component()) || request.targetVersion() == null) {
       return CompletableFuture.failedFuture(new IllegalArgumentException("unsupported fixture plan"));
