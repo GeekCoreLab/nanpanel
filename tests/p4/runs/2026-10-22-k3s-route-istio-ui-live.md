@@ -139,3 +139,26 @@ acceptance. Multi-node mapping/removal, multi-node lifecycle recovery, and
 KubeEdge gates remain open because no second cluster/node or KubeEdge target is
 available. `npm run build`, `npm test` (13 tests), and `npm run test:topology`
 passed for this change. The build reports the existing large-chunk warning.
+
+## Read-only recheck at 2026-10-22 06:25 UTC
+
+- Re-ran `node web/scripts/k3s-route-live-browser.mjs` from the current `main`
+  worktree. The SSH query read only the target Host and route snapshot; the
+  browser again used a test-only session and empty draft projection, while
+  Kubernetes Service inventory and Envoy telemetry came from the deployed
+  Core via the restricted read-only API key.
+- Result: `PASS`, Host `k3s-1`, route gateway `10.0.0.1`, inventory timestamp
+  `2026-10-22T06:25:49.806Z`, `topologyWrites: 0`, and no browser page errors.
+- Visually inspected the refreshed screenshots. The topology view shows the
+  observed-only Router edge and searchable Gateway-to-Host binding. The
+  separate Istio workspace shows 2 Services, 2/2 Ready endpoints, 3/3 sidecars,
+  and 26 Envoy requests: 13 HTTP 200 and 13 HTTP 403, both labeled mTLS. The
+  service list and traffic panel remain separate, with Service details
+  collapsed until expanded.
+- Screenshots: `/tmp/nanpanel-k3s-route-live-ui.png`,
+  `/tmp/nanpanel-k3s-istio-service-network-ui.png`, and
+  `/tmp/nanpanel-k3s-gateway-asset-live-ui.png`.
+
+This recheck confirms the real single-node route and Istio display only. The
+production topology remains untouched, and no `k3s.preflight` operation was
+run.
