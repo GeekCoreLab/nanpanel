@@ -28,4 +28,25 @@ class KubernetesClusterCredentialVaultTest {
     tampered[tampered.length - 1] ^= 1;
     assertThrows(IllegalStateException.class, () -> vault.decryptK3sInstallToken(planId, tampered));
   }
+
+  @Test
+  void providerCredentialIsBoundToProviderAndCluster() {
+    var vault = new KubernetesClusterCredentialVault();
+    vault.credentialKey = Base64.getEncoder().encodeToString(new byte[32]);
+    UUID credentialId = UUID.randomUUID();
+    UUID clusterId = UUID.randomUUID();
+    String material = "edgecore-bootstrap-token-0123456789";
+
+    byte[] encrypted = vault.encryptProviderCredential(credentialId, clusterId,
+        "kubeedge-core", material);
+
+    assertNotEquals(material, new String(encrypted, StandardCharsets.UTF_8));
+    assertArrayEquals(material.getBytes(StandardCharsets.UTF_8),
+        vault.decryptProviderCredential(credentialId, clusterId, "kubeedge-core", encrypted)
+            .getBytes(StandardCharsets.UTF_8));
+    assertThrows(IllegalStateException.class, () -> vault.decryptProviderCredential(
+        credentialId, clusterId, "another-provider", encrypted));
+    assertThrows(IllegalStateException.class, () -> vault.decryptProviderCredential(
+        credentialId, UUID.randomUUID(), "kubeedge-core", encrypted));
+  }
 }

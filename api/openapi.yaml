@@ -466,6 +466,117 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
+  /api/v1/cluster-providers/{providerId}/clusters/{clusterId}/credentials:
+    parameters:
+    - name: providerId
+      in: path
+      required: true
+      schema: { type: string }
+    - name: clusterId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    get:
+      tags: [KubernetesClusters]
+      operationId: listClusterProviderCredentials
+      summary: 查询 Provider 凭据元数据
+      description: 仅返回用途、到期、撤销和创建时间；不会读取或返回秘密材料。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 按 Provider 和集群隔离的凭据元数据。
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ClusterProviderCredentialMetadata' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [KubernetesClusters]
+      operationId: createClusterProviderCredential
+      summary: 加密托管 KubeEdge 凭据
+      description: 需要 5 分钟内重新验证身份。Core 使用 Kubernetes credential key 加密保存一次性提交的材料，响应和列表只返回元数据。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [purpose, material]
+              properties:
+                purpose:
+                  type: string
+                  enum: [CLOUDCORE_BOOTSTRAP_TOKEN, EDGECORE_BOOTSTRAP_TOKEN, EDGECORE_CERTIFICATE, EDGECORE_PRIVATE_KEY]
+                material: { type: string, minLength: 1, maxLength: 32768, writeOnly: true }
+                expiresAt: { type: [string, 'null'], format: date-time }
+      responses:
+        '201':
+          description: 凭据已加密保存；响应不包含凭据材料。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClusterProviderCredentialMetadata' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 需要重新验证身份。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: Provider、集群、用途、到期时间或凭据材料不符合限制。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          description: Core 凭据加密不可用。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /api/v1/cluster-providers/{providerId}/clusters/{clusterId}/credentials/{credentialId}:
+    parameters:
+    - name: providerId
+      in: path
+      required: true
+      schema: { type: string }
+    - name: clusterId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    - name: credentialId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    delete:
+      tags: [KubernetesClusters]
+      operationId: revokeClusterProviderCredential
+      summary: 撤销 Provider 凭据
+      description: 需要 5 分钟内重新验证身份；撤销为单向状态变更，Core 后续不得解密该凭据。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      responses:
+        '204':
+          description: 凭据已撤销。
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 需要重新验证身份。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          $ref: '#/components/responses/NotFound'
   /api/v1/cluster-providers/{providerId}/clusters/{clusterId}/plans:
     parameters:
     - name: providerId
@@ -480,7 +591,7 @@ paths:
       tags: [KubernetesClusters]
       operationId: createClusterProviderPlan
       summary: 创建并持久化集群生命周期计划
-      description: Core 先读取注册集群的凭据隔离快照，再让匹配类型的 Provider 生成计划。此 API 只保存和校验计划，不执行 Kubernetes 或 Agent Helper 步骤；当前 Core 尚无 ClusterProvider 凭据签发接口。
+      description: Core 先读取注册集群的凭据隔离快照，再让匹配类型的 Provider 生成计划。此 API 只保存和校验计划，不执行 Kubernetes 或 Agent Helper 步骤；凭据托管目前不代表计划可引用或执行该凭据。
       x-implementation-status: implemented
       security:
       - cookieAuth: []
@@ -506,7 +617,7 @@ paths:
                 credentialReference:
                   type: [string, 'null']
                   format: uuid
-                  description: 暂不支持凭据托管；非空时返回 409 CLUSTER_CREDENTIALS_UNSUPPORTED。
+                  description: 当前计划 Provider 尚不支持凭据引用；非空时返回 409 CLUSTER_CREDENTIALS_UNSUPPORTED。
                 reason: { type: string, minLength: 1, maxLength: 500 }
       responses:
         '201':
@@ -4367,6 +4478,16 @@ components:
         type: string
         const: no-store
   schemas:
+    ClusterProviderCredentialMetadata:
+      type: object
+      additionalProperties: false
+      required: [id, purpose, expiresAt, revokedAt, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        purpose: { type: string, enum: [CLOUDCORE_BOOTSTRAP_TOKEN, EDGECORE_BOOTSTRAP_TOKEN, EDGECORE_CERTIFICATE, EDGECORE_PRIVATE_KEY] }
+        expiresAt: { type: [string, 'null'], format: date-time }
+        revokedAt: { type: [string, 'null'], format: date-time }
+        createdAt: { type: string, format: date-time }
     ClusterProviderOperation:
       type: object
       additionalProperties: false

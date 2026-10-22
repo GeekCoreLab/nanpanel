@@ -5,6 +5,8 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasItems;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.quarkus.test.junit.QuarkusTest;
@@ -25,6 +27,7 @@ class NetworkProviderApiTest {
   private static final String PASSWORD = "p3-provider-test-password-2026";
   @Inject AuthStore store;
   @Inject ObjectMapper mapper;
+  @Inject ClusterProviderCredentialStore credentials;
 
   private record Session(String cookie, String csrf, String userId) {}
 
@@ -64,6 +67,49 @@ class NetworkProviderApiTest {
           Timestamp.from(observedAt));
       return null;
     });
+    String credentialPath = "/api/v1/cluster-providers/p3-fixture-cluster-provider/clusters/"
+        + clusterId + "/credentials";
+    String secretMaterial = "edgecore-fixture-token-0123456789";
+    var credentialResponse = given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.csrf()).contentType("application/json")
+        .body(Map.of("purpose", "EDGECORE_BOOTSTRAP_TOKEN", "material", secretMaterial))
+        .post(credentialPath)
+        .then().statusCode(201).body("purpose", equalTo("EDGECORE_BOOTSTRAP_TOKEN"))
+        .extract();
+    String credentialId = credentialResponse.path("id");
+    assertFalse(credentialResponse.asString().contains(secretMaterial));
+    store.transaction(connection -> {
+      byte[] encrypted = (byte[])AuthStore.query(connection,
+          "SELECT encrypted_material FROM cluster_provider_credential WHERE id=?",
+          UUID.fromString(credentialId)).getFirst().get("encrypted_material");
+      assertFalse(new String(encrypted, java.nio.charset.StandardCharsets.ISO_8859_1)
+          .contains(secretMaterial));
+      return null;
+    });
+    assertEquals(secretMaterial, credentials.open(UUID.fromString(credentialId), clusterId,
+        "p3-fixture-cluster-provider", "EDGECORE_BOOTSTRAP_TOKEN"));
+    store.transaction(connection -> {
+      AuthStore.update(connection,
+          "UPDATE cluster_provider_credential SET expires_at=? WHERE id=?",
+          System.currentTimeMillis() - 1, UUID.fromString(credentialId));
+      return null;
+    });
+    assertThrows(IllegalArgumentException.class, () -> credentials.open(UUID.fromString(credentialId),
+        clusterId, "p3-fixture-cluster-provider", "EDGECORE_BOOTSTRAP_TOKEN"));
+    store.transaction(connection -> {
+      AuthStore.update(connection,
+          "UPDATE cluster_provider_credential SET expires_at=NULL WHERE id=?",
+          UUID.fromString(credentialId));
+      return null;
+    });
+    var metadata = given().cookie("nanpanel_session", session.cookie())
+        .get(credentialPath).then().statusCode(200).extract().asString();
+    assertFalse(metadata.contains(secretMaterial));
+    assertFalse(metadata.contains("encrypted_material"));
+    given().cookie("nanpanel_session", session.cookie()).header("X-CSRF-Token", session.csrf())
+        .delete(credentialPath + "/" + credentialId).then().statusCode(204);
+    assertThrows(IllegalArgumentException.class, () -> credentials.open(UUID.fromString(credentialId),
+        clusterId, "p3-fixture-cluster-provider", "EDGECORE_BOOTSTRAP_TOKEN"));
     given().cookie("nanpanel_session", session.cookie())
         .header("X-CSRF-Token", session.csrf())
         .post("/api/v1/cluster-providers/p3-fixture-cluster-provider/clusters/" + clusterId

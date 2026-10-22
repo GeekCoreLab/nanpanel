@@ -34,6 +34,20 @@ public class KubernetesClusterCredentialVault {
     return decrypt(planId, "nanpanel-k3s-install-plan:v1:", envelope);
   }
 
+  byte[] encryptProviderCredential(UUID credentialId, UUID clusterId,
+      String providerId, String material) {
+    return encrypt(credentialId, providerCredentialContext(clusterId, providerId), material);
+  }
+
+  String decryptProviderCredential(UUID credentialId, UUID clusterId,
+      String providerId, byte[] envelope) {
+    return decrypt(credentialId, providerCredentialContext(clusterId, providerId), envelope);
+  }
+
+  private static String providerCredentialContext(UUID clusterId, String providerId) {
+    return "nanpanel-cluster-provider-credential:v1:" + providerId + ":" + clusterId + ":";
+  }
+
   private byte[] encrypt(UUID id, String context, String value) {
     byte[] cleartext = value.getBytes(StandardCharsets.UTF_8);
     byte[] key = keyBytes();

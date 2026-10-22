@@ -54,11 +54,15 @@ durable plan and validation API deployed to `k3s-1`, with idempotency,
 generation drift checks, and Provider state restoration covered by isolated
 Core integration tests. The deployment ran its database migration and passed
 readiness checks; an authenticated production plan request has not been
-accepted yet. The API does not execute plan steps. The snapshot and planning
-provider do not install CloudCore/EdgeCore,
+accepted yet. Core now has encrypted, cluster/provider-scoped KubeEdge credential
+storage with metadata-only list/create responses, recent reauthentication for
+write/revoke, and one-way revocation. Credential references are not yet accepted
+by lifecycle plans, and no execution path opens a stored secret. The API does
+not execute plan steps. The snapshot and planning provider do not install CloudCore/EdgeCore,
 register/remove an Edge node, upgrade components, rotate certificates, or
 coordinate an ingress. Registration, version, certificate, component-health,
 offline-autonomy, and reachable-ingress operations remain unimplemented. No
 live KubeEdge target is available, so this change is not live KubeEdge
-acceptance. The P4 gate stays open until credential custody, safe Core
-execution/recovery paths, rejection coverage, and live KubeEdge evidence exist.
+acceptance. The P4 gate stays open until credentials can be safely referenced
+and consumed by Core execution/recovery paths, rejection coverage passes, and
+live KubeEdge evidence exists.

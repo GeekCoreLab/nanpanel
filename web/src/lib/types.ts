@@ -1,4 +1,5 @@
 // Generated from api/openapi.yaml. Regenerate with scripts/generate-types.py.
+export type ClusterProviderCredentialMetadata = { id: string; purpose: "CLOUDCORE_BOOTSTRAP_TOKEN" | "EDGECORE_BOOTSTRAP_TOKEN" | "EDGECORE_CERTIFICATE" | "EDGECORE_PRIVATE_KEY"; expiresAt: string | null; revokedAt: string | null; createdAt: string };
 export type ClusterProviderOperation = { id: string; providerId: string; clusterId: string; generation: number; operation: string; state: "PLANNED" | "VALIDATED" | "DRIFTED" | "FAILED"; detail: string; createdAt: string; updatedAt: string };
 export type TopologyNodeKind = "GATEWAY" | "HOST" | "ROUTER" | "SERVICE" | "SWITCH" | "MERGE" | "SPLIT" | "FORWARDER" | "FOLDER";
 export type TopologyPosition = { x: number; y: number };
