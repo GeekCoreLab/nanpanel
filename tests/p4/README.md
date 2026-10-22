@@ -193,10 +193,12 @@ recorded in
   failed or unknown operation results stop the plan, while temporary API failure
   leaves it in `VERIFYING`. API validation, authentication, version range, and
   schema tests pass. A Core scheduler test injects an operation `UNKNOWN` result
-  and verifies that the plan stops and no later Agent step is dispatched. This
-  remains code-level evidence: successful auto-advance, uncertain remote-action
-  reconciliation, restart recovery, and multi-node behavior still need an
-  isolated multi-node K3s integration run. The upgrade plan was initially
+  and verifies that the plan stops and no later Agent step is dispatched. A
+  single-node replay test also verifies that persisted `SUBMITTING` state reuses
+  its stable idempotency key without dispatching twice through a fake Gateway.
+  This remains code-level evidence: successful auto-advance, uncertain
+  remote-action reconciliation, actual Core process restart, and multi-node
+  behavior still need an isolated multi-node K3s integration run. The upgrade plan was initially
   deployed at commit `6f146e3`; current `k3s-1` runs commit
   `f6c373c2fbf2f45bf88dcfec17c1a5249495e6e4`, which also includes the persistent
   installation-plan API/UI. Current image, migration, Agent, and health evidence

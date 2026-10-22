@@ -31,14 +31,19 @@ class K3sInstallationApiTest {
 
   @BeforeEach
   void authenticateAdmin() {
-    var bootstrap = given().get("/api/v1/auth/csrf").then().statusCode(200).extract();
-    var login = given().cookie("nanpanel_session", bootstrap.cookie("nanpanel_session"))
-        .header("X-CSRF-Token", bootstrap.path("csrfToken"))
-        .contentType("application/json")
-        .body(Map.of("username", "admin", "password", "test-only-password"))
-        .post("/api/v1/auth/login").then().extract();
-    if (login.statusCode() != 200 && login.statusCode() != 401) {
-      throw new AssertionError("Unable to establish the test admin session: HTTP " + login.statusCode());
+    boolean adminExists = store.transaction(connection -> !AuthStore.query(connection,
+        "SELECT id FROM panel_user WHERE username='admin'").isEmpty());
+    if (!adminExists) {
+      var bootstrap = given().get("/api/v1/auth/csrf").then().statusCode(200).extract();
+      var login = given().cookie("nanpanel_session", bootstrap.cookie("nanpanel_session"))
+          .header("X-CSRF-Token", bootstrap.path("csrfToken"))
+          .contentType("application/json")
+          .body(Map.of("username", "admin", "password", "test-only-password"))
+          .post("/api/v1/auth/login").then().extract();
+      if (login.statusCode() != 200 && login.statusCode() != 401) {
+        throw new AssertionError("Unable to establish the test admin session: HTTP "
+            + login.statusCode());
+      }
     }
     store.transaction(connection -> {
       var users = AuthStore.query(connection,

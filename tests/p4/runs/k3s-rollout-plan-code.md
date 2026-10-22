@@ -2,7 +2,7 @@
 
 Date: 2026-10-22
 
-Base source revision: `95a05bf`
+Base source revision: `ad0c702` plus the test changes described below.
 
 ## Implemented
 
@@ -25,12 +25,22 @@ Base source revision: `95a05bf`
   Server operation in a two-step plan. The plan and current step become
   `UNKNOWN`, the next Agent step remains `PENDING`, and a second scheduler pass
   does not create an Agent operation.
+- A single-node Core integration test starts from a persisted `SUBMITTING`
+  step, dispatches the Server upgrade through a fake Agent Gateway, then
+  restores the `SUBMITTING`/missing-operation-ID state. The next scheduler pass
+  finds the existing Helper operation by its stable idempotency key and
+  reattaches its operation ID without a second dispatch.
 
 ## Code validation
 
 - `./mvnw -pl backend/panel-core -am -Dtest=K3sRolloutApiTest -Dsurefire.failIfNoSpecifiedTests=false test`
-  passed: 4 tests, no failures, including the persisted UNKNOWN scheduler
-  transition and no-next-step assertion.
+  passed: 5 tests, no failures, including persisted UNKNOWN termination and
+  single-node SUBMITTING replay without duplicate Agent dispatch.
+- `./mvnw -pl backend/panel-core -am -Dtest=K3sRolloutApiTest,K3sInstallationApiTest -Dsurefire.failIfNoSpecifiedTests=false test`
+  passed: 11 tests, no failures. The two auth fixtures bootstrap the shared
+  test admin only when it is absent, preventing repeated CSRF bootstrap calls
+  from exhausting the suite's real rate-limit bucket.
+- `./mvnw -pl backend/panel-core -am test` passed: 42 Core tests, no failures.
 - `./mvnw -pl backend/panel-core -am -Dtest=SystemResourceTest -Dsurefire.failIfNoSpecifiedTests=false test`
   passed: 4 tests, no failures.
 - The first full Core run exposed a test-fixture ordering issue: the rollout
@@ -53,8 +63,10 @@ This is code-level evidence only. No rollout plan has been run against
 `k3s-1`, and the worker has not yet been exercised against an isolated
 multi-node K3s cluster. The UNKNOWN test verifies safe plan termination and
 prevention of later-node dispatch; it does not prove recovery of an uncertain
-remote Agent action. Successive-node upgrade behavior, Agent failure and
-unknown-outcome reconciliation, process restart recovery, and API interruption
-during verification still need disposable-cluster integration coverage.
-Multi-node installation orchestration is not implemented. Do not use the
-production test cluster `k3s-1` for destructive upgrade testing.
+remote Agent action. The replay test verifies persisted-state idempotency with
+a fake Gateway; it is not a real Core process restart or live Agent recovery.
+Successive-node upgrade behavior, Agent failure and unknown-outcome
+reconciliation, actual process restart recovery, and API interruption during
+verification still need disposable-cluster integration coverage. Multi-node
+installation orchestration is not implemented. Do not use the production test
+cluster `k3s-1` for destructive upgrade testing.
