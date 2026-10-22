@@ -34,8 +34,7 @@ production topology draft, and no production route table was changed. This
 source and test evidence establishes the mapping behavior for the actual
 observed gateway address, but the authenticated production UI has not yet
 shown the route edge. The target route-matching acceptance gate therefore
-remains open until an operator adds a Router node for `10.0.0.1` and verifies
-the displayed edge against the live Agent snapshot.
+remains open until the UI displays the mapped Host's observed route edge.
 
 ### Read-only deployment recheck
 
@@ -47,6 +46,20 @@ is still generation 0 with zero nodes and no Router for that address. This
 confirms the source route data exists while the production topology has not
 yet been configured to display its observed edge. No production topology or
 route table was changed.
+
+### Automatic unmatched-gateway display recheck
+
+The deployed topology code creates an ephemeral, read-only Router node for
+each unmatched gateway observed from a Host asset in the outer topology. The
+operator does not need to save a Router node for an unmatched next hop. This
+display still requires the source Host asset to be added to the topology; the
+saved `topology_head` on `k3s-1` remains generation 0 with zero nodes and links.
+
+A read-only Agent inventory query on 2026-10-22 again found the `k3s-1` default
+route through `10.0.0.1` on `enp6s18`. The latest inventory timestamp was
+2026-10-22 01:18 UTC. The real route data and deployed automatic Router display
+behavior are established, but the production graph has no Host node from which
+to render an observed edge, and authenticated UI acceptance remains open.
 
 ## Deployment
 

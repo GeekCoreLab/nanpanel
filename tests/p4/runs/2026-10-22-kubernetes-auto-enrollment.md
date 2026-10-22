@@ -12,8 +12,8 @@ Date: 2026-10-22
   ./mvnw -pl backend/panel-core -am test
   ```
 
-- Result: all 38 Core and required-module tests passed. The focused
-  `KubernetesAutoEnrollmentTest` contains three isolated H2/Kubernetes API
+- Result: all 39 Core and required-module tests passed. The focused
+  `KubernetesAutoEnrollmentTest` contains four isolated H2/Kubernetes API
   cases; none of these mock responses are counted as live-cluster acceptance.
 - New-cluster case: a Ready local K3s Node, kube-system UID, Kubernetes Service
   IP, and bounded Node list created one HEALTHY cluster with
@@ -25,6 +25,14 @@ Date: 2026-10-22
   `KUBECONFIG` credential source.
 - Retry case: a reported Node with Ready=False created no managed cluster. A
   subsequent call after the Node became Ready completed enrollment.
+- API recovery case: a temporary `503 Service Unavailable` from the local Node
+  lookup created neither a cluster nor a Host mapping. A later enrollment call
+  after the API recovered completed registration with one in-cluster cluster
+  and one UID-mapped Node.
+
+The full command `./mvnw -pl backend/panel-core -am test` passed after adding
+the API recovery case. This is isolated failure and retry coverage; it does not
+simulate an outage on the live `k3s-1` API.
 
 ## `k3s-1` live state
 
@@ -45,8 +53,8 @@ creating a new in-cluster credential record.
 ## Remaining boundary
 
 This confirms real runtime discovery and the existing-cluster adoption path on
-`k3s-1`; isolated tests cover new-cluster enrollment, readiness retry, and
-idempotence. A fresh live K3s cluster with no imported kubeconfig has not yet
-been auto-enrolled end to end. The live API-unreachable recovery path and
-remote Agent credential issuance/rotation are also unverified or unimplemented,
-so the P4 auto-enrollment gate remains open.
+`k3s-1`; isolated tests cover new-cluster enrollment, readiness retry, API
+recovery retry, and idempotence. A fresh live K3s cluster with no imported
+kubeconfig has not yet been auto-enrolled end to end. The live API-unreachable
+recovery path and remote Agent credential issuance/rotation are also
+unverified or unimplemented, so the P4 auto-enrollment gate remains open.

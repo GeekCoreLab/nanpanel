@@ -116,6 +116,25 @@ class KubernetesAutoEnrollmentTest {
   }
 
   @Test
+  void retriesEnrollmentAfterLocalKubernetesApiRecovers() {
+    String hostname = hostname();
+    server.expect().get().withPath("/api/v1/nodes/" + hostname)
+        .andReturn(503, "Kubernetes API temporarily unavailable").once();
+
+    clusters.autoEnrollLocalCluster(hostId, hostname);
+
+    assertEquals(0, enrolledClusterCount());
+    assertEquals(0, mappedNodeCount());
+
+    expectSuccessfulDiscovery(hostname, readyNode(hostname));
+    clusters.autoEnrollLocalCluster(hostId, hostname);
+
+    assertEquals("IN_CLUSTER", enrolledCluster().get("credential_source"));
+    assertEquals(1, enrolledClusterCount());
+    assertEquals(1, mappedNodeCount());
+  }
+
+  @Test
   void adoptsMatchingImportedClusterWithoutReplacingItsCredentialSource() {
     String hostname = hostname();
     UUID importedClusterId = UUID.randomUUID();
