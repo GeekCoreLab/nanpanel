@@ -492,6 +492,7 @@ hybrid-infrastructure-platform/
 - [x] 在真实 `k3s-1` Agent 路由上验收下一跳匹配：浏览器通过正常“添加主机资产”流程读取真实路由，并显示 `k3s-1 → 自动发现 Router 10.0.0.1`、React Flow 观测边及 Gateway 主机资产绑定；部署后复验仍通过，服务网络显示真实 Istio 数据且拓扑写入为 0。见[路由与 Istio UI 实测](tests/p4/runs/2026-10-22-k3s-route-istio-ui-live.md)和[部署后复验](tests/p4/runs/2026-10-22-topology-istio-freshness-deployment.md)。
 - [ ] 在目标生产拓扑中保存并重新加载 Host/Gateway 资产及观察到的路由边。目标拓扑草稿尚未写入；本地保存/重载与卡片无重叠回归通过，但不替代目标持久化证据，见[路由保存 UI 回归](tests/p4/runs/2026-10-22-topology-route-save-ui.md)。
 - [x] 在目标 K3s 上完成单集群导入、Node UID 映射及 namespace 限定 Deployment 创建/列表/缩放/删除，见 [真实 K3s API 验收](tests/p4/runs/2026-10-21-k3s-target-api-smoke.md)。
+- [x] Core 的 K3s Node 映射状态机通过隔离 API 回归：同一 Host 的重复映射被拒绝，Node 移除后保留 tombstone，显式解除映射后 Host 可重新分配；该证据不代表真实多节点运行时，见[K3s Node 映射代码验收](tests/p4/runs/2026-10-22-k3s-node-mapping-code.md)。
 - [x] 在目标 `k3s-1` 与隔离 K3s API 间验收集群隔离和跨集群资源拒绝：真实目标集群参与双集群导入，隔离集群完成 Deployment 创建/列表/缩放/删除；跨集群资源 ID、未拥有资源删除及错误凭据被拒绝。见[混合集群 API 验收](tests/p4/runs/2026-10-21-k3s-target-multi-cluster-api.md)。这项不以本机 Kind 测试代替目标集群证据。
 - [ ] 在目标环境验收多个真实 Node 的映射冲突及 Node 移除/解除映射。当前唯一目标 `k3s-1` 是单节点集群；本机 Kind 或无 kubelet 的隔离 K3s API fixture 不计入真实多节点运行时验收。
 - [x] K3s 安装与升级的类型化 Helper/Core 代码路径：固定版本/校验和、目标主机准入、持久化计划、单节点 Server 安装步骤、幂等重放及失败/UNKNOWN 停止行为已有隔离代码测试；单节点安装计划成功后等待集群导入和 Ready Node 主机映射，不会派发 Agent。见[安装计划代码验收](tests/p4/runs/k3s-installation-plan-code.md)、[升级计划代码验收](tests/p4/runs/k3s-rollout-plan-code.md)和[单主机 Helper 能力记录](tests/p4/runs/2026-10-21-k3s-install-helper-capability.md)。

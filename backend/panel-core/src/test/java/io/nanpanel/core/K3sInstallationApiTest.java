@@ -14,6 +14,8 @@ import com.sun.net.httpserver.HttpServer;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import java.net.InetSocketAddress;
+import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -365,6 +367,76 @@ class K3sInstallationApiTest {
         "SELECT id FROM operation WHERE idempotency_key=?",
         "p4-k3s-api-failure-container-01").size());
     assertEquals(0, createdOperations);
+  }
+
+  @Test
+  void k3sNodeMappingConflictAndRemovedNodeUnmappingReleaseHostOwnership() {
+    UUID clusterId = UUID.randomUUID();
+    UUID firstHostId = UUID.randomUUID();
+    UUID secondHostId = UUID.randomUUID();
+    String firstNodeUid = "p4-k3s-map-node-1";
+    String removedNodeUid = "p4-k3s-map-node-2";
+    Instant now = Instant.now();
+    java.sql.Timestamp observedAt = java.sql.Timestamp.from(now);
+    UUID userId = store.transaction(connection -> UUID.fromString(String.valueOf(
+        AuthStore.query(connection,
+            "SELECT id FROM panel_user WHERE username='installation-test-admin'"
+        ).getFirst().get("id"))));
+    store.transaction(connection -> {
+      AuthStore.update(connection,
+          "INSERT INTO host (id,hostname,capabilities,generation,observed_generation,status) "
+              + "VALUES (?,?,'[]',1,1,'ONLINE'),(?,?,'[]',1,1,'ONLINE')",
+          firstHostId, "p4-k3s-map-host-1", secondHostId, "p4-k3s-map-host-2");
+      AuthStore.update(connection,
+          "INSERT INTO kubernetes_cluster (id,name,kind,endpoint,context_name,"
+              + "encrypted_kubeconfig,health_status,observed_at,imported_by) "
+              + "VALUES (?,?,'K3S','https://127.0.0.1:6443','p4-map-context',?,'HEALTHY',?,?)",
+          clusterId, "p4-k3s-node-map-cluster", new byte[] {1}, observedAt, userId);
+      AuthStore.update(connection,
+          "INSERT INTO kubernetes_cluster_node (cluster_id,node_uid,node_name,roles,ready,"
+              + "kubelet_version,container_owner,host_id,observed_at,node_present) "
+              + "VALUES (?,?,?,'control-plane',TRUE,'v1.33.5+k3s1','KUBERNETES',?,?,TRUE),"
+              + "(?,?,?,'worker',TRUE,'v1.33.5+k3s1','KUBERNETES',?,?,TRUE)",
+          clusterId, firstNodeUid, "p4-k3s-map-node-1", firstHostId, observedAt,
+          clusterId, removedNodeUid, "p4-k3s-map-node-2", secondHostId, observedAt);
+      return null;
+    });
+
+    given().cookie("nanpanel_session", sessionCookie)
+        .header("X-CSRF-Token", csrfToken)
+        .contentType("application/json")
+        .body(Map.of("hostId", firstHostId))
+        .put("/api/v1/kubernetes/clusters/" + clusterId + "/nodes/" + firstNodeUid + "/host")
+        .then().statusCode(200).body("hostId", equalTo(firstHostId.toString()));
+    given().cookie("nanpanel_session", sessionCookie)
+        .header("X-CSRF-Token", csrfToken)
+        .contentType("application/json")
+        .body(Map.of("hostId", firstHostId))
+        .put("/api/v1/kubernetes/clusters/" + clusterId + "/nodes/" + removedNodeUid + "/host")
+        .then().statusCode(409).body("code", equalTo("KUBERNETES_NODE_MAPPING_CONFLICT"));
+
+    store.transaction(connection -> {
+      KubernetesClusterRegistryService.replaceNodes(connection, clusterId, List.of(
+          new KubernetesClusterRegistryService.NodeObservation(firstNodeUid,
+              "p4-k3s-map-node-1", "control-plane", false, true,
+              "v1.33.5+k3s1", "10.0.0.11", "KUBERNETES")), now);
+      return null;
+    });
+    given().cookie("nanpanel_session", sessionCookie)
+        .header("X-CSRF-Token", csrfToken)
+        .delete("/api/v1/kubernetes/clusters/" + clusterId + "/nodes/" + removedNodeUid + "/host")
+        .then().statusCode(204);
+    int removedNodeCount = store.transaction(connection -> AuthStore.query(connection,
+        "SELECT node_uid FROM kubernetes_cluster_node WHERE cluster_id=? AND node_uid=?",
+        clusterId, removedNodeUid).size());
+    assertEquals(0, removedNodeCount);
+
+    given().cookie("nanpanel_session", sessionCookie)
+        .header("X-CSRF-Token", csrfToken)
+        .contentType("application/json")
+        .body(Map.of("hostId", secondHostId))
+        .put("/api/v1/kubernetes/clusters/" + clusterId + "/nodes/" + firstNodeUid + "/host")
+        .then().statusCode(200).body("hostId", equalTo(secondHostId.toString()));
   }
 
   @Test
