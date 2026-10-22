@@ -155,11 +155,12 @@ function Editor() {
   const [menu, setMenu] = useState<Menu>(); const menuRef = useRef<HTMLDivElement>(null); const canvasRef = useRef<HTMLElement>(null);
   const observedRouterSignatureRef = useRef('');
   const { screenToFlowPosition, fitView } = useReactFlow<DeviceNode>();
+  const updateNodeInternals = useUpdateNodeInternals();
   const activeFolderClusterId = nodes.find(node => node.id === folderId)?.data.model.clusterId ?? null;
   const topologyNamespacesPath = (clusterId = activeFolderClusterId) => clusterId
     ? `/kubernetes/clusters/${encodeURIComponent(clusterId)}/topology/namespaces`
     : '/kubernetes/topology/namespaces';
-  const draft = (): TopologyDraftWrite => ({ nodes: nodes.map(n => ({ ...n.data.model, parentId: n.data.model.parentId ?? null, assetId: n.data.model.assetId ?? null, clusterId: n.data.model.clusterId ?? null, position: n.position })), links: edges.map(asLink) });
+  const draft = (): TopologyDraftWrite => ({ nodes: nodes.filter(node => !node.data.observedOnly).map(n => ({ ...n.data.model, parentId: n.data.model.parentId ?? null, assetId: n.data.model.assetId ?? null, clusterId: n.data.model.clusterId ?? null, position: n.position })), links: edges.map(asLink) });
   async function load() {
     setBusy(true); setError(''); setMenu(undefined);
     try { const r = await api<TopologyDraft>('/topology/draft', 'GET', undefined, {}, true); const payload = { nodes: r.data.nodes.map(node => ({ ...node, parentId: node.parentId ?? null, assetId: node.assetId ?? null, clusterId: node.clusterId ?? null })), links: r.data.links.map(({ state: _state, ...link }) => link) }; const invalid = draftError(payload); if (invalid) throw new Error(invalid); setNodes(payload.nodes.map(node => asNode(node))); setEdges(r.data.links.map(asEdge)); setFolderId(null); setEtag(r.etag ?? ''); setDirty(false); setLoaded(true); setMessage(`已读取 Revision ${r.data.generation}；链路状态来自运行观测`); requestAnimationFrame(() => { void fitView({ padding: .2 }); }); }
@@ -323,7 +324,7 @@ function Editor() {
     setMenu({ x: Math.max(8, Math.min(event.clientX, window.innerWidth - 278)), y: Math.max(8, Math.min(event.clientY, window.innerHeight - 450)), point: screenToFlowPosition(insertionPoint ?? { x: event.clientX, y: event.clientY }), nodeId, edgeId });
   }
   function addNode(kind: TopologyNodeKind) {
-    if (nodes.length >= 100) { setError('最多添加 100 个节点'); return; }
+    if (nodes.filter(node => !node.data.observedOnly).length >= 100) { setError('最多添加 100 个节点'); return; }
     const point = menu?.point ?? screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
     const height = 110 + Math.max(nodePresets[kind].inputs, nodePresets[kind].outputs) * 26;
     // Keep the clicked position when free; otherwise find a nearby free grid cell.
@@ -343,7 +344,7 @@ function Editor() {
   }
   function addHostAsset(host: Host) {
     if (nodes.some(node => node.data.model.assetId === host.id)) { setError('该主机资产已添加到主拓扑'); return; }
-    if (nodes.length >= 100) { setError('最多添加 100 个节点'); return; }
+    if (nodes.filter(node => !node.data.observedOnly).length >= 100) { setError('最多添加 100 个节点'); return; }
     const canvas = canvasRef.current?.getBoundingClientRect();
     const point = screenToFlowPosition({ x: canvas ? canvas.left + canvas.width / 2 : window.innerWidth / 2, y: canvas ? canvas.top + canvas.height / 2 : window.innerHeight / 2 });
     const base = createTopologyNode('HOST', point);
@@ -432,8 +433,8 @@ function Editor() {
       model.ipAddress = address;
       const node = asNode(model);
       node.data.observedOnly = true;
-      node.width = 230;
-      node.height = 180;
+      node.initialWidth = 230;
+      node.initialHeight = 180;
       node.selectable = false;
       node.draggable = false;
       node.deletable = false;
@@ -444,15 +445,27 @@ function Editor() {
     });
   const observedRouterSignature = autoRouterNodes.map(node => node.id).join('|');
   useEffect(() => {
-    if (!loaded || folderId || observedRouterSignatureRef.current === observedRouterSignature) return;
-    observedRouterSignatureRef.current = observedRouterSignature;
+    setNodes(current => {
+      const configured = current.filter(node => !node.data.observedOnly);
+      const existingIds = current.filter(node => node.data.observedOnly).map(node => node.id).sort();
+      const desiredIds = autoRouterNodes.map(node => node.id).sort();
+      if (existingIds.length === desiredIds.length && existingIds.every((id, index) => id === desiredIds[index])) return current;
+      return [...configured, ...autoRouterNodes];
+    });
+  }, [observedRouterSignature, setNodes]);
+  const renderedObservedRouterSignature = nodes.filter(node => node.data.observedOnly).map(node => node.id).sort().join('|');
+  useEffect(() => {
+    const desiredSignature = autoRouterNodes.map(node => node.id).sort().join('|');
+    if (!loaded || folderId || renderedObservedRouterSignature !== desiredSignature || observedRouterSignatureRef.current === desiredSignature) return;
+    observedRouterSignatureRef.current = desiredSignature;
     const fitTimer = window.setTimeout(() => {
-      void fitView({ padding: .2, includeHiddenNodes: true });
+      autoRouterNodes.forEach(node => updateNodeInternals(node.id));
+      requestAnimationFrame(() => void fitView({ padding: .2, includeHiddenNodes: true }));
     }, 120);
     return () => window.clearTimeout(fitTimer);
-  }, [fitView, folderId, loaded, observedRouterSignature]);
+  }, [fitView, folderId, loaded, observedRouterSignature, renderedObservedRouterSignature, updateNodeInternals]);
   const rootNodeByNextHopId = new Map(rootAssetNodes.map(node => [node.data.model.assetId!, node]));
-  for (const node of nodes.filter(item => !item.data.model.parentId && item.data.model.kind === 'ROUTER')) {
+  for (const node of nodes.filter(item => !item.data.observedOnly && !item.data.model.parentId && item.data.model.kind === 'ROUTER')) {
     const address = node.data.model.ipAddress?.trim().toLowerCase();
     if (!address) continue;
     const owners = hostByAddress.get(address) ?? [];
@@ -547,7 +560,7 @@ function Editor() {
     {routeEvidence && <div className="alert" role="status"><strong>实际路由已验证</strong> · {routeEvidence.route} · HTTP {routeEvidence.httpStatus} · 响应 {routeEvidence.responseBody} · SHA-256 {routeEvidence.configSha256}<pre className="p0-route-diff">{routeEvidence.diff}</pre></div>}
     <div className="topology-tools"><div className="port-legend"><span><i className="input-dot" />蓝色：入口</span><span><i className="output-dot" />绿色：出口</span>{Object.entries(linkStateLabels).map(([state, label]) => <span key={state}><i className={`state-dot ${state.toLowerCase()}`} />{label}</span>)}</div><div className="topology-actions"><button className="secondary" disabled={!loaded || busy} onClick={e => { const rect = e.currentTarget.getBoundingClientRect(); const canvas = canvasRef.current?.getBoundingClientRect(); openMenu({ preventDefault() {}, clientX: rect.left, clientY: rect.bottom + 8 }, undefined, undefined, canvas ? { x: canvas.left + canvas.width / 2, y: canvas.top + canvas.height / 2 } : undefined); }}>＋ 添加节点</button><button className="secondary" disabled={busy || !activeEdges.length} onClick={() => { setEdges(current => current.filter(edge => !activeEdges.some(active => active.id === edge.id))); setDirty(true); setRouteEvidence(undefined); }}>清空本层连接</button></div></div>
     <section className="topology card" aria-label="拓扑编辑器" ref={canvasRef}>
-      <ReactFlow<DeviceNode> nodes={folderId ? activeDisplayNodes : [...activeDisplayNodes, ...autoRouterNodes]} edges={folderId ? activeEdges : [...activeEdges, ...observedRouteEdges]} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
+      <ReactFlow<DeviceNode> nodes={activeDisplayNodes} edges={folderId ? activeEdges : [...activeEdges, ...observedRouteEdges]} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
         onNodesChange={changes => { onNodesChange(changes); if (changes.some(c => c.type === 'position' && c.position || c.type === 'remove')) { setDirty(true); setRouteEvidence(undefined); } }}
         onEdgesChange={changes => { onEdgesChange(changes); if (changes.some(c => c.type === 'remove')) { setDirty(true); setRouteEvidence(undefined); } }}
         onConnect={connect} isValidConnection={validConnection} connectionMode={ConnectionMode.Strict}
@@ -640,7 +653,7 @@ function Editor() {
       </>}
     </section>}
     <NetbirdProviderPanel />
-    <div className="topology-caption"><span>全拓扑 {nodes.length} 个配置节点 · Agent 自动发现 {autoRouterNodes.length} 个 Router；期望连接 {edges.length} 条 · 当前层 {activeNodes.length} 个节点 · {activeEdges.length} 条期望连接 · {dirty ? '有未保存的修改' : '草稿未修改'}</span><span role="status">{message || (busy ? '正在读取草稿…' : '')}</span></div>
+    <div className="topology-caption"><span>全拓扑 {nodes.filter(node => !node.data.observedOnly).length} 个配置节点 · Agent 自动发现 {autoRouterNodes.length} 个 Router；期望连接 {edges.length} 条 · 当前层 {activeNodes.filter(node => !node.data.observedOnly).length} 个节点 · {activeEdges.length} 条期望连接 · {dirty ? '有未保存的修改' : '草稿未修改'}</span><span role="status">{message || (busy ? '正在读取草稿…' : '')}</span></div>
     {menu && <div className="topology-menu" role="menu" aria-label="拓扑右键菜单" ref={menuRef} style={{ left: menu.x, top: menu.y } as CSSProperties}>
       {contextNode ? <><strong>{contextNode.name} · {contextNode.inputCount} 入 / {contextNode.outputCount} 出</strong>{contextNode.kind === 'FOLDER' && <button role="menuitem" onClick={() => enterFolder(contextNode.id)}>打开层级视图</button>}{(['inputCount', 'outputCount'] as const).map(direction => <div key={direction} className="menu-port-actions">{[1, -1].map(delta => <button role="menuitem" key={delta} disabled={!portChangeCandidate(contextNode, direction, delta)} onClick={() => changePorts(contextNode, direction, delta)}>{delta > 0 ? '增加' : '减少'}{direction === 'inputCount' ? '入口' : '出口'}</button>)}</div>)}<button role="menuitem" className="danger" onClick={() => removeNode(contextNode.id)}>删除节点及关联连接</button></> : menu.edgeId ? <><strong>期望连接 · {linkStateLabels[(contextEdge?.data?.state ?? 'PENDING') as keyof typeof linkStateLabels]} · L4/{(contextEdge?.data?.protocol ?? 'TCP') as string}</strong><button role="menuitem" className="danger" onClick={() => { setEdges(current => current.filter(e => e.id !== menu.edgeId)); setDirty(true); setRouteEvidence(undefined); setMenu(undefined); }}>删除连接</button></> : <><strong>添加节点</strong>{(Object.keys(nodePresets) as TopologyNodeKind[]).map(kind => <button role="menuitem" key={kind} onClick={() => addNode(kind)}><span>{nodePresets[kind].name}</span><small>{nodePresets[kind].inputs} 入 / {nodePresets[kind].outputs} 出</small></button>)}</>}
       <button role="menuitem" className="menu-cancel" onClick={() => setMenu(undefined)}>关闭菜单 · Esc</button>
