@@ -162,3 +162,34 @@ passed for this change. The build reports the existing large-chunk warning.
 This recheck confirms the real single-node route and Istio display only. The
 production topology remains untouched, and no `k3s.preflight` operation was
 run.
+
+## Web layout refinement deployment at 2026-10-22 07:05 UTC
+
+- Commit `8722235f8ed61e25aa32d407d1c004e0f200d8be` passed GitHub Actions run
+  `39736376356`; Rust formatting/check/Clippy/tests, Maven verification, Web
+  build, and both GHCR image publications succeeded.
+- Only `deployment/nanpanel-web` was updated from
+  `sha-fbf151f1bf7eb4dd87899a61d8a34cb0d639a4f1` to the immutable GHCR image
+  `ghcr.io/geekcorelab/nanpanel-web:sha-8722235f8ed61e25aa32d407d1c004e0f200d8be`.
+  The rollout completed with Web `1/1` Ready and zero restarts. Core remained
+  on `sha-ff53346e3ee4f21b1aef00b7429604c982582ba5`, `1/1` Ready with zero
+  restarts; PostgreSQL remained Running. The HTTPS Web root returned HTTP 200.
+- The deployment removes topology draft save/reload actions while the Istio
+  read-only workspace is selected. Gateway asset unbinding is now an inline
+  control that keeps the card size fixed; auto-placement accounts for Gateway,
+  Router, and folder controls when avoiding overlaps.
+- `node web/scripts/k3s-route-live-browser.mjs` returned `PASS` against the
+  deployed Web and real Core. It displayed the observed `k3s-1 → 10.0.0.1`
+  route, a Gateway bound to the live Host asset, 2 Services, 2/2 Ready
+  endpoints, 3/3 sidecars, and 26 real Envoy requests (13 HTTP 200 and 13 HTTP
+  403, both mTLS). `topologyWrites` remained `0`; no browser errors occurred.
+- Visually inspected the screenshots at
+  `/tmp/nanpanel-k3s-route-live-ui.png`,
+  `/tmp/nanpanel-k3s-istio-service-network-ui.png`, and
+  `/tmp/nanpanel-k3s-gateway-asset-live-ui.png`. The Istio workspace has no
+  topology save/reload buttons and keeps the Service list and traffic panel in
+  separate columns. The route canvas has no overlapping cards.
+
+The deployed browser session and empty topology draft remain test-only. This
+confirms the live UI and Istio data path, not production topology persistence.
+No Core, database, PVC, host route, or `k3s.preflight` state was changed.
