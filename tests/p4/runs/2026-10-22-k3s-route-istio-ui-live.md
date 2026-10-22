@@ -302,3 +302,19 @@ recovery, or KubeEdge lifecycle acceptance. No `k3s.preflight` ran.
   topology projection; it does not establish saved production topology.
 - No Agent/Helper operation or `k3s.preflight` ran. The single-node target was
   not used for multi-node, fresh-install, or destructive upgrade acceptance.
+
+## Current-state recheck at 2026-10-22 14:40 UTC
+
+- Re-ran `node web/scripts/k3s-route-live-browser.mjs`: `PASS`, observed route
+  gateway `10.0.0.1` at `2026-10-22T14:40:50.491+00:00`, and
+  `topologyWrites: 0`. Core is Ready 1/1 with image
+  `ghcr.io/geekcorelab/nanpanel-core:sha-05bb3271b41905141d101f687cc20416cfbb341e`
+  and unchanged `agent-gateway`; Web remains Ready 1/1 on its existing image.
+  All application Pods are Running; Core and Web report zero restarts.
+- Inspected the refreshed Istio workspace screenshot. It shows the real Core
+  Service/EndpointSlice inventory (2 Services, 2/2 Ready endpoints), 3/3 Envoy
+  sidecars, and 26 Envoy/mTLS requests with separate HTTP 200 and 403 rows.
+  Services and Istio traffic remain in two columns; endpoint details stay
+  collapsed until requested. Mock mode remains explicitly disconnected.
+- This remains a read-only test-session projection. No production topology
+  save, `k3s.preflight`, Helper operation, or K3s lifecycle operation ran.
