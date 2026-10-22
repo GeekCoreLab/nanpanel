@@ -154,9 +154,12 @@ recorded in
   installation plans: the encrypted short token is not returned, the Server
   must be imported and mapped before Agent install, and each Agent must map to
   a Ready Node at the requested version before the next step. API, encryption,
-  and frontend build checks pass. This remains code-level evidence; sequential
-  multi-node execution, restart recovery, failure injection, and K3s-specific
-  live validation remain open. Code evidence is recorded in
+  and frontend build checks pass. A Core scheduler test now injects a terminal
+  Server-operation `UNKNOWN` state and verifies that the plan stops, no Agent
+  operation is dispatched, and the encrypted join token is cleared. This is
+  state-machine coverage, not an Agent or K3s failure run. Sequential multi-node
+  execution, end-to-end restart recovery, and K3s-specific live validation
+  remain open. Code evidence is recorded in
   [`k3s-preflight-agent-helper.md`](runs/2026-10-21-k3s-preflight-agent-helper.md),
   [`k3s-install-helper-capability.md`](runs/2026-10-21-k3s-install-helper-capability.md),
   and [`k3s-installation-plan-code.md`](runs/k3s-installation-plan-code.md).

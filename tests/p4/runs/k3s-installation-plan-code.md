@@ -39,6 +39,7 @@ Date: 2026-10-21
   draft creation, encrypted-token persistence, plan-context binding, and
   authenticated-encryption tamper rejection. A fake-Gateway run also proves
   Server-first submission and that Agent steps remain undispatched until
+  cluster import and Ready Node mapping.
 - `./mvnw -pl backend/panel-core -am test` passed with 32 tests, no failures or
   errors; this includes the new scheduler case, direct-install ownership gate,
   and Kubernetes registry credential regression tests. The focused regression
@@ -56,6 +57,21 @@ mapped to a Kubernetes Node or has a positive kubelet/K3s runtime discovery
 record. The SystemResource integration case reports runtime discovery as absent
 before checking the valid first-install path, while a separate mapped-Host case
 proves the `409 K3S_INSTALL_HOST_ALREADY_MANAGED` rejection.
+
+## 2026-10-22 UNKNOWN-result state-machine follow-up
+
+- Source commit: `d9f5faa` (`Test stopping K3s install plan on unknown result`).
+- Command: `./mvnw -pl backend/panel-core -am -Dtest=K3sInstallationApiTest -Dsurefire.failIfNoSpecifiedTests=false test`.
+- Result: six `K3sInstallationApiTest` cases passed; the full selected reactor succeeded.
+- The new H2/fake-Gateway case dispatches only the Server step, marks its
+  persisted operation `UNKNOWN`, and invokes the scheduler. Core marks the plan
+  and Server step `UNKNOWN`, leaves the Agent step `PENDING`, creates no Agent
+  operation after another scheduler pass, and clears the encrypted join-token
+  envelope. The API response does not echo the token.
+- This verifies Core fail-stop behavior for an already persisted unknown
+  operation state. It does not simulate an actual lost Agent result, exercise a
+  K3s API, or prove multi-node restart/failure recovery. Those acceptance gates
+  remain open.
 
 ## Acceptance still required
 
