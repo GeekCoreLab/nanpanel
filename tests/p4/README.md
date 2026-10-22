@@ -26,6 +26,9 @@ The target `k3s-1` live Istio service-network UI/API acceptance passed on
 images, registry retrieval, real traffic values, and test-session boundary are
 recorded in
 [`runs/2026-10-22-k3s-route-istio-ui-live.md`](runs/2026-10-22-k3s-route-istio-ui-live.md).
+The 2026-10-22 P4 regression recheck reran Maven, Web, and Rust checks against
+the current `main` checkout; results and the remaining live-acceptance limits
+are in [`runs/2026-10-22-p4-regression-recheck.md`](runs/2026-10-22-p4-regression-recheck.md).
 
 ## Current source boundary
 

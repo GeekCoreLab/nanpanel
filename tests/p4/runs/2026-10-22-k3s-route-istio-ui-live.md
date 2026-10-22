@@ -266,3 +266,17 @@ No Core, database, PVC, host route, or `k3s.preflight` state was changed.
 This remains read-only single-node UI and data-path evidence. It does not
 establish production topology persistence, multi-node behavior, K3s lifecycle
 recovery, or KubeEdge lifecycle acceptance. No `k3s.preflight` ran.
+
+## Read-only target recheck at 2026-10-22 14:11 UTC
+
+- Re-ran `node web/scripts/k3s-route-live-browser.mjs`: `PASS`, Host `k3s-1`,
+  observed route gateway `10.0.0.1`, route observation
+  `2026-10-22T14:11:36.652+00:00`, no browser errors, and `topologyWrites: 0`.
+- The browser continued to source Service inventory and Istio telemetry from
+  deployed Core. Script assertions confirmed Istio `LIVE`, 3/3 sidecars,
+  HTTP 200 and HTTP 403 traffic rows both labeled mTLS. Visually inspected the
+  refreshed Istio screenshot: 2 Services, 2/2 Ready endpoints, separate
+  Service/traffic columns, and collapsed per-Service endpoint details.
+- The browser session and empty topology projection are test-only; topology
+  writes were blocked. This does not prove production topology persistence.
+  No `k3s.preflight` operation ran.
