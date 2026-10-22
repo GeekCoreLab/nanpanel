@@ -144,6 +144,38 @@ public class HostHelperOperationResource {
             expectedGeneration), actor, null);
   }
 
+  Response replayPlannedKubeEdgeJoin(UUID hostId, String idempotencyKey, String actor) {
+    Map<String, Object> row = store.transaction(connection -> {
+      var rows = query(connection, operationSelect()
+          + " WHERE o.host_id=? AND o.idempotency_key=? AND o.requested_by=? "
+          + "AND o.kind='HOST_HELPER_OPERATION' AND o.capability='kubeedge.edgecore.join'",
+          hostId, idempotencyKey, actor);
+      return rows.isEmpty() ? null : rows.getFirst();
+    });
+    return row == null ? null : operationResponse(row, true);
+  }
+
+  Response plannedKubeEdgeOperation(UUID operationId, UUID hostId, String actor) {
+    Map<String, Object> row = store.transaction(connection -> {
+      var rows = query(connection, operationSelect()
+          + " WHERE o.id=? AND o.host_id=? AND o.requested_by=? "
+          + "AND o.kind='HOST_HELPER_OPERATION' AND o.capability='kubeedge.edgecore.join'",
+          operationId, hostId, actor);
+      return rows.isEmpty() ? null : rows.getFirst();
+    });
+    if (row == null) throw fail(404, "NOT_FOUND", "EdgeCore Helper 操作不存在");
+    return operationResponse(row, true);
+  }
+
+  private Response operationResponse(Map<String, Object> row, boolean replayed) {
+    String status = String.valueOf(row.get("status"));
+    int responseStatus = Set.of("PENDING", "RUNNING").contains(status) ? 202 : 200;
+    return Response.status(responseStatus).entity(view(row))
+        .header("Location", "/api/v1/operations/" + row.get("id"))
+        .header("Retry-After", "2")
+        .header("Idempotency-Replayed", Boolean.toString(replayed)).build();
+  }
+
   private Response submitAs(UUID hostId, String idempotencyKey, HelperOperationRequest input,
                             String actor, String remoteAddress) {
     String key = validateIdempotencyKey(idempotencyKey);

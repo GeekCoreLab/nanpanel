@@ -664,7 +664,8 @@ paths:
     get:
       tags: [KubernetesClusters]
       operationId: getClusterProviderOperation
-      summary: 查询当前管理员的集群生命周期计划
+      summary: 查询当前管理员的集群生命周期计划与执行状态
+      description: 返回关联的 Host Operation ID 和对账状态。Helper 成功后，EdgeCore 计划保持等待状态，直到最近一次集群快照中的同名 Ready Edge Node 已映射到目标 Host；Helper 失败或执行结果不确定时分别保留 FAILED 或 UNKNOWN。
       x-implementation-status: implemented
       security:
       - cookieAuth: []
@@ -4545,15 +4546,16 @@ components:
     ClusterProviderOperation:
       type: object
       additionalProperties: false
-      required: [id, providerId, clusterId, generation, operation, state, detail, createdAt, updatedAt]
+      required: [id, providerId, clusterId, generation, operation, state, detail, hostOperationId, createdAt, updatedAt]
       properties:
         id: { type: string, format: uuid }
         providerId: { type: string }
         clusterId: { type: string, format: uuid }
         generation: { type: integer, format: int64, minimum: 0 }
         operation: { type: string }
-        state: { type: string, enum: [PLANNED, VALIDATED, DRIFTED, FAILED] }
+        state: { type: string, enum: [PLANNED, VALIDATED, DRIFTED, EXECUTING, AWAITING_NODE_REGISTRATION, SUCCEEDED, FAILED, UNKNOWN] }
         detail: { type: string, maxLength: 512 }
+        hostOperationId: { type: [string, 'null'], format: uuid, description: 执行计划对应的 Host Helper Operation；无执行任务时为 null。 }
         createdAt: { type: string, format: date-time }
         updatedAt: { type: string, format: date-time }
     TopologyNodeKind:

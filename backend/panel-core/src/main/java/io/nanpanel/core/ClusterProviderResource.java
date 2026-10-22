@@ -224,7 +224,7 @@ public class ClusterProviderResource {
           "SELECT * FROM cluster_provider_operation WHERE provider_id=? AND id=? AND requested_by=?",
           providerId, uuid(operationId), actor.get("user_id"));
       if (rows.isEmpty()) throw fail(404, "NOT_FOUND", "集群 Provider 操作不存在");
-      return view(rows.getFirst());
+      return reconcileExecution(connection, rows.getFirst(), actor);
     });
   }
 
@@ -274,7 +274,7 @@ public class ClusterProviderResource {
       @PathParam("operationId") String operationId) {
     Map<String, Object> actor = session();
     recent(actor);
-    Map<String, Object> row = validatedOperation(providerId, operationId, actor);
+    Map<String, Object> row = operationForExecution(providerId, operationId, actor);
     ClusterProvider.ClusterPlan plan = deserialize(row.get("plan_configuration"));
     if (!"kubeedge-core".equals(providerId) || !"join_edgecore".equals(plan.operation())
         || plan.steps().size() != 1) {
@@ -286,6 +286,25 @@ public class ClusterProviderResource {
         || !"kubeedge.edgecore.join".equals(step.capability())
         || step.hostId() == null || step.credentialReferences().size() != 1) {
       throw fail(409, "CLUSTER_PROVIDER_PLAN_UNSAFE", "EdgeCore 计划无法安全派发");
+    }
+    String executionKey = digest("cluster-provider-execution\n" + plan.id() + "\n"
+        + step.ordinal());
+    String actorId = String.valueOf(actor.get("user_id"));
+    Object existingOperationId = row.get("host_operation_id");
+    if (existingOperationId != null) {
+      return helperOperations.plannedKubeEdgeOperation(
+          (UUID)existingOperationId, step.hostId(), actorId);
+    }
+    Response replayed = helperOperations.replayPlannedKubeEdgeJoin(
+        step.hostId(), executionKey, actorId);
+    if (replayed != null) {
+      @SuppressWarnings("unchecked")
+      Map<String, Object> operation = (Map<String, Object>)replayed.getEntity();
+      persistExecution(row, actor, UUID.fromString(String.valueOf(operation.get("id"))));
+      return replayed;
+    }
+    if (!"VALIDATED".equals(row.get("state"))) {
+      throw fail(409, "INVALID_OPERATION_STATE", "只有已验证的集群 Provider 操作可以执行");
     }
     UUID clusterId = (UUID)row.get("cluster_id");
     UUID credentialId = step.credentialReferences().getFirst();
@@ -329,26 +348,41 @@ public class ClusterProviderResource {
     } catch (RuntimeException unavailable) {
       throw fail(409, "CLUSTER_CREDENTIAL_UNAVAILABLE", "EdgeCore 加入凭据不可用");
     }
-    String executionKey = digest("cluster-provider-execution\n" + plan.id() + "\n"
-        + step.ordinal());
     Response submitted = helperOperations.submitPlannedKubeEdgeJoin(step.hostId(), executionKey,
         step.parameters().get("version"), step.parameters().get("cloudCoreEndpoint"), token,
         "Execute validated KubeEdge EdgeCore join plan " + plan.id(),
-        String.valueOf(actor.get("user_id")));
+        actorId);
     @SuppressWarnings("unchecked")
     Map<String, Object> operation = (Map<String, Object>)submitted.getEntity();
+    persistExecution(row, actor, UUID.fromString(String.valueOf(operation.get("id"))));
+    return submitted;
+  }
+
+  private void persistExecution(Map<String, Object> row, Map<String, Object> actor,
+      UUID hostOperationId) {
+    String providerId = String.valueOf(row.get("provider_id"));
+    UUID planId = (UUID)row.get("id");
+    String detail = "EdgeCore join dispatched as host operation " + hostOperationId
+        + "; waiting for Helper and Edge Node registration";
     store.transaction(connection -> {
-      update(connection, "UPDATE cluster_provider_operation SET detail=?,updated_at=? "
-          + "WHERE provider_id=? AND id=? AND state='VALIDATED'",
-          bounded("EdgeCore join dispatched as host operation " + operation.get("id")
-              + "; inspect the host operation for completion"), System.currentTimeMillis(),
-          providerId, plan.id());
+      int changed = update(connection, "UPDATE cluster_provider_operation "
+          + "SET state='EXECUTING',host_operation_id=?,detail=?,updated_at=? "
+          + "WHERE provider_id=? AND id=? AND state IN ('VALIDATED','EXECUTING') "
+          + "AND (host_operation_id IS NULL OR host_operation_id=?)",
+          hostOperationId, bounded(detail), System.currentTimeMillis(), providerId, planId,
+          hostOperationId);
+      if (changed != 1) {
+        var current = query(connection,
+            "SELECT host_operation_id FROM cluster_provider_operation WHERE provider_id=? AND id=?",
+            providerId, planId);
+        if (current.isEmpty() || !hostOperationId.equals(current.getFirst().get("host_operation_id"))) {
+          throw fail(409, "CLUSTER_PROVIDER_EXECUTION_RACE", "生命周期计划已关联其他 Helper 操作");
+        }
+      }
       audit(connection, String.valueOf(actor.get("user_id")), "cluster-provider.execute",
-          "cluster-provider-operation", plan.id().toString(), "ACCEPTED", remoteAddress(),
-          "Dispatched EdgeCore join as host operation " + operation.get("id"));
+          "cluster-provider-operation", planId.toString(), "ACCEPTED", remoteAddress(), detail);
       return null;
     });
-    return submitted;
   }
 
   private ClusterProvider provider(String providerId) {
@@ -551,18 +585,93 @@ public class ClusterProviderResource {
     });
   }
 
-  private Map<String, Object> validatedOperation(String providerId, String operationId,
+  private Map<String, Object> operationForExecution(String providerId, String operationId,
       Map<String, Object> actor) {
     return store.transaction(connection -> {
       var rows = query(connection,
           "SELECT * FROM cluster_provider_operation WHERE provider_id=? AND id=? AND requested_by=?",
           providerId, uuid(operationId), actor.get("user_id"));
       if (rows.isEmpty()) throw fail(404, "NOT_FOUND", "集群 Provider 操作不存在");
-      if (!"VALIDATED".equals(rows.getFirst().get("state"))) {
-        throw fail(409, "INVALID_OPERATION_STATE", "只有已验证的集群 Provider 操作可以执行");
-      }
       return rows.getFirst();
     });
+  }
+
+  private Map<String, Object> reconcileExecution(java.sql.Connection connection,
+      Map<String, Object> row, Map<String, Object> actor) throws java.sql.SQLException {
+    String state = String.valueOf(row.get("state"));
+    Object operationValue = row.get("host_operation_id");
+    if (operationValue == null || !Set.of("EXECUTING", "AWAITING_NODE_REGISTRATION")
+        .contains(state)) return view(row);
+    UUID hostOperationId = operationValue instanceof UUID id ? id
+        : UUID.fromString(String.valueOf(operationValue));
+    var hostOperations = query(connection,
+        "SELECT id,host_id,capability,status,finished_at FROM operation "
+            + "WHERE id=? AND requested_by=? AND kind='HOST_HELPER_OPERATION'",
+        hostOperationId, actor.get("user_id"));
+    if (hostOperations.isEmpty()) return view(row);
+    Map<String, Object> hostOperation = hostOperations.getFirst();
+    ClusterProvider.ClusterPlan plan = deserialize(row.get("plan_configuration"));
+    if (!"kubeedge-core".equals(row.get("provider_id"))
+        || !"join_edgecore".equals(plan.operation()) || plan.steps().size() != 1
+        || !"kubeedge.edgecore.join".equals(hostOperation.get("capability"))
+        || !plan.steps().getFirst().hostId().equals(hostOperation.get("host_id"))) {
+      return view(row);
+    }
+    String helperStatus = String.valueOf(hostOperation.get("status"));
+    String nextState;
+    String detail;
+    switch (helperStatus) {
+      case "PENDING", "RUNNING" -> {
+        nextState = "EXECUTING";
+        detail = "EdgeCore join Helper operation is still running";
+      }
+      case "UNKNOWN" -> {
+        nextState = "UNKNOWN";
+        detail = "EdgeCore join outcome is uncertain; inspect the Host Operation before retrying";
+      }
+      case "FAILED", "CANCELLED" -> {
+        nextState = "FAILED";
+        detail = "EdgeCore join Helper operation ended with status " + helperStatus;
+      }
+      case "SUCCEEDED" -> {
+        boolean registered = !query(connection,
+            "SELECT n.node_uid FROM kubernetes_cluster_node n "
+                + "JOIN host h ON h.id=n.host_id "
+                + "WHERE n.cluster_id=? AND n.host_id=? AND n.node_present=TRUE "
+                + "AND n.kubeedge_edge=TRUE AND n.ready=TRUE "
+                + "AND LOWER(n.node_name)=LOWER(h.hostname) "
+                + "AND n.observed_at >= ? LIMIT 1",
+            row.get("cluster_id"), plan.steps().getFirst().hostId(),
+            hostOperation.get("finished_at")).isEmpty();
+        nextState = registered ? "SUCCEEDED" : "AWAITING_NODE_REGISTRATION";
+        detail = registered
+            ? "EdgeCore Helper succeeded and a fresh Ready Edge Node matching the Host is mapped"
+            : "EdgeCore service is active; waiting for a fresh Ready Edge Node to be mapped to the Host";
+      }
+      default -> { return view(row); }
+    }
+    if (nextState.equals(state) && detail.equals(row.get("detail"))) return view(row);
+    long now = System.currentTimeMillis();
+    int changed = update(connection,
+        "UPDATE cluster_provider_operation SET state=?,detail=?,updated_at=? "
+            + "WHERE provider_id=? AND id=? AND state=? AND host_operation_id=?",
+        nextState, bounded(detail), now, row.get("provider_id"), row.get("id"), state,
+        hostOperationId);
+    if (changed == 1 && !nextState.equals(state)) {
+      String outcome = switch (nextState) {
+        case "SUCCEEDED" -> "SUCCEEDED";
+        case "FAILED" -> "FAILED";
+        case "UNKNOWN" -> "UNKNOWN";
+        default -> "ACCEPTED";
+      };
+      audit(connection, String.valueOf(actor.get("user_id")), "cluster-provider.reconcile",
+          "cluster-provider-operation", String.valueOf(row.get("id")), outcome,
+          remoteAddress(), bounded(detail));
+    }
+    var current = query(connection,
+        "SELECT * FROM cluster_provider_operation WHERE provider_id=? AND id=?",
+        row.get("provider_id"), row.get("id"));
+    return current.isEmpty() ? view(row) : view(current.getFirst());
   }
 
   private Map<String, Object> transition(Map<String, Object> row, Map<String, Object> actor,
@@ -583,12 +692,20 @@ public class ClusterProviderResource {
   }
 
   private Map<String, Object> view(Map<String, Object> row) {
-    return Map.of("id", row.get("id"), "providerId", row.get("provider_id"),
-        "clusterId", row.get("cluster_id"), "generation", row.get("generation"),
-        "operation", row.get("operation"), "state", row.get("state"),
-        "detail", row.get("detail"),
-        "createdAt", Instant.ofEpochMilli(((Number)row.get("created_at")).longValue()).toString(),
-        "updatedAt", Instant.ofEpochMilli(((Number)row.get("updated_at")).longValue()).toString());
+    var value = new java.util.LinkedHashMap<String, Object>();
+    value.put("id", row.get("id"));
+    value.put("providerId", row.get("provider_id"));
+    value.put("clusterId", row.get("cluster_id"));
+    value.put("generation", row.get("generation"));
+    value.put("operation", row.get("operation"));
+    value.put("state", row.get("state"));
+    value.put("detail", row.get("detail"));
+    value.put("hostOperationId", row.get("host_operation_id"));
+    value.put("createdAt", Instant.ofEpochMilli(((Number)row.get("created_at")).longValue())
+        .toString());
+    value.put("updatedAt", Instant.ofEpochMilli(((Number)row.get("updated_at")).longValue())
+        .toString());
+    return value;
   }
 
   private void recent(Map<String, Object> actor) {

@@ -237,6 +237,46 @@ class NetworkProviderApiTest {
         .post("/api/v1/cluster-providers/p3-fixture-cluster-provider/operations/"
             + edgeOperationId + "/execute")
         .then().statusCode(409).body("code", equalTo("CLUSTER_PROVIDER_EXECUTION_UNSUPPORTED"));
+    UUID hostOperationId = UUID.randomUUID();
+    String edgeHostname = "provider-edge-fixture-" + edgeHostId.toString().substring(0, 8);
+    Instant helperFinishedAt = Instant.now();
+    store.transaction(connection -> {
+      AuthStore.update(connection,
+          "INSERT INTO operation (id,idempotency_key,phase,status,error,created_at,updated_at,"
+              + "kind,host_id,requested_by,reason,capability,target,finished_at) "
+              + "VALUES (?,?,'COMMIT','RUNNING',NULL,?,?,?,?,?,?,?,?,NULL)",
+          hostOperationId, "kubeedge-fixture-host-operation", Timestamp.from(Instant.now()),
+          Timestamp.from(Instant.now()), "HOST_HELPER_OPERATION", edgeHostId, session.userId(),
+          "test KubeEdge plan reconciliation", "kubeedge.edgecore.join", "");
+      AuthStore.update(connection,
+          "UPDATE cluster_provider_operation SET provider_id='kubeedge-core',state='EXECUTING',"
+              + "host_operation_id=?,detail='EdgeCore dispatch fixture' WHERE id=?",
+          hostOperationId, UUID.fromString(edgeOperationId));
+      return null;
+    });
+    String reconciledPlan = "/api/v1/cluster-providers/kubeedge-core/operations/"
+        + edgeOperationId;
+    given().cookie("nanpanel_session", session.cookie()).get(reconciledPlan)
+        .then().statusCode(200).body("state", equalTo("EXECUTING"))
+        .body("hostOperationId", equalTo(hostOperationId.toString()));
+    store.transaction(connection -> {
+      AuthStore.update(connection,
+          "UPDATE operation SET status='SUCCEEDED',finished_at=?,updated_at=? WHERE id=?",
+          Timestamp.from(helperFinishedAt), Timestamp.from(helperFinishedAt), hostOperationId);
+      return null;
+    });
+    given().cookie("nanpanel_session", session.cookie()).get(reconciledPlan)
+        .then().statusCode(200).body("state", equalTo("AWAITING_NODE_REGISTRATION"));
+    store.transaction(connection -> {
+      AuthStore.update(connection,
+          "UPDATE kubernetes_cluster_node SET node_name=?,host_id=?,observed_at=? "
+              + "WHERE cluster_id=? AND node_uid=?",
+          edgeHostname, edgeHostId, Timestamp.from(helperFinishedAt.plusMillis(1)), clusterId,
+          "fixture-node-uid");
+      return null;
+    });
+    given().cookie("nanpanel_session", session.cookie()).get(reconciledPlan)
+        .then().statusCode(200).body("state", equalTo("SUCCEEDED"));
     store.transaction(connection -> {
       AuthStore.update(connection,
           "UPDATE kubernetes_cluster_node SET host_id=? WHERE cluster_id=? AND node_uid=?",

@@ -112,11 +112,18 @@
         <sql>CREATE TABLE k3s_install_step (plan_id UUID NOT NULL REFERENCES k3s_install_plan(id) ON DELETE CASCADE, ordinal INTEGER NOT NULL CHECK (ordinal &gt;= 0), host_id UUID NOT NULL REFERENCES host(id), role VARCHAR(8) NOT NULL CHECK (role IN ('server','agent')), expected_generation BIGINT NOT NULL CHECK (expected_generation &gt;= 1), state VARCHAR(16) NOT NULL CHECK (state IN ('PENDING','SUBMITTING','RUNNING','VERIFYING','SUCCEEDED','FAILED','UNKNOWN')), idempotency_key VARCHAR(128) NOT NULL UNIQUE, operation_id UUID REFERENCES operation(id), error_code VARCHAR(64), error_message VARCHAR(1000), created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP, finished_at TIMESTAMP WITH TIME ZONE, PRIMARY KEY (plan_id,ordinal), UNIQUE (plan_id,host_id));</sql>
     </changeSet>
     <changeSet id="cluster-provider-operations-test" author="nanpanel">
-        <sql>CREATE TABLE cluster_provider_operation (id UUID PRIMARY KEY, provider_id VARCHAR(80) NOT NULL, cluster_id UUID NOT NULL REFERENCES kubernetes_cluster(id), idempotency_key CHAR(64) NOT NULL, request_fingerprint CHAR(64) NOT NULL, generation BIGINT NOT NULL CHECK (generation &gt;= 0), operation VARCHAR(80) NOT NULL, state VARCHAR(16) NOT NULL CHECK (state IN ('PLANNED','VALIDATED','DRIFTED','FAILED')), plan_configuration CLOB NOT NULL, detail VARCHAR(512) NOT NULL, requested_by VARCHAR(36) NOT NULL REFERENCES panel_user(id), created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL, UNIQUE (provider_id,idempotency_key));</sql>
+        <sql>CREATE TABLE cluster_provider_operation (id UUID PRIMARY KEY, provider_id VARCHAR(80) NOT NULL, cluster_id UUID NOT NULL REFERENCES kubernetes_cluster(id), idempotency_key CHAR(64) NOT NULL, request_fingerprint CHAR(64) NOT NULL, generation BIGINT NOT NULL CHECK (generation &gt;= 0), operation VARCHAR(80) NOT NULL, state VARCHAR(16) NOT NULL CONSTRAINT cluster_provider_operation_state_check CHECK (state IN ('PLANNED','VALIDATED','DRIFTED','FAILED')), plan_configuration CLOB NOT NULL, detail VARCHAR(512) NOT NULL, requested_by VARCHAR(36) NOT NULL REFERENCES panel_user(id), created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL, UNIQUE (provider_id,idempotency_key));</sql>
         <sql>CREATE INDEX cluster_provider_operation_cluster_idx ON cluster_provider_operation(cluster_id, updated_at);</sql>
     </changeSet>
     <changeSet id="cluster-provider-credentials-test" author="nanpanel">
         <sql>CREATE TABLE cluster_provider_credential (id UUID PRIMARY KEY, provider_id VARCHAR(80) NOT NULL, cluster_id UUID NOT NULL REFERENCES kubernetes_cluster(id), purpose VARCHAR(48) NOT NULL, encrypted_material VARBINARY NOT NULL, expires_at BIGINT, revoked_at BIGINT, created_by VARCHAR(36) NOT NULL REFERENCES panel_user(id), created_at BIGINT NOT NULL);</sql>
         <sql>CREATE INDEX cluster_provider_credential_scope_idx ON cluster_provider_credential(provider_id, cluster_id, created_at);</sql>
+    </changeSet>
+    <changeSet id="cluster-provider-execution-test" author="nanpanel">
+        <sql>ALTER TABLE cluster_provider_operation DROP CONSTRAINT cluster_provider_operation_state_check;</sql>
+        <sql>ALTER TABLE cluster_provider_operation ADD CONSTRAINT cluster_provider_operation_state_check CHECK (state IN ('PLANNED','VALIDATED','DRIFTED','EXECUTING','AWAITING_NODE_REGISTRATION','SUCCEEDED','FAILED','UNKNOWN'));</sql>
+        <sql>ALTER TABLE cluster_provider_operation ALTER COLUMN state TYPE VARCHAR(40);</sql>
+        <sql>ALTER TABLE cluster_provider_operation ADD COLUMN host_operation_id UUID REFERENCES operation(id);</sql>
+        <sql>CREATE UNIQUE INDEX cluster_provider_host_operation_unique ON cluster_provider_operation(host_operation_id);</sql>
     </changeSet>
 </databaseChangeLog>
