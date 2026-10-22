@@ -70,3 +70,21 @@ HEALTHY with one Ready Node mapped to that Host and credential source
 `KUBECONFIG`. This reconfirms live discovery and adoption of the existing
 imported cluster. It does not prove new-cluster auto-enrollment from an empty
 inventory or API outage recovery.
+
+## Agent heartbeat integration follow-up
+
+- `KubernetesAutoEnrollmentTest` now drives discovery through
+  `/internal/agent-heartbeats` instead of calling the enrollment service
+  directly. Each test has a registered Agent certificate fingerprint and
+  submits a K3S runtime report with the `kubernetes.runtime.detect` capability.
+- The new-cluster/idempotence case also verifies the heartbeat persisted
+  `detected`, `kubelet_running`, `api_server_local`, and `runtime_kind=K3S` for
+  the Host before asserting the in-cluster credential and UID mapping.
+- New-cluster registration, existing-cluster adoption, NotReady retry, and
+  temporary local API 503/retry all pass through the heartbeat endpoint. The
+  Kubernetes API remains an isolated Fabric8 fixture, so these tests prove the
+  Core integration path but do not replace live `k3s-1` fresh-cluster or outage
+  acceptance.
+- Command:
+  `./mvnw -pl backend/panel-core -am -Dtest=KubernetesAutoEnrollmentTest -Dsurefire.failIfNoSpecifiedTests=false test`
+- Result: all four `KubernetesAutoEnrollmentTest` tests passed.

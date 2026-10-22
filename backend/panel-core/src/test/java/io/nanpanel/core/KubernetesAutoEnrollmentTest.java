@@ -1,5 +1,6 @@
 package io.nanpanel.core;
 
+import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
@@ -39,11 +40,12 @@ class KubernetesAutoEnrollmentTest {
   }
 
   @Inject AuthStore store;
-  @Inject KubernetesClusterRegistryService clusters;
   @Inject KubernetesClusterCredentialVault vault;
 
   private KubernetesMockServer server;
   private UUID hostId;
+  private UUID agentId;
+  private String certificateFingerprint;
 
   @BeforeEach
   void startApiFixture() {
@@ -61,6 +63,8 @@ class KubernetesAutoEnrollmentTest {
       }
     }, KubernetesClusterClientFactory.class);
     hostId = UUID.randomUUID();
+    agentId = UUID.randomUUID();
+    certificateFingerprint = "a".repeat(64);
     Instant createdAt = Instant.now();
     store.transaction(connection -> {
       AuthStore.update(connection,
@@ -68,6 +72,11 @@ class KubernetesAutoEnrollmentTest {
               + "status,created_at) VALUES (?,?,?,?,'[]',1,1,'ONLINE',?)",
           hostId, "auto-enroll-" + hostId.toString().substring(0, 8), "Linux", "x86_64",
           Timestamp.from(createdAt));
+      AuthStore.update(connection,
+          "INSERT INTO agent (id,host_id,cert_identity,version,last_seen,cert_fingerprint,helper_status) "
+              + "VALUES (?,?,?,'test',?,?,'AVAILABLE')",
+          agentId, hostId, "auto-enroll-test-" + agentId, Timestamp.from(createdAt),
+          certificateFingerprint);
       return null;
     });
   }
@@ -82,7 +91,7 @@ class KubernetesAutoEnrollmentTest {
     String hostname = hostname();
     expectSuccessfulDiscovery(hostname, readyNode(hostname));
 
-    clusters.autoEnrollLocalCluster(hostId, hostname);
+    postRuntimeDiscoveryHeartbeat(hostname);
 
     var enrolled = enrolledCluster();
     assertNotNull(enrolled);
@@ -92,8 +101,12 @@ class KubernetesAutoEnrollmentTest {
     assertEquals("cluster-uid-" + hostId.toString().substring(0, 8),
         enrolled.get("cluster_fingerprint"));
     assertEquals(1, mappedNodeCount());
+    assertEquals(true, runtimeDiscovery().get("detected"));
+    assertEquals(true, runtimeDiscovery().get("kubelet_running"));
+    assertEquals(true, runtimeDiscovery().get("api_server_local"));
+    assertEquals("K3S", runtimeDiscovery().get("runtime_kind"));
 
-    clusters.autoEnrollLocalCluster(hostId, hostname);
+    postRuntimeDiscoveryHeartbeat(hostname);
 
     assertEquals(1, enrolledClusterCount());
     assertEquals(1, mappedNodeCount());
@@ -104,12 +117,12 @@ class KubernetesAutoEnrollmentTest {
     String hostname = hostname();
     expectNodeLookup(hostname, node(hostname, false));
 
-    clusters.autoEnrollLocalCluster(hostId, hostname);
+    postRuntimeDiscoveryHeartbeat(hostname);
 
     assertEquals(0, enrolledClusterCount());
 
     expectSuccessfulDiscovery(hostname, readyNode(hostname));
-    clusters.autoEnrollLocalCluster(hostId, hostname);
+    postRuntimeDiscoveryHeartbeat(hostname);
 
     assertEquals("IN_CLUSTER", enrolledCluster().get("credential_source"));
     assertEquals(1, mappedNodeCount());
@@ -121,13 +134,13 @@ class KubernetesAutoEnrollmentTest {
     server.expect().get().withPath("/api/v1/nodes/" + hostname)
         .andReturn(503, "Kubernetes API temporarily unavailable").once();
 
-    clusters.autoEnrollLocalCluster(hostId, hostname);
+    postRuntimeDiscoveryHeartbeat(hostname);
 
     assertEquals(0, enrolledClusterCount());
     assertEquals(0, mappedNodeCount());
 
     expectSuccessfulDiscovery(hostname, readyNode(hostname));
-    clusters.autoEnrollLocalCluster(hostId, hostname);
+    postRuntimeDiscoveryHeartbeat(hostname);
 
     assertEquals("IN_CLUSTER", enrolledCluster().get("credential_source"));
     assertEquals(1, enrolledClusterCount());
@@ -170,7 +183,7 @@ class KubernetesAutoEnrollmentTest {
     });
     expectSuccessfulDiscovery(hostname, readyNode(hostname));
 
-    clusters.autoEnrollLocalCluster(hostId, hostname);
+    postRuntimeDiscoveryHeartbeat(hostname);
 
     var adopted = enrolledCluster();
     assertNotNull(adopted);
@@ -198,6 +211,30 @@ class KubernetesAutoEnrollmentTest {
         .andReturn(200, new NodeListBuilder().withItems(localNode).build()).always();
   }
 
+  private void postRuntimeDiscoveryHeartbeat(String hostname) {
+    long observedAt = Instant.now().toEpochMilli();
+    given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
+        .contentType("application/json")
+        .body(Map.of(
+            "agentId", agentId.toString(),
+            "version", "test",
+            "certificateFingerprint", certificateFingerprint,
+            "hostname", hostname,
+            "os", "Linux",
+            "arch", "x86_64",
+            "capabilities", List.of("host.inventory", "agent.heartbeat", "agent.self_update",
+                "kubernetes.runtime.detect"),
+            "helperStatus", "AVAILABLE",
+            "kubernetesRuntime", Map.of(
+                "detected", true,
+                "kubeletRunning", true,
+                "apiServerLocal", true,
+                "runtimeKind", "K3S",
+                "observedAtEpochMs", observedAt)))
+        .post("/internal/agent-heartbeats")
+        .then().statusCode(204);
+  }
+
   private void expectNodeLookup(String hostname, Node localNode) {
     server.expect().get().withPath("/api/v1/nodes/" + hostname)
         .andReturn(200, localNode).once();
@@ -222,6 +259,12 @@ class KubernetesAutoEnrollmentTest {
     return store.transaction(connection -> AuthStore.query(connection,
         "SELECT COUNT(*) AS count FROM kubernetes_cluster_node WHERE host_id=?", hostId)
         .getFirst().get("count") instanceof Number count ? count.intValue() : 0);
+  }
+
+  private Map<String, Object> runtimeDiscovery() {
+    return store.transaction(connection -> AuthStore.query(connection,
+        "SELECT detected,kubelet_running,api_server_local,runtime_kind "
+            + "FROM host_kubernetes_runtime_discovery WHERE host_id=?", hostId).getFirst());
   }
 
   private String hostname() {
