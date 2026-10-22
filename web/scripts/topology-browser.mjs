@@ -117,7 +117,19 @@ try {
   await expect(gateway.locator('.device-status')).toContainText('gateway-sg-01');
   await page.getByRole('button', { name: '＋ 添加主机资产' }).click();
   await page.locator('.topology-asset-option').filter({ hasText: 'homelab-node-01' }).click();
-  await expect(device('homelab-node-01')).toBeVisible();
+  const hostAssetNode = device('homelab-node-01');
+  await expect(hostAssetNode).toBeVisible();
+  const hostAssetOverlapsNode = await hostAssetNode.evaluate(element => {
+    const bounds = element.getBoundingClientRect();
+    return [...document.querySelectorAll('.react-flow__node-device')]
+      .filter(other => other !== element)
+      .some(other => {
+        const candidate = other.getBoundingClientRect();
+        return bounds.left < candidate.right && bounds.right > candidate.left
+          && bounds.top < candidate.bottom && bounds.bottom > candidate.top;
+      });
+  });
+  if (hostAssetOverlapsNode) throw new Error('Added Host asset overlaps an existing topology card');
   await expect(page.locator('.host-route-row').filter({ hasText: 'gateway-sg-01 → homelab-node-01' })).toBeVisible();
   const observedRouter = device('自动发现 Router 192.0.2.1');
   await expect(observedRouter).toBeVisible();
@@ -125,8 +137,27 @@ try {
   await expect(observedRouter.locator('.router-address-control input')).toHaveCount(0);
   await expect(page.locator('.host-route-row').filter({ hasText: 'homelab-node-01 → 自动发现 Router 192.0.2.1' })).toBeVisible();
   await page.getByRole('button', { name: 'fit view' }).click();
+  const overlappingCards = await page.locator('.react-flow__node-device').evaluateAll(elements => elements.flatMap((element, index) => {
+    const bounds = element.getBoundingClientRect();
+    return elements.slice(index + 1).filter(other => {
+      const candidate = other.getBoundingClientRect();
+      return bounds.left < candidate.right && bounds.right > candidate.left
+        && bounds.top < candidate.bottom && bounds.bottom > candidate.top;
+    }).map(other => `${element.textContent?.trim()} / ${other.textContent?.trim()}`);
+  }));
+  if (overlappingCards.length) throw new Error(`Topology cards overlap: ${overlappingCards.join('; ')}`);
   await expect(page.locator('.react-flow__edge')).toHaveCount(4);
   await expect(page.locator('.link-state-observed')).toHaveCount(2);
+  await page.getByRole('button', { name: '保存草稿', exact: true }).click();
+  await expect(page.getByRole('status')).toContainText('草稿已保存');
+  await page.getByRole('button', { name: '↻ 重新读取' }).click();
+  await expect(gateway.locator('.device-status')).toContainText('gateway-sg-01');
+  await expect(device('homelab-node-01')).toBeVisible();
+  await expect(page.locator('.host-route-row').filter({ hasText: 'homelab-node-01 → 自动发现 Router 192.0.2.1' })).toBeVisible();
+  await expect(device('自动发现 Router 192.0.2.1')).toBeVisible();
+  await expect(page.locator('.react-flow__edge')).toHaveCount(4);
+  await expect(page.locator('.link-state-observed')).toHaveCount(2);
+  await page.screenshot({ path: new URL('../artifacts/topology-routes-saved.png', import.meta.url).pathname, fullPage: true });
   await page.getByRole('button', { name: '＋ 添加节点' }).click();
   await page.getByRole('menuitem', { name: 'K3s 集群文件夹 1 入 / 1 出' }).click();
   const cluster = device('K3s 集群文件夹');
@@ -155,5 +186,5 @@ try {
   await expect(device('K3s Service')).toBeVisible();
   await expect(page.locator('.react-flow__edge')).toHaveCount(1);
   if (errors.length) throw new Error(errors.join('\n'));
-  console.log('PASS: base topology editing, searchable Gateway host asset binding, automatic route next-hop matching, nested folder editing and persistence, Namespace/Ingress/Service/Pod/container drill-down, mobile menu; no page errors');
+  console.log('PASS: base topology editing, searchable Gateway host asset binding, automatic route next-hop matching, Host/Gateway asset save and reload with Router reconstruction, nested folder editing and persistence, Namespace/Ingress/Service/Pod/container drill-down, mobile menu; no page errors');
 } finally { await browser.close(); }

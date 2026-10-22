@@ -347,7 +347,23 @@ function Editor() {
     if (nodes.filter(node => !node.data.observedOnly).length >= 100) { setError('最多添加 100 个节点'); return; }
     const canvas = canvasRef.current?.getBoundingClientRect();
     const point = screenToFlowPosition({ x: canvas ? canvas.left + canvas.width / 2 : window.innerWidth / 2, y: canvas ? canvas.top + canvas.height / 2 : window.innerHeight / 2 });
-    const base = createTopologyNode('HOST', point);
+    const height = 110 + Math.max(nodePresets.HOST.inputs, nodePresets.HOST.outputs) * 26;
+    let position: { x: number; y: number } | undefined;
+    const rootNodes = nodes.filter(node => (node.data.model.parentId ?? null) === null);
+    for (let ring = 0; ring <= 20 && !position; ring++) {
+      for (let dx = -ring; dx <= ring && !position; dx++) {
+        for (let dy = -ring; dy <= ring; dy++) {
+          if (ring && Math.abs(dx) !== ring && Math.abs(dy) !== ring) continue;
+          const candidate = { x: Math.max(-10000, Math.min(10000, point.x + dx * 300)), y: Math.max(-10000, Math.min(10000, point.y + dy * (height + 40))) };
+          if (!rootNodes.some(node => candidate.x < node.position.x + 270 && candidate.x + 270 > node.position.x && candidate.y < node.position.y + 150 + Math.max(node.data.model.inputCount, node.data.model.outputCount) * 26 && candidate.y + height + 40 > node.position.y)) {
+            position = candidate;
+            break;
+          }
+        }
+      }
+    }
+    if (!position) { setError('附近没有可用位置，请平移画布后重试'); return; }
+    const base = createTopologyNode('HOST', position);
     const model = { ...base, name: host.hostname, assetId: host.id, parentId: null };
     setNodes(current => [...current, asNode(model, host)]); setDirty(true); setRouteEvidence(undefined); setAssetPickerOpen(false); setError(''); setMessage(`已将主机资产 ${host.hostname} 添加到最外层拓扑`); requestAnimationFrame(() => { void fitView({ padding: .2 }); });
   }
@@ -422,11 +438,31 @@ function Editor() {
     const asset = hostAssets[node.data.model.assetId!];
     return asset ? [[asset.host.id, asset.host.id] as const] : [];
   }));
+  const occupiedRootNodes = nodes.filter(node => !node.data.model.parentId && !node.data.observedOnly);
   const autoRouterNodes = folderId ? [] : unmatchedRouteGateways(observedRoutes, routeSourceHostIds, hostByAddress)
     .map((address, index) => {
-      const model = createTopologyNode('ROUTER', {
+      const width = 270;
+      const height = 150 + Math.max(nodePresets.ROUTER.inputs, nodePresets.ROUTER.outputs) * 26;
+      let position: { x: number; y: number } | undefined;
+      for (let ring = 0; ring <= 20 && !position; ring++) {
+        for (let dx = -ring; dx <= ring && !position; dx++) {
+          for (let dy = -ring; dy <= ring; dy++) {
+            if (ring && Math.abs(dx) !== ring && Math.abs(dy) !== ring) continue;
+            const candidate = {
+              x: Math.max(0, ...rootAssetNodes.map(node => node.position.x)) + 360 + dx * 300,
+              y: 80 + index * (height + 40) + dy * (height + 40),
+            };
+            const overlaps = occupiedRootNodes.some(node => candidate.x < node.position.x + 270
+              && candidate.x + width > node.position.x
+              && candidate.y < node.position.y + 150 + Math.max(node.data.model.inputCount, node.data.model.outputCount) * 26
+              && candidate.y + height > node.position.y);
+            if (!overlaps) { position = candidate; break; }
+          }
+        }
+      }
+      const model = createTopologyNode('ROUTER', position ?? {
         x: Math.max(0, ...rootAssetNodes.map(node => node.position.x)) + 360,
-        y: 80 + index * 150,
+        y: 80 + index * (height + 40),
       });
       model.id = `observed-router-${encodeURIComponent(address)}`;
       model.name = `自动发现 Router ${address}`;
@@ -438,6 +474,7 @@ function Editor() {
       node.selectable = false;
       node.draggable = false;
       node.deletable = false;
+      occupiedRootNodes.push(node);
       const owners = hostByAddress.get(address) ?? [];
       owners.push({ id: node.id, hostname: model.name, kind: 'ROUTER' });
       hostByAddress.set(address, owners);

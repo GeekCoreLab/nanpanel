@@ -99,9 +99,14 @@ recorded in
   Kubernetes service inventory and probes come directly from deployed Core.
   The browser deliberately supplies a test-only session and blocks topology
   writes, so this proves live UI/data rendering but not production login or a
-  persisted Host node. The production topology remains unchanged and the saved
-  graph acceptance stays open; see
+  persisted Host node. A separate local browser run now saves and reloads a
+  Gateway/Host asset graph, then confirms that route observations rebuild the
+  read-only Router node and edges. That run uses the mock Host inventory and
+  mock topology API; it strengthens UI regression coverage but does not count
+  as target persistence. The production topology remains unchanged and the
+  saved graph acceptance stays open; see
   `runs/2026-10-22-k3s-route-istio-ui-live.md`,
+  `runs/2026-10-22-topology-route-save-ui.md`,
   `runs/2026-10-21-k3s-route-router-matching.md`, and
   `runs/2026-10-21-k3s-target-inventory.md`.
 - A live target-K3s smoke report is recorded at
