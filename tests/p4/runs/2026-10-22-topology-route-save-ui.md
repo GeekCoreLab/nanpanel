@@ -22,6 +22,26 @@ Date: 2026-10-22
   directive and large-chunk warnings.
 - Screenshot: [`topology-routes-saved.png`](../../../web/artifacts/topology-routes-saved.png).
 
+## Regression fix
+
+The first browser rerun found that the generated read-only Router could overlap
+the bound Gateway. The placement calculation used the generic port-row height
+for every configured node, even though Gateway cards include a host-asset
+control. Placement now reserves a per-kind height for Gateway, Router, and
+folder controls and leaves extra space for the derived Router. The browser
+recheck passed its no-overlap assertion and the full topology flow afterward.
+The test failure included both card bounds so a future collision is diagnosable.
+
+## Service-network freshness UI
+
+The real service-network panel now polls the persisted Core snapshot every 30
+seconds while the page is visible, prevents overlapping requests, and marks
+Service inventory and Istio telemetry separately when either observation is
+older than two minutes. `npm run build` and `npm test` passed (13 tests), and
+the targeted Core run passed `SystemResourceTest` and
+`KubernetesIstioTelemetryCollectorTest` (7 tests total). The live target image
+has not been updated with these local UI changes yet.
+
 This is a local UI/mock API regression, not a target data-persistence run. The
 Mock service network showed the explicit live-Istio-required state with no
 service items. The separate target run at

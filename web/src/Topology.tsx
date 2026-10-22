@@ -140,6 +140,8 @@ function Editor() {
   const [serviceInventory, setServiceInventory] = useState<KubernetesServiceInventorySnapshot>();
   const [serviceProbes, setServiceProbes] = useState<KubernetesServiceProbeSnapshot>();
   const [serviceInventoryError, setServiceInventoryError] = useState(''); const [inventoryBusy, setInventoryBusy] = useState(false);
+  const [inventoryClock, setInventoryClock] = useState(Date.now());
+  const inventoryRequestInFlight = useRef(false);
   const [serviceSearch, setServiceSearch] = useState('');
   const [folderId, setFolderId] = useState<string | null>(null);
   const [hostAssets, setHostAssets] = useState<Record<string, { host: Host; inventory: HostNetworkInventory }>>({});
@@ -172,14 +174,17 @@ function Editor() {
       setServiceInventoryError('服务网络只显示真实 Kubernetes 与 Istio 数据；Mock 模式不会提供模拟服务图。');
       return;
     }
+    if (inventoryRequestInFlight.current) return;
+    inventoryRequestInFlight.current = true;
     setInventoryBusy(true); setServiceInventoryError('');
     try {
       const result = await api<KubernetesServiceInventorySnapshot>(refresh ? '/kubernetes/service-inventory/refresh' : '/kubernetes/service-inventory', refresh ? 'POST' : 'GET', undefined, {}, true);
       setServiceInventory(result.data);
+      setInventoryClock(Date.now());
       const probes = await api<KubernetesServiceProbeSnapshot>('/kubernetes/service-probes', 'GET', undefined, {}, true); setServiceProbes(probes.data);
     }
     catch (e) { setServiceInventoryError((e as Error).message); }
-    finally { setInventoryBusy(false); }
+    finally { inventoryRequestInFlight.current = false; setInventoryBusy(false); }
   }
   async function loadHostAssets() {
     setAssetPickerBusy(true); setError('');
@@ -259,7 +264,15 @@ function Editor() {
     finally { setKubernetesBusy(false); }
   }
   useEffect(() => { void load(); }, []);
-  useEffect(() => { if (!isMock) void loadServiceInventory(); }, []);
+  useEffect(() => {
+    if (isMock) return;
+    void loadServiceInventory();
+    const timer = window.setInterval(() => {
+      setInventoryClock(Date.now());
+      if (!document.hidden) void loadServiceInventory();
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
   useEffect(() => {
     if (isMock) { setKubernetesClusters([]); return; }
     let cancelled = false;
@@ -442,7 +455,15 @@ function Editor() {
   const autoRouterNodes = folderId ? [] : unmatchedRouteGateways(observedRoutes, routeSourceHostIds, hostByAddress)
     .map((address, index) => {
       const width = 270;
-      const height = 150 + Math.max(nodePresets.ROUTER.inputs, nodePresets.ROUTER.outputs) * 26;
+      const height = 270;
+      const occupiedHeight = (node: DeviceNode) => {
+        const model = node.data.model;
+        const portRows = Math.max(model.inputCount, model.outputCount, 1) * 26 + 16;
+        const controls = model.kind === 'GATEWAY' ? 150
+          : model.kind === 'ROUTER' ? 100
+            : model.kind === 'FOLDER' ? 52 : 0;
+        return 60 + portRows + 32 + controls;
+      };
       let position: { x: number; y: number } | undefined;
       for (let ring = 0; ring <= 20 && !position; ring++) {
         for (let dx = -ring; dx <= ring && !position; dx++) {
@@ -454,7 +475,7 @@ function Editor() {
             };
             const overlaps = occupiedRootNodes.some(node => candidate.x < node.position.x + 270
               && candidate.x + width > node.position.x
-              && candidate.y < node.position.y + 150 + Math.max(node.data.model.inputCount, node.data.model.outputCount) * 26
+              && candidate.y < node.position.y + occupiedHeight(node)
               && candidate.y + height > node.position.y);
             if (!overlaps) { position = candidate; break; }
           }
@@ -589,6 +610,10 @@ function Editor() {
       .toLocaleLowerCase().includes(serviceSearch.trim().toLocaleLowerCase())) ?? [];
   const observedIstioRequests = serviceInventory?.istio.traffic.reduce((count, edge) =>
     count + edge.requestCount, 0) ?? 0;
+  const inventoryStale = serviceInventory?.observedAt
+    ? inventoryClock - new Date(serviceInventory.observedAt).getTime() > 120_000 : false;
+  const istioTelemetryStale = serviceInventory?.istio.observedAt
+    ? inventoryClock - new Date(serviceInventory.istio.observedAt).getTime() > 120_000 : false;
   return <>
     {folderId && <nav className="topology-breadcrumb" aria-label="拓扑层级"><button className="secondary" onClick={() => { setFolderId(null); requestAnimationFrame(() => { void fitView({ padding: .2 }); }); }}>主拓扑</button>{folderPath().map((item, index) => <span key={item.id}><span className="muted">/</span>{index === folderPath().length - 1 ? <strong>{item.name}</strong> : <button className="secondary" onClick={() => enterFolder(item.id)}>{item.name}</button>}</span>)}</nav>}
     <div className="page-heading"><div><h1>{isP0Lab ? '拓扑到实际路由 P0 实验' : folder?.name ?? '网络拓扑实验室'}</h1><p>{folderId ? '编辑此文件夹内的期望网络拓扑；下方可逐级浏览 Namespace、Ingress、Service 和 Pod。' : '双击文件夹进入子拓扑。绿色出口 → 蓝色入口，用多端口节点组织期望转发路径。'}</p></div><div className="topology-actions"><button className="secondary" disabled={busy} onClick={load}>{dirty ? '重新读取（丢弃未保存）' : '↻ 重新读取'}</button>{!folderId && <button className="secondary" disabled={!loaded || busy || assetPickerBusy} onClick={() => void loadHostAssets()}>{assetPickerBusy ? '读取主机…' : '＋ 添加主机资产'}</button>}<button className="primary" disabled={!loaded || busy || !dirty || !etag} onClick={save}>{busy ? '处理中…' : '保存草稿'}</button>{isP0Lab && <button className="primary" disabled={!loaded || busy || !!draftError(draft()) || !!p0RouteError(draft())} onClick={applyP0Route}>{busy ? '处理中…' : '应用到 FRP 实际路由'}</button>}</div></div>
@@ -656,7 +681,7 @@ function Editor() {
       {isMock ? <div className="service-network-live-required" role="note"><span className="service-network-live-icon">◉</span><div><strong>实时 Istio 数据尚未连接</strong><p>服务网络不显示 Mock 样例。切换到连接 K3s Core 的实时模式后，页面才会读取真实 Service、EndpointSlice 和 Envoy 指标。</p></div></div> : <>
         {serviceInventoryError && <div className="alert error" role="alert">{serviceInventoryError} · 检查 Core 集群身份、namespace、Pod 读取权限及 Istio Envoy metrics 可达性。</div>}
         {serviceInventory && <>
-          <div className="service-network-meta"><span>集群 <b>{serviceInventory.sourceId}</b></span><span>namespace <b>{serviceInventory.namespace}</b></span><span>清单 {serviceInventory.observedAt ? new Date(serviceInventory.observedAt).toLocaleString() : '未采集'}</span><span className={`badge ${serviceInventory.istio.status === 'LIVE' ? 'online' : serviceInventory.istio.status === 'PARTIAL' ? 'pending' : 'unknown'}`}>Istio {serviceInventory.istio.status}</span></div>
+          <div className="service-network-meta"><span>集群 <b>{serviceInventory.sourceId}</b></span><span>namespace <b>{serviceInventory.namespace}</b></span><span>清单 {serviceInventory.observedAt ? new Date(serviceInventory.observedAt).toLocaleString() : '未采集'}{inventoryStale && <b className="badge pending">清单过期</b>}</span><span className={`badge ${istioTelemetryStale ? 'pending' : serviceInventory.istio.status === 'LIVE' ? 'online' : serviceInventory.istio.status === 'PARTIAL' ? 'pending' : 'unknown'}`}>Istio {serviceInventory.istio.status}{istioTelemetryStale ? ' · 观测过期' : ''}</span></div>
           <div className="service-network-overview">
             <article><span>Services</span><strong>{serviceInventory.services.length}</strong><small>{readyServiceEndpoints}/{totalServiceEndpoints} 个 Endpoint Ready</small></article>
             <article><span>Istio sidecar</span><strong>{serviceInventory.istio.sidecarsReady}/{serviceInventory.istio.sidecarsDiscovered}</strong><small>{serviceInventory.istio.sidecarsScraped} 个代理取得指标</small></article>

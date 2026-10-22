@@ -143,7 +143,10 @@ try {
       const candidate = other.getBoundingClientRect();
       return bounds.left < candidate.right && bounds.right > candidate.left
         && bounds.top < candidate.bottom && bounds.bottom > candidate.top;
-    }).map(other => `${element.textContent?.trim()} / ${other.textContent?.trim()}`);
+    }).map(other => {
+      const candidate = other.getBoundingClientRect();
+      return `${element.textContent?.trim()} @ ${Math.round(bounds.x)},${Math.round(bounds.y)} ${Math.round(bounds.width)}x${Math.round(bounds.height)} / ${other.textContent?.trim()} @ ${Math.round(candidate.x)},${Math.round(candidate.y)} ${Math.round(candidate.width)}x${Math.round(candidate.height)}`;
+    });
   }));
   if (overlappingCards.length) throw new Error(`Topology cards overlap: ${overlappingCards.join('; ')}`);
   await expect(page.locator('.react-flow__edge')).toHaveCount(4);
@@ -157,6 +160,7 @@ try {
   await expect(device('自动发现 Router 192.0.2.1')).toBeVisible();
   await expect(page.locator('.react-flow__edge')).toHaveCount(4);
   await expect(page.locator('.link-state-observed')).toHaveCount(2);
+  await expect(page.getByRole('status')).toContainText('已读取 Revision');
   await page.screenshot({ path: new URL('../artifacts/topology-routes-saved.png', import.meta.url).pathname, fullPage: true });
   await page.getByRole('button', { name: '＋ 添加节点' }).click();
   await page.getByRole('menuitem', { name: 'K3s 集群文件夹 1 入 / 1 出' }).click();
