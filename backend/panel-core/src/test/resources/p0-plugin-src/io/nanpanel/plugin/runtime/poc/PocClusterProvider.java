@@ -50,4 +50,11 @@ public final class PocClusterProvider implements ClusterProvider {
                 snapshot.clusterId().equals(cluster.id()) && snapshot.generation() == plan.generation(),
                 "VALID", "fixture plan valid"));
     }
+
+    @Override
+    public CompletionStage<ValidationResult> restorePlan(
+            ClusterReference cluster, ClusterPlan plan, ClusterAccess access) {
+        return CompletableFuture.completedFuture(new ValidationResult(
+                cluster.id().equals(plan.clusterId()), "RESTORED", "fixture plan restored"));
+    }
 }

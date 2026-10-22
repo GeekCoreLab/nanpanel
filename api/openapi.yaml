@@ -466,6 +466,142 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
+  /api/v1/cluster-providers/{providerId}/clusters/{clusterId}/plans:
+    parameters:
+    - name: providerId
+      in: path
+      required: true
+      schema: { type: string }
+    - name: clusterId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    post:
+      tags: [KubernetesClusters]
+      operationId: createClusterProviderPlan
+      summary: 创建并持久化集群生命周期计划
+      description: Core 先读取注册集群的凭据隔离快照，再让匹配类型的 Provider 生成计划。此 API 只保存和校验计划，不执行 Kubernetes 或 Agent Helper 步骤；当前 Core 尚无 ClusterProvider 凭据签发接口。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema: { type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9_-]+$' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [operation, component, reason]
+              properties:
+                operation: { type: string, pattern: '^[a-z][a-z0-9_.-]{0,79}$' }
+                component: { type: string, pattern: '^[a-z][a-z0-9_.-]{0,79}$' }
+                hostId: { type: [string, 'null'], format: uuid }
+                targetVersion: { type: [string, 'null'], maxLength: 64 }
+                credentialReference:
+                  type: [string, 'null']
+                  format: uuid
+                  description: 暂不支持凭据托管；非空时返回 409 CLUSTER_CREDENTIALS_UNSUPPORTED。
+                reason: { type: string, minLength: 1, maxLength: 500 }
+      responses:
+        '201':
+          description: 生命周期计划已持久化，尚未执行。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClusterProviderOperation' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 需要重新验证身份。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '409':
+          description: Provider 拒绝计划、凭据托管尚不可用或幂等键被复用。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: Provider 不支持集群类型或生命周期操作。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '502':
+          description: Provider 返回无效或不可安全持久化的计划。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /api/v1/cluster-providers/{providerId}/operations/{operationId}:
+    parameters:
+    - name: providerId
+      in: path
+      required: true
+      schema: { type: string }
+    - name: operationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    get:
+      tags: [KubernetesClusters]
+      operationId: getClusterProviderOperation
+      summary: 查询当前管理员的集群生命周期计划
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 计划状态和安全摘要，不包含步骤参数或凭据。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClusterProviderOperation' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/cluster-providers/{providerId}/operations/{operationId}/validate:
+    parameters:
+    - name: providerId
+      in: path
+      required: true
+      schema: { type: string }
+    - name: operationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    post:
+      tags: [KubernetesClusters]
+      operationId: validateClusterProviderOperation
+      summary: 恢复并校验持久化生命周期计划
+      description: 仅当集群 generation 未变化且 Provider 能从持久化计划恢复状态时返回 VALIDATED；不会执行外部步骤。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      responses:
+        '200':
+          description: 计划校验结果。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClusterProviderOperation' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 需要重新验证身份。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 计划当前状态不可校验。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
   /api/v1/kubernetes/clusters/{clusterId}/topology/namespaces:
     parameters:
     - name: clusterId
@@ -4231,6 +4367,20 @@ components:
         type: string
         const: no-store
   schemas:
+    ClusterProviderOperation:
+      type: object
+      additionalProperties: false
+      required: [id, providerId, clusterId, generation, operation, state, detail, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        providerId: { type: string }
+        clusterId: { type: string, format: uuid }
+        generation: { type: integer, format: int64, minimum: 0 }
+        operation: { type: string }
+        state: { type: string, enum: [PLANNED, VALIDATED, DRIFTED, FAILED] }
+        detail: { type: string, maxLength: 512 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
     TopologyNodeKind:
       type: string
       enum:

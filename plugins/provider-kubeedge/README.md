@@ -38,9 +38,11 @@ key names. Core still owns durable operation state, audit redaction, typed
 Agent/Helper dispatch, and reconciliation after restart.
 
 Core now exposes an authenticated read-only Provider observation route that
-uses cached inventory; it does not refresh the cluster or execute a plan. The
-extension contract and loader still have no KubeEdge implementation or Core
-lifecycle execution API. The v2 snapshot contract does not install CloudCore/EdgeCore,
+uses cached inventory; it does not refresh the cluster. Core also has a local
+durable plan and validation API with idempotency, generation drift checks, and
+Provider state restoration. It does not execute plan steps. The extension
+contract and loader still have no KubeEdge implementation or Core lifecycle
+execution API. The v2 snapshot contract does not install CloudCore/EdgeCore,
 register/remove an Edge node, upgrade components, rotate certificates, or
 coordinate an ingress. Registration, version, certificate, component-health,
 offline-autonomy, and reachable-ingress operations remain unimplemented. No

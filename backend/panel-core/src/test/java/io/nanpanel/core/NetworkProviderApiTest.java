@@ -12,6 +12,7 @@ import io.quarkus.test.common.QuarkusTestResource;
 import io.restassured.response.ExtractableResponse;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.Map;
@@ -23,11 +24,12 @@ import org.junit.jupiter.api.Test;
 class NetworkProviderApiTest {
   private static final String PASSWORD = "p3-provider-test-password-2026";
   @Inject AuthStore store;
+  @Inject ObjectMapper mapper;
 
   private record Session(String cookie, String csrf, String userId) {}
 
   @Test
-  void coreRoutesPluginProtocolAndBlocksDisableUntilOperationsAreTerminal() {
+  void coreRoutesPluginProtocolAndBlocksDisableUntilOperationsAreTerminal() throws Exception {
     Session session = administratorSession();
 
     given().cookie("nanpanel_session", session.cookie())
@@ -70,6 +72,65 @@ class NetworkProviderApiTest {
         .body("status", equalTo("HEALTHY"))
         .body("fingerprint", equalTo("DEGRADED"))
         .body("conditions", hasItems("nodes=1", "edgeNodes=1"));
+    Map<String, String> lifecycleRequest = Map.of("operation", "install_cloudcore",
+        "component", "cloudcore", "targetVersion", "v1.21.0",
+        "reason", "Create an isolated provider plan fixture");
+    String clusterOperations = "/api/v1/cluster-providers/p3-fixture-cluster-provider/clusters/"
+        + clusterId + "/plans";
+    var clusterPlan = given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.csrf()).header("Idempotency-Key", "cloudcore-plan-0001")
+        .contentType("application/json").body(lifecycleRequest)
+        .post(clusterOperations)
+        .then().statusCode(201).body("providerId", equalTo("p3-fixture-cluster-provider"))
+        .body("clusterId", equalTo(clusterId.toString())).body("operation", equalTo("install_cloudcore"))
+        .body("state", equalTo("PLANNED")).extract();
+    String clusterOperationId = clusterPlan.path("id");
+    String persistedPlan = store.transaction(connection -> {
+      Object stored = AuthStore.query(connection,
+        "SELECT plan_configuration FROM cluster_provider_operation WHERE id=?",
+        UUID.fromString(clusterOperationId)).getFirst().get("plan_configuration");
+      return stored instanceof java.sql.Clob clob
+          ? clob.getSubString(1, Math.toIntExact(clob.length())) : stored.toString();
+    });
+    assertTrue(mapper.readValue(persistedPlan, io.nanpanel.plugin.api.ClusterProvider.ClusterPlan.class)
+        .steps().size() == 1);
+    var duplicateClusterPlan = given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.csrf()).header("Idempotency-Key", "cloudcore-plan-0001")
+        .contentType("application/json").body(lifecycleRequest)
+        .post(clusterOperations)
+        .then().statusCode(201).extract();
+    assertEquals(clusterOperationId, duplicateClusterPlan.path("id"));
+    given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.csrf())
+        .post("/api/v1/cluster-providers/p3-fixture-cluster-provider/operations/"
+            + clusterOperationId + "/validate")
+        .then().statusCode(200).body("state", equalTo("VALIDATED"));
+    assertTrue(persistedPlan.contains("kubeedge.cloudcore.install"));
+    assertTrue(!persistedPlan.contains("token"));
+    given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.csrf()).header("Idempotency-Key", "cloudcore-plan-0001")
+        .contentType("application/json")
+        .body(Map.of("operation", "install_cloudcore", "component", "cloudcore",
+            "targetVersion", "v1.22.0", "reason", "Create a conflicting idempotency request"))
+        .post(clusterOperations)
+        .then().statusCode(409).body("code", equalTo("IDEMPOTENCY_KEY_REUSED"));
+    String stalePlanId = given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.csrf()).header("Idempotency-Key", "cloudcore-plan-0002")
+        .contentType("application/json")
+        .body(Map.of("operation", "install_cloudcore", "component", "cloudcore",
+            "targetVersion", "v1.22.0", "reason", "Check inventory drift before validation"))
+        .post(clusterOperations)
+        .then().statusCode(201).body("state", equalTo("PLANNED")).extract().path("id");
+    store.transaction(connection -> {
+      AuthStore.update(connection, "UPDATE kubernetes_cluster SET updated_at=? WHERE id=?",
+          Timestamp.from(observedAt.plusSeconds(1)), clusterId);
+      return null;
+    });
+    given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.csrf())
+        .post("/api/v1/cluster-providers/p3-fixture-cluster-provider/operations/"
+            + stalePlanId + "/validate")
+        .then().statusCode(200).body("state", equalTo("DRIFTED"));
     given().cookie("nanpanel_session", session.cookie())
         .get("/api/v1/config-translators")
         .then().statusCode(200).body("[0].id", equalTo("p3-fixture-translator"))
