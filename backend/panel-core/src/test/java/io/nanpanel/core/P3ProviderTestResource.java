@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 import io.nanpanel.plugin.api.ConfigTranslator;
+import io.nanpanel.plugin.api.ClusterProvider;
 import io.nanpanel.plugin.api.NetworkProvider;
 import java.io.File;
 import java.io.InputStream;
@@ -61,6 +62,7 @@ public final class P3ProviderTestResource implements QuarkusTestResourceLifecycl
     Path classes = Files.createDirectories(fixture.resolve("classes"));
     compileFixture(sourceRoot, classes, "io/nanpanel/core/p3/P3FixturePlugin.java");
     compileFixture(sourceRoot, classes, "io/nanpanel/core/p3/P3FixtureNetworkProvider.java");
+    compileFixture(sourceRoot, classes, "io/nanpanel/core/p3/P3FixtureClusterProvider.java");
     compileFixture(sourceRoot, classes, "io/nanpanel/core/p3/P3FixtureConfigTranslator.java");
 
     Manifest manifest = new Manifest();
@@ -81,6 +83,7 @@ public final class P3ProviderTestResource implements QuarkusTestResourceLifecycl
       }
       output.putNextEntry(new JarEntry("META-INF/extensions.idx"));
       output.write(("io.nanpanel.core.p3.P3FixtureNetworkProvider\n"
+          + "io.nanpanel.core.p3.P3FixtureClusterProvider\n"
           + "io.nanpanel.core.p3.P3FixtureConfigTranslator\n")
           .getBytes(java.nio.charset.StandardCharsets.UTF_8));
       output.closeEntry();
@@ -99,7 +102,8 @@ public final class P3ProviderTestResource implements QuarkusTestResourceLifecycl
     var compiler = ToolProvider.getSystemJavaCompiler();
     assertNotNull(compiler, "P3 Provider API test requires a JDK");
     String classpath = String.join(File.pathSeparator,
-        classLocation(NetworkProvider.class), classLocation(ConfigTranslator.class),
+        classLocation(NetworkProvider.class), classLocation(ClusterProvider.class),
+        classLocation(ConfigTranslator.class),
         classLocation(Plugin.class), classLocation(Extension.class));
     int result = compiler.run(null, null, null, "--release", "21", "-proc:none", "-classpath",
         classpath, "-d", classes.toString(), source.toString());

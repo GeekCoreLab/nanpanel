@@ -24,18 +24,23 @@ KubeEdge acceptance.
 ## Provider boundary
 
 `NetworkProvider` is the PF4J contract for network reconciliation; it is not a
-Kubernetes node lifecycle API. `panel-plugin-api` now defines a dedicated
+Kubernetes node lifecycle API. `panel-plugin-api` defines a dedicated
 `ClusterProvider` extension point, and `ProviderRuntime` loads it independently
-from network providers and reports its ID in plugin status. The contract is
-cluster-scoped and identifies a cluster by the Core registry UUID, kind, and
-generation. A plan can describe ordered Kubernetes API or Agent Helper steps;
-Helper steps must name a Host, and credentials are represented only by opaque
-Core-owned UUID references. Plan parameters reject secret-like key names. Core
-still owns durable operation state, audit redaction, typed Agent/Helper
-dispatch, and reconciliation after restart.
+from network providers and reports its ID in plugin status. The v2 contract
+provides a Core-owned, read-only snapshot of cluster health, CloudCore status,
+and Node identity/readiness. It does not provide a Kubernetes client,
+kubeconfig, ServiceAccount token, or raw Kubernetes resources to the plugin.
+The contract is cluster-scoped and identifies a cluster by Core registry UUID,
+kind, and generation. A plan can describe ordered Kubernetes API or Agent
+Helper steps; Helper steps must name a Host, and credentials are represented
+only by opaque Core-owned UUID references. Plan parameters reject secret-like
+key names. Core still owns durable operation state, audit redaction, typed
+Agent/Helper dispatch, and reconciliation after restart.
 
-This is an extension contract and loader only; no KubeEdge implementation or
-Core lifecycle API is installed yet. It does not install CloudCore/EdgeCore,
+Core now exposes an authenticated read-only Provider observation route that
+uses cached inventory; it does not refresh the cluster or execute a plan. The
+extension contract and loader still have no KubeEdge implementation or Core
+lifecycle execution API. The v2 snapshot contract does not install CloudCore/EdgeCore,
 register/remove an Edge node, upgrade components, rotate certificates, or
 coordinate an ingress. Registration, version, certificate, component-health,
 offline-autonomy, and reachable-ingress operations remain unimplemented. No

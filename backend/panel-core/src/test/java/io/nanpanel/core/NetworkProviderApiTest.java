@@ -11,15 +11,20 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.common.QuarkusTestResource;
 import io.restassured.response.ExtractableResponse;
 import io.restassured.response.Response;
+import jakarta.inject.Inject;
+import java.sql.Timestamp;
+import java.time.Instant;
 import java.util.Map;
+import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
 @QuarkusTest
 @QuarkusTestResource(value = P3ProviderTestResource.class, restrictToAnnotatedClass = true)
 class NetworkProviderApiTest {
   private static final String PASSWORD = "p3-provider-test-password-2026";
+  @Inject AuthStore store;
 
-  private record Session(String cookie, String csrf) {}
+  private record Session(String cookie, String csrf, String userId) {}
 
   @Test
   void coreRoutesPluginProtocolAndBlocksDisableUntilOperationsAreTerminal() {
@@ -35,7 +40,36 @@ class NetworkProviderApiTest {
         .get("/api/v1/plugins")
         .then().statusCode(200).body("[0].id", equalTo("p3-api-fixture"))
         .body("[0].state", equalTo("STARTED"))
-        .body("[0].clusterProviderIds.size()", equalTo(0));
+        .body("[0].clusterProviderIds", hasItem("p3-fixture-cluster-provider"));
+    given().cookie("nanpanel_session", session.cookie())
+        .get("/api/v1/cluster-providers")
+        .then().statusCode(200).body("[0].id", equalTo("p3-fixture-cluster-provider"))
+        .body("[0].apiVersion", equalTo("panel.io/cluster-providers/v2"));
+
+    UUID clusterId = UUID.randomUUID();
+    Instant observedAt = Instant.now();
+    store.transaction(connection -> {
+      AuthStore.update(connection, "INSERT INTO kubernetes_cluster (id,name,kind,endpoint,"
+          + "context_name,encrypted_kubeconfig,health_status,cloudcore_status,observed_at,"
+          + "imported_by,created_at,updated_at) VALUES (?,?,?,?,?,?,'HEALTHY','DEGRADED',?,?,?,?)",
+          clusterId, "provider-snapshot-test", "KUBEEDGE", "https://kubeedge.test:6443",
+          "fixture", new byte[] {1}, Timestamp.from(observedAt),
+          session.userId(), Timestamp.from(observedAt), Timestamp.from(observedAt));
+      AuthStore.update(connection, "INSERT INTO kubernetes_cluster_node (cluster_id,node_uid,"
+          + "node_name,roles,node_present,kubeedge_edge,ready,kubelet_version,container_owner,"
+          + "observed_at) VALUES (?,?,?,'edge',TRUE,TRUE,TRUE,?,'KUBEEDGE',?)",
+          clusterId, "fixture-node-uid", "fixture-edge-node", "v1.31.0-kubeedge.1",
+          Timestamp.from(observedAt));
+      return null;
+    });
+    given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.csrf())
+        .post("/api/v1/cluster-providers/p3-fixture-cluster-provider/clusters/" + clusterId
+            + "/observations")
+        .then().statusCode(200).body("clusterId", equalTo(clusterId.toString()))
+        .body("status", equalTo("HEALTHY"))
+        .body("fingerprint", equalTo("DEGRADED"))
+        .body("conditions", hasItems("nodes=1", "edgeNodes=1"));
     given().cookie("nanpanel_session", session.cookie())
         .get("/api/v1/config-translators")
         .then().statusCode(200).body("[0].id", equalTo("p3-fixture-translator"))
@@ -134,7 +168,8 @@ class NetworkProviderApiTest {
       var next = given().get("/api/v1/auth/csrf").then().statusCode(200).extract();
       initial = login(next.cookie("nanpanel_session"), next.path("csrfToken"), PASSWORD);
     }
-    return new Session(initial.cookie("nanpanel_session"), initial.path("csrfToken"));
+    return new Session(initial.cookie("nanpanel_session"), initial.path("csrfToken"),
+        initial.path("user.id"));
   }
 
   private static ExtractableResponse<Response> login(String cookie, String csrf, String password) {

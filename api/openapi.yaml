@@ -378,6 +378,94 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+  /api/v1/cluster-providers:
+    get:
+      tags: [KubernetesClusters]
+      operationId: listClusterProviders
+      summary: 查询已装载的集群生命周期 Provider
+      description: 返回 PF4J 已装载的 ClusterProvider 能力；不表示对应操作已实现或可用于生产。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: Provider 描述、支持的集群类型及声明操作。
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  additionalProperties: false
+                  required: [id, name, version, apiVersion, clusterKinds, operations]
+                  properties:
+                    id: { type: string }
+                    name: { type: string }
+                    version: { type: string }
+                    apiVersion: { type: string }
+                    clusterKinds:
+                      type: array
+                      items: { type: string, enum: [K3S, KUBEEDGE, KUBERNETES] }
+                    operations:
+                      type: array
+                      items: { type: string }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/cluster-providers/{providerId}/clusters/{clusterId}/observations:
+    parameters:
+    - name: providerId
+      in: path
+      required: true
+      schema: { type: string }
+    - name: clusterId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    post:
+      tags: [KubernetesClusters]
+      operationId: observeClusterWithProvider
+      summary: 使用集群 Provider 观察已登记集群
+      description: Core 从缓存的集群元数据和 Node 清单构建受限快照；不会刷新 Kubernetes API，也不向 Provider 暴露 kubeconfig、ServiceAccount token、原始资源或节点 IP。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      responses:
+        '200':
+          description: Provider 对当前 Core 快照的观察。
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [clusterId, generation, status, fingerprint, conditions]
+                properties:
+                  clusterId: { type: string, format: uuid }
+                  generation: { type: integer, format: int64, minimum: 0 }
+                  status: { type: string, minLength: 1 }
+                  fingerprint: { type: [string, 'null'] }
+                  conditions:
+                    type: array
+                    items: { type: string }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Provider 无法完成观察。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: Provider 不支持该集群类型。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '502':
+          description: Provider 返回与目标集群不符的观察结果或违反大小限制。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
   /api/v1/kubernetes/clusters/{clusterId}/topology/namespaces:
     parameters:
     - name: clusterId

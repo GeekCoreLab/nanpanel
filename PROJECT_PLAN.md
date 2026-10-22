@@ -499,7 +499,7 @@ hybrid-infrastructure-platform/
 - [x] Core 在 K3s API 不可用时仍提供缓存的 Host 路由诊断，并拒绝 Agent 接管 Kubernetes 管理的容器；隔离 Core 集成测试验证 API `UNAVAILABLE`、路由查询成功、容器操作 `409 KUBERNETES_CONTAINER_OWNED` 且没有创建操作记录。该测试不模拟目标 API 断连，见[K3s API 故障与主机诊断](tests/p4/runs/2026-10-22-k3s-api-failure-host-diagnostics.md)。
 - [ ] K3s 实机安装、升级前校验及失败恢复：尚无真实安装/升级恢复或实际 Core 进程重启验收。唯一目标 `k3s-1` 是已管理的运行中单节点集群，不在其上执行首次安装或破坏性升级；本轮按用户选择跳过实时 `k3s.preflight`。本机 rootless Podman 的 K3s fixture 预检因 cpuset cgroup 未委派而未启动，见[fixture 预检记录](tests/p4/runs/2026-10-22-rootless-k3s-fixture-preflight.md)。
 - [x] Core 提供 KubeEdge CloudCore/EdgeCore 状态观测和 Host/Node 所有权保护；隔离集成测试覆盖缓存 EdgeCore systemd 状态及 Kubernetes API 不可用时保留 Host 诊断，见[KubeEdge EdgeCore 状态验收](tests/p4/runs/2026-10-21-kubeedge-edgecore-process-observation.md)。
-- [ ] KubeEdge Provider 生命周期与注册管理：独立 `ClusterProvider` SPI、PF4J 装载和 plugin 状态枚举已实现，并已部署到唯一目标 `k3s-1`；KubeEdge Provider 本身及安装、加入、升级、证书轮换、移除和 Core 安全执行/恢复流程仍未实现。当前没有 KubeEdge 目标，SPI/loader 不计作生命周期或实机验收，见[Provider 边界记录](plugins/provider-kubeedge/README.md)及[部署记录](tests/p4/runs/2026-10-22-cluster-provider-spi-deployment.md)。
+- [ ] KubeEdge Provider 生命周期与注册管理：独立 `ClusterProvider` SPI、PF4J 装载和 plugin 状态枚举已实现，并已部署到唯一目标 `k3s-1`；本地新增的只读 Core 观察 API 尚未部署。KubeEdge Provider 本身及安装、加入、升级、证书轮换、移除和 Core 安全执行/恢复流程仍未实现。当前没有 KubeEdge 目标，SPI/loader/观察 API 不计作生命周期或实机验收，见[Provider 边界记录](plugins/provider-kubeedge/README.md)及[部署记录](tests/p4/runs/2026-10-22-cluster-provider-spi-deployment.md)。
 - [x] 普通 Linux Gateway 为 Ready K3s Service 提供入口，并验证 TLS、访问控制及回滚；见 [目标 K3s Gateway 入口验收](tests/p4/runs/2026-10-21-linux-gateway-k3s-service-ingress.md)。拓扑到远程 Gateway 的自动协调仍未实现。
 
 **验收**：K3s API 故障时，Host Agent 仍能诊断宿主机；不会让 Agent 与 KubeEdge 双重管理容器。

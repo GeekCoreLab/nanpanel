@@ -772,6 +772,15 @@ class SystemResourceTest {
           java.sql.Timestamp.from(kubeedgeObservedAt));
       return null;
     });
+    var providerSnapshot = kubernetesClusters.providerSnapshot(kubeedgeClusterId);
+    assertEquals(kubeedgeClusterId, providerSnapshot.clusterId());
+    assertEquals("KUBEEDGE", providerSnapshot.kind());
+    assertEquals("HEALTHY", providerSnapshot.healthStatus());
+    assertEquals(1, providerSnapshot.nodes().size());
+    assertEquals(kubeedgeNodeUid, providerSnapshot.nodes().getFirst().uid());
+    assertTrue(providerSnapshot.nodes().getFirst().edge());
+    assertTrue(providerSnapshot.nodes().getFirst().ready());
+    assertNull(providerSnapshot.nodes().getFirst().hostId());
     kubernetesClusters.reportApiFailure(kubeedgeClusterId,
         new KubernetesClusterRegistryService.ClusterApiUnavailableException());
     given().cookie("nanpanel_session", restoredCookie)

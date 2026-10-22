@@ -27,9 +27,10 @@ public final class PocClusterProvider implements ClusterProvider {
     }
 
     @Override
-    public CompletionStage<ClusterObservation> observe(ClusterReference cluster) {
-        return CompletableFuture.completedFuture(new ClusterObservation(
-                cluster.id(), cluster.generation(), "READY", "fixture-fingerprint", List.of()));
+    public CompletionStage<ClusterObservation> observe(ClusterReference cluster, ClusterAccess access) {
+        return access.snapshot().thenApply(snapshot -> new ClusterObservation(
+                cluster.id(), cluster.generation(), snapshot.healthStatus(), "fixture-fingerprint",
+                List.of("nodes=" + snapshot.nodes().size(), "cloudcore=" + snapshot.cloudCoreStatus())));
     }
 
     @Override
@@ -43,7 +44,10 @@ public final class PocClusterProvider implements ClusterProvider {
     }
 
     @Override
-    public CompletionStage<ValidationResult> validate(ClusterReference cluster, ClusterPlan plan) {
-        return CompletableFuture.completedFuture(new ValidationResult(true, "VALID", "fixture plan valid"));
+    public CompletionStage<ValidationResult> validate(
+            ClusterReference cluster, ClusterPlan plan, ClusterAccess access) {
+        return access.snapshot().thenApply(snapshot -> new ValidationResult(
+                snapshot.clusterId().equals(cluster.id()) && snapshot.generation() == plan.generation(),
+                "VALID", "fixture plan valid"));
     }
 }

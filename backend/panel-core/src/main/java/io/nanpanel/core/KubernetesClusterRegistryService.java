@@ -12,9 +12,11 @@ import io.fabric8.kubernetes.api.model.ListOptionsBuilder;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.nanpanel.cluster.KubernetesClusterKubeConfig;
 import io.nanpanel.cluster.KubernetesTopologyDiscovery;
+import io.nanpanel.plugin.api.ClusterProvider;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.sql.Timestamp;
+import java.sql.Connection;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.net.URI;
@@ -87,6 +89,28 @@ public class KubernetesClusterRegistryService {
           + "FROM kubernetes_cluster c WHERE c.id=?", clusterId);
       if (rows.isEmpty()) throw new ClusterNotFoundException();
       return summary(rows.getFirst());
+    });
+  }
+
+  /** Builds the restricted view exposed to cluster lifecycle plugins from cached Core inventory. */
+  public ClusterProvider.ClusterSnapshot providerSnapshot(UUID clusterId) {
+    return store.transaction(connection -> {
+      var rows = query(connection, "SELECT c." + CLUSTER_COLUMNS + ","
+          + "(SELECT COUNT(*) FROM kubernetes_cluster_node n WHERE n.cluster_id=c.id "
+          + "AND n.node_present=TRUE) AS node_count FROM kubernetes_cluster c WHERE c.id=?",
+          clusterId);
+      if (rows.isEmpty()) throw new ClusterNotFoundException();
+      Map<String, Object> row = rows.getFirst();
+      ClusterSummary cluster = summary(row);
+      Instant updatedAt = instant(row.get("updated_at"));
+      ClusterNodeList inventory = readNodes(connection, clusterId, cluster.observedAt());
+      List<ClusterProvider.NodeSnapshot> nodes = inventory.items().stream()
+          .map(node -> new ClusterProvider.NodeSnapshot(node.nodeUid(), node.nodeName(),
+              node.nodePresent(), node.kubeedgeEdge(), node.ready(), node.kubeletVersion(), node.hostId()))
+          .toList();
+      return new ClusterProvider.ClusterSnapshot(cluster.id(),
+          updatedAt == null ? 0 : Math.max(0, updatedAt.toEpochMilli()), cluster.kind(),
+          cluster.healthStatus(), cluster.cloudCoreStatus(), cluster.observedAt(), nodes);
     });
   }
 
@@ -348,28 +372,31 @@ public class KubernetesClusterRegistryService {
   }
 
   private ClusterNodeList readNodes(UUID clusterId, Instant observedAt) {
-    return store.transaction(connection -> {
-      var settings = query(connection,
-          "SELECT host_offline_after_seconds FROM platform_settings WHERE id=1");
-      int staleAfterSeconds = settings.isEmpty() ? 90
-          : ((Number)settings.getFirst().get("host_offline_after_seconds")).intValue();
-      var rows = query(connection, "SELECT n.cluster_id,n.node_uid,n.node_name,n.roles,n.node_present,"
-          + "n.kubeedge_edge,n.ready,n.kubelet_version,n.internal_ip,n.container_owner,n.host_id,"
-          + "n.observed_at,(SELECT s.active_state FROM system_service_observation s "
-          + "WHERE s.host_id=n.host_id AND LOWER(s.unit_name) IN ('edgecore.service','edgecore') "
-          + "ORDER BY s.observed_at DESC LIMIT 1) AS edgecore_active_state,"
-          + "(SELECT s.observed_at FROM system_service_observation s WHERE s.host_id=n.host_id "
-          + "AND LOWER(s.unit_name) IN ('edgecore.service','edgecore') "
-          + "ORDER BY s.observed_at DESC LIMIT 1) AS edgecore_observed_at,"
-          + "(SELECT MAX(a.last_seen) FROM agent a WHERE a.host_id=n.host_id) AS host_agent_last_seen "
-          + "FROM kubernetes_cluster_node n WHERE n.cluster_id=? ORDER BY n.node_name,n.node_uid",
-          clusterId);
-      Instant newest = observedAt;
-      Instant now = Instant.now();
-      List<ClusterNode> nodes = rows.stream()
-          .map(row -> node(row, now, staleAfterSeconds)).toList();
-      return new ClusterNodeList(clusterId, newest, nodes);
-    });
+    return store.transaction(connection -> readNodes(connection, clusterId, observedAt));
+  }
+
+  private ClusterNodeList readNodes(Connection connection, UUID clusterId, Instant observedAt)
+      throws java.sql.SQLException {
+    var settings = query(connection,
+        "SELECT host_offline_after_seconds FROM platform_settings WHERE id=1");
+    int staleAfterSeconds = settings.isEmpty() ? 90
+        : ((Number)settings.getFirst().get("host_offline_after_seconds")).intValue();
+    var rows = query(connection, "SELECT n.cluster_id,n.node_uid,n.node_name,n.roles,n.node_present,"
+        + "n.kubeedge_edge,n.ready,n.kubelet_version,n.internal_ip,n.container_owner,n.host_id,"
+        + "n.observed_at,(SELECT s.active_state FROM system_service_observation s "
+        + "WHERE s.host_id=n.host_id AND LOWER(s.unit_name) IN ('edgecore.service','edgecore') "
+        + "ORDER BY s.observed_at DESC LIMIT 1) AS edgecore_active_state,"
+        + "(SELECT s.observed_at FROM system_service_observation s WHERE s.host_id=n.host_id "
+        + "AND LOWER(s.unit_name) IN ('edgecore.service','edgecore') "
+        + "ORDER BY s.observed_at DESC LIMIT 1) AS edgecore_observed_at,"
+        + "(SELECT MAX(a.last_seen) FROM agent a WHERE a.host_id=n.host_id) AS host_agent_last_seen "
+        + "FROM kubernetes_cluster_node n WHERE n.cluster_id=? ORDER BY n.node_name,n.node_uid",
+        clusterId);
+    Instant newest = observedAt;
+    Instant now = Instant.now();
+    List<ClusterNode> nodes = rows.stream()
+        .map(row -> node(row, now, staleAfterSeconds)).toList();
+    return new ClusterNodeList(clusterId, newest, nodes);
   }
 
   private Map<String, Object> requireCluster(UUID clusterId) {

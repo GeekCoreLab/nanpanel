@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.time.Instant;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import org.pf4j.ExtensionPoint;
@@ -18,18 +19,24 @@ public interface ClusterProvider extends ExtensionPoint {
     Set<String> operations();
 
     default ProviderDescriptor descriptor() {
-        return new ProviderDescriptor(id(), id(), "0.1.0", "panel.io/cluster-providers/v1");
+        return new ProviderDescriptor(id(), id(), "0.2.0", "panel.io/cluster-providers/v2");
     }
 
-    CompletionStage<ClusterObservation> observe(ClusterReference cluster);
+    /**
+     * Reads a Core-owned, credential-free snapshot. Providers never receive a Kubernetes client,
+     * kubeconfig, ServiceAccount token, or raw Kubernetes resource payload.
+     */
+    CompletionStage<ClusterObservation> observe(ClusterReference cluster, ClusterAccess access);
 
     CompletionStage<ClusterPlan> plan(
             ClusterReference cluster, LifecycleRequest request, ClusterObservation observed);
 
-    CompletionStage<ValidationResult> validate(ClusterReference cluster, ClusterPlan plan);
+    CompletionStage<ValidationResult> validate(
+            ClusterReference cluster, ClusterPlan plan, ClusterAccess access);
 
     /** Providers must not claim recovery across Core restarts unless they can rebuild safe state. */
-    default CompletionStage<ValidationResult> restorePlan(ClusterReference cluster, ClusterPlan plan) {
+    default CompletionStage<ValidationResult> restorePlan(
+            ClusterReference cluster, ClusterPlan plan, ClusterAccess access) {
         return CompletableFuture.completedFuture(
                 new ValidationResult(false, "RESTORE_UNSUPPORTED", "Provider plan restoration is unsupported"));
     }
@@ -61,6 +68,34 @@ public interface ClusterProvider extends ExtensionPoint {
                 throw new IllegalArgumentException("cluster observation is invalid");
             }
             conditions = List.copyOf(conditions);
+        }
+    }
+
+    /** Restricted read-only view built by Core from the registered cluster inventory. */
+    @FunctionalInterface
+    interface ClusterAccess {
+        CompletionStage<ClusterSnapshot> snapshot();
+    }
+
+    record ClusterSnapshot(UUID clusterId, long generation, String kind, String healthStatus,
+                           String cloudCoreStatus, Instant observedAt, List<NodeSnapshot> nodes) {
+        public ClusterSnapshot {
+            if (clusterId == null || generation < 0 || kind == null
+                    || !kind.matches("[A-Z][A-Z0-9_-]{1,31}")
+                    || healthStatus == null || healthStatus.isBlank()
+                    || cloudCoreStatus == null || cloudCoreStatus.isBlank()) {
+                throw new IllegalArgumentException("cluster snapshot is invalid");
+            }
+            nodes = List.copyOf(nodes);
+        }
+    }
+
+    record NodeSnapshot(String uid, String name, boolean present, boolean edge,
+                        boolean ready, String kubeletVersion, UUID hostId) {
+        public NodeSnapshot {
+            if (uid == null || uid.isBlank() || name == null || name.isBlank()) {
+                throw new IllegalArgumentException("node snapshot is invalid");
+            }
         }
     }
 

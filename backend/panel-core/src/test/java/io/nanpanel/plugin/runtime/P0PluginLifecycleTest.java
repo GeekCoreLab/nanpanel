@@ -11,6 +11,7 @@ import java.lang.ref.WeakReference;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.List;
 import java.util.UUID;
 import java.util.jar.Attributes;
 import java.util.jar.JarEntry;
@@ -67,12 +68,20 @@ class P0PluginLifecycleTest {
     var credentialReference = UUID.randomUUID();
     var request = new ClusterProvider.LifecycleRequest(
         "register_edge", "edgecore", hostId, "1.31.1", credentialReference);
-    var observed = clusterProviders.getFirst().observe(cluster).toCompletableFuture().join();
+    var snapshot = new ClusterProvider.ClusterSnapshot(cluster.id(), cluster.generation(), "KUBEEDGE",
+        "HEALTHY", "HEALTHY", java.time.Instant.now(), java.util.List.of(
+            new ClusterProvider.NodeSnapshot("node-uid", "edge-node", true, true,
+                true, "v1.31.1-kubeedge.1", hostId)));
+    ClusterProvider.ClusterAccess access = () -> java.util.concurrent.CompletableFuture
+        .completedFuture(snapshot);
+    var observed = clusterProviders.getFirst().observe(cluster, access).toCompletableFuture().join();
+    assertEquals("HEALTHY", observed.status());
+    assertEquals(List.of("nodes=1", "cloudcore=HEALTHY"), observed.conditions());
     var plan = clusterProviders.getFirst().plan(cluster, request, observed).toCompletableFuture().join();
     assertEquals(cluster.id(), plan.clusterId());
     assertEquals(credentialReference, plan.steps().getFirst().credentialReferences().getFirst());
     assertEquals(hostId, plan.steps().getFirst().hostId());
-    assertTrue(clusterProviders.getFirst().validate(cluster, plan).toCompletableFuture()
+    assertTrue(clusterProviders.getFirst().validate(cluster, plan, access).toCompletableFuture()
         .join().successful());
     assertThrows(IllegalArgumentException.class, () -> new ClusterProvider.PlanStep(0,
         ClusterProvider.ExecutionTarget.AGENT_HELPER, hostId, "kubeedge.join",
