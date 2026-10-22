@@ -148,10 +148,14 @@ try {
   await expect(routerCard.getByText('Agent 自动发现 · 只读观测')).toBeVisible();
   await expect(page.locator('.host-route-row').filter({ hasText: 'k3s-1 → 自动发现 Router 10.0.0.1（Router）' })).toBeVisible();
   await expect(page.locator('.react-flow__edge')).toHaveCount(1);
-  await expect(page.getByText('LIVE', { exact: true })).toBeVisible();
+  await page.screenshot({ path: '/tmp/nanpanel-k3s-route-live-ui.png', fullPage: true });
+  await expect(page.getByRole('navigation', { name: '网络工作区' })).toBeVisible();
+  await page.getByRole('button', { name: /Istio 服务网络/ }).click();
+  await expect(page.locator('.service-network-meta .badge').filter({ hasText: 'Istio LIVE' })).toBeVisible();
   await expect(page.getByText('3/3', { exact: true })).toBeVisible();
   expect(await page.locator('.service-network-item').count()).toBeGreaterThan(0);
-  await page.screenshot({ path: '/tmp/nanpanel-k3s-route-live-ui.png', fullPage: true });
+  await expect(page.getByRole('heading', { name: 'Istio 服务网络' })).toBeVisible();
+  await page.screenshot({ path: '/tmp/nanpanel-k3s-istio-service-network-ui.png', fullPage: true });
 
   await page.reload({ waitUntil: 'networkidle' });
   await page.getByRole('button', { name: '＋ 添加节点' }).click();

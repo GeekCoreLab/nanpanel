@@ -12,6 +12,7 @@ import NetbirdProviderPanel from './NetbirdProviderPanel';
 import { connectionError, createTopologyNode, draftError, nodePresets, resolveRouteNextHop, unmatchedRouteGateways, validNodeShape } from './lib/topology-model';
 import './topology-status.css';
 import './topology-hierarchy.css';
+import './topology-workspaces.css';
 import './gateway-asset-picker.css';
 import './service-network.css';
 import type { Host, HostNetworkInventory, HostPage, KubernetesClusterList, KubernetesClusterSummary, KubernetesServiceInventorySnapshot, KubernetesServiceProbeSnapshot, KubernetesTopologyNamespaceDetail, KubernetesTopologyNamespaceSnapshot, TopologyDraft, TopologyDraftWrite, TopologyLink, TopologyNode, TopologyNodeKind } from './lib/types';
@@ -144,6 +145,7 @@ function Editor() {
   const inventoryRequestInFlight = useRef(false);
   const [serviceSearch, setServiceSearch] = useState('');
   const [folderId, setFolderId] = useState<string | null>(null);
+  const [workspace, setWorkspace] = useState<'topology' | 'istio' | 'providers'>('topology');
   const [hostAssets, setHostAssets] = useState<Record<string, { host: Host; inventory: HostNetworkInventory }>>({});
   const hostAssetLoads = useRef(new Set<string>());
   const [assetChoices, setAssetChoices] = useState<Host[]>([]); const [assetNextCursor, setAssetNextCursor] = useState<string | null>(null); const [assetPickerOpen, setAssetPickerOpen] = useState(false); const [assetPickerBusy, setAssetPickerBusy] = useState(false);
@@ -165,7 +167,7 @@ function Editor() {
   const draft = (): TopologyDraftWrite => ({ nodes: nodes.filter(node => !node.data.observedOnly).map(n => ({ ...n.data.model, parentId: n.data.model.parentId ?? null, assetId: n.data.model.assetId ?? null, clusterId: n.data.model.clusterId ?? null, position: n.position })), links: edges.map(asLink) });
   async function load() {
     setBusy(true); setError(''); setMenu(undefined);
-    try { const r = await api<TopologyDraft>('/topology/draft', 'GET', undefined, {}, true); const payload = { nodes: r.data.nodes.map(node => ({ ...node, parentId: node.parentId ?? null, assetId: node.assetId ?? null, clusterId: node.clusterId ?? null })), links: r.data.links.map(({ state: _state, ...link }) => link) }; const invalid = draftError(payload); if (invalid) throw new Error(invalid); setNodes(payload.nodes.map(node => asNode(node))); setEdges(r.data.links.map(asEdge)); setFolderId(null); setEtag(r.etag ?? ''); setDirty(false); setLoaded(true); setMessage(`已读取 Revision ${r.data.generation}；链路状态来自运行观测`); requestAnimationFrame(() => { void fitView({ padding: .2 }); }); }
+    try { const r = await api<TopologyDraft>('/topology/draft', 'GET', undefined, {}, true); const payload = { nodes: r.data.nodes.map(node => ({ ...node, parentId: node.parentId ?? null, assetId: node.assetId ?? null, clusterId: node.clusterId ?? null })), links: r.data.links.map(({ state: _state, ...link }) => link) }; const invalid = draftError(payload); if (invalid) throw new Error(invalid); setNodes(payload.nodes.map(node => asNode(node))); setEdges(r.data.links.map(asEdge)); setFolderId(null); setWorkspace('topology'); setEtag(r.etag ?? ''); setDirty(false); setLoaded(true); setMessage(`已读取 Revision ${r.data.generation}；链路状态来自运行观测`); requestAnimationFrame(() => { void fitView({ padding: .2 }); }); }
     catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   }
   async function loadServiceInventory(refresh = false) {
@@ -383,7 +385,7 @@ function Editor() {
   function enterFolder(id: string) {
     const folder = nodes.find(node => node.id === id)?.data.model;
     if (!folder || folder.kind !== 'FOLDER') return;
-    setFolderId(id); setMenu(undefined); setMessage(`正在编辑 ${folder.name} 的层级拓扑`); requestAnimationFrame(() => { void fitView({ padding: .2 }); });
+    setFolderId(id); setWorkspace('topology'); setMenu(undefined); setMessage(`正在编辑 ${folder.name} 的层级拓扑`); requestAnimationFrame(() => { void fitView({ padding: .2 }); });
   }
   function folderPath(): TopologyNode[] {
     const path: TopologyNode[] = [];
@@ -615,11 +617,17 @@ function Editor() {
   const istioTelemetryStale = serviceInventory?.istio.observedAt
     ? inventoryClock - new Date(serviceInventory.istio.observedAt).getTime() > 120_000 : false;
   return <>
-    {folderId && <nav className="topology-breadcrumb" aria-label="拓扑层级"><button className="secondary" onClick={() => { setFolderId(null); requestAnimationFrame(() => { void fitView({ padding: .2 }); }); }}>主拓扑</button>{folderPath().map((item, index) => <span key={item.id}><span className="muted">/</span>{index === folderPath().length - 1 ? <strong>{item.name}</strong> : <button className="secondary" onClick={() => enterFolder(item.id)}>{item.name}</button>}</span>)}</nav>}
-    <div className="page-heading"><div><h1>{isP0Lab ? '拓扑到实际路由 P0 实验' : folder?.name ?? '网络拓扑实验室'}</h1><p>{folderId ? '编辑此文件夹内的期望网络拓扑；下方可逐级浏览 Namespace、Ingress、Service 和 Pod。' : '双击文件夹进入子拓扑。绿色出口 → 蓝色入口，用多端口节点组织期望转发路径。'}</p></div><div className="topology-actions"><button className="secondary" disabled={busy} onClick={load}>{dirty ? '重新读取（丢弃未保存）' : '↻ 重新读取'}</button>{!folderId && <button className="secondary" disabled={!loaded || busy || assetPickerBusy} onClick={() => void loadHostAssets()}>{assetPickerBusy ? '读取主机…' : '＋ 添加主机资产'}</button>}<button className="primary" disabled={!loaded || busy || !dirty || !etag} onClick={save}>{busy ? '处理中…' : '保存草稿'}</button>{isP0Lab && <button className="primary" disabled={!loaded || busy || !!draftError(draft()) || !!p0RouteError(draft())} onClick={applyP0Route}>{busy ? '处理中…' : '应用到 FRP 实际路由'}</button>}</div></div>
-    <div className="alert">右键画布添加交换机、转发器或 K3s 文件夹；右键节点调整端口，右键连线删除。每个端口仅连接一条线；同色连接、自连接、跨层级连接与环路均不允许。{isP0Lab ? 'P0 实验仅接受 Gateway → NAT Host → Service，并把配置部署到隔离 FRP 容器。' : '拓扑及内部编辑保存为期望草稿，不直接修改主机路由表或 Kubernetes 资源。'}</div>
+    {folderId && <nav className="topology-breadcrumb" aria-label="拓扑层级"><button className="secondary" onClick={() => { setFolderId(null); setWorkspace('topology'); requestAnimationFrame(() => { void fitView({ padding: .2 }); }); }}>主拓扑</button>{folderPath().map((item, index) => <span key={item.id}><span className="muted">/</span>{index === folderPath().length - 1 ? <strong>{item.name}</strong> : <button className="secondary" onClick={() => enterFolder(item.id)}>{item.name}</button>}</span>)}</nav>}
+    <div className="page-heading"><div><h1>{isP0Lab ? '拓扑到实际路由 P0 实验' : folder?.name ?? '网络拓扑实验室'}</h1><p>{folderId ? '编辑此文件夹内的期望网络拓扑；下方可逐级浏览 Namespace、Ingress、Service 和 Pod。' : workspace === 'istio' ? '查看 Kubernetes Service、EndpointSlice 与 Istio Envoy 的真实流量观测。' : workspace === 'providers' ? '管理已接入的网络 Provider 配置。' : '双击文件夹进入子拓扑。绿色出口 → 蓝色入口，用多端口节点组织期望转发路径。'}</p></div><div className="topology-actions"><button className="secondary" disabled={busy} onClick={load}>{dirty ? '重新读取（丢弃未保存）' : '↻ 重新读取'}</button>{!folderId && workspace === 'topology' && <button className="secondary" disabled={!loaded || busy || assetPickerBusy} onClick={() => void loadHostAssets()}>{assetPickerBusy ? '读取主机…' : '＋ 添加主机资产'}</button>}<button className="primary" disabled={!loaded || busy || !dirty || !etag} onClick={save}>{busy ? '处理中…' : '保存草稿'}</button>{isP0Lab && <button className="primary" disabled={!loaded || busy || !!draftError(draft()) || !!p0RouteError(draft())} onClick={applyP0Route}>{busy ? '处理中…' : '应用到 FRP 实际路由'}</button>}</div></div>
+    <div className="alert">{workspace === 'topology' || folderId || isP0Lab ? <>右键画布添加交换机、转发器或 K3s 文件夹；右键节点调整端口，右键连线删除。每个端口仅连接一条线；同色连接、自连接、跨层级连接与环路均不允许。{isP0Lab ? 'P0 实验仅接受 Gateway → NAT Host → Service，并把配置部署到隔离 FRP 容器。' : '拓扑及内部编辑保存为期望草稿，不直接修改主机路由表或 Kubernetes 资源。'}</> : workspace === 'istio' ? '此视图只展示 Core 从 Kubernetes API 与 Istio Envoy 采集的数据；Mock 模式会明确提示未连接，不生成服务或流量样例。' : 'Provider 配置单独呈现，不与主拓扑和运行观测混排。'}</div>
     {error && <div className="alert error" role="alert">{error}</div>}
     {routeEvidence && <div className="alert" role="status"><strong>实际路由已验证</strong> · {routeEvidence.route} · HTTP {routeEvidence.httpStatus} · 响应 {routeEvidence.responseBody} · SHA-256 {routeEvidence.configSha256}<pre className="p0-route-diff">{routeEvidence.diff}</pre></div>}
+    {!folderId && !isP0Lab && <nav className="topology-workspace-tabs" aria-label="网络工作区">
+      <button type="button" aria-current={workspace === 'topology' ? 'page' : undefined} onClick={() => setWorkspace('topology')}><strong>拓扑编辑</strong><small>主机、Gateway 与路由</small></button>
+      <button type="button" aria-current={workspace === 'istio' ? 'page' : undefined} onClick={() => setWorkspace('istio')}><strong>Istio 服务网络</strong><small>{isMock ? '仅真实数据' : serviceInventory?.istio.status ?? '读取中'}</small></button>
+      <button type="button" aria-current={workspace === 'providers' ? 'page' : undefined} onClick={() => setWorkspace('providers')}><strong>网络接入</strong><small>Provider 配置</small></button>
+    </nav>}
+    {(workspace === 'topology' || !!folderId || isP0Lab) && <>
     <div className="topology-tools"><div className="port-legend"><span><i className="input-dot" />蓝色：入口</span><span><i className="output-dot" />绿色：出口</span>{Object.entries(linkStateLabels).map(([state, label]) => <span key={state}><i className={`state-dot ${state.toLowerCase()}`} />{label}</span>)}</div><div className="topology-actions"><button className="secondary" disabled={!loaded || busy} onClick={e => { const rect = e.currentTarget.getBoundingClientRect(); const canvas = canvasRef.current?.getBoundingClientRect(); openMenu({ preventDefault() {}, clientX: rect.left, clientY: rect.bottom + 8 }, undefined, undefined, canvas ? { x: canvas.left + canvas.width / 2, y: canvas.top + canvas.height / 2 } : undefined); }}>＋ 添加节点</button><button className="secondary" disabled={busy || !activeEdges.length} onClick={() => { setEdges(current => current.filter(edge => !activeEdges.some(active => active.id === edge.id))); setDirty(true); setRouteEvidence(undefined); }}>清空本层连接</button></div></div>
     <section className="topology card" aria-label="拓扑编辑器" ref={canvasRef}>
       <ReactFlow<DeviceNode> nodes={activeDisplayNodes} edges={folderId ? activeEdges : [...activeEdges, ...observedRouteEdges]} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
@@ -635,7 +643,7 @@ function Editor() {
         <Background color="#dbe3ee" gap={24} /><Controls />
       </ReactFlow>
     </section>
-    {!folderId && <section className="service-network card" aria-labelledby="host-routes-title">
+    {!folderId && workspace === 'topology' && <section className="service-network card" aria-labelledby="host-routes-title">
       <div className="card-title"><div><h2 id="host-routes-title">主机路由观测与自动下一跳匹配</h2><p>读取已绑定主机的 Agent 路由快照；未建模的唯一下一跳会自动显示为只读 Router</p></div></div>
       {rootAssetNodes.length ? <div className="service-network-list">{rootAssetNodes.map(node => {
         const asset = hostAssets[node.data.model.assetId!];
@@ -676,7 +684,8 @@ function Editor() {
         </article>;
       })}</div> : <div className="empty">{kubernetesNamespaces ? '此集群没有 Namespace。' : '尚未读取集群清单。'}</div>}
     </section>}
-    {!folderId && <section className="service-network card" aria-labelledby="service-network-title">
+    </>}
+    {!folderId && !isP0Lab && workspace === 'istio' && <section className="service-network card" aria-labelledby="service-network-title">
       <div className="card-title"><div><h2 id="service-network-title">Istio 服务网络</h2><p>Service / EndpointSlice 来自 Kubernetes API；流量、响应码和 mTLS 来自 Istio Envoy 实时指标</p></div>{!isMock && <button className="secondary" disabled={inventoryBusy} onClick={() => void loadServiceInventory(true)}>{inventoryBusy ? '读取中…' : '↻ 刷新实时数据'}</button>}</div>
       {isMock ? <div className="service-network-live-required" role="note"><span className="service-network-live-icon">◉</span><div><strong>实时 Istio 数据尚未连接</strong><p>服务网络不显示 Mock 样例。切换到连接 K3s Core 的实时模式后，页面才会读取真实 Service、EndpointSlice 和 Envoy 指标。</p></div></div> : <>
         {serviceInventoryError && <div className="alert error" role="alert">{serviceInventoryError} · 检查 Core 集群身份、namespace、Pod 读取权限及 Istio Envoy metrics 可达性。</div>}
@@ -714,8 +723,8 @@ function Editor() {
         {!serviceInventory && !serviceInventoryError && <div className="empty">正在读取真实 Kubernetes 与 Istio 快照…</div>}
       </>}
     </section>}
-    <NetbirdProviderPanel />
-    <div className="topology-caption"><span>全拓扑 {nodes.filter(node => !node.data.observedOnly).length} 个配置节点 · Agent 自动发现 {autoRouterNodes.length} 个 Router；期望连接 {edges.length} 条 · 当前层 {activeNodes.filter(node => !node.data.observedOnly).length} 个节点 · {activeEdges.length} 条期望连接 · {dirty ? '有未保存的修改' : '草稿未修改'}</span><span role="status">{message || (busy ? '正在读取草稿…' : '')}</span></div>
+    {!folderId && workspace === 'providers' && <NetbirdProviderPanel />}
+    {(workspace === 'topology' || !!folderId || isP0Lab) && <div className="topology-caption"><span>全拓扑 {nodes.filter(node => !node.data.observedOnly).length} 个配置节点 · Agent 自动发现 {autoRouterNodes.length} 个 Router；期望连接 {edges.length} 条 · 当前层 {activeNodes.filter(node => !node.data.observedOnly).length} 个节点 · {activeEdges.length} 条期望连接 · {dirty ? '有未保存的修改' : '草稿未修改'}</span><span role="status">{message || (busy ? '正在读取草稿…' : '')}</span></div>}
     {menu && <div className="topology-menu" role="menu" aria-label="拓扑右键菜单" ref={menuRef} style={{ left: menu.x, top: menu.y } as CSSProperties}>
       {contextNode ? <><strong>{contextNode.name} · {contextNode.inputCount} 入 / {contextNode.outputCount} 出</strong>{contextNode.kind === 'FOLDER' && <button role="menuitem" onClick={() => enterFolder(contextNode.id)}>打开层级视图</button>}{(['inputCount', 'outputCount'] as const).map(direction => <div key={direction} className="menu-port-actions">{[1, -1].map(delta => <button role="menuitem" key={delta} disabled={!portChangeCandidate(contextNode, direction, delta)} onClick={() => changePorts(contextNode, direction, delta)}>{delta > 0 ? '增加' : '减少'}{direction === 'inputCount' ? '入口' : '出口'}</button>)}</div>)}<button role="menuitem" className="danger" onClick={() => removeNode(contextNode.id)}>删除节点及关联连接</button></> : menu.edgeId ? <><strong>期望连接 · {linkStateLabels[(contextEdge?.data?.state ?? 'PENDING') as keyof typeof linkStateLabels]} · L4/{(contextEdge?.data?.protocol ?? 'TCP') as string}</strong><button role="menuitem" className="danger" onClick={() => { setEdges(current => current.filter(e => e.id !== menu.edgeId)); setDirty(true); setRouteEvidence(undefined); setMenu(undefined); }}>删除连接</button></> : <><strong>添加节点</strong>{(Object.keys(nodePresets) as TopologyNodeKind[]).map(kind => <button role="menuitem" key={kind} onClick={() => addNode(kind)}><span>{nodePresets[kind].name}</span><small>{nodePresets[kind].inputs} 入 / {nodePresets[kind].outputs} 出</small></button>)}</>}
       <button role="menuitem" className="menu-cancel" onClick={() => setMenu(undefined)}>关闭菜单 · Esc</button>
