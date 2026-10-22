@@ -10,6 +10,8 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.QuarkusTestProfile;
+import io.quarkus.test.junit.TestProfile;
 import io.quarkus.test.common.QuarkusTestResource;
 import io.restassured.response.ExtractableResponse;
 import io.restassured.response.Response;
@@ -23,8 +25,16 @@ import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
 @QuarkusTest
+@TestProfile(NetworkProviderApiTest.ProviderApiProfile.class)
 @QuarkusTestResource(value = P3ProviderTestResource.class, restrictToAnnotatedClass = true)
 class NetworkProviderApiTest {
+  public static class ProviderApiProfile implements QuarkusTestProfile {
+    @Override
+    public Map<String, String> getConfigOverrides() {
+      return Map.of("quarkus.scheduler.enabled", "false");
+    }
+  }
+
   private static final String PASSWORD = "p3-provider-test-password-2026";
   @Inject AuthStore store;
   @Inject ObjectMapper mapper;

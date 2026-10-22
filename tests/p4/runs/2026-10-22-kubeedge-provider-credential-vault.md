@@ -54,6 +54,12 @@ Date: 2026-10-22
   tests with no failures, the four KubeEdge Provider tests passed, and the
   other modules passed (two opt-in live-provider tests remained skipped).
   `python web/scripts/generate-types.py` also completed successfully.
+- The first pushed CI run (`39767474695`) exposed a test-fixture timing race:
+  the Core 60-second cluster refresh updated the fixture's `updated_at`-based
+  generation during the long full suite, so validation correctly marked the
+  old plan `DRIFTED`. The API fixture now disables the unrelated scheduler;
+  production scheduling and generation checks are unchanged. The full
+  `./mvnw -B -ntp verify` command passed again with this isolated profile.
 
 ## Boundary
 
