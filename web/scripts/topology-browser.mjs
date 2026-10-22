@@ -11,9 +11,13 @@ try {
   const device = name => page.locator('.react-flow__node-device').filter({ has: page.getByText(name, { exact: true }) });
   const gateway = device('公网 Gateway'), host = device('NAT Host'), service = device('K3s Service');
   await gateway.waitFor();
+  await page.getByRole('button', { name: /Istio 服务网络/ }).click();
   await expect(page.getByRole('heading', { name: 'Istio 服务网络', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '保存草稿', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '↻ 重新读取', exact: true })).toHaveCount(0);
   await expect(page.getByText('实时 Istio 数据尚未连接')).toBeVisible();
   await expect(page.locator('.service-network-item')).toHaveCount(0);
+  await page.getByRole('button', { name: /拓扑编辑/ }).click();
   await page.getByLabel('拓扑编辑器').scrollIntoViewIfNeeded();
   await expect(gateway.locator('[data-handleid="out-1"]')).toHaveCSS('background-color', 'rgb(46, 175, 131)');
   await expect(host.locator('[data-handleid="in-1"]')).toHaveCSS('background-color', 'rgb(74, 134, 237)');
@@ -112,9 +116,13 @@ try {
   if (scrollMetrics.scrollTop <= 0) throw new Error('Gateway asset options did not scroll inside the dropdown');
   const viewportAfterListScroll = await page.locator('.react-flow__viewport').getAttribute('style');
   if (viewportBeforeListScroll !== viewportAfterListScroll) throw new Error('Scrolling Gateway assets zoomed the topology canvas');
+  const gatewayHeightBeforeBinding = await gateway.evaluate(element => element.getBoundingClientRect().height);
   await gatewayPicker.fill('gateway-sg');
   await page.getByRole('option', { name: /gateway-sg-01/ }).click();
   await expect(gateway.locator('.device-status')).toContainText('gateway-sg-01');
+  await expect(gateway.getByRole('button', { name: '取消主机绑定' })).toBeVisible();
+  const gatewayHeightAfterBinding = await gateway.evaluate(element => element.getBoundingClientRect().height);
+  if (Math.abs(gatewayHeightAfterBinding - gatewayHeightBeforeBinding) > 1) throw new Error('Binding a Host asset unexpectedly resized the Gateway card');
   await page.getByRole('button', { name: '＋ 添加主机资产' }).click();
   await page.locator('.topology-asset-option').filter({ hasText: 'homelab-node-01' }).click();
   const hostAssetNode = device('homelab-node-01');

@@ -44,6 +44,11 @@ const asNode = (model: TopologyNode, asset?: Host): DeviceNode => ({ id: model.i
 const asEdge = (link: TopologyLink): Edge => ({ id: link.id, source: link.sourceNodeId, sourceHandle: link.sourcePort, target: link.targetNodeId, targetHandle: link.targetPort, type: 'directed', markerEnd: { type: MarkerType.ArrowClosed, color: '#4a86ed' }, data: { status: 'UNVERIFIED', state: link.state ?? 'PENDING', layer: link.layer, protocol: link.protocol }, ariaLabel: `期望连接，${link.state ?? 'PENDING'} · ${link.layer}/${link.protocol}` });
 const asLink = (edge: Edge): TopologyLink => ({ id: edge.id, sourceNodeId: edge.source, sourcePort: edge.sourceHandle ?? '', targetNodeId: edge.target, targetPort: edge.targetHandle ?? '', layer: (edge.data?.layer as TopologyLink['layer']) ?? 'L4', protocol: (edge.data?.protocol as TopologyLink['protocol']) ?? 'TCP', status: 'UNVERIFIED' });
 const linkStateLabels = { PENDING: '待部署', VERIFIED: '已验证', ERROR: '异常', UNSUPPORTED: '不可支持', OBSERVED: 'Agent 路由观测' } as const;
+const estimatedNodeHeight = (node: Pick<TopologyNode, 'kind' | 'inputCount' | 'outputCount'>) => {
+  const portRows = Math.max(node.inputCount, node.outputCount, 1) * 26 + 16;
+  const controls = node.kind === 'GATEWAY' ? 80 : node.kind === 'ROUTER' ? 64 : node.kind === 'FOLDER' ? 52 : 0;
+  return 96 + portRows + controls;
+};
 
 function p0RouteError(graph: TopologyDraftWrite): string | null {
   if (graph.nodes.length !== 3 || graph.links.length !== 2) return 'P0 实验要求一条 Gateway → NAT Host → Service 路径';
@@ -105,7 +110,9 @@ function Device({ data, selected }: NodeProps<DeviceNode>) {
       : <div className="router-address-control nodrag"><label htmlFor={`router-address-${node.id}`}>下一跳 IP 地址</label><input id={`router-address-${node.id}`} className="nodrag" inputMode="text" maxLength={45} placeholder="例如 10.0.0.1" value={node.ipAddress ?? ''} onChange={event => data.onRouterAddressChange?.(node.id, event.target.value)} /></div>)}
     {node.kind === 'GATEWAY' && <div className="gateway-asset-control nodrag">
       <label htmlFor={`gateway-asset-search-${node.id}`}>绑定主机资产 <span className={`gateway-asset-source ${data.gatewayAssetMock ? 'is-mock' : ''}`}>{data.gatewayAssetMock ? 'Mock 演示数据' : '实时资产'}</span></label>
-      <input ref={gatewaySearchInput} id={`gateway-asset-search-${node.id}`} className="nodrag" role="combobox" aria-label="搜索 Gateway 主机资产" aria-autocomplete="list" aria-expanded={!!data.gatewayAssetOpen} aria-controls={gatewayListId} placeholder={data.asset?.hostname ?? '输入主机名搜索…'} value={data.gatewayAssetSearch ?? ''} onFocus={() => data.onGatewayAssetFocus?.(node.id)} onBlur={() => data.onGatewayAssetClose?.(node.id)} onChange={event => data.onGatewayAssetSearch?.(node.id, event.target.value)} onKeyDown={event => { if (event.key === 'Escape') data.onGatewayAssetClose?.(node.id); }} />
+      <div className="gateway-asset-input-row"><input ref={gatewaySearchInput} id={`gateway-asset-search-${node.id}`} className="nodrag" role="combobox" aria-label="搜索 Gateway 主机资产" aria-autocomplete="list" aria-expanded={!!data.gatewayAssetOpen} aria-controls={gatewayListId} placeholder={data.asset?.hostname ?? '输入主机名搜索…'} value={data.gatewayAssetSearch ?? ''} onFocus={() => data.onGatewayAssetFocus?.(node.id)} onBlur={() => data.onGatewayAssetClose?.(node.id)} onChange={event => data.onGatewayAssetSearch?.(node.id, event.target.value)} onKeyDown={event => { if (event.key === 'Escape') data.onGatewayAssetClose?.(node.id); }} />
+        {node.assetId && <button type="button" className="gateway-asset-clear nodrag" aria-label="取消主机绑定" title="取消主机绑定" onClick={() => data.onGatewayAssetSelect?.(node.id, null)}>×</button>}
+      </div>
       {data.gatewayAssetOpen && gatewayDropdownPosition && createPortal(<div className="gateway-asset-dropdown nowheel" id={gatewayListId} role="listbox" aria-label="可绑定的主机资产" onWheelCapture={scrollGatewayAssetList} style={{ position: 'fixed', left: gatewayDropdownPosition.left, top: gatewayDropdownPosition.top, width: gatewayDropdownPosition.width, maxHeight: gatewayDropdownPosition.maxHeight }}>
         {filteredGatewayChoices.map(host => {
           const boundElsewhere = (data.gatewayBoundAssetIds ?? []).includes(host.id) && host.id !== node.assetId;
@@ -114,7 +121,6 @@ function Device({ data, selected }: NodeProps<DeviceNode>) {
         {!filteredGatewayChoices.length && <div className="gateway-asset-empty">{data.gatewayAssetLoading ? '读取主机资产…' : data.gatewayAssetError ?? '没有匹配的主机资产'}</div>}
         {data.gatewayAssetNextCursor && <button type="button" className="gateway-asset-more nodrag" disabled={data.gatewayAssetLoading} onMouseDown={event => event.preventDefault()} onClick={() => data.onGatewayAssetLoadMore?.(node.id)}>{data.gatewayAssetLoading ? '读取中…' : '加载更多主机'}</button>}
       </div>, document.body)}
-      {node.assetId && <button type="button" className="gateway-asset-clear nodrag" onClick={() => data.onGatewayAssetSelect?.(node.id, null)}>取消主机绑定</button>}
     </div>}
     <div className="device-ports" style={{ height }}>
       {Array.from({ length: node.inputCount }, (_, i) => <div className="device-port port-in" key={`in-${i + 1}`} style={{ top: 12 + i * 26 }}><Handle id={`in-${i + 1}`} type="target" position={Position.Left} aria-label={`${node.name} 入口 ${i + 1}`} /><span>{node.kind === 'FOLDER' && i === 0 ? 'Ingress 接入' : `入口 ${i + 1}`} · L4</span></div>)}
@@ -341,7 +347,7 @@ function Editor() {
   function addNode(kind: TopologyNodeKind) {
     if (nodes.filter(node => !node.data.observedOnly).length >= 100) { setError('最多添加 100 个节点'); return; }
     const point = menu?.point ?? screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
-    const height = 110 + Math.max(nodePresets[kind].inputs, nodePresets[kind].outputs) * 26;
+    const height = estimatedNodeHeight({ kind, inputCount: nodePresets[kind].inputs, outputCount: nodePresets[kind].outputs });
     // Keep the clicked position when free; otherwise find a nearby free grid cell.
     let position: { x: number; y: number } | undefined;
     for (let ring = 0; ring <= 20 && !position; ring++) {
@@ -349,7 +355,7 @@ function Editor() {
         for (let dy = -ring; dy <= ring; dy++) {
           if (ring && Math.abs(dx) !== ring && Math.abs(dy) !== ring) continue;
           const candidate = { x: Math.max(-10000, Math.min(10000, point.x + dx * 300)), y: Math.max(-10000, Math.min(10000, point.y + dy * (height + 40))) };
-          if (!nodes.filter(n => (n.data.model.parentId ?? null) === folderId).some(n => candidate.x < n.position.x + 270 && candidate.x + 270 > n.position.x && candidate.y < n.position.y + 150 + Math.max(n.data.model.inputCount, n.data.model.outputCount) * 26 && candidate.y + height + 40 > n.position.y)) { position = candidate; break; }
+          if (!nodes.filter(n => (n.data.model.parentId ?? null) === folderId).some(n => candidate.x < n.position.x + 270 && candidate.x + 270 > n.position.x && candidate.y < n.position.y + estimatedNodeHeight(n.data.model) + 40 && candidate.y + height + 40 > n.position.y)) { position = candidate; break; }
         }
       }
     }
@@ -362,7 +368,7 @@ function Editor() {
     if (nodes.filter(node => !node.data.observedOnly).length >= 100) { setError('最多添加 100 个节点'); return; }
     const canvas = canvasRef.current?.getBoundingClientRect();
     const point = screenToFlowPosition({ x: canvas ? canvas.left + canvas.width / 2 : window.innerWidth / 2, y: canvas ? canvas.top + canvas.height / 2 : window.innerHeight / 2 });
-    const height = 110 + Math.max(nodePresets.HOST.inputs, nodePresets.HOST.outputs) * 26;
+    const height = estimatedNodeHeight({ kind: 'HOST', inputCount: nodePresets.HOST.inputs, outputCount: nodePresets.HOST.outputs });
     let position: { x: number; y: number } | undefined;
     const rootNodes = nodes.filter(node => (node.data.model.parentId ?? null) === null);
     for (let ring = 0; ring <= 20 && !position; ring++) {
@@ -370,7 +376,7 @@ function Editor() {
         for (let dy = -ring; dy <= ring; dy++) {
           if (ring && Math.abs(dx) !== ring && Math.abs(dy) !== ring) continue;
           const candidate = { x: Math.max(-10000, Math.min(10000, point.x + dx * 300)), y: Math.max(-10000, Math.min(10000, point.y + dy * (height + 40))) };
-          if (!rootNodes.some(node => candidate.x < node.position.x + 270 && candidate.x + 270 > node.position.x && candidate.y < node.position.y + 150 + Math.max(node.data.model.inputCount, node.data.model.outputCount) * 26 && candidate.y + height + 40 > node.position.y)) {
+          if (!rootNodes.some(node => candidate.x < node.position.x + 270 && candidate.x + 270 > node.position.x && candidate.y < node.position.y + estimatedNodeHeight(node.data.model) + 40 && candidate.y + height + 40 > node.position.y)) {
             position = candidate;
             break;
           }
@@ -457,15 +463,7 @@ function Editor() {
   const autoRouterNodes = folderId ? [] : unmatchedRouteGateways(observedRoutes, routeSourceHostIds, hostByAddress)
     .map((address, index) => {
       const width = 270;
-      const height = 270;
-      const occupiedHeight = (node: DeviceNode) => {
-        const model = node.data.model;
-        const portRows = Math.max(model.inputCount, model.outputCount, 1) * 26 + 16;
-        const controls = model.kind === 'GATEWAY' ? 150
-          : model.kind === 'ROUTER' ? 100
-            : model.kind === 'FOLDER' ? 52 : 0;
-        return 60 + portRows + 32 + controls;
-      };
+      const height = estimatedNodeHeight({ kind: 'ROUTER', inputCount: 1, outputCount: 1 });
       let position: { x: number; y: number } | undefined;
       for (let ring = 0; ring <= 20 && !position; ring++) {
         for (let dx = -ring; dx <= ring && !position; dx++) {
@@ -477,7 +475,7 @@ function Editor() {
             };
             const overlaps = occupiedRootNodes.some(node => candidate.x < node.position.x + 270
               && candidate.x + width > node.position.x
-              && candidate.y < node.position.y + occupiedHeight(node)
+              && candidate.y < node.position.y + estimatedNodeHeight(node.data.model) + 40
               && candidate.y + height > node.position.y);
             if (!overlaps) { position = candidate; break; }
           }
@@ -618,7 +616,7 @@ function Editor() {
     ? inventoryClock - new Date(serviceInventory.istio.observedAt).getTime() > 120_000 : false;
   return <>
     {folderId && <nav className="topology-breadcrumb" aria-label="拓扑层级"><button className="secondary" onClick={() => { setFolderId(null); setWorkspace('topology'); requestAnimationFrame(() => { void fitView({ padding: .2 }); }); }}>主拓扑</button>{folderPath().map((item, index) => <span key={item.id}><span className="muted">/</span>{index === folderPath().length - 1 ? <strong>{item.name}</strong> : <button className="secondary" onClick={() => enterFolder(item.id)}>{item.name}</button>}</span>)}</nav>}
-    <div className="page-heading"><div><h1>{isP0Lab ? '拓扑到实际路由 P0 实验' : folder?.name ?? '网络拓扑实验室'}</h1><p>{folderId ? '编辑此文件夹内的期望网络拓扑；下方可逐级浏览 Namespace、Ingress、Service 和 Pod。' : workspace === 'istio' ? '查看 Kubernetes Service、EndpointSlice 与 Istio Envoy 的真实流量观测。' : workspace === 'providers' ? '管理已接入的网络 Provider 配置。' : '双击文件夹进入子拓扑。绿色出口 → 蓝色入口，用多端口节点组织期望转发路径。'}</p></div><div className="topology-actions"><button className="secondary" disabled={busy} onClick={load}>{dirty ? '重新读取（丢弃未保存）' : '↻ 重新读取'}</button>{!folderId && workspace === 'topology' && <button className="secondary" disabled={!loaded || busy || assetPickerBusy} onClick={() => void loadHostAssets()}>{assetPickerBusy ? '读取主机…' : '＋ 添加主机资产'}</button>}<button className="primary" disabled={!loaded || busy || !dirty || !etag} onClick={save}>{busy ? '处理中…' : '保存草稿'}</button>{isP0Lab && <button className="primary" disabled={!loaded || busy || !!draftError(draft()) || !!p0RouteError(draft())} onClick={applyP0Route}>{busy ? '处理中…' : '应用到 FRP 实际路由'}</button>}</div></div>
+    <div className="page-heading"><div><h1>{isP0Lab ? '拓扑到实际路由 P0 实验' : folder?.name ?? '网络拓扑实验室'}</h1><p>{folderId ? '编辑此文件夹内的期望网络拓扑；下方可逐级浏览 Namespace、Ingress、Service 和 Pod。' : workspace === 'istio' ? '查看 Kubernetes Service、EndpointSlice 与 Istio Envoy 的真实流量观测。' : workspace === 'providers' ? '管理已接入的网络 Provider 配置。' : '双击文件夹进入子拓扑。绿色出口 → 蓝色入口，用多端口节点组织期望转发路径。'}</p></div><div className="topology-actions">{(workspace === 'topology' || !!folderId || isP0Lab) && <><button className="secondary" disabled={busy} onClick={load}>{dirty ? '重新读取（丢弃未保存）' : '↻ 重新读取'}</button><button className="primary" disabled={!loaded || busy || !dirty || !etag} onClick={save}>{busy ? '处理中…' : '保存草稿'}</button></>}{!folderId && workspace === 'topology' && <button className="secondary" disabled={!loaded || busy || assetPickerBusy} onClick={() => void loadHostAssets()}>{assetPickerBusy ? '读取主机…' : '＋ 添加主机资产'}</button>}{isP0Lab && <button className="primary" disabled={!loaded || busy || !!draftError(draft()) || !!p0RouteError(draft())} onClick={applyP0Route}>{busy ? '处理中…' : '应用到 FRP 实际路由'}</button>}</div></div>
     <div className="alert">{workspace === 'topology' || folderId || isP0Lab ? <>右键画布添加交换机、转发器或 K3s 文件夹；右键节点调整端口，右键连线删除。每个端口仅连接一条线；同色连接、自连接、跨层级连接与环路均不允许。{isP0Lab ? 'P0 实验仅接受 Gateway → NAT Host → Service，并把配置部署到隔离 FRP 容器。' : '拓扑及内部编辑保存为期望草稿，不直接修改主机路由表或 Kubernetes 资源。'}</> : workspace === 'istio' ? '此视图只展示 Core 从 Kubernetes API 与 Istio Envoy 采集的数据；Mock 模式会明确提示未连接，不生成服务或流量样例。' : 'Provider 配置单独呈现，不与主拓扑和运行观测混排。'}</div>
     {error && <div className="alert error" role="alert">{error}</div>}
     {routeEvidence && <div className="alert" role="status"><strong>实际路由已验证</strong> · {routeEvidence.route} · HTTP {routeEvidence.httpStatus} · 响应 {routeEvidence.responseBody} · SHA-256 {routeEvidence.configSha256}<pre className="p0-route-diff">{routeEvidence.diff}</pre></div>}
