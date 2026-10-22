@@ -112,6 +112,21 @@ viewport animation.
   Host selection and route matching were exercised in the ephemeral UI draft;
   saved production graph acceptance is still open.
 
+## Read-only rerun after `2e11950`
+
+`ssh k3s-1` confirmed the deployed Core and Web remain on immutable image
+`sha-12a7b33d269218be412e59ccd07fb55c859a0b9a`, both `1/1` Ready. The same
+browser script returned `PASS` against the live target with route gateway
+`10.0.0.1` and route timestamp `2026-10-22T03:04:55.838Z`. The screenshot again
+showed two real Services, 2/2 Ready endpoints, 3/3 scraped sidecars, and 26
+Envoy requests (13 HTTP 200 and 13 HTTP 403, all mTLS). The observed Router
+edge and searchable Gateway Host selection rendered, with `topologyWrites: 0`.
+
+This source commit changed tests and P4 records only, so no new runtime image
+was built or deployed. The browser used the existing test-only session and
+ephemeral empty topology projection; production login and persisted topology
+save remain unverified. Screenshot: `/tmp/nanpanel-k3s-gateway-asset-live-ui.png`.
+
 ## Acceptance boundary
 
 This verifies the normal Host asset picker and route matching display using the
