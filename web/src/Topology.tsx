@@ -6,7 +6,7 @@ import {
   BaseEdge, getBezierPath, MarkerType, useNodesState, useEdgesState, useReactFlow, useUpdateNodeInternals,
   type Node, type NodeProps, type Edge, type EdgeProps, type Connection, type IsValidConnection,
 } from '@xyflow/react';
-import { api, isMock, isP0Lab, mockBusiness } from './lib/api';
+import { api, isMock, isP0Lab } from './lib/api';
 import { createUuid } from './lib/uuid.ts';
 import NetbirdProviderPanel from './NetbirdProviderPanel';
 import { connectionError, createTopologyNode, draftError, nodePresets, resolveRouteNextHop, unmatchedRouteGateways, validNodeShape } from './lib/topology-model';
@@ -184,7 +184,7 @@ function Editor() {
   async function loadHostAssets() {
     setAssetPickerBusy(true); setError('');
     try {
-      const result = await api<HostPage>('/hosts?limit=100');
+      const result = await api<HostPage>('/hosts?limit=100', 'GET', undefined, {}, true);
       setAssetChoices(result.data.items); setAssetNextCursor(result.data.nextCursor); setAssetPickerOpen(true);
     } catch (e) { setError((e as Error).message); }
     finally { setAssetPickerBusy(false); }
@@ -193,7 +193,7 @@ function Editor() {
     if (!assetNextCursor) return;
     setAssetPickerBusy(true);
     try {
-      const result = await api<HostPage>(`/hosts?limit=100&cursor=${encodeURIComponent(assetNextCursor)}`);
+      const result = await api<HostPage>(`/hosts?limit=100&cursor=${encodeURIComponent(assetNextCursor)}`, 'GET', undefined, {}, true);
       setAssetChoices(current => [...current, ...result.data.items]); setAssetNextCursor(result.data.nextCursor);
     } catch (e) { setError((e as Error).message); }
     finally { setAssetPickerBusy(false); }
@@ -207,7 +207,7 @@ function Editor() {
       if (cursor) params.set('cursor', cursor);
       if (search.trim()) params.set('search', search.trim());
       const query = `?${params}`;
-      const result = await api<HostPage>(`/hosts${query}`);
+      const result = await api<HostPage>(`/hosts${query}`, 'GET', undefined, {}, true);
       if (gatewayAssetRequest.current[nodeId] === requestId) {
         setGatewayAssetPages(current => ({ ...current, [nodeId]: { choices: cursor ? [...(current[nodeId]?.choices ?? []), ...result.data.items] : result.data.items, nextCursor: result.data.nextCursor, loading: false } }));
       }
@@ -253,7 +253,7 @@ function Editor() {
   async function loadNamespace(namespace: string) {
     setExpandedNamespace(namespace); setKubernetesBusy(true); setKubernetesError('');
     try {
-      const result = await api<KubernetesTopologyNamespaceDetail>(`${topologyNamespacesPath()}/${encodeURIComponent(namespace)}`, 'GET', undefined, {}, !!activeFolderClusterId);
+      const result = await api<KubernetesTopologyNamespaceDetail>(`${topologyNamespacesPath()}/${encodeURIComponent(namespace)}`, 'GET', undefined, {}, true);
       setNamespaceDetails(current => ({ ...current, [`${folderId}:${activeFolderClusterId ?? 'default'}:${namespace}`]: result.data }));
     } catch (e) { setKubernetesError((e as Error).message); }
     finally { setKubernetesBusy(false); }
@@ -290,7 +290,7 @@ function Editor() {
   useEffect(() => {
     if (!folderId) { setKubernetesNamespaces(undefined); setExpandedNamespace(undefined); setExpandedPod(undefined); return; }
     let cancelled = false; setKubernetesNamespaces(undefined); setExpandedNamespace(undefined); setExpandedPod(undefined); setKubernetesBusy(true); setKubernetesError('');
-    void api<KubernetesTopologyNamespaceSnapshot>(topologyNamespacesPath(), 'GET', undefined, {}, !!activeFolderClusterId)
+    void api<KubernetesTopologyNamespaceSnapshot>(topologyNamespacesPath(), 'GET', undefined, {}, true)
       .then(result => { if (!cancelled) setKubernetesNamespaces(result.data); })
       .catch(e => { if (!cancelled) setKubernetesError((e as Error).message); })
       .finally(() => { if (!cancelled) setKubernetesBusy(false); });
@@ -378,7 +378,7 @@ function Editor() {
           gatewayAssetOpen: gatewayAssetOpen[node.id] ?? false,
           gatewayAssetLoading: gatewayAssetPages[node.id]?.loading ?? false,
           gatewayAssetError: gatewayAssetPages[node.id]?.error,
-          gatewayAssetMock: mockBusiness,
+          gatewayAssetMock: isMock,
           gatewayAssetNextCursor: gatewayAssetPages[node.id]?.nextCursor,
           gatewayBoundAssetIds: nodes.map(item => item.data.model.assetId).filter((id): id is string => !!id),
           onGatewayAssetFocus: openGatewayAssetPicker,
@@ -456,14 +456,14 @@ function Editor() {
   const renderedObservedRouterSignature = nodes.filter(node => node.data.observedOnly).map(node => node.id).sort().join('|');
   useEffect(() => {
     const desiredSignature = autoRouterNodes.map(node => node.id).sort().join('|');
-    if (!loaded || folderId || renderedObservedRouterSignature !== desiredSignature || observedRouterSignatureRef.current === desiredSignature) return;
+    if (!loaded || folderId || menu || renderedObservedRouterSignature !== desiredSignature || observedRouterSignatureRef.current === desiredSignature) return;
     observedRouterSignatureRef.current = desiredSignature;
     const fitTimer = window.setTimeout(() => {
       autoRouterNodes.forEach(node => updateNodeInternals(node.id));
       requestAnimationFrame(() => void fitView({ padding: .2, includeHiddenNodes: true }));
     }, 120);
     return () => window.clearTimeout(fitTimer);
-  }, [fitView, folderId, loaded, observedRouterSignature, renderedObservedRouterSignature, updateNodeInternals]);
+  }, [fitView, folderId, loaded, menu, observedRouterSignature, renderedObservedRouterSignature, updateNodeInternals]);
   const rootNodeByNextHopId = new Map(rootAssetNodes.map(node => [node.data.model.assetId!, node]));
   for (const node of nodes.filter(item => !item.data.observedOnly && !item.data.model.parentId && item.data.model.kind === 'ROUTER')) {
     const address = node.data.model.ipAddress?.trim().toLowerCase();
@@ -566,7 +566,7 @@ function Editor() {
         onConnect={connect} isValidConnection={validConnection} connectionMode={ConnectionMode.Strict}
         onConnectEnd={(_, state) => { if (state.toHandle && !state.isValid) setError('连接无效：仅允许未占用的绿色出口 → 蓝色入口，且不能形成自连接或环路'); }}
         onPaneContextMenu={e => openMenu(e)} onNodeContextMenu={(e, node) => { if (!node.data.observedOnly) openMenu(e, node.id); }} onNodeDoubleClick={(_, node) => { if (!node.data.observedOnly && node.data.model.kind === 'FOLDER') enterFolder(node.id); }} onEdgeContextMenu={(e, edge) => { if (!edge.data?.observedRoute) openMenu(e, undefined, edge.id); }}
-        onPaneClick={() => setMenu(undefined)} onMoveStart={() => { setMenu(undefined); setGatewayAssetOpen({}); }}
+        onPaneClick={() => setMenu(undefined)} onMoveStart={event => { if (event) { setMenu(undefined); setGatewayAssetOpen({}); } }}
         onNodesDelete={deleted => { deleted.forEach(node => removeNode(node.id)); }}
         nodesDraggable={!busy} nodesConnectable={loaded && !busy} elementsSelectable={!busy} deleteKeyCode={busy ? null : ['Backspace', 'Delete']}
         fitView minZoom={.2} maxZoom={1.7} noWheelClassName="nowheel" translateExtent={[[-11000, -11000], [11000, 11000]]} nodeExtent={[[-10000, -10000], [10000, 10000]]}>
@@ -592,9 +592,9 @@ function Editor() {
       <p className="service-network-empty">匹配结果是只读观测关联；当前 Provider 尚未实现通用主机路由下发。</p>
     </section>}
     {folderId && <section className="service-network card" aria-labelledby="kubernetes-hierarchy-title">
-      <div className="card-title"><div><h2 id="kubernetes-hierarchy-title">{folder?.name ?? 'K3s'} · Namespace 资源视图</h2><p>{folder?.clusterId ? `读取已登记集群 ${kubernetesClusters.find(cluster => cluster.id === folder.clusterId)?.name ?? folder.clusterId}。` : '读取默认 Kubernetes 集群。'}点击 Namespace 展开 Ingress、Service 与 Pod，再打开 Pod 查看容器、端口和重启计数。</p></div><button className="secondary" disabled={kubernetesBusy} onClick={() => { setKubernetesNamespaces(undefined); setKubernetesError(''); setKubernetesBusy(true); void api<KubernetesTopologyNamespaceSnapshot>(topologyNamespacesPath(), 'GET', undefined, {}, !!activeFolderClusterId).then(result => setKubernetesNamespaces(result.data)).catch(e => setKubernetesError((e as Error).message)).finally(() => setKubernetesBusy(false)); }}>↻ 刷新 Namespace</button></div>
+      <div className="card-title"><div><h2 id="kubernetes-hierarchy-title">{folder?.name ?? 'K3s'} · Namespace 资源视图</h2><p>{folder?.clusterId ? `读取已登记集群 ${kubernetesClusters.find(cluster => cluster.id === folder.clusterId)?.name ?? folder.clusterId}。` : '读取默认 Kubernetes 集群。'}点击 Namespace 展开 Ingress、Service 与 Pod，再打开 Pod 查看容器、端口和重启计数。</p></div><button className="secondary" disabled={kubernetesBusy} onClick={() => { setKubernetesNamespaces(undefined); setKubernetesError(''); setKubernetesBusy(true); void api<KubernetesTopologyNamespaceSnapshot>(topologyNamespacesPath(), 'GET', undefined, {}, true).then(result => setKubernetesNamespaces(result.data)).catch(e => setKubernetesError((e as Error).message)).finally(() => setKubernetesBusy(false)); }}>↻ 刷新 Namespace</button></div>
       {kubernetesError && <div className="alert error" role="alert">{kubernetesError}{!isMock && ' · 请启用 Kubernetes 服务发现并为 Core 身份授予 Namespace、Pod、Service、Ingress 的 get/list 权限。'}</div>}
-      {kubernetesNamespaces && <div className="service-network-meta"><span><b>{kubernetesNamespaces.sourceId}</b></span><span>观测于 {new Date(kubernetesNamespaces.observedAt).toLocaleString()}</span>{mockBusiness && <span className="badge pending">Mock 示例</span>}</div>}
+      {kubernetesNamespaces && <div className="service-network-meta"><span><b>{kubernetesNamespaces.sourceId}</b></span><span>观测于 {new Date(kubernetesNamespaces.observedAt).toLocaleString()}</span>{isMock && <span className="badge pending">Mock 示例</span>}</div>}
       {kubernetesBusy && !kubernetesNamespaces ? <div className="empty">读取集群 Namespace…</div> : kubernetesNamespaces?.namespaces.length ? <div className="kubernetes-namespace-list">{kubernetesNamespaces.namespaces.map(namespace => {
         const detail = namespaceDetails[`${folderId}:${activeFolderClusterId ?? 'default'}:${namespace.name}`];
         const expanded = expandedNamespace === namespace.name;

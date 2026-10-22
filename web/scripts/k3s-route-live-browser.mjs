@@ -62,22 +62,6 @@ if (!host?.id || !inventory?.observedAt
   throw new Error('The live k3s-1 inventory did not contain the expected default route.');
 }
 
-const hostNode = {
-  id: '00000000-0000-4000-8000-000000000001',
-  kind: 'HOST',
-  name: host.hostname,
-  position: { x: 120, y: 120 },
-  inputCount: 1,
-  outputCount: 1,
-  ports: [
-    { id: 'in-1', direction: 'INPUT', layer: 'L4', protocols: ['TCP', 'UDP'] },
-    { id: 'out-1', direction: 'OUTPUT', layer: 'L4', protocols: ['TCP', 'UDP'] },
-  ],
-  parentId: null,
-  assetId: host.id,
-  clusterId: null,
-  ipAddress: null,
-};
 const syntheticSession = {
   user: {
     id: 'route-live-test', username: 'admin', displayName: 'Route UI Test',
@@ -115,8 +99,12 @@ try {
       await route.fulfill({
         status: 200,
         headers: { etag: '"test-only-route-projection"' },
-        json: { revisionId: 'test-only-route-projection', generation: 0, nodes: [hostNode], links: [] },
+        json: { revisionId: 'test-only-route-projection', generation: 0, nodes: [], links: [] },
       });
+      return;
+    }
+    if (pathname === '/api/v1/hosts') {
+      await route.fulfill({ json: { items: [host], nextCursor: null } });
       return;
     }
     if (pathname === `/api/v1/hosts/${host.id}`) {
@@ -148,6 +136,8 @@ try {
   });
 
   await page.goto(`${webOrigin}/#topology`, { waitUntil: 'networkidle' });
+  await page.getByRole('button', { name: '＋ 添加主机资产' }).click();
+  await page.locator('.topology-asset-option').filter({ hasText: host.hostname }).click();
   const hostCard = page.locator('.react-flow__node-device')
     .filter({ has: page.getByText('k3s-1', { exact: true }) });
   await expect(hostCard).toBeVisible();
@@ -162,6 +152,23 @@ try {
   await expect(page.getByText('3/3', { exact: true })).toBeVisible();
   expect(await page.locator('.service-network-item').count()).toBeGreaterThan(0);
   await page.screenshot({ path: '/tmp/nanpanel-k3s-route-live-ui.png', fullPage: true });
+
+  await page.reload({ waitUntil: 'networkidle' });
+  await page.getByRole('button', { name: '＋ 添加节点' }).click();
+  await page.getByRole('menuitem', { name: '公网 Gateway 0 入 / 1 出' }).click();
+  const gatewayCard = page.locator('.react-flow__node-device')
+    .filter({ has: page.getByText('公网 Gateway', { exact: true }) });
+  await expect(gatewayCard).toBeVisible();
+  await gatewayCard.getByRole('combobox', { name: '搜索 Gateway 主机资产' }).click();
+  await expect(gatewayCard.getByText('实时资产', { exact: true })).toBeVisible();
+  const gatewayHostOption = page.getByRole('option', { name: /k3s-1/ });
+  await expect(gatewayHostOption).toBeVisible();
+  await gatewayHostOption.click();
+  await expect(page.locator('.host-route-row').filter({ hasText: 'k3s-1 → 自动发现 Router 10.0.0.1（Router）' })).toBeVisible();
+  await page.getByRole('button', { name: 'fit view' }).click();
+  await expect(page.locator('.react-flow__edge')).toHaveCount(1);
+  await page.screenshot({ path: '/tmp/nanpanel-k3s-gateway-asset-live-ui.png', fullPage: true });
+
   if (topologyWrites !== 0) throw new Error('The live route acceptance test attempted to save topology.');
   if (pageErrors.length) throw new Error(`Browser errors: ${pageErrors.join('; ')}`);
   console.log(JSON.stringify({
@@ -171,7 +178,7 @@ try {
     routeObservedAt: inventory.observedAt,
     routerNode: 'ephemeral read-only UI projection',
     topologyWrites,
-    screenshot: '/tmp/nanpanel-k3s-route-live-ui.png',
+    screenshots: ['/tmp/nanpanel-k3s-route-live-ui.png', '/tmp/nanpanel-k3s-gateway-asset-live-ui.png'],
   }, null, 2));
 } finally {
   await browser.close();
