@@ -173,9 +173,9 @@ function Editor() {
     }
     setInventoryBusy(true); setServiceInventoryError('');
     try {
-      const result = await api<KubernetesServiceInventorySnapshot>(refresh ? '/kubernetes/service-inventory/refresh' : '/kubernetes/service-inventory', refresh ? 'POST' : 'GET');
+      const result = await api<KubernetesServiceInventorySnapshot>(refresh ? '/kubernetes/service-inventory/refresh' : '/kubernetes/service-inventory', refresh ? 'POST' : 'GET', undefined, {}, true);
       setServiceInventory(result.data);
-      const probes = await api<KubernetesServiceProbeSnapshot>('/kubernetes/service-probes'); setServiceProbes(probes.data);
+      const probes = await api<KubernetesServiceProbeSnapshot>('/kubernetes/service-probes', 'GET', undefined, {}, true); setServiceProbes(probes.data);
     }
     catch (e) { setServiceInventoryError((e as Error).message); }
     finally { setInventoryBusy(false); }
