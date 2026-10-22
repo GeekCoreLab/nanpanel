@@ -18,6 +18,29 @@ Date: 2026-10-22
 - Using the target's serving certificate, `/q/health/ready` returned `UP` and
   the HTTPS Web root returned HTTP 200.
 
+## Follow-up release for the live Host/Gateway picker
+
+- Commit `12a7b33d269218be412e59ccd07fb55c859a0b9a` passed GitHub Actions run
+  `39711248650`; Rust, Maven, Web validation and both GHCR image publications
+  succeeded.
+- Core and Web images were pulled on `k3s-1` directly from the public GHCR
+  repositories and deployed with `deploy/k3s/deploy.sh`. The supplied GHCR
+  mirror returned the Core manifest, but its layer transfer remained below
+  0.4 MiB/s, so that incomplete prefetch was stopped before the GHCR pull.
+- Core and Web now use immutable `sha-12a7b33d269218be412e59ccd07fb55c859a0b9a`
+  image tags and each Deployment reports `1/1` available. The current Core and
+  Web pods are Ready with zero restarts. PostgreSQL remained Running and its
+  existing 5 GiB PVC stayed Bound.
+- The Agent service is active with zero systemd restarts. Its installed binary
+  SHA-256 matches `/work/nanpanel-agent` in the Core image:
+  `e9c53a930a7267f4d1819fc7a88b1234470c27ac8343609d83952d473b8e75c8`.
+- The serving-certificate readiness check returned `UP`; the HTTPS Web root
+  returned HTTP 200. The live browser script passed against the deployed Web,
+  loaded Host and Gateway choices through the picker, rendered the observed
+  `10.0.0.1` route edge and live Istio inventory, and reported zero topology
+  writes. Its latest route inventory timestamp was
+  `2026-10-22T02:44:40.836+00:00`.
+
 ## Read-only target inputs
 
 - Read the `k3s-1` Host and its network inventory from the target PostgreSQL
