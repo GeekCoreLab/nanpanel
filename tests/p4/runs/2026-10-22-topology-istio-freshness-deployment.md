@@ -48,3 +48,23 @@ This run proves the updated Web image is deployed and renders actual target
 Kubernetes/Istio data without topology writes. It does not change or persist
 the production topology; authenticated target save/reload and the remaining
 P4 KubeEdge, multi-node and lifecycle-recovery gates remain open.
+
+## Current-state revalidation
+
+Rechecked on 2026-10-22 from the current `main` worktree:
+
+- `ssh k3s-1 kubectl -n nanpanel get deployments,pods -o wide` reported Core
+  and Web deployments `1/1`; the Core and Web Pods were Running with zero
+  restarts. The Web image remained
+  `ghcr.io/geekcorelab/nanpanel-web:sha-d69b2b4e3e73daa942d80cad822e0437081f76e6`.
+- `ssh k3s-1 kubectl -n nanpanel-mesh get pods -o wide` reported all four
+  fixture workloads Running; three had Ready Envoy sidecars and the probe
+  target had no sidecar, as intended.
+- `node web/scripts/k3s-route-live-browser.mjs` returned `PASS` against the
+  deployed Web and real Core snapshot. It displayed the `k3s-1` default route
+  via `10.0.0.1`, the live Istio state and sidecars, and the Gateway host
+  picker. Its topology write counter remained `0`. The inventory timestamp was
+  `2026-10-22T04:47:40.837+00:00`; screenshots were regenerated under `/tmp`.
+
+This is read-only route and Istio UI revalidation. It does not perform the
+separately skipped `k3s.preflight` operation or save production topology.
