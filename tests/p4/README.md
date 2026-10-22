@@ -114,10 +114,13 @@ are in [`runs/2026-10-22-p4-regression-recheck.md`](runs/2026-10-22-p4-regressio
   Gateway/Host asset graph, then confirms that route observations rebuild the
   read-only Router node and edges. That run uses the mock Host inventory and
   mock topology API; it strengthens UI regression coverage but does not count
-  as target persistence. A new isolated Core API integration test saves and
-  reloads Host/Gateway asset bindings, a Router IP, and a link with Revision,
-  ETag, stale-write, and invalid-asset checks; it still does not write the
-  production topology. The production topology remains unchanged and the
+  as target persistence. An isolated Live API browser run also saved and
+  reloaded Gateway, Host, Router, and K3s folder nodes through a disposable
+  local PostgreSQL-backed Core, covering the browser → Core HTTP path; see
+  [`topology-core-save-api.md`](runs/2026-10-22-topology-core-save-api.md).
+  A Core integration test separately covers Host/Gateway asset bindings, a
+  Router IP, and a link with Revision, ETag, stale-write, and invalid-asset
+  checks. Neither run writes the production topology. The production topology remains unchanged and the
   saved graph acceptance stays open; see
   `runs/2026-10-22-k3s-route-istio-ui-live.md`,
   `runs/2026-10-22-topology-route-save-ui.md`,
