@@ -25,6 +25,7 @@ import org.junit.jupiter.api.Test;
 class K3sInstallationApiTest {
   @Inject AuthStore store;
   @Inject K3sInstallationResource installations;
+  @Inject KubernetesClusterRegistryService clusters;
   @Inject ObjectMapper mapper;
   private String sessionCookie;
   private String csrfToken;
@@ -301,6 +302,69 @@ class K3sInstallationApiTest {
     } finally {
       fakeGateway.stop(0);
     }
+  }
+
+  @Test
+  void k3sApiFailureKeepsHostDiagnosticsAndBlocksAgentContainerOperations() {
+    UUID hostId = UUID.randomUUID();
+    UUID agentId = UUID.randomUUID();
+    UUID clusterId = UUID.randomUUID();
+    String nodeUid = "p4-k3s-api-failure-node";
+    var now = new java.sql.Timestamp(System.currentTimeMillis());
+    String userId = store.transaction(connection -> String.valueOf(AuthStore.query(connection,
+        "SELECT id FROM panel_user WHERE username='installation-test-admin'")
+        .getFirst().get("id")));
+    store.transaction(connection -> {
+      AuthStore.update(connection,
+          "INSERT INTO host (id,hostname,capabilities,generation,observed_generation,status,created_at) "
+              + "VALUES (?,?,?,1,1,'ONLINE',?)",
+          hostId, "p4-k3s-api-failure-host", "[\"container.stop\",\"network.inventory\"]", now);
+      AuthStore.update(connection,
+          "INSERT INTO agent (id,host_id,cert_identity,version,last_seen,helper_status) "
+              + "VALUES (?,?,?,'test',?,'AVAILABLE')",
+          agentId, hostId, "p4-k3s-api-failure-agent-" + agentId, now);
+      AuthStore.update(connection,
+          "INSERT INTO kubernetes_cluster (id,name,kind,endpoint,context_name,"
+              + "encrypted_kubeconfig,health_status,observed_at,imported_by) "
+              + "VALUES (?,?,'K3S','https://127.0.0.1:6443','p4-api-failure-context',?,'HEALTHY',?,?)",
+          clusterId, "p4-k3s-api-failure-cluster", new byte[] {1}, now, UUID.fromString(userId));
+      AuthStore.update(connection,
+          "INSERT INTO kubernetes_cluster_node (cluster_id,node_uid,node_name,roles,kubeedge_edge,"
+              + "ready,kubelet_version,container_owner,host_id,observed_at,node_present) "
+              + "VALUES (?,?,?,'control-plane',FALSE,TRUE,'v1.33.5+k3s1','KUBERNETES',?,?,TRUE)",
+          clusterId, nodeUid, "p4-k3s-api-failure-node", hostId, now);
+      AuthStore.update(connection,
+          "INSERT INTO host_network_inventory (host_id,interfaces,routes,observed_at) "
+              + "VALUES (?,?,?,?)",
+          hostId, "[]", "[{\"destination\":\"default\",\"gateway\":\"10.0.0.1\","
+              + "\"interfaceName\":\"eth0\",\"table\":\"main\"}]", now);
+      return null;
+    });
+
+    clusters.reportApiFailure(clusterId,
+        new KubernetesClusterRegistryService.ClusterApiUnavailableException());
+
+    given().cookie("nanpanel_session", sessionCookie)
+        .get("/api/v1/kubernetes/clusters/" + clusterId)
+        .then().statusCode(200).body("healthStatus", equalTo("UNAVAILABLE"));
+    given().cookie("nanpanel_session", sessionCookie)
+        .get("/api/v1/hosts/" + hostId + "/network-inventory")
+        .then().statusCode(200)
+        .body("routes[0].destination", equalTo("default"))
+        .body("routes[0].gateway", equalTo("10.0.0.1"));
+    given().cookie("nanpanel_session", sessionCookie)
+        .header("X-CSRF-Token", csrfToken)
+        .header("Idempotency-Key", "p4-k3s-api-failure-container-01")
+        .contentType("application/json")
+        .body(Map.of("capability", "container.stop", "target", "p4-web",
+            "reason", "Verify Kubernetes retains container ownership",
+            "expectedGeneration", 1))
+        .post("/api/v1/hosts/" + hostId + "/operations")
+        .then().statusCode(409).body("code", equalTo("KUBERNETES_CONTAINER_OWNED"));
+    int createdOperations = store.transaction(connection -> AuthStore.query(connection,
+        "SELECT id FROM operation WHERE idempotency_key=?",
+        "p4-k3s-api-failure-container-01").size());
+    assertEquals(0, createdOperations);
   }
 
   @Test
