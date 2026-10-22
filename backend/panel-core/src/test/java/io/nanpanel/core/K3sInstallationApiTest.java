@@ -233,6 +233,82 @@ class K3sInstallationApiTest {
     }
   }
 
+  @Test
+  void unknownServerOperationStopsPlanAndPreventsAgentDispatch() throws Exception {
+    UUID serverId = insertInstallCapableHost("p4-unknown-server");
+    UUID agentId = insertInstallCapableHost("p4-unknown-agent");
+    String token = "test-install-token-0123456789";
+    var dispatchBody = new AtomicReference<String>();
+    var dispatchCount = new AtomicInteger();
+    HttpServer fakeGateway = HttpServer.create(new InetSocketAddress("127.0.0.1", 59999), 0);
+    fakeGateway.createContext("/control", exchange -> {
+      dispatchCount.incrementAndGet();
+      dispatchBody.set(new String(exchange.getRequestBody().readAllBytes(),
+          java.nio.charset.StandardCharsets.UTF_8));
+      exchange.sendResponseHeaders(202, -1);
+      exchange.close();
+    });
+    fakeGateway.start();
+    try {
+      String planId = given().cookie("nanpanel_session", sessionCookie)
+          .header("X-CSRF-Token", csrfToken)
+          .contentType("application/json")
+          .body(Map.of("serverHostId", serverId.toString(),
+              "agentHostIds", new String[] { agentId.toString() },
+              "targetVersion", "v1.33.5+k3s1", "serverUrl", "https://k3s.example.net:6443",
+              "token", token, "reason", "Stop after an unknown Server operation"))
+          .post("/api/v1/kubernetes/installations")
+          .then().statusCode(201).extract().path("id");
+      given().cookie("nanpanel_session", sessionCookie)
+          .header("X-CSRF-Token", csrfToken)
+          .contentType("application/json").body(Map.of())
+          .post("/api/v1/kubernetes/installations/" + planId + "/start")
+          .then().statusCode(202).body("state", equalTo("RUNNING"));
+
+      installations.advancePlans();
+      assertNotNull(dispatchBody.get());
+      JsonNode dispatch = mapper.readTree(dispatchBody.get());
+      assertEquals("server", mapper.readTree(dispatch.path("payloadJson").asText())
+          .path("role").asText());
+      UUID operationId = UUID.fromString(dispatch.path("operationId").asText());
+      store.transaction(connection -> {
+        AuthStore.update(connection,
+            "UPDATE operation SET status='UNKNOWN',phase='UNKNOWN',error_json=?,finished_at=?,updated_at=? WHERE id=?",
+            "{\"code\":\"AGENT_RESULT_UNKNOWN\"}",
+            new java.sql.Timestamp(System.currentTimeMillis()),
+            new java.sql.Timestamp(System.currentTimeMillis()), operationId);
+        return null;
+      });
+
+      installations.advancePlans();
+      given().cookie("nanpanel_session", sessionCookie)
+          .get("/api/v1/kubernetes/installations/" + planId)
+          .then().statusCode(200)
+          .body("state", equalTo("UNKNOWN"))
+          .body("steps[0].state", equalTo("UNKNOWN"))
+          .body("steps[1].state", equalTo("PENDING"))
+          .body(not(containsString(token)));
+      installations.advancePlans();
+      assertEquals(1, dispatchCount.get(),
+          "An unknown Server result must prevent all subsequent Agent installs");
+      int agentOperations = store.transaction(connection -> {
+        var rows = AuthStore.query(connection,
+            "SELECT id FROM operation WHERE idempotency_key=?",
+            "k3s-install:" + planId + ":1");
+        return rows.size();
+      });
+      assertEquals(0, agentOperations);
+      int tokenEnvelopeLength = store.transaction(connection -> {
+        var rows = AuthStore.query(connection,
+            "SELECT encrypted_token FROM k3s_install_plan WHERE id=?", UUID.fromString(planId));
+        return ((byte[])rows.getFirst().get("encrypted_token")).length;
+      });
+      assertEquals(0, tokenEnvelopeLength);
+    } finally {
+      fakeGateway.stop(0);
+    }
+  }
+
   private UUID insertInstallCapableHost(String hostname) {
     UUID hostId = UUID.randomUUID();
     UUID agentId = UUID.randomUUID();
