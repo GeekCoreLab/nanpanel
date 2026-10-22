@@ -155,6 +155,9 @@ try {
   await expect(page.getByText('3/3', { exact: true })).toBeVisible();
   expect(await page.locator('.service-network-item').count()).toBeGreaterThan(0);
   await expect(page.getByRole('heading', { name: 'Istio 服务网络' })).toBeVisible();
+  const trafficRows = page.locator('.service-network-flow');
+  await expect(trafficRows.filter({ hasText: 'HTTP 200' }).filter({ hasText: 'mTLS' })).toHaveCount(1);
+  await expect(trafficRows.filter({ hasText: 'HTTP 403' }).filter({ hasText: 'mTLS' })).toHaveCount(1);
   await page.screenshot({ path: '/tmp/nanpanel-k3s-istio-service-network-ui.png', fullPage: true });
 
   await page.reload({ waitUntil: 'networkidle' });

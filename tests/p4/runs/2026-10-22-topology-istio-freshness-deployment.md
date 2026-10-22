@@ -90,6 +90,25 @@ This recheck did not run `k3s.preflight`, update `.env`, or persist a
 production topology revision. It refreshes the live evidence for real Istio
 data and the UI layout only.
 
+## Live UI and traffic row revalidation at 2026-10-22 09:19 UTC
+
+- `node web/scripts/k3s-route-live-browser.mjs` returned `PASS` against the
+  deployed Web/Core and current target data. The live route observation was
+  timestamped `2026-10-22T09:19:09.990+00:00`; the browser test reported
+  `topologyWrites: 0`.
+- The browser acceptance now requires visible real `HTTP 200` and `HTTP 403`
+  Istio traffic rows, each labeled mTLS, alongside the `LIVE` status, 3/3
+  sidecars, and discovered Services. Both rows passed. The inspected screenshot
+  showed the Service list and Istio traffic in separate columns, with Service
+  details collapsed by default.
+- A read-only `kubectl` check showed both `nanpanel-mesh` Services with
+  EndpointSlices and all four fixture workloads Running; the three injected
+  workloads had `2/2` containers Ready and the intentionally un-injected TCP
+  probe target had `1/1` Ready.
+
+This revalidation skips `k3s.preflight`, makes no `.env` changes, and saves no
+production topology data.
+
 ## Workspace separation deployment at 2026-10-22 05:36 UTC
 
 - Source commit `fbf151f1bf7eb4dd87899a61d8a34cb0d639a4f1` passed GitHub
