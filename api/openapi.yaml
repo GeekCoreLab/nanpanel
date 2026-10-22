@@ -591,7 +591,7 @@ paths:
       tags: [KubernetesClusters]
       operationId: createClusterProviderPlan
       summary: 创建并持久化集群生命周期计划
-      description: Core 先读取注册集群的凭据隔离快照，再让匹配类型的 Provider 生成计划。此 API 只保存和校验计划，不执行 Kubernetes 或 Agent Helper 步骤；凭据托管目前不代表计划可引用或执行该凭据。
+      description: Core 先读取注册集群的凭据隔离快照，再让匹配类型的 Provider 生成计划。此 API 只保存和校验计划，不执行 Kubernetes 或 Agent Helper 步骤。若提供凭据引用，Provider 必须把同一 opaque UUID 放入计划步骤；Core 校验其 Provider/集群作用域、撤销和到期状态，但不会向 Provider 暴露秘密材料。
       x-implementation-status: implemented
       security:
       - cookieAuth: []
@@ -617,7 +617,7 @@ paths:
                 credentialReference:
                   type: [string, 'null']
                   format: uuid
-                  description: 当前计划 Provider 尚不支持凭据引用；非空时返回 409 CLUSTER_CREDENTIALS_UNSUPPORTED。
+                  description: 可选的 Core 托管凭据 UUID。Provider 必须把该 UUID 原样放入至少一个计划步骤，Core 验证作用域和有效状态。
                 reason: { type: string, minLength: 1, maxLength: 500 }
       responses:
         '201':
@@ -633,7 +633,7 @@ paths:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
         '409':
-          description: Provider 拒绝计划、凭据托管尚不可用或幂等键被复用。
+          description: Provider 拒绝计划、凭据不可用或幂等键被复用。
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }

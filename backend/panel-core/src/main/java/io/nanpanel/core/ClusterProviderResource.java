@@ -112,14 +112,17 @@ public class ClusterProviderResource {
             || input.targetVersion().isBlank()))) {
       throw fail(422, "VALIDATION_FAILED", "计划原因或目标版本无效");
     }
-    if (input.credentialReference() != null) {
-      throw fail(409, "CLUSTER_CREDENTIALS_UNSUPPORTED",
-          "Core 尚未提供此 Provider 的凭据托管流程");
+    UUID credentialReference = input.credentialReference() == null ? null
+        : uuid(input.credentialReference());
+    if (credentialReference != null
+        && !credentialAvailable(providerId, clusterId, credentialReference)) {
+      throw fail(409, "CLUSTER_CREDENTIAL_UNAVAILABLE",
+          "凭据不存在、已撤销、已过期或不属于此 Provider 与集群");
     }
     ClusterProvider.LifecycleRequest lifecycle;
     try {
       lifecycle = new ClusterProvider.LifecycleRequest(input.operation(), input.component(),
-          input.hostId() == null ? null : uuid(input.hostId()), input.targetVersion(), null);
+          input.hostId() == null ? null : uuid(input.hostId()), input.targetVersion(), credentialReference);
     } catch (IllegalArgumentException invalid) {
       throw fail(422, "VALIDATION_FAILED", "生命周期操作参数无效");
     }
@@ -157,7 +160,8 @@ public class ClusterProviderResource {
     } catch (RuntimeException rejected) {
       throw fail(409, "CLUSTER_PROVIDER_PLAN_REJECTED", "集群 Provider 拒绝了生命周期计划");
     }
-    validatePlan(plan, clusterId, lifecycle.operation(), snapshot.generation());
+    validatePlan(plan, providerId, clusterId, lifecycle.operation(), snapshot.generation(),
+        credentialReference);
     String configuration = serialize(plan);
     long now = System.currentTimeMillis();
     Map<String, Object> saved = store.transaction(connection -> {
@@ -171,6 +175,11 @@ public class ClusterProviderResource {
           throw fail(409, "IDEMPOTENCY_KEY_REUSED", "幂等键已用于不同的集群生命周期请求");
         }
         return row;
+      }
+      if (credentialReference != null
+          && !credentialAvailable(connection, providerId, clusterId, credentialReference)) {
+        throw fail(409, "CLUSTER_CREDENTIAL_UNAVAILABLE",
+            "计划持久化前凭据已撤销或过期");
       }
       update(connection, "INSERT INTO cluster_provider_operation "
           + "(id,provider_id,cluster_id,idempotency_key,request_fingerprint,generation,operation,"
@@ -214,6 +223,9 @@ public class ClusterProviderResource {
     ClusterProvider provider = provider(providerId);
     if (current.generation() != plan.generation() || !provider.clusterKinds().contains(current.kind())) {
       return transition(row, actor, "DRIFTED", "Cluster inventory changed after planning");
+    }
+    if (!credentialReferencesAvailable(plan, providerId, current.clusterId())) {
+      return transition(row, actor, "DRIFTED", "A referenced Provider credential is unavailable");
     }
     ClusterProvider.ClusterReference reference = reference(current, provider);
     ClusterProvider.ClusterAccess access = access(current);
@@ -281,14 +293,22 @@ public class ClusterProviderResource {
     return observed;
   }
 
-  private void validatePlan(ClusterProvider.ClusterPlan plan, UUID clusterId, String operation,
-      long generation) {
+  private void validatePlan(ClusterProvider.ClusterPlan plan, String providerId, UUID clusterId,
+      String operation, long generation, UUID requestedCredentialReference) {
+    List<UUID> credentialReferences = plan == null ? List.of() : plan.steps().stream()
+        .flatMap(step -> step.credentialReferences().stream()).distinct().toList();
+    boolean credentialsMatch = requestedCredentialReference == null
+        ? credentialReferences.isEmpty()
+        : !credentialReferences.isEmpty()
+            && credentialReferences.stream().allMatch(requestedCredentialReference::equals)
+            && credentialAvailable(providerId, clusterId, requestedCredentialReference);
     if (plan == null || plan.id() == null || !clusterId.equals(plan.clusterId())
         || generation != plan.generation() || !operation.equals(plan.operation())
         || !plan.idempotencyKey().matches("[A-Za-z0-9_.:-]{1,128}")
         || plan.steps().isEmpty() || plan.steps().size() > 128
-        || plan.steps().stream().anyMatch(step -> !step.credentialReferences().isEmpty()
-            || !(step.capability().startsWith("kubeedge.") || step.capability().startsWith("k3s."))
+        || !credentialsMatch
+        || plan.steps().stream().anyMatch(step -> !(step.capability().startsWith("kubeedge.")
+            || step.capability().startsWith("k3s."))
             || !safeParameters(step.parameters()))) {
       throw fail(502, "CLUSTER_PROVIDER_PLAN_INVALID", "集群 Provider 返回了无效的生命周期计划");
     }
@@ -296,6 +316,28 @@ public class ClusterProviderResource {
     if (serialized.length() > 65536) {
       throw fail(502, "CLUSTER_PROVIDER_PLAN_INVALID", "集群 Provider 计划超过大小限制");
     }
+  }
+
+  private boolean credentialReferencesAvailable(ClusterProvider.ClusterPlan plan,
+      String providerId, UUID clusterId) {
+    List<UUID> references = plan.steps().stream()
+        .flatMap(step -> step.credentialReferences().stream()).distinct().toList();
+    return references.stream().allMatch(reference -> credentialAvailable(providerId, clusterId, reference));
+  }
+
+  private boolean credentialAvailable(String providerId, UUID clusterId, UUID credentialId) {
+    return store.transaction(connection -> credentialAvailable(connection, providerId, clusterId, credentialId));
+  }
+
+  private static boolean credentialAvailable(java.sql.Connection connection, String providerId,
+      UUID clusterId, UUID credentialId) throws java.sql.SQLException {
+    var rows = query(connection, "SELECT expires_at,revoked_at FROM cluster_provider_credential "
+        + "WHERE id=? AND provider_id=? AND cluster_id=?", credentialId, providerId, clusterId);
+    if (rows.isEmpty()) return false;
+    Map<String, Object> row = rows.getFirst();
+    return row.get("revoked_at") == null
+        && (row.get("expires_at") == null
+            || ((Number)row.get("expires_at")).longValue() > System.currentTimeMillis());
   }
 
   private static boolean safeParameters(Map<String, String> parameters) {

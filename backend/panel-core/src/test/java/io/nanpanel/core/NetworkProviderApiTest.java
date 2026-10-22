@@ -17,6 +17,7 @@ import jakarta.inject.Inject;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
@@ -110,6 +111,19 @@ class NetworkProviderApiTest {
         .delete(credentialPath + "/" + credentialId).then().statusCode(204);
     assertThrows(IllegalArgumentException.class, () -> credentials.open(UUID.fromString(credentialId),
         clusterId, "p3-fixture-cluster-provider", "EDGECORE_BOOTSTRAP_TOKEN"));
+    var planCredential = given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.csrf()).contentType("application/json")
+        .body(Map.of("purpose", "EDGECORE_BOOTSTRAP_TOKEN", "material", secretMaterial))
+        .post(credentialPath).then().statusCode(201).extract();
+    String planCredentialId = planCredential.path("id");
+    given().cookie("nanpanel_session", session.cookie()).header("X-CSRF-Token", session.csrf())
+        .header("Idempotency-Key", "cloudcore-plan-invalid")
+        .contentType("application/json").body(Map.of("operation", "install_cloudcore",
+            "component", "cloudcore", "targetVersion", "v1.21.0",
+            "credentialReference", credentialId,
+            "reason", "Reject an unavailable credential reference"))
+        .post("/api/v1/cluster-providers/p3-fixture-cluster-provider/clusters/" + clusterId + "/plans")
+        .then().statusCode(409).body("code", equalTo("CLUSTER_CREDENTIAL_UNAVAILABLE"));
     given().cookie("nanpanel_session", session.cookie())
         .header("X-CSRF-Token", session.csrf())
         .post("/api/v1/cluster-providers/p3-fixture-cluster-provider/clusters/" + clusterId
@@ -120,6 +134,7 @@ class NetworkProviderApiTest {
         .body("conditions", hasItems("nodes=1", "edgeNodes=1"));
     Map<String, String> lifecycleRequest = Map.of("operation", "install_cloudcore",
         "component", "cloudcore", "targetVersion", "v1.21.0",
+        "credentialReference", planCredentialId,
         "reason", "Create an isolated provider plan fixture");
     String clusterOperations = "/api/v1/cluster-providers/p3-fixture-cluster-provider/clusters/"
         + clusterId + "/plans";
@@ -138,8 +153,11 @@ class NetworkProviderApiTest {
       return stored instanceof java.sql.Clob clob
           ? clob.getSubString(1, Math.toIntExact(clob.length())) : stored.toString();
     });
-    assertTrue(mapper.readValue(persistedPlan, io.nanpanel.plugin.api.ClusterProvider.ClusterPlan.class)
-        .steps().size() == 1);
+    var restoredPlan = mapper.readValue(persistedPlan,
+        io.nanpanel.plugin.api.ClusterProvider.ClusterPlan.class);
+    assertEquals(List.of(UUID.fromString(planCredentialId)),
+        restoredPlan.steps().getFirst().credentialReferences());
+    assertFalse(persistedPlan.contains(secretMaterial));
     var duplicateClusterPlan = given().cookie("nanpanel_session", session.cookie())
         .header("X-CSRF-Token", session.csrf()).header("Idempotency-Key", "cloudcore-plan-0001")
         .contentType("application/json").body(lifecycleRequest)
@@ -153,6 +171,25 @@ class NetworkProviderApiTest {
         .then().statusCode(200).body("state", equalTo("VALIDATED"));
     assertTrue(persistedPlan.contains("kubeedge.cloudcore.install"));
     assertTrue(!persistedPlan.contains("token"));
+    var revocationCredential = given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.csrf()).contentType("application/json")
+        .body(Map.of("purpose", "EDGECORE_BOOTSTRAP_TOKEN", "material", secretMaterial))
+        .post(credentialPath).then().statusCode(201).extract();
+    String revocationCredentialId = revocationCredential.path("id");
+    String referencedPlanId = given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.csrf()).header("Idempotency-Key", "cloudcore-plan-revoked")
+        .contentType("application/json").body(Map.of("operation", "install_cloudcore",
+            "component", "cloudcore", "targetVersion", "v1.23.0",
+            "credentialReference", revocationCredentialId,
+            "reason", "Check revocation before plan validation"))
+        .post(clusterOperations).then().statusCode(201).body("state", equalTo("PLANNED"))
+        .extract().path("id");
+    given().cookie("nanpanel_session", session.cookie()).header("X-CSRF-Token", session.csrf())
+        .delete(credentialPath + "/" + revocationCredentialId).then().statusCode(204);
+    given().cookie("nanpanel_session", session.cookie()).header("X-CSRF-Token", session.csrf())
+        .post("/api/v1/cluster-providers/p3-fixture-cluster-provider/operations/"
+            + referencedPlanId + "/validate")
+        .then().statusCode(200).body("state", equalTo("DRIFTED"));
     given().cookie("nanpanel_session", session.cookie())
         .header("X-CSRF-Token", session.csrf()).header("Idempotency-Key", "cloudcore-plan-0001")
         .contentType("application/json")

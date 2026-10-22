@@ -32,13 +32,36 @@ Date: 2026-10-22
   Kubernetes auto-enrollment regressions, and all four KubeEdge Provider tests.
 - `python web/scripts/generate-types.py` completed after the OpenAPI update.
 
+## Opaque plan reference follow-up
+
+- Core now accepts a requested credential UUID only when it belongs to the
+  selected Provider and cluster and remains unexpired and unrevoked. The
+  Provider must return the same UUID in one or more plan steps; Core persists
+  only the UUID and rechecks credential status before saving and when restoring
+  a plan for validation. A revoked, expired, cross-scope, or omitted/mismatched
+  reference is rejected or marks a restored plan `DRIFTED` before Provider
+  validation. No secret material is sent to the Provider or serialized in the
+  plan.
+- `NetworkProviderApiTest` now covers invalid revoked references, valid UUID
+  persistence with no secret leakage, successful active-reference restoration,
+  and revocation before restoration. The focused command passed with 3 tests:
+  `./mvnw -pl backend/panel-core -am test -Dtest=NetworkProviderApiTest,KubernetesClusterCredentialVaultTest -Dsurefire.failIfNoSpecifiedTests=false`.
+- The KubeEdge CloudCore installation plan still rejects an EdgeCore bootstrap
+  token because CloudCore installation does not consume it. There is no
+  EdgeCore join plan or lifecycle executor, and no credential secret is opened
+  by a plan step. This plumbing does not claim lifecycle execution acceptance.
+- After this follow-up, repository-wide `./mvnw verify` passed: Core ran 47
+  tests with no failures, the four KubeEdge Provider tests passed, and the
+  other modules passed (two opt-in live-provider tests remained skipped).
+  `python web/scripts/generate-types.py` also completed successfully.
+
 ## Boundary
 
-This is credential custody code acceptance only. ClusterProvider lifecycle plans
-still reject credential references; no plan step reads these credentials and no
-Core Kubernetes or Agent Helper execution, verification, compensation, or
-restart reconciliation has been added. There is no live KubeEdge target, so
-this does not close KubeEdge lifecycle acceptance.
+This is credential custody and opaque plan-reference code acceptance only. No
+plan step reads these credentials and no Core Kubernetes or Agent Helper
+execution, verification, compensation, or restart reconciliation has been
+added. There is no live KubeEdge target, so this does not close KubeEdge
+lifecycle acceptance.
 
 ## Core deployment on `k3s-1`
 

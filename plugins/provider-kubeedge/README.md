@@ -56,8 +56,7 @@ Core integration tests. The deployment ran its database migration and passed
 readiness checks; an authenticated production plan request has not been
 accepted yet. Core now has encrypted, cluster/provider-scoped KubeEdge credential
 storage with metadata-only list/create responses, recent reauthentication for
-write/revoke, and one-way revocation. Credential references are not yet accepted
-by lifecycle plans, and no execution path opens a stored secret. The API does
+write/revoke, and one-way revocation. Core accepts a credential reference only when the Provider returns the same opaque UUID in its persisted plan and rechecks its scope, expiry and revocation during restoration. The current CloudCore installation plan rejects an EdgeCore bootstrap-token reference because that step does not consume it; no EdgeCore join plan or execution path opens a stored secret. The API does
 not execute plan steps. The snapshot and planning provider do not install CloudCore/EdgeCore,
 register/remove an Edge node, upgrade components, rotate certificates, or
 coordinate an ingress. Registration, version, certificate, component-health,

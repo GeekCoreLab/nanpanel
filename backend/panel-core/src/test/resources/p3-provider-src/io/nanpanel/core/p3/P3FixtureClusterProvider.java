@@ -30,10 +30,12 @@ public final class P3FixtureClusterProvider implements ClusterProvider {
         || !"cloudcore".equals(request.component()) || request.targetVersion() == null) {
       return CompletableFuture.failedFuture(new IllegalArgumentException("unsupported fixture plan"));
     }
+    List<UUID> credentials = request.credentialReference() == null
+        ? List.of() : List.of(request.credentialReference());
     return CompletableFuture.completedFuture(new ClusterPlan(UUID.randomUUID(), cluster.id(),
         cluster.generation(), request.operation(), cluster.id() + "-" + request.targetVersion(),
         List.of(new PlanStep(0, ExecutionTarget.KUBERNETES_API, null, "kubeedge.cloudcore.install",
-            Map.of("version", request.targetVersion()), List.of()))));
+            Map.of("version", request.targetVersion()), credentials))));
   }
 
   @Override
