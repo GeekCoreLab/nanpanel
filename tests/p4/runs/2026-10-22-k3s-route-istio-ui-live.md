@@ -193,3 +193,21 @@ run.
 The deployed browser session and empty topology draft remain test-only. This
 confirms the live UI and Istio data path, not production topology persistence.
 No Core, database, PVC, host route, or `k3s.preflight` state was changed.
+
+## Read-only recheck after Core credential-reference deployment at 2026-10-22 11:21 UTC
+
+- Re-ran `node web/scripts/k3s-route-live-browser.mjs` against the current
+  `k3s-1` Core and Web. Result: `PASS`, Host `k3s-1`, observed route gateway
+  `10.0.0.1`, route observation `2026-10-22T11:21:37.162+00:00`, no browser
+  errors, and `topologyWrites: 0`.
+- The test fetched Kubernetes Service inventory and Envoy telemetry through the
+  deployed Core and the existing restricted read-only API key. It asserted
+  `Istio LIVE`, 3/3 ready/scraped sidecars, and one real HTTP 200 mTLS flow plus
+  one real HTTP 403 mTLS flow. Mock mode explicitly returns
+  `503 LIVE_ISTIO_REQUIRED` for these endpoints.
+- Visually inspected the refreshed screenshots. The Istio workspace keeps
+  Kubernetes Services and Istio traffic in separate columns, with Service
+  details collapsed until expanded. The topology workspace keeps the observed
+  Router read-only and shows the matched Host route without overlapping cards.
+- This remains a single-node read-only UI/data-path recheck. The production
+  topology draft was not written, and no `k3s.preflight` operation ran.
