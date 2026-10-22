@@ -339,7 +339,7 @@ paths:
       tags: [KubernetesClusters]
       operationId: listKubernetesRuntimeDiscoveries
       summary: 查询 Agent 自动发现的 Kubernetes 主机
-      description: 返回 Agent 报告为运行 kubelet/K3s 的主机。发现记录不包含 kubeconfig；检测本身不能授权 Core 访问集群 API，管理员仍需导入有效凭据。
+      description: 返回 Agent 报告为运行 kubelet/K3s 的主机。发现记录不包含 kubeconfig，单凭检测结果不会授权 Core 访问集群 API。若启用本地 K3s 自动纳管，且 Agent 报告的主机是 Core 所在 K3s 集群中 Ready 的 API Server Node，Core 可使用自身只读集群内身份登记该集群并映射该 Host；其他发现仍需管理员导入并验证集群凭据，远程 Agent 凭据签发与轮换尚未实现。
       x-implementation-status: implemented
       security:
       - cookieAuth: []
