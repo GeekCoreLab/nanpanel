@@ -194,6 +194,10 @@ test-session limitation are recorded in
   [`k3s-installation-plan-code.md`](runs/k3s-installation-plan-code.md); upgrade
   recovery still needs the separate acceptance in
   [`k3s-rollout-plan-code.md`](runs/k3s-rollout-plan-code.md).
+  A local rootless Podman K3s fixture was attempted on 2026-10-22 but could not
+  start its kubelet because the `cpuset` cgroup controller is not delegated to
+  the user container scope; this attempt is not K3s lifecycle evidence. See
+  [`rootless K3s fixture preflight`](runs/2026-10-22-rootless-k3s-fixture-preflight.md).
 - The live Linux Gateway-to-Ready-K3s-Service path, TLS/access policy, backend
   transition, and compensation passed on 2026-10-21; evidence is in
   `runs/2026-10-21-linux-gateway-k3s-service-ingress.md`. FRPC/Nginx were
