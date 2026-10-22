@@ -280,3 +280,25 @@ recovery, or KubeEdge lifecycle acceptance. No `k3s.preflight` ran.
 - The browser session and empty topology projection are test-only; topology
   writes were blocked. This does not prove production topology persistence.
   No `k3s.preflight` operation ran.
+
+## Core mapping update deployment at 2026-10-22 14:34 UTC
+
+- GitHub Actions run `39795045950` passed all displayed Rust, Maven, and Web
+  validation steps. The `publish` job completed successfully and published
+  `ghcr.io/geekcorelab/nanpanel-core:sha-05bb3271b41905141d101f687cc20416cfbb341e`;
+  its registry manifest resolves to `sha256:2395b2dc8235ea39898f7621faef48846cf18445cf27da0f9d37301f11e3534f`.
+  GitHub still reported the `validate` job as `in_progress` after all displayed
+  steps had completed, so the workflow run-level conclusion had not settled.
+- Updated only the `core` container in Deployment `nanpanel-core` on `k3s-1`.
+  The rollout completed; the old Pod exited and the replacement Pod is Running
+  with both containers Ready and zero restarts. The `agent-gateway` sidecar
+  remains on `sha-92d86546ee0ad20bb0a069637268ced09b3d2d55`. The Web Deployment
+  remains on `sha-8722235f8ed61e25aa32d407d1c004e0f200d8be`, Ready 1/1.
+- Re-ran `node web/scripts/k3s-route-live-browser.mjs` after rollout: `PASS`,
+  Host `k3s-1`, route gateway `10.0.0.1`, observation
+  `2026-10-22T14:34:51.653+00:00`, no browser errors, and `topologyWrites: 0`.
+  It again verified live Core Service inventory and Envoy telemetry, 3/3
+  sidecars, and HTTP 200/403 mTLS rows. This is still a test-only read-only
+  topology projection; it does not establish saved production topology.
+- No Agent/Helper operation or `k3s.preflight` ran. The single-node target was
+  not used for multi-node, fresh-install, or destructive upgrade acceptance.
