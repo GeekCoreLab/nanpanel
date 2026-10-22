@@ -290,6 +290,23 @@ class NetworkProviderApiTest {
           "UPDATE kubernetes_cluster_node SET host_id=NULL,observed_at=? "
               + "WHERE cluster_id=? AND node_uid=?",
           Timestamp.from(helperFinishedAt.plusMillis(2)), clusterId, "fixture-node-uid");
+      AuthStore.update(connection,
+          "INSERT INTO kubernetes_cluster_node (cluster_id,node_uid,node_name,roles,kubeedge_edge,"
+              + "ready,container_owner,host_id,observed_at) VALUES (?,?,'other-node','',FALSE,"
+              + "TRUE,'KUBERNETES',?,?)",
+          clusterId, "host-conflict-node-uid", edgeHostId,
+          Timestamp.from(helperFinishedAt.plusMillis(3)));
+      return null;
+    });
+    given().cookie("nanpanel_session", session.cookie()).get(reconciledPlan)
+        .then().statusCode(200).body("state", equalTo("AWAITING_NODE_REGISTRATION"));
+    assertEquals(edgeHostId, store.transaction(connection -> AuthStore.query(connection,
+        "SELECT host_id FROM kubernetes_cluster_node WHERE cluster_id=? AND node_uid=?",
+        clusterId, "host-conflict-node-uid").getFirst().get("host_id")));
+    store.transaction(connection -> {
+      AuthStore.update(connection,
+          "DELETE FROM kubernetes_cluster_node WHERE cluster_id=? AND node_uid=?",
+          clusterId, "host-conflict-node-uid");
       return null;
     });
     given().cookie("nanpanel_session", session.cookie()).get(reconciledPlan)

@@ -17,9 +17,10 @@ Node, no match, or ambiguous matches leave the plan in
 
 - `NetworkProviderApiTest` passed with the following sequence: Helper running;
   Helper success with no fresh Node; a fresh same-name Ready Edge node already
-  mapped to another Host (plan stays waiting and mapping is preserved); the
-  conflict is removed; Core automatically maps the Edge Node to the planned
-  Host and reports `SUCCEEDED`.
+  mapped to another Host (plan stays waiting and mapping is preserved); then a
+  different node already mapped to the target Host (again stays waiting and
+  preserves the mapping); both conflicts are removed; Core automatically maps
+  the Edge Node to the planned Host and reports `SUCCEEDED`.
 - Command: `./mvnw -pl backend/panel-core -am -Dtest=NetworkProviderApiTest -Dsurefire.failIfNoSpecifiedTests=false test`.
 
 ## Limits
