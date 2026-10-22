@@ -3,6 +3,7 @@ package io.nanpanel.core;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -14,6 +15,7 @@ import org.junit.jupiter.api.Test;
 @QuarkusTest
 class K3sRolloutApiTest {
   @Inject AuthStore store;
+  @Inject K3sRolloutResource rollouts;
 
   private String sessionCookie;
   private String csrfToken;
@@ -94,5 +96,68 @@ class K3sRolloutApiTest {
         .contentType("application/json").body(Map.of())
         .post("/api/v1/kubernetes/rollouts/not-a-uuid/start")
         .then().statusCode(404).body("code", equalTo("K3S_ROLLOUT_NOT_FOUND"));
+  }
+
+  @Test
+  void unknownUpgradeOperationStopsPlanWithoutSubmittingNextNode() {
+    var fixture = store.transaction(connection -> {
+      String userId = String.valueOf(AuthStore.query(connection,
+          "SELECT id FROM panel_user WHERE username='rollout-test-admin'").getFirst().get("id"));
+      UUID clusterId = UUID.randomUUID();
+      UUID hostId = UUID.randomUUID();
+      UUID planId = UUID.randomUUID();
+      UUID operationId = UUID.randomUUID();
+      UUID secondHostId = UUID.randomUUID();
+      AuthStore.update(connection,
+          "INSERT INTO host (id,hostname,capabilities,generation,observed_generation,status) "
+              + "VALUES (?,?,'[]',1,1,'ONLINE')", hostId, "rollout-unknown-server");
+      AuthStore.update(connection,
+          "INSERT INTO host (id,hostname,capabilities,generation,observed_generation,status) "
+              + "VALUES (?,?,'[]',1,1,'ONLINE')", secondHostId, "rollout-pending-agent");
+      AuthStore.update(connection,
+          "INSERT INTO kubernetes_cluster (id,name,kind,endpoint,context_name,"
+              + "encrypted_kubeconfig,health_status,imported_by) VALUES (?,?,'K3S',?,?,?,'UNKNOWN',?)",
+          clusterId, "rollout-unknown-cluster", "https://127.0.0.1:6443", "rollout-unknown-context",
+          new byte[] {1}, userId);
+      AuthStore.update(connection,
+          "INSERT INTO operation (id,idempotency_key,phase,status,error_json,finished_at) "
+              + "VALUES (?,?,'UNKNOWN','UNKNOWN',?,?)", operationId, "rollout-unknown-operation",
+          "{\"code\":\"EXECUTION_OUTCOME_UNKNOWN\"}", java.time.OffsetDateTime.now());
+      AuthStore.update(connection,
+          "INSERT INTO k3s_rollout_plan (id,cluster_id,target_version,reason,state,active_ordinal,"
+              + "requested_by) VALUES (?,?,?,'test unknown upgrade result','RUNNING',0,?)",
+          planId, clusterId, "v1.34.0+k3s1", userId);
+      AuthStore.update(connection,
+          "INSERT INTO k3s_rollout_step (plan_id,ordinal,host_id,node_uid,node_name,role,"
+              + "expected_generation,state,idempotency_key,operation_id) "
+              + "VALUES (?,0,?,'node-server-uid','server','server',1,'RUNNING',?,?),"
+              + "(?,1,?,'node-agent-uid','agent','agent',1,'PENDING',?,NULL)",
+          planId, hostId, "rollout-step-server", operationId,
+          planId, secondHostId, "rollout-step-agent");
+      return Map.of("planId", planId);
+    });
+
+    rollouts.advancePlans();
+    rollouts.advancePlans();
+
+    var states = store.transaction(connection -> {
+      var plan = AuthStore.query(connection,
+          "SELECT state FROM k3s_rollout_plan WHERE id=?", fixture.get("planId"));
+      var steps = AuthStore.query(connection,
+          "SELECT ordinal,state FROM k3s_rollout_step WHERE plan_id=? ORDER BY ordinal",
+          fixture.get("planId"));
+      var operations = AuthStore.query(connection,
+          "SELECT id FROM operation WHERE idempotency_key='k3s-rollout:"
+              + fixture.get("planId") + ":1'");
+      return Map.of("plan", plan.getFirst().get("state"), "steps", steps,
+          "nextOperationCount", operations.size());
+    });
+
+    assertEquals("UNKNOWN", states.get("plan"));
+    @SuppressWarnings("unchecked")
+    var steps = (java.util.List<Map<String, Object>>)states.get("steps");
+    assertEquals("UNKNOWN", steps.get(0).get("state"));
+    assertEquals("PENDING", steps.get(1).get("state"));
+    assertEquals(0, states.get("nextOperationCount"));
   }
 }

@@ -192,8 +192,10 @@ recorded in
   Ready and the upgraded Node's `kubeletVersion` equals the requested version;
   failed or unknown operation results stop the plan, while temporary API failure
   leaves it in `VERIFYING`. API validation, authentication, version range, and
-  schema tests pass. This remains code-level evidence: the successful auto-advance,
-  operation failure/UNKNOWN recovery, and multi-node behavior still need an
+  schema tests pass. A Core scheduler test injects an operation `UNKNOWN` result
+  and verifies that the plan stops and no later Agent step is dispatched. This
+  remains code-level evidence: successful auto-advance, uncertain remote-action
+  reconciliation, restart recovery, and multi-node behavior still need an
   isolated multi-node K3s integration run. The upgrade plan was initially
   deployed at commit `6f146e3`; current `k3s-1` runs commit
   `f6c373c2fbf2f45bf88dcfec17c1a5249495e6e4`, which also includes the persistent

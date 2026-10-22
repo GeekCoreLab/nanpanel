@@ -1,6 +1,6 @@
 # K3s persistent rollout plan code evidence
 
-Date: 2026-10-21
+Date: 2026-10-22
 
 Base source revision: `95a05bf`
 
@@ -21,11 +21,16 @@ Base source revision: `95a05bf`
   stop the plan; temporary observation failures leave it pending verification.
 - The Kubernetes console exposes draft creation, explicit start, ordered step
   state, and polling of the current administrator's plans.
+- Core scheduler coverage injects a terminal `UNKNOWN` result for the first
+  Server operation in a two-step plan. The plan and current step become
+  `UNKNOWN`, the next Agent step remains `PENDING`, and a second scheduler pass
+  does not create an Agent operation.
 
 ## Code validation
 
-- `./mvnw -pl backend/panel-core -am -Dtest=K3sRolloutApiTest,K3sRolloutResourceTest -Dsurefire.failIfNoSpecifiedTests=false test`
-  passed: 4 tests, no failures.
+- `./mvnw -pl backend/panel-core -am -Dtest=K3sRolloutApiTest -Dsurefire.failIfNoSpecifiedTests=false test`
+  passed: 4 tests, no failures, including the persisted UNKNOWN scheduler
+  transition and no-next-step assertion.
 - `./mvnw -pl backend/panel-core -am -Dtest=SystemResourceTest -Dsurefire.failIfNoSpecifiedTests=false test`
   passed: 4 tests, no failures.
 - The first full Core run exposed a test-fixture ordering issue: the rollout
@@ -46,8 +51,10 @@ Base source revision: `95a05bf`
 
 This is code-level evidence only. No rollout plan has been run against
 `k3s-1`, and the worker has not yet been exercised against an isolated
-multi-node K3s cluster. Successive-node upgrade behavior, operation failure and
-unknown-outcome recovery, process restart recovery, and API interruption during
-verification need disposable-cluster integration coverage. Multi-node
-installation orchestration is not implemented. Do not use the production
-test cluster `k3s-1` for destructive upgrade testing.
+multi-node K3s cluster. The UNKNOWN test verifies safe plan termination and
+prevention of later-node dispatch; it does not prove recovery of an uncertain
+remote Agent action. Successive-node upgrade behavior, Agent failure and
+unknown-outcome reconciliation, process restart recovery, and API interruption
+during verification still need disposable-cluster integration coverage.
+Multi-node installation orchestration is not implemented. Do not use the
+production test cluster `k3s-1` for destructive upgrade testing.
