@@ -487,7 +487,7 @@ hybrid-infrastructure-platform/
 - [x] 在目标 K3s 环境读取 Namespace、Ingress 路由、Service、Pod 及容器端口/状态；见 [真实 K3s API 与拓扑视图验收](tests/p4/runs/2026-10-21-k3s-target-api-smoke.md)。
 - [x] 服务网络只显示真实 Kubernetes 与 Istio 数据：Service/EndpointSlice、Envoy sidecar 就绪状态、Envoy 请求计数/HTTP 响应/mTLS 标签；Mock 模式不生成网络数据，服务和端点按需展开。已部署并完成 `k3s-1` UI/API 实测，证据与认证边界见 [Istio 服务网络实测](tests/p4/runs/2026-10-22-k3s-istio-service-network-live.md)。
 - [x] Agent 自动探测安装主机上的 kubelet/K3s 并按 Host 保存发现记录；目标 `k3s-1` 实时记录与当前部署复核见[部署记录](tests/p4/runs/2026-10-21-agent-kubernetes-runtime-discovery-deployment.md)。
-- [ ] Agent 发现后自动纳入集群管理：已实现 Core 与 Agent 同处目标 K3s 时的自动登记路径，使用 Core 集群内只读 ServiceAccount、不导出或持久化 kubeconfig/token，并按 `kube-system` UID 和 Kubernetes Service IP 对已有导入去重；仍需 `k3s-1` 部署后验证新集群与既有集群两条路径。Core 不在目标集群内时，远程 Agent 的安全凭据签发/更新流程、不可达重试及通用 Kubernetes 实机验收仍未完成。
+- [ ] Agent 发现后自动纳入集群管理：已实现 Core 与 Agent 同处目标 K3s 时的自动登记路径，使用 Core 集群内只读 ServiceAccount、不导出或持久化 kubeconfig/token，并按 `kube-system` UID 和 Kubernetes Service IP 对已有导入去重。2026-10-22 已在 `k3s-1` 实测认领既有导入集群，并用隔离 API 测试覆盖新建、指纹匹配、Ready 重试和重复心跳；仍缺真实集群无导入初始状态的端到端证明、API 不可达恢复验收及远程 Agent 的安全凭据签发/更新流程，见 [自动纳管验收](tests/p4/runs/2026-10-22-kubernetes-auto-enrollment.md)。
 - [ ] 在目标 K3s 环境验收已映射主机路由的下一跳匹配；Mock/Kind UI 场景仅覆盖代码路径。
 - [x] 在目标 K3s 上完成单集群导入、Node UID 映射及 namespace 限定 Deployment 创建/列表/缩放/删除，见 [真实 K3s API 验收](tests/p4/runs/2026-10-21-k3s-target-api-smoke.md)。
 - [ ] 在目标 K3s 环境完成多集群隔离、跨集群资源拒绝、多节点映射冲突及 Node 移除/解除映射验收；目标 `k3s-1` 与隔离 K3s API 的跨集群拒绝已通过，但多节点映射/移除仍未在目标环境完成，见[混合集群 API 验收](tests/p4/runs/2026-10-21-k3s-target-multi-cluster-api.md)。本机 Kind 仅作为 API/CRUD 开发测试，不计入该项。

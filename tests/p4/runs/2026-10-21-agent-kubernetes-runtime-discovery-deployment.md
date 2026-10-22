@@ -52,3 +52,14 @@ Rechecked on 2026-10-21 after subsequent P4 updates:
   code. Automatic discovery records runtime evidence; a newly discovered API
   cluster still requires an administrator to import and verify its kubeconfig
   before resource management is enabled.
+
+## 2026-10-22 auto-enrollment follow-up
+
+The later same-cluster auto-enrollment implementation and its evidence are
+recorded separately in
+[`2026-10-22-kubernetes-auto-enrollment.md`](2026-10-22-kubernetes-auto-enrollment.md).
+That follow-up supersedes the final paragraph above for the existing
+`k3s-1` cluster: its Agent observation now claims the matching imported cluster
+and maps the Ready Node automatically. The new-cluster branch has isolated
+integration coverage; it has not yet been demonstrated on an initially
+unimported live K3s cluster.

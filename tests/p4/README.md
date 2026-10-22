@@ -66,9 +66,15 @@ test-session limitation are recorded in
   existing read-only in-cluster ServiceAccount instead of exporting or storing
   an admin kubeconfig/token. Kube-system Namespace UID identifies matching
   clusters; the Kubernetes Service IP narrows candidates among older imported
-  records without a stored fingerprint. The gate remains open until this path is verified on `k3s-1` and
-  unreachable/retry behavior is exercised; agents on remote hosts still need a
-  safe credential issuance and refresh protocol before they can be auto-enrolled.
+  records without a stored fingerprint. On 2026-10-22, `k3s-1` live state
+  confirmed a fresh Agent discovery and an existing KUBECONFIG cluster that
+  had been claimed with its Ready Node mapped. Isolated Core/API tests cover
+  first enrollment, matching imported-cluster adoption, NotReady retry, and
+  duplicate-heartbeat idempotence. The gate remains open until fresh-cluster
+  enrollment and API-unreachable recovery are demonstrated end to end on a
+  real K3s fixture; remote hosts still need safe credential issuance and
+  refresh before they can be auto-enrolled. See
+  [`kubernetes-auto-enrollment.md`](runs/2026-10-22-kubernetes-auto-enrollment.md).
 - A separate isolated K3s API-only integration run is recorded at
   `tests/p4/runs/2026-10-21-k3s-multi-cluster-api-only.md`. It used two actual
   K3s `v1.33.5+k3s1` API servers with independent endpoints and exercised the
