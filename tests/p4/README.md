@@ -142,6 +142,15 @@ recorded in
   upgrade, or remove EdgeCore nodes. The code-level report is at
   `tests/p4/runs/2026-10-21-kubeedge-edgecore-process-observation.md`; the
   KubeEdge management gate remains open.
+- A PF4J `kubeedge-core` Provider now creates a planning-only CloudCore install
+  plan when a fresh, healthy KUBEEDGE snapshot reports `NOT_OBSERVED`. Its
+  restore and validation paths re-read the Core-owned snapshot and reject
+  changed generation, unhealthy/stale inventory, or a CloudCore that is now
+  observed. It has no Kubernetes client and does not execute writes. Four
+  Provider unit tests pass; this code has not yet been deployed and there is no
+  live KubeEdge target. Credential custody, execution, compensation, and live
+  acceptance remain open. See
+  [`kubeedge-cloudcore-plan-provider.md`](runs/2026-10-22-kubeedge-cloudcore-plan-provider.md).
 - Cluster summaries expose `observationsStale` when the last successful refresh
   is older than 120 seconds or a refresh fails. Core integration coverage marks
   a cluster unavailable after an API failure while retaining the last

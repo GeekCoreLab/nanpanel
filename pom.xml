@@ -32,6 +32,7 @@
         <module>backend/panel-core</module>
         <module>plugins/provider-netbird</module>
         <module>plugins/provider-frp</module>
+        <module>plugins/provider-kubeedge</module>
     </modules>
     
 

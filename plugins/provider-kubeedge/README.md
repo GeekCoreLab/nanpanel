@@ -1,7 +1,15 @@
 # KubeEdge Provider status
 
-The Provider is not implemented yet. The current KubeEdge support lives in Core
-and provides bounded observation and ownership-safe Host mapping:
+The PF4J `kubeedge-core` provider is a planning-only implementation for
+CloudCore installation. It plans `install_cloudcore` only for a registered
+KUBEEDGE cluster when the Core snapshot reports CloudCore as `NOT_OBSERVED`.
+The plan contains one `kubeedge.cloudcore.install` Kubernetes API step with a
+version, namespace, and release name. Restore and validation re-read the
+Core-owned snapshot and reject a changed generation or observed CloudCore.
+The provider has no Kubernetes client and performs no cluster writes.
+
+The current KubeEdge support in Core also provides bounded observation and
+ownership-safe Host mapping:
 
 - Cluster refresh reports containerized CloudCore Pod readiness in the
   `kubeedge` namespace. Binary CloudCore is `NOT_OBSERVED`; API or RBAC failures
@@ -34,7 +42,7 @@ The contract is cluster-scoped and identifies a cluster by Core registry UUID,
 kind, and generation. A plan can describe ordered Kubernetes API or Agent
 Helper steps; Helper steps must name a Host, and credentials are represented
 only by opaque Core-owned UUID references. Plan parameters reject secret-like
-key names. Core still owns durable operation state, audit redaction, typed
+key names. Core owns durable operation state, audit redaction, typed
 Agent/Helper dispatch, and reconciliation after restart.
 
 Core now exposes an authenticated read-only Provider observation route that
@@ -43,12 +51,11 @@ durable plan and validation API deployed to `k3s-1`, with idempotency,
 generation drift checks, and Provider state restoration covered by isolated
 Core integration tests. The deployment ran its database migration and passed
 readiness checks; an authenticated production plan request has not been
-accepted yet. The API does not execute plan steps. The extension
-contract and loader still have no KubeEdge implementation or Core lifecycle
-execution API. The v2 snapshot contract does not install CloudCore/EdgeCore,
+accepted yet. The API does not execute plan steps. The snapshot and planning
+provider do not install CloudCore/EdgeCore,
 register/remove an Edge node, upgrade components, rotate certificates, or
 coordinate an ingress. Registration, version, certificate, component-health,
 offline-autonomy, and reachable-ingress operations remain unimplemented. No
 live KubeEdge target is available, so this change is not live KubeEdge
-acceptance. The P4 gate stays open until the concrete provider, safe Core
+acceptance. The P4 gate stays open until credential custody, safe Core
 execution/recovery paths, rejection coverage, and live KubeEdge evidence exist.
