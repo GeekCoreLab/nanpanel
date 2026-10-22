@@ -50,3 +50,14 @@ service items. The separate target run at
 real Kubernetes and Istio data and blocked all topology writes. The production
 topology on `k3s-1` remains unchanged; authenticated save and reload against the
 target database are still open.
+
+## Current target persistence state
+
+At `2026-10-22T06:13Z`, a read-only PostgreSQL query through `ssh k3s-1`
+reported topology generation `0`, `0` configured nodes, and `0` configured
+links. The topology contract requires an active administrator session after
+the initial password change. The P2 API key used for live service-network
+verification is restricted by Core to Kubernetes inventory read and refresh;
+it cannot read or write topology. No topology write or credential reset was
+attempted. A valid administrator session is still required to complete the
+target save/reload check.
