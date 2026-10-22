@@ -114,7 +114,9 @@ class KubernetesAutoEnrollmentTest {
 
   @Test
   void rejectsRuntimeDiscoveryFromAnUnregisteredCertificateBeforePersistingIt() {
-    assertEquals(403, postRuntimeDiscoveryHeartbeat(hostname(), "b".repeat(64)));
+    String hostname = hostname();
+    seedClusterNode("K3S", hostname, Instant.now(), true, null);
+    assertEquals(403, postRuntimeDiscoveryHeartbeat(hostname, "b".repeat(64), false));
     assertEquals(0, enrolledClusterCount());
     assertEquals(0, mappedNodeCount());
     assertEquals(0, runtimeDiscoveryCount());
@@ -204,6 +206,84 @@ class KubernetesAutoEnrollmentTest {
     assertEquals(1, enrolledClusterCount());
   }
 
+  @Test
+  void mapsRemoteAgentOnlyToOneFreshReadyNodeInAnAlreadyImportedK3sCluster() {
+    String hostname = hostname();
+    UUID clusterId = seedClusterNode("K3S", hostname, Instant.now(), true, null);
+
+    postRemoteRuntimeDiscoveryHeartbeat(hostname);
+
+    assertEquals(1, mappedNodeCount());
+    assertEquals(clusterId, mappedNode().get("cluster_id"));
+    assertEquals("node-uid-" + hostname, mappedNode().get("node_uid"));
+    assertEquals(false, runtimeDiscovery().get("api_server_local"));
+
+    postRemoteRuntimeDiscoveryHeartbeat(hostname);
+    assertEquals(1, mappedNodeCount());
+  }
+
+  @Test
+  void doesNotMapRemoteAgentWhenReadyNodeNameIsAmbiguous() {
+    String hostname = hostname();
+    seedClusterNode("K3S", hostname, Instant.now(), true, null);
+    seedClusterNode("K3S", hostname, Instant.now(), true, null);
+    postRemoteRuntimeDiscoveryHeartbeat(hostname);
+    assertEquals(0, mappedNodeCount());
+  }
+
+  @Test
+  void doesNotMapRemoteAgentFromStaleClusterObservation() {
+    String hostname = hostname();
+    seedClusterNode("K3S", hostname,
+        Instant.now().minusSeconds(180), true, null);
+    postRemoteRuntimeDiscoveryHeartbeat(hostname);
+    assertEquals(0, mappedNodeCount());
+  }
+
+  @Test
+  void doesNotMapRemoteAgentToANotReadyNode() {
+    String hostname = hostname();
+    seedClusterNode("K3S", hostname, Instant.now(), false, null);
+    postRemoteRuntimeDiscoveryHeartbeat(hostname);
+    assertEquals(0, mappedNodeCount());
+  }
+
+  @Test
+  void doesNotOverrideANodeAlreadyMappedToAnotherHost() {
+    String hostname = hostname();
+    UUID otherHostId = UUID.randomUUID();
+    Instant now = Instant.now();
+    store.transaction(connection -> {
+      AuthStore.update(connection,
+          "INSERT INTO host (id,hostname,os,arch,capabilities,generation,observed_generation,"
+              + "status,created_at) VALUES (?,?,?,?,'[]',1,1,'ONLINE',?)",
+          otherHostId, "already-mapped", "Linux", "x86_64", Timestamp.from(now));
+      return null;
+    });
+    seedClusterNode("K3S", hostname, now, true, otherHostId);
+    postRemoteRuntimeDiscoveryHeartbeat(hostname);
+    assertEquals(0, mappedNodeCount());
+  }
+
+  @Test
+  void doesNotRemapAHostAlreadyMappedToAnotherNode() {
+    String hostname = hostname();
+    Instant now = Instant.now();
+    seedClusterNode("K3S", "already-mapped-" + hostname, now, true, hostId);
+    seedClusterNode("K3S", hostname, now, true, null);
+    postRemoteRuntimeDiscoveryHeartbeat(hostname);
+    assertEquals(1, mappedNodeCount());
+    assertEquals("node-uid-already-mapped-" + hostname, mappedNode().get("node_uid"));
+  }
+
+  @Test
+  void doesNotMapKubeEdgeNodeFromK3sRuntimeReport() {
+    String hostname = hostname();
+    seedClusterNode("KUBEEDGE", hostname, Instant.now(), true, null);
+    postRemoteRuntimeDiscoveryHeartbeat(hostname);
+    assertEquals(0, mappedNodeCount());
+  }
+
   private void expectSuccessfulDiscovery(String hostname, Node localNode) {
     expectNodeLookup(hostname, localNode);
     server.expect().get().withPath("/api/v1/namespaces/kube-system")
@@ -224,6 +304,15 @@ class KubernetesAutoEnrollmentTest {
   }
 
   private int postRuntimeDiscoveryHeartbeat(String hostname, String fingerprint) {
+    return postRuntimeDiscoveryHeartbeat(hostname, fingerprint, true);
+  }
+
+  private int postRemoteRuntimeDiscoveryHeartbeat(String hostname) {
+    return postRuntimeDiscoveryHeartbeat(hostname, certificateFingerprint, false);
+  }
+
+  private int postRuntimeDiscoveryHeartbeat(String hostname, String fingerprint,
+      boolean apiServerLocal) {
     long observedAt = Instant.now().toEpochMilli();
     return given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
         .contentType("application/json")
@@ -240,11 +329,40 @@ class KubernetesAutoEnrollmentTest {
             "kubernetesRuntime", Map.of(
                 "detected", true,
                 "kubeletRunning", true,
-                "apiServerLocal", true,
+                "apiServerLocal", apiServerLocal,
                 "runtimeKind", "K3S",
                 "observedAtEpochMs", observedAt)))
         .post("/internal/agent-heartbeats")
         .statusCode();
+  }
+
+  private UUID seedClusterNode(String kind, String nodeName, Instant observedAt,
+      boolean ready, UUID mappedHostId) {
+    UUID clusterId = UUID.randomUUID();
+    store.transaction(connection -> {
+      AuthStore.update(connection,
+          "INSERT INTO kubernetes_cluster (id,name,kind,endpoint,context_name,"
+              + "encrypted_kubeconfig,health_status,observed_at,updated_at) "
+              + "VALUES (?,?,?,?,'test',?,'HEALTHY',?,?)",
+          clusterId, "remote-auto-map-" + clusterId.toString().substring(0, 8), kind,
+          "https://cluster-" + clusterId.toString().substring(0, 8) + ".test:6443",
+          new byte[] {1}, Timestamp.from(observedAt), Timestamp.from(observedAt));
+      boolean edge = "KUBEEDGE".equals(kind);
+      AuthStore.update(connection,
+          "INSERT INTO kubernetes_cluster_node (cluster_id,node_uid,node_name,roles,node_present,"
+              + "kubeedge_edge,ready,container_owner,host_id,observed_at) "
+              + "VALUES (?,?,?,'worker',TRUE,?,?, ?,?,?)",
+          clusterId, "node-uid-" + nodeName, nodeName, edge, ready,
+          edge ? "KUBEEDGE" : "KUBERNETES", mappedHostId, Timestamp.from(observedAt));
+      return null;
+    });
+    return clusterId;
+  }
+
+  private Map<String, Object> mappedNode() {
+    return store.transaction(connection -> AuthStore.query(connection,
+        "SELECT cluster_id,node_uid FROM kubernetes_cluster_node WHERE host_id=?", hostId)
+        .stream().findFirst().orElse(null));
   }
 
   private void expectNodeLookup(String hostname, Node localNode) {

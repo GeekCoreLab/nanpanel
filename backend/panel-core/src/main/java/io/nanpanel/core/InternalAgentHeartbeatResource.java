@@ -225,6 +225,9 @@ public class InternalAgentHeartbeatResource {
     if (runtime != null && runtime.detected() && runtime.kubeletRunning()
         && runtime.apiServerLocal() && "K3S".equals(runtime.runtimeKind())) {
       kubernetesClusters.autoEnrollLocalCluster(discoveredHostId, report.hostname());
+    } else if (runtime != null && runtime.detected() && runtime.kubeletRunning()
+        && !runtime.apiServerLocal() && "K3S".equals(runtime.runtimeKind())) {
+      kubernetesClusters.autoMapKnownRemoteK3sNode(discoveredHostId, report.hostname());
     }
     return Response.noContent().build();
   }

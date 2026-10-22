@@ -282,6 +282,49 @@ public class KubernetesClusterRegistryService {
     }
   }
 
+  /** Maps a remote Agent only to one fresh, Ready K3s Node in a cluster already owned by Core. */
+  public void autoMapKnownRemoteK3sNode(UUID hostId, String hostname) {
+    if (!autoEnrollLocalEnabled || hostId == null || hostname == null
+        || !hostname.matches("[A-Za-z0-9][A-Za-z0-9_.-]{0,252}")) return;
+    try {
+      store.transaction(connection -> {
+        Timestamp cutoff = Timestamp.from(Instant.now()
+            .minusSeconds(OBSERVATION_STALE_AFTER_SECONDS));
+        var candidates = query(connection,
+            "SELECT c.id AS cluster_id,n.node_uid,n.host_id FROM kubernetes_cluster c "
+                + "JOIN kubernetes_cluster_node n ON n.cluster_id=c.id "
+                + "WHERE c.kind='K3S' AND c.credential_source IN ('KUBECONFIG','IN_CLUSTER') "
+                + "AND c.health_status='HEALTHY' AND c.observed_at>=? "
+                + "AND n.node_name=? AND n.node_present=TRUE AND n.ready=TRUE "
+                + "AND n.container_owner='KUBERNETES' AND n.observed_at>=?",
+            cutoff, hostname, cutoff);
+        if (candidates.size() != 1) return null;
+        Map<String, Object> candidate = candidates.getFirst();
+        UUID clusterId = (UUID)candidate.get("cluster_id");
+        String nodeUid = String.valueOf(candidate.get("node_uid"));
+        var hostMappings = query(connection,
+            "SELECT cluster_id,node_uid FROM kubernetes_cluster_node WHERE host_id=?", hostId);
+        if (!hostMappings.isEmpty()) return null;
+        if (candidate.get("host_id") != null) return null;
+        int changed = update(connection,
+            "UPDATE kubernetes_cluster_node SET host_id=? WHERE cluster_id=? AND node_uid=? "
+                + "AND node_name=? AND node_present=TRUE AND ready=TRUE "
+                + "AND container_owner='KUBERNETES' AND host_id IS NULL "
+                + "AND observed_at>=?",
+            hostId, clusterId, nodeUid, hostname, cutoff);
+        if (changed == 1) {
+          audit(connection, null, "KUBERNETES_NODE_AUTO_MAPPED", "kubernetes_cluster_node",
+              clusterId + ":" + nodeUid, "SUCCEEDED", null,
+              "通过已登记 Agent 身份将远端主机 " + hostId + " 关联到唯一的新鲜 Ready K3s Node");
+        }
+        return null;
+      });
+    } catch (RuntimeException failure) {
+      LOG.warnf("Automatic remote K3s Node mapping deferred for host %s (%s)", hostId,
+          failure.getClass().getSimpleName());
+    }
+  }
+
   @Scheduled(every = "60s", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
   void refreshRegisteredClusters() {
     List<UUID> clusterIds = store.transaction(connection -> query(connection,
