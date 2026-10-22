@@ -22,9 +22,10 @@ and limitations. Destructive upgrade and ingress experiments belong in a
 disposable cluster, never the production `k3s-1` cluster.
 
 The target `k3s-1` live Istio service-network UI/API acceptance passed on
-2026-10-22; exact image, GHCR mirror retrieval, real traffic values, and the
-test-session limitation are recorded in
-[`runs/2026-10-22-k3s-istio-service-network-live.md`](runs/2026-10-22-k3s-istio-service-network-live.md).
+2026-10-22 and was repeated after release `12a7b33`. The current deployed
+images, registry retrieval, real traffic values, and test-session boundary are
+recorded in
+[`runs/2026-10-22-k3s-route-istio-ui-live.md`](runs/2026-10-22-k3s-route-istio-ui-live.md).
 
 ## Current source boundary
 
@@ -90,11 +91,18 @@ test-session limitation are recorded in
   Router field is validated and persisted by Core. Frontend tests cover unique
   Host/Router ownership, duplicate references, ambiguity, self-addresses and
   unmatched gateways; Core tests cover valid Router persistence and invalid IP
-  rejection. The target inventory records the `k3s-1` default gateway
-  `10.0.0.1`, which is a router and has no matching Host asset. The feature
-  supports representing that next hop without inventing a Host, but the live
-  production topology has not been edited and authenticated UI route-edge
-  evidence remains open; see `runs/2026-10-21-k3s-route-router-matching.md` and
+  rejection. The live target browser run now loads an empty test-only topology
+  projection, selects `k3s-1` through the normal Host asset picker, reads its
+  actual Agent route inventory, binds a Gateway through the searchable asset
+  picker, and renders the observed `10.0.0.1` Router edge against the deployed
+  Istio inventory. Host metadata is a read-only snapshot from target PostgreSQL;
+  Kubernetes service inventory and probes come directly from deployed Core.
+  The browser deliberately supplies a test-only session and blocks topology
+  writes, so this proves live UI/data rendering but not production login or a
+  persisted Host node. The production topology remains unchanged and the saved
+  graph acceptance stays open; see
+  `runs/2026-10-22-k3s-route-istio-ui-live.md`,
+  `runs/2026-10-21-k3s-route-router-matching.md`, and
   `runs/2026-10-21-k3s-target-inventory.md`.
 - A live target-K3s smoke report is recorded at
   `tests/p4/runs/2026-10-21-k3s-target-api-smoke.md`. Using a disposable local
@@ -208,13 +216,16 @@ test-session limitation are recorded in
   the topology browser scenario. They are not a K3s or KubeEdge live acceptance
   report. `KubernetesTopologyDiscoveryTest` also passes against a Kubernetes
   API mock; it validates bounded Namespace, Pod, Service, and Ingress reads.
-- On 2026-10-21, `npm run build` passed, the topology Playwright scenario passed
-  against the mock console, and the targeted Core command below passed all seven
-  tests. The browser scenario verifies Gateway host selection, list scroll
+- On 2026-10-22, `npm run build`, all 13 `npm test` cases, and the topology
+  Playwright scenario passed against the mock console; GitHub Actions also
+  passed Rust format/check/clippy/test, Maven verify, Web build, and Core/Web
+  image publication for `12a7b33`. The browser scenario verifies Gateway host selection, list scroll
   movement without changing the React Flow viewport, route matching, nested
   topology editing, and Kubernetes drill-down. These checks strengthen the
   documented UI/code paths but do not close the outstanding cluster lifecycle,
-  KubeEdge, or topology-driven remote Gateway reconciliation gates.
+  KubeEdge, authenticated live route persistence, or topology-driven remote
+  Gateway reconciliation gates. The deployed `k3s-1` live browser run also
+  passed using the normal Host/Gateway asset pickers and real Istio API data.
 
   ```sh
   ./mvnw -pl backend/panel-core -am \
