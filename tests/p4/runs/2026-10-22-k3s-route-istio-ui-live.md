@@ -2,12 +2,28 @@
 
 Date: 2026-10-22
 
+## Release and deployment
+
+- Commit `5d658921d52bd4cdc0ad8e69b55f8d3f62571292` passed GitHub Actions run
+  `39708548940`; Rust, Maven, Web validation and both GHCR image publications
+  succeeded.
+- Core and Web now run the immutable `sha-5d658921d52bd4cdc0ad8e69b55f8d3f62571292`
+  images on `k3s-1`, each `1/1` Ready with zero restarts. The Agent binary was
+  synchronized from Core; its SHA-256 matched the image artifact and
+  `nanpanel-agent.service` is active with zero restarts.
+- Direct node pulls from GHCR did not finish within the rollout wait. Both
+  images were then pulled on `k3s-1` from the supplied GHCR mirror and the
+  deployment script was rerun. No image was uploaded from the development
+  machine. PostgreSQL remained Running and its existing 5 GiB PVC stayed Bound.
+- Using the target's serving certificate, `/q/health/ready` returned `UP` and
+  the HTTPS Web root returned HTTP 200.
+
 ## Read-only target inputs
 
 - Read the `k3s-1` Host and its network inventory from the target PostgreSQL
   database over `ssh k3s-1`; the query only selected the Host, `enp6s18`, and
   its default route. The observed route is `default via 10.0.0.1` and the
-  inventory timestamp was `2026-10-22T01:53:48Z`.
+  inventory timestamp was `2026-10-22T02:13:53Z`.
 - The persisted production topology was not changed. It remains generation 0
   with no nodes or links. The browser used a test-only one-Host topology draft
   projection to exercise how the real inventory renders after an operator adds
@@ -24,7 +40,8 @@ Date: 2026-10-22
 ## UI result
 
 `web/scripts/k3s-route-live-browser.mjs` passed twice against the local Web
-dev server and the live `k3s-1` APIs. The browser displayed:
+dev server and then passed against the deployed Web on `k3s-1`. The browser
+displayed:
 
 - `k3s-1` Host asset and its default route row resolving to
   `自动发现 Router 10.0.0.1`;
@@ -53,5 +70,4 @@ The single-node target is sufficient for this route and service-network
 acceptance. Multi-node mapping/removal, multi-node lifecycle recovery, and
 KubeEdge gates remain open because no second cluster/node or KubeEdge target is
 available. `npm run build`, `npm test` (13 tests), and `npm run test:topology`
-passed for this change; the custom live browser harness passed twice. The
-build reports the existing large-chunk warning.
+passed for this change. The build reports the existing large-chunk warning.

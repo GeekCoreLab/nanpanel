@@ -485,7 +485,7 @@ hybrid-infrastructure-platform/
 
 - [x] 拓扑文件夹支持多层编辑（本机浏览器场景已覆盖）。
 - [x] 在目标 K3s 环境读取 Namespace、Ingress 路由、Service、Pod 及容器端口/状态；见 [真实 K3s API 与拓扑视图验收](tests/p4/runs/2026-10-21-k3s-target-api-smoke.md)。
-- [x] 服务网络只显示真实 Kubernetes 与 Istio 数据：Service/EndpointSlice、Envoy sidecar 就绪状态、Envoy 请求计数/HTTP 响应/mTLS 标签；Mock 模式不生成网络数据，服务和端点按需展开。已部署并完成 `k3s-1` UI/API 实测，证据与认证边界见 [Istio 服务网络实测](tests/p4/runs/2026-10-22-k3s-istio-service-network-live.md)。
+- [x] 服务网络只显示真实 Kubernetes 与 Istio 数据：Service/EndpointSlice、Envoy sidecar 就绪状态、Envoy 请求计数/HTTP 响应/mTLS 标签；Mock 模式不生成网络数据，服务和端点按需展开。已部署并完成 `k3s-1` UI/API 实测，2026-10-22 再次从目标真实 Core API 显示 Istio LIVE、3/3 sidecar 和 HTTP 200/403 mTLS 流量；见 [Istio 服务网络实测](tests/p4/runs/2026-10-22-k3s-istio-service-network-live.md)和[部署后路由与 Istio UI 复验](tests/p4/runs/2026-10-22-k3s-route-istio-ui-live.md)。
 - [x] Agent 自动探测安装主机上的 kubelet/K3s 并按 Host 保存发现记录；目标 `k3s-1` 实时记录与当前部署复核见[部署记录](tests/p4/runs/2026-10-21-agent-kubernetes-runtime-discovery-deployment.md)。
 - [ ] Agent 发现后自动纳入集群管理：已实现 Core 与 Agent 同处目标 K3s 时的自动登记路径，使用 Core 集群内只读 ServiceAccount、不导出或持久化 kubeconfig/token，并按 `kube-system` UID 和 Kubernetes Service IP 对已有导入去重。2026-10-22 已在 `k3s-1` 实测认领既有导入集群，并用隔离 API 测试覆盖新建、指纹匹配、Ready 重试、重复心跳及临时 API 503 后重试；仍缺真实集群无导入初始状态的端到端证明、目标 API 故障恢复验收及远程 Agent 的安全凭据签发/更新流程，见 [自动纳管验收](tests/p4/runs/2026-10-22-kubernetes-auto-enrollment.md)。
 - [ ] 在目标 K3s 环境验收已映射主机路由的下一跳匹配：2026-10-22 浏览器验收通过真实 `k3s-1` Agent 路由数据显示 `k3s-1 → 自动发现 Router 10.0.0.1` 和 React Flow 观测边；测试仅投影了一个 Host 拓扑节点，生产草稿仍为空且未写入。操作员将 Host 资产加入根拓扑后的实时展示已验证，生产保存态验收仍开放。见[路由与 Istio UI 实测](tests/p4/runs/2026-10-22-k3s-route-istio-ui-live.md)和[路由下一跳验收记录](tests/p4/runs/2026-10-21-k3s-route-router-matching.md)。
