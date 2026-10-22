@@ -90,6 +90,28 @@ Mock labeling follows the active Mock mode rather than a separate business
 mock flag. The topology browser test also covers its menu during programmatic
 viewport animation.
 
+## Read-only recheck after topology persistence regression coverage
+
+- Recheck command: `node web/scripts/k3s-route-live-browser.mjs` from the
+  repository root. It read the `k3s-1` Host and route snapshot over SSH, fetched
+  Kubernetes service inventory and Istio telemetry from the deployed Core with
+  the restricted read-only key, and opened the configured HTTPS Web/Core
+  origin. The browser supplied a test-only session and empty draft projection;
+  its route handler blocked every topology `PUT`.
+- Result: `PASS`, Host `k3s-1`, route gateway `10.0.0.1`, observed at
+  `2026-10-22T02:57:25.84+00:00`, `topologyWrites: 0`, no browser page errors.
+- The fresh screen showed two `nanpanel-mesh` Services, 2/2 Ready endpoints,
+  3/3 ready and scraped Istio sidecars, and 26 real Envoy requests: 13 HTTP 200
+  and 13 HTTP 403, all labeled mTLS. The UI keeps four summary metrics above a
+  two-column expandable Kubernetes Service list and Istio traffic panel; it
+  does not flatten all endpoints and flows into one list.
+- Screenshot files: `/tmp/nanpanel-k3s-route-live-ui.png` and
+  `/tmp/nanpanel-k3s-gateway-asset-live-ui.png`; the latter was visually
+  inspected after this run.
+- The target production topology remains generation 0 with no nodes or links.
+  Host selection and route matching were exercised in the ephemeral UI draft;
+  saved production graph acceptance is still open.
+
 ## Acceptance boundary
 
 This verifies the normal Host asset picker and route matching display using the
