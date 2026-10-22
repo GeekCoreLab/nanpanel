@@ -228,3 +228,21 @@ No Core, database, PVC, host route, or `k3s.preflight` state was changed.
   Services and Istio traffic, with per-Service endpoint details collapsed until
   expanded. This is a read-only single-node recheck; production topology and
   `k3s.preflight` state remain untouched.
+
+## Read-only target recheck at 2026-10-22 12:12 UTC
+
+- Re-ran `node web/scripts/k3s-route-live-browser.mjs` against the deployed
+  target: `PASS`, Host `k3s-1`, observed route gateway `10.0.0.1`, observation
+  time `2026-10-22T12:12:07.449+00:00`, and `topologyWrites: 0`.
+- The browser assertions again consumed the deployed Core's Kubernetes and
+  Istio APIs. The rendered snapshot showed 2 Services, 2/2 Ready endpoints,
+  3/3 Envoy sidecars, and 26 Envoy requests: 13 HTTP 200 and 13 HTTP 403,
+  both labeled mTLS. Mock mode remains explicitly disconnected and does not
+  fabricate this data.
+- Inspected the refreshed route and service-network screenshots. The route
+  canvas shows the observed `k3s-1 → 10.0.0.1` edge without overlapping cards;
+  the Istio workspace separates Kubernetes Services and traffic into two
+  columns and keeps per-Service endpoint details collapsed until requested.
+- This is a read-only, single-node UI/data-path recheck. It does not establish
+  saved production topology, multi-node behavior, K3s lifecycle recovery, or
+  KubeEdge lifecycle acceptance. No `k3s.preflight` was run.
