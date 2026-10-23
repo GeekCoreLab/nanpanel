@@ -133,3 +133,16 @@ K3s runtime and that Core has claimed the already imported cluster for that
 Host. It does not prove creation from an empty imported-cluster inventory,
 live API outage recovery, or remote credential issuance/rotation. The query
 was read-only; no `k3s.preflight` or cluster operation ran.
+
+## Focused regression at 2026-10-23 00:12 UTC
+
+Command:
+
+```text
+./mvnw -pl backend/panel-core -am -Dtest=KubernetesAutoEnrollmentTest -Dsurefire.failIfNoSpecifiedTests=false test
+```
+
+Result: all 12 `KubernetesAutoEnrollmentTest` cases passed (0 failures, 0
+errors, 0 skips). This rechecks local enrollment/idempotence and retry paths,
+remote mapping constraints, and certificate rejection against isolated test
+fixtures; it is not a second-host or live API recovery acceptance.
