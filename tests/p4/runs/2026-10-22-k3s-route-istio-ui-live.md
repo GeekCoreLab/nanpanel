@@ -337,3 +337,27 @@ recovery, or KubeEdge lifecycle acceptance. No `k3s.preflight` ran.
   collapsed until requested. Mock mode remains explicitly disconnected.
 - This remains a read-only test-session projection. No production topology
   save, `k3s.preflight`, Helper operation, or K3s lifecycle operation ran.
+
+## Post-release UI and discovery recheck at 2026-10-23 00:30 UTC
+
+- After deployment of commit `1a53474`, reran
+  `node web/scripts/k3s-route-live-browser.mjs`: `PASS`, Host `k3s-1`, route
+  gateway `10.0.0.1`, observation `2026-10-23T00:30:24.21+00:00`,
+  `topologyWrites: 0`, and no browser errors. The harness continued to block
+  all topology draft PUT requests.
+- The live Istio workspace showed `Istio LIVE`, 2 Services, 2/2 Ready
+  EndpointSlices, 3/3 Envoy sidecars, and 26 requests from the real Envoy
+  reporter. Separate HTTP 200 and HTTP 403 flows both carried mTLS labels.
+  The screenshot `/tmp/nanpanel-k3s-istio-service-network-ui.png` was visually
+  inspected: Services and Istio traffic are in separate columns, with endpoint
+  details collapsed until requested.
+- A read-only PostgreSQL join after rollout confirmed Host `k3s-1` is still
+  mapped to Ready Node `k3s-1` in `k3s-1-k3s`; the KUBECONFIG credential source
+  remains intact. Fresh Agent network inventory contains that Node's
+  `InternalIP` (`10.100.0.1`), matching the new identity guard, and runtime
+  discovery reports `K3S` with `api_server_local=true`.
+- Core/Web readiness and the PostgreSQL check were `UP`; each application
+  Deployment had one Ready Pod with zero restarts. This is live existing-cluster
+  adoption/health evidence only. No live `k3s.preflight`, Helper operation,
+  production topology write, fresh-cluster enrollment, or K3s lifecycle action
+  ran.
