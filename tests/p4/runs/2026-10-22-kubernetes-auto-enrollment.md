@@ -113,6 +113,24 @@ where the Agent reports a different host IP and no cluster or Node mapping is
 created. This is isolated H2/Fabric8 integration coverage; it does not replace
 the skipped live `k3s.preflight` or the outstanding empty-cluster live test.
 
+## `k3s-1` deployment
+
+Commit `1a53474015936181459d3e80bded281f8a9f099b` was pushed to `main` and
+GitHub Actions workflow `39877223431` completed successfully. Both Core and Web
+images were published to GHCR with the immutable tag
+`sha-1a53474015936181459d3e80bded281f8a9f099b`; the repository deployment
+script consumed those GHCR images on `k3s-1`.
+
+After rollout, Core and Web each had one Ready replica and zero Pod restarts;
+the previous Core Pod was deleted. HTTPS `/q/health/ready` returned `UP` with
+the database check `UP`. PostgreSQL remained Ready with its existing 5 GiB PVC
+Bound. The local Agent remained `active/running`, `NRestarts=0`; the deploy
+script verified the image-bundled Agent SHA-256
+`603c5026b64883dd81324df1efd513937300fe198cf977a40ff640dd7db21a5f`, replaced
+the old binary, and restarted the service successfully. No live
+`k3s.preflight` was run, per the user's choice; this deployment verifies service
+health and rollout, not K3s installation preflight or empty-cluster enrollment.
+
 ## Remote Agent mapping to an already managed K3s cluster
 
 - Source commit: `3a3627cd43654c2f05e0a398797ca57e8419d527`
