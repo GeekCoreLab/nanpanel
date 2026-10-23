@@ -194,6 +194,25 @@ The deployed browser session and empty topology draft remain test-only. This
 confirms the live UI and Istio data path, not production topology persistence.
 No Core, database, PVC, host route, or `k3s.preflight` state was changed.
 
+## Read-only recheck at 2026-10-23 00:07 UTC
+
+- Re-ran `node web/scripts/k3s-route-live-browser.mjs` against the current
+  configured HTTPS Web/Core origin. The Host and route snapshot were read over
+  SSH; Kubernetes Service inventory and Istio telemetry were fetched from Core
+  with the restricted read-only API key. The browser used the test-only session
+  and an empty draft projection, and blocked all topology `PUT` requests.
+- Result: `PASS`, Host `k3s-1`, route gateway `10.0.0.1`, inventory timestamp
+  `2026-10-23T00:07:50.492Z`, no page errors, and `topologyWrites: 0`.
+- The refreshed Istio screen displayed 2 Services, 2/2 Ready endpoints, 3/3
+  ready/scraped sidecars, and 26 real Envoy requests: 13 HTTP 200 and 13 HTTP
+  403, both labeled mTLS. The Service list and traffic panel are separate
+  columns; endpoint details remain collapsed until expanded. The screenshot
+  was visually inspected at `/tmp/nanpanel-k3s-istio-service-network-ui.png`.
+- This confirms the current single-node read-only UI/data path and segmented
+  layout. It does not save the production topology or close multi-node,
+  installation/upgrade recovery, remote credential, or KubeEdge lifecycle
+  gates. No `k3s.preflight` ran.
+
 ## Read-only recheck after Core credential-reference deployment at 2026-10-22 11:21 UTC
 
 - Re-ran `node web/scripts/k3s-route-live-browser.mjs` against the current
