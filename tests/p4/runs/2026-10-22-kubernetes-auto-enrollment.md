@@ -118,3 +118,18 @@ There is no separate remote Agent host in the available environment, so the
 remote mapping has not been exercised against a real second Node. Automatic
 credential issuance/rotation and import of a previously unknown remote cluster
 remain open P4 work.
+
+## Read-only target recheck at 2026-10-23 00:10 UTC
+
+Over `ssh k3s-1`, queried only the target PostgreSQL Host discovery and
+registered-cluster rows. Host `k3s-1` reported `runtime_kind=K3S`,
+`detected=true`, `kubelet_running=true`, and `api_server_local=true` at
+`2026-10-23T00:10:05.483Z`. Cluster `k3s-1-k3s` remained `HEALTHY` with
+`credential_source=KUBECONFIG`; its `discovered_host_id` matches the reporting
+Host, and its observation timestamp was `2026-10-23T00:10:00.094Z`.
+
+This freshly verifies that the installed Agent is still detecting the local
+K3s runtime and that Core has claimed the already imported cluster for that
+Host. It does not prove creation from an empty imported-cluster inventory,
+live API outage recovery, or remote credential issuance/rotation. The query
+was read-only; no `k3s.preflight` or cluster operation ran.
