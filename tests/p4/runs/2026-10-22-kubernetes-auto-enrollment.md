@@ -159,6 +159,26 @@ remote mapping has not been exercised against a real second Node. Automatic
 credential issuance/rotation and import of a previously unknown remote cluster
 remain open P4 work.
 
+### Remote Host address identity follow-up
+
+On 2026-10-23, the remote mapping path was tightened to require a fresh Host
+network inventory containing the candidate Node's cached `InternalIP`, in
+addition to the existing unique-name, Ready, freshness, credentialed-cluster,
+and unmapped checks. A matching hostname from another network now remains
+unmapped. The address is checked in the same database transaction as the
+mapping decision.
+
+Focused command:
+
+```sh
+./mvnw -pl backend/panel-core -am -Dtest=KubernetesAutoEnrollmentTest -Dsurefire.failIfNoSpecifiedTests=false test
+```
+
+Result: all 14 `KubernetesAutoEnrollmentTest` tests passed, including rejection
+of a same-name remote Agent with an IP different from the Node. This remains
+isolated Core/H2/Fabric8 coverage; no second physical K3s Node is available for
+live mapping acceptance.
+
 ## Read-only target recheck at 2026-10-23 00:10 UTC
 
 Over `ssh k3s-1`, queried only the target PostgreSQL Host discovery and

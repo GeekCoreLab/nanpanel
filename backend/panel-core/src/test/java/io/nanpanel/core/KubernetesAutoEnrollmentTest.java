@@ -243,6 +243,16 @@ class KubernetesAutoEnrollmentTest {
   }
 
   @Test
+  void doesNotMapRemoteAgentToSameNameNodeWhenInternalIpDiffers() {
+    String hostname = hostname();
+    seedClusterNode("K3S", hostname, Instant.now(), true, null);
+
+    postRuntimeDiscoveryHeartbeat(hostname, certificateFingerprint, false, "10.0.0.21");
+
+    assertEquals(0, mappedNodeCount());
+  }
+
+  @Test
   void doesNotMapRemoteAgentFromStaleClusterObservation() {
     String hostname = hostname();
     seedClusterNode("K3S", hostname,
@@ -372,10 +382,11 @@ class KubernetesAutoEnrollmentTest {
       boolean edge = "KUBEEDGE".equals(kind);
       AuthStore.update(connection,
           "INSERT INTO kubernetes_cluster_node (cluster_id,node_uid,node_name,roles,node_present,"
-              + "kubeedge_edge,ready,container_owner,host_id,observed_at) "
-              + "VALUES (?,?,?,'worker',TRUE,?,?, ?,?,?)",
+              + "kubeedge_edge,ready,internal_ip,container_owner,host_id,observed_at) "
+              + "VALUES (?,?,?,'worker',TRUE,?,?,?,?,?,?)",
           clusterId, "node-uid-" + nodeName, nodeName, edge, ready,
-          edge ? "KUBEEDGE" : "KUBERNETES", mappedHostId, Timestamp.from(observedAt));
+          "10.0.0.20", edge ? "KUBEEDGE" : "KUBERNETES", mappedHostId,
+          Timestamp.from(observedAt));
       return null;
     });
     return clusterId;

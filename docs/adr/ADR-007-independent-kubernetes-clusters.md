@@ -35,6 +35,10 @@ resource request.
   discovered clusters still require an administrator to import and validate
   credentials; secure credential issuance and rotation for remote Agents are
   not implemented.
+- A remote Agent may be mapped only to one fresh Ready K3s Node in a healthy
+  registered cluster, and its fresh Host network inventory must contain that
+  Node's InternalIP. A hostname match by itself cannot associate a remote Host
+  with a Node in an unrelated cluster.
 - Node mappings are cluster-scoped and do not merge cluster membership or
   authorize cross-cluster resource operations.
 - A multi-node K3s first-install plan uses a separately domain-bound AES-GCM

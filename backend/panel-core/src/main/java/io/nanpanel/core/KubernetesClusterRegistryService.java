@@ -297,35 +297,38 @@ public class KubernetesClusterRegistryService {
   }
 
   private boolean hostHasFreshAddress(UUID hostId, String internalIp) {
-    return store.transaction(connection -> {
-      var rows = query(connection,
-          "SELECT CAST(interfaces AS VARCHAR) AS interfaces_json,observed_at "
-              + "FROM host_network_inventory WHERE host_id=?", hostId);
-      if (rows.isEmpty()) return false;
-      Object observedAtValue = rows.getFirst().get("observed_at");
-      Instant observedAt = observedAtValue instanceof Timestamp timestamp ? timestamp.toInstant()
-          : observedAtValue instanceof OffsetDateTime timestamp ? timestamp.toInstant()
-          : observedAtValue instanceof Instant timestamp ? timestamp : null;
-      if (observedAt == null || observedAt
-          .isBefore(Instant.now().minusSeconds(OBSERVATION_STALE_AFTER_SECONDS))) return false;
-      try {
-        JsonNode interfaces = mapper.readTree(
-            String.valueOf(rows.getFirst().get("interfaces_json")));
-        if (!interfaces.isArray()) return false;
-        for (JsonNode networkInterface : interfaces) {
-          JsonNode addresses = networkInterface.path("addresses");
-          if (!addresses.isArray()) continue;
-          for (JsonNode address : addresses) {
-            if (internalIp.equals(address.path("address").asText())) return true;
-          }
+    return store.transaction(connection -> hostHasFreshAddress(connection, hostId, internalIp));
+  }
+
+  private boolean hostHasFreshAddress(Connection connection, UUID hostId, String internalIp)
+      throws java.sql.SQLException {
+    var rows = query(connection,
+        "SELECT CAST(interfaces AS VARCHAR) AS interfaces_json,observed_at "
+            + "FROM host_network_inventory WHERE host_id=?", hostId);
+    if (rows.isEmpty()) return false;
+    Object observedAtValue = rows.getFirst().get("observed_at");
+    Instant observedAt = observedAtValue instanceof Timestamp timestamp ? timestamp.toInstant()
+        : observedAtValue instanceof OffsetDateTime timestamp ? timestamp.toInstant()
+        : observedAtValue instanceof Instant timestamp ? timestamp : null;
+    if (observedAt == null || observedAt
+        .isBefore(Instant.now().minusSeconds(OBSERVATION_STALE_AFTER_SECONDS))) return false;
+    try {
+      JsonNode interfaces = mapper.readTree(
+          String.valueOf(rows.getFirst().get("interfaces_json")));
+      if (!interfaces.isArray()) return false;
+      for (JsonNode networkInterface : interfaces) {
+        JsonNode addresses = networkInterface.path("addresses");
+        if (!addresses.isArray()) continue;
+        for (JsonNode address : addresses) {
+          if (internalIp.equals(address.path("address").asText())) return true;
         }
-        return false;
-      } catch (java.io.IOException | IllegalArgumentException failure) {
-        LOG.debugf("Unable to verify Agent host address for automatic K3s enrollment (%s)",
-            failure.getClass().getSimpleName());
-        return false;
       }
-    });
+      return false;
+    } catch (java.io.IOException | IllegalArgumentException failure) {
+      LOG.debugf("Unable to verify Agent host address for automatic K3s enrollment (%s)",
+          failure.getClass().getSimpleName());
+      return false;
+    }
   }
 
   /** Maps a remote Agent only to one fresh, Ready K3s Node in a cluster already owned by Core. */
@@ -337,7 +340,8 @@ public class KubernetesClusterRegistryService {
         Timestamp cutoff = Timestamp.from(Instant.now()
             .minusSeconds(OBSERVATION_STALE_AFTER_SECONDS));
         var candidates = query(connection,
-            "SELECT c.id AS cluster_id,n.node_uid,n.host_id FROM kubernetes_cluster c "
+            "SELECT c.id AS cluster_id,n.node_uid,n.host_id,n.internal_ip "
+                + "FROM kubernetes_cluster c "
                 + "JOIN kubernetes_cluster_node n ON n.cluster_id=c.id "
                 + "WHERE c.kind='K3S' AND c.credential_source IN ('KUBECONFIG','IN_CLUSTER') "
                 + "AND c.health_status='HEALTHY' AND c.observed_at>=? "
@@ -348,6 +352,9 @@ public class KubernetesClusterRegistryService {
         Map<String, Object> candidate = candidates.getFirst();
         UUID clusterId = (UUID)candidate.get("cluster_id");
         String nodeUid = String.valueOf(candidate.get("node_uid"));
+        String internalIp = (String)candidate.get("internal_ip");
+        if (internalIp == null || !hostHasFreshAddress(connection, hostId, internalIp))
+          return null;
         var hostMappings = query(connection,
             "SELECT cluster_id,node_uid FROM kubernetes_cluster_node WHERE host_id=?", hostId);
         if (!hostMappings.isEmpty()) return null;
