@@ -4,6 +4,8 @@ import static io.nanpanel.core.AuthStore.audit;
 import static io.nanpanel.core.AuthStore.query;
 import static io.nanpanel.core.AuthStore.update;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.fabric8.kubernetes.api.model.Node;
 import io.fabric8.kubernetes.api.model.NodeList;
 import io.fabric8.kubernetes.api.model.Namespace;
@@ -47,6 +49,7 @@ public class KubernetesClusterRegistryService {
   @Inject AuthStore store;
   @Inject KubernetesClusterCredentialVault vault;
   @Inject KubernetesClusterClientFactory clients;
+  @Inject ObjectMapper mapper;
   private final KubernetesTopologyDiscovery topologyDiscovery = new KubernetesTopologyDiscovery();
 
   @ConfigProperty(name = "nanpanel.kubernetes.credential-key", defaultValue = "")
@@ -239,6 +242,8 @@ public class KubernetesClusterRegistryService {
       Node localNode = client.nodes().withName(hostname).get();
       if (localNode == null || localNode.getMetadata() == null
           || localNode.getMetadata().getUid() == null || !nodeReady(localNode)) return;
+      String internalIp = nodeInternalIp(localNode);
+      if (internalIp == null || !hostHasFreshAddress(hostId, internalIp)) return;
       String fingerprint = clusterFingerprint(client);
       String serviceIp = kubernetesServiceIp(client);
       UUID existingClusterId = findLocalCluster(fingerprint, serviceIp);
@@ -280,6 +285,47 @@ public class KubernetesClusterRegistryService {
       LOG.warnf("Automatic local K3s enrollment deferred for host %s (%s)", hostname,
           failure.getClass().getSimpleName());
     }
+  }
+
+  private String nodeInternalIp(Node node) {
+    if (node.getStatus() == null || node.getStatus().getAddresses() == null) return null;
+    return node.getStatus().getAddresses().stream()
+        .filter(address -> address != null && "InternalIP".equals(address.getType()))
+        .map(io.fabric8.kubernetes.api.model.NodeAddress::getAddress)
+        .filter(address -> address != null && !address.isBlank() && address.length() <= 64)
+        .findFirst().orElse(null);
+  }
+
+  private boolean hostHasFreshAddress(UUID hostId, String internalIp) {
+    return store.transaction(connection -> {
+      var rows = query(connection,
+          "SELECT CAST(interfaces AS VARCHAR) AS interfaces_json,observed_at "
+              + "FROM host_network_inventory WHERE host_id=?", hostId);
+      if (rows.isEmpty()) return false;
+      Object observedAtValue = rows.getFirst().get("observed_at");
+      Instant observedAt = observedAtValue instanceof Timestamp timestamp ? timestamp.toInstant()
+          : observedAtValue instanceof OffsetDateTime timestamp ? timestamp.toInstant()
+          : observedAtValue instanceof Instant timestamp ? timestamp : null;
+      if (observedAt == null || observedAt
+          .isBefore(Instant.now().minusSeconds(OBSERVATION_STALE_AFTER_SECONDS))) return false;
+      try {
+        JsonNode interfaces = mapper.readTree(
+            String.valueOf(rows.getFirst().get("interfaces_json")));
+        if (!interfaces.isArray()) return false;
+        for (JsonNode networkInterface : interfaces) {
+          JsonNode addresses = networkInterface.path("addresses");
+          if (!addresses.isArray()) continue;
+          for (JsonNode address : addresses) {
+            if (internalIp.equals(address.path("address").asText())) return true;
+          }
+        }
+        return false;
+      } catch (java.io.IOException | IllegalArgumentException failure) {
+        LOG.debugf("Unable to verify Agent host address for automatic K3s enrollment (%s)",
+            failure.getClass().getSimpleName());
+        return false;
+      }
+    });
   }
 
   /** Maps a remote Agent only to one fresh, Ready K3s Node in a cluster already owned by Core. */

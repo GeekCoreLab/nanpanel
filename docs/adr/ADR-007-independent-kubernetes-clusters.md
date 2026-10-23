@@ -27,8 +27,11 @@ resource request.
 - The Host Agent may report local kubelet/K3s runtime evidence for discovery.
   Discovery never transfers a host kubeconfig. When the opt-in local K3s
   auto-enrollment is enabled and the reporting Host is a Ready API Server Node
-  in Core's own cluster, Core may register that cluster using its existing
-  read-only in-cluster identity and map the Node UID to the Host. Other
+  in Core's own cluster, with a fresh Host network inventory containing that
+  Node's InternalIP, Core may register that cluster using its existing
+  read-only in-cluster identity and map the Node UID to the Host. The IP check
+  supplements the Agent's local API-port observation and hostname lookup; it
+  does not treat either as proof of cluster identity. Other
   discovered clusters still require an administrator to import and validate
   credentials; secure credential issuance and rotation for remote Agents are
   not implemented.

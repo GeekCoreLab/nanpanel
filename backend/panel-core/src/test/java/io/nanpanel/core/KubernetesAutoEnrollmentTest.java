@@ -123,6 +123,17 @@ class KubernetesAutoEnrollmentTest {
   }
 
   @Test
+  void defersLocalEnrollmentWhenAgentAddressDoesNotMatchCoreNode() {
+    String hostname = hostname();
+    expectSuccessfulDiscovery(hostname, readyNode(hostname));
+
+    postRuntimeDiscoveryHeartbeat(hostname, certificateFingerprint, true, "10.0.0.21");
+
+    assertEquals(0, enrolledClusterCount());
+    assertEquals(0, mappedNodeCount());
+  }
+
+  @Test
   void defersNotReadyNodeAndRetriesEnrollmentAfterItBecomesReady() {
     String hostname = hostname();
     expectNodeLookup(hostname, node(hostname, false));
@@ -313,25 +324,36 @@ class KubernetesAutoEnrollmentTest {
 
   private int postRuntimeDiscoveryHeartbeat(String hostname, String fingerprint,
       boolean apiServerLocal) {
+    return postRuntimeDiscoveryHeartbeat(hostname, fingerprint, apiServerLocal, "10.0.0.20");
+  }
+
+  private int postRuntimeDiscoveryHeartbeat(String hostname, String fingerprint,
+      boolean apiServerLocal, String hostAddress) {
     long observedAt = Instant.now().toEpochMilli();
     return given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
         .contentType("application/json")
-        .body(Map.of(
-            "agentId", agentId.toString(),
-            "version", "test",
-            "certificateFingerprint", fingerprint,
-            "hostname", hostname,
-            "os", "Linux",
-            "arch", "x86_64",
-            "capabilities", List.of("host.inventory", "agent.heartbeat", "agent.self_update",
-                "kubernetes.runtime.detect"),
-            "helperStatus", "AVAILABLE",
-            "kubernetesRuntime", Map.of(
+        .body(Map.ofEntries(
+            Map.entry("agentId", agentId.toString()),
+            Map.entry("version", "test"),
+            Map.entry("certificateFingerprint", fingerprint),
+            Map.entry("hostname", hostname),
+            Map.entry("os", "Linux"),
+            Map.entry("arch", "x86_64"),
+            Map.entry("capabilities", List.of("host.inventory", "agent.heartbeat",
+                "agent.self_update", "kubernetes.runtime.detect", "network.inventory")),
+            Map.entry("helperStatus", "AVAILABLE"),
+            Map.entry("networkObservedAtEpochMs", observedAt),
+            Map.entry("networkInterfaces", List.of(Map.of(
+                "name", "eth0", "macAddress", "02:00:00:00:00:01", "mtu", 1500,
+                "state", "UP", "addresses", List.of(Map.of("family", "inet",
+                    "address", hostAddress, "prefixLength", 24, "scope", "global"))))),
+            Map.entry("networkRoutes", List.of()),
+            Map.entry("kubernetesRuntime", Map.of(
                 "detected", true,
                 "kubeletRunning", true,
                 "apiServerLocal", apiServerLocal,
                 "runtimeKind", "K3S",
-                "observedAtEpochMs", observedAt)))
+                "observedAtEpochMs", observedAt))))
         .post("/internal/agent-heartbeats")
         .statusCode();
   }

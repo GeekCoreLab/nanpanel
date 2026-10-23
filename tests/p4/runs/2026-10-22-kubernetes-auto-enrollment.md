@@ -91,6 +91,28 @@ inventory or API outage recovery.
   `./mvnw -pl backend/panel-core -am -Dtest=KubernetesAutoEnrollmentTest -Dsurefire.failIfNoSpecifiedTests=false test`
 - Result: all five `KubernetesAutoEnrollmentTest` tests passed.
 
+## Local Node identity guard
+
+On 2026-10-23, local auto-enrollment was tightened because an Agent's TCP probe
+of `127.0.0.1:6443` and a matching hostname alone do not prove that its local
+K3s API is Core's own cluster. Before claiming or creating the in-cluster
+record, Core now requires a fresh (within 120 seconds) Host network inventory
+whose interface addresses include the Core Node's Kubernetes `InternalIP`.
+Missing, stale, malformed, or mismatched network data defers enrollment until
+a later heartbeat; remote Agent mapping continues to use the existing
+credentialed-cluster checks.
+
+Focused command:
+
+```sh
+./mvnw -pl backend/panel-core -am -Dtest=KubernetesAutoEnrollmentTest -Dsurefire.failIfNoSpecifiedTests=false test
+```
+
+Result: all 13 `KubernetesAutoEnrollmentTest` tests passed, including a case
+where the Agent reports a different host IP and no cluster or Node mapping is
+created. This is isolated H2/Fabric8 integration coverage; it does not replace
+the skipped live `k3s.preflight` or the outstanding empty-cluster live test.
+
 ## Remote Agent mapping to an already managed K3s cluster
 
 - Source commit: `3a3627cd43654c2f05e0a398797ca57e8419d527`
