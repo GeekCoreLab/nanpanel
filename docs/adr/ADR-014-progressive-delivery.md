@@ -62,8 +62,15 @@ claim success from a requested weight or a successful create call alone.
    resumed both hosts to success with audit evidence. A later mixed-runtime run
    restarted both Helpers at the same persisted batch boundary, kept the
    existing routes healthy, and verified that the Agents returned online with
-   release capabilities. Rootful Helper permissions and in-flight uncertain-
-   result recovery remain open. See
+   release capabilities. A separate live run dropped a successful Helper
+   result callback, let Core mark its timed-out operation `UNKNOWN`, then
+   reconciled the same operation ID and key. After Agent restart its durable
+   `SUCCEEDED` result completed the release without creating a second
+   container; the route returned `200 v2` and Core ACK cleared the Agent
+   journal. Execution with no durable terminal result remains `UNKNOWN` and
+   is not retried as a new operation. Rootful Helper permissions and physically
+   independent hosts remain open. See
+   `tests/p5/runs/2026-10-24-host-release-uncertain-result-recovery-live.md`,
    `tests/p5/runs/2026-10-24-host-release-mixed-helper-core-restart-live.md`,
    `tests/p5/runs/2026-10-24-host-release-mixed-rootless-live.md`,
    `tests/p5/runs/2026-10-23-host-release-core-restart-live.md`, and
@@ -80,8 +87,9 @@ claim success from a requested weight or a successful create call alone.
    persisted batch pause, route continuity while Core was stopped, Agent
    reconnection, and operator resume to terminal success. Both Podman and
    Docker Helpers have also restarted at an idle batch pause with route
-   continuity and Agent capability recovery. An in-flight or uncertain Helper
-   result still requires isolated acceptance.
+   continuity and Agent capability recovery. Lost callback recovery with a
+   durable Agent success is accepted; an operation with no durable terminal
+   result remains `UNKNOWN` for investigation.
 5. Controller installation is an operator-managed prerequisite. NaNPanel does
    not install cluster-wide CRDs/controllers as a side effect of creating an
    application release.
@@ -96,7 +104,8 @@ claim success from a requested weight or a successful create call alone.
 - Rootless Podman and rootless Docker delivery now have live
   browser-to-Core-to-Agent-to-Helper evidence for routed traffic, ordered
   approval, manual rollback, and compensation. They used separate runtime
-  daemons on one physical machine; rootful Helper permissions and physically
+  daemons on one physical machine. Lost callback recovery from a durable Agent
+  result is also accepted; rootful Helper permissions and physically
   independent hosts remain unverified. The [mixed-runtime report](../../tests/p5/runs/2026-10-24-host-release-mixed-rootless-live.md)
   records the Docker socket boundary and traffic evidence. Container lifecycle
   success by itself is not application release success.

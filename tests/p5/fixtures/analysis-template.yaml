@@ -1,0 +1,35 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: p5-canary-error-rate
+  namespace: default
+spec:
+  args:
+    - name: canaryHash
+  metrics:
+    - name: canary-http-error-rate
+      initialDelay: 15s
+      interval: 10s
+      count: 3
+      failureLimit: 0
+      inconclusiveLimit: 0
+      successCondition: result[0] <= 0.01
+      failureCondition: result[0] > 0.05
+      provider:
+        prometheus:
+          address: http://prometheus.default.svc.cluster.local:9090
+          query: >-
+            (
+              (
+                sum(increase(nanpanel_http_requests_total{app="p5-demo",rollout_hash="{{ args.canaryHash }}",outcome="error"}[30s]))
+                /
+                clamp_min(sum(increase(nanpanel_http_requests_total{app="p5-demo",rollout_hash="{{ args.canaryHash }}"}[30s])), 1)
+              )
+              and
+              sum(increase(nanpanel_http_requests_total{app="p5-demo",rollout_hash="{{ args.canaryHash }}"}[30s])) >= 20
+            )
+            or
+            (
+              vector(0.025)
+              unless sum(increase(nanpanel_http_requests_total{app="p5-demo",rollout_hash="{{ args.canaryHash }}"}[30s])) >= 20
+            )

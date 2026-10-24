@@ -1,0 +1,60 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: p5-demo
+  namespace: default
+spec:
+  replicas: 4
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app: p5-demo
+  strategy:
+    canary:
+      stableService: p5-demo-stable
+      canaryService: p5-demo-canary
+      trafficRouting:
+        plugins:
+          argoproj-labs/gatewayAPI:
+            httpRoute: p5-demo
+      analysis:
+        args:
+          - name: canaryHash
+            valueFrom:
+              podTemplateHashValue: Latest
+        templates:
+          - templateName: p5-canary-error-rate
+        startingStep: 0
+      steps:
+        - setWeight: 10
+        - pause: {}
+        - setWeight: 50
+        - pause: {}
+        - setWeight: 100
+        - pause: {}
+  template:
+    metadata:
+      labels:
+        app: p5-demo
+    spec:
+      containers:
+        - name: app
+          image: python:3.13-alpine
+          imagePullPolicy: IfNotPresent
+          command: [python3, -u, /app/app.py]
+          env:
+            - name: APP_VERSION
+              value: v1
+            - name: APP_BROKEN
+              value: "false"
+          ports:
+            - name: http
+              containerPort: 8080
+          volumeMounts:
+            - name: app
+              mountPath: /app
+              readOnly: true
+      volumes:
+        - name: app
+          configMap:
+            name: p5-http-app
