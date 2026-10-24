@@ -33,12 +33,15 @@ def helper_call(socket_path, capability, target="", payload=None):
     return json.loads(chunks)
 
 
-def wait_for_http(url, timeout=30):
+def wait_for_http(url, timeout=30, host_header=None):
     deadline = time.monotonic() + timeout
     last_error = None
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=2) as response:
+            request = urllib.request.Request(url)
+            if host_header:
+                request.add_header("Host", host_header)
+            with urllib.request.urlopen(request, timeout=2) as response:
                 body = response.read().decode().strip()
                 return {"status": response.status, "body": body}
         except (urllib.error.URLError, TimeoutError, OSError) as error:
@@ -55,14 +58,20 @@ def main():
     parser.add_argument("--host-port", type=int, required=True)
     parser.add_argument("--container-port", type=int, default=8080)
     parser.add_argument("--expected-body", default="v2")
+    parser.add_argument("--route-port", type=int, help="optional managed Nginx listener port")
+    parser.add_argument("--server-name", default="nanpanel-rootful.test")
     args = parser.parse_args()
 
     capabilities_response = helper_call(args.socket, "helper.capabilities")
     if not capabilities_response.get("ok"):
         raise RuntimeError(f"Helper capability request failed: {capabilities_response}")
     capabilities = json.loads(capabilities_response["result"])
-    if "container.deploy" not in capabilities:
-        raise RuntimeError(f"Helper did not advertise container.deploy: {capabilities}")
+    required = {"container.deploy", "container.list", "container.stop"}
+    if args.route_port is not None:
+        required.add("nginx.route.set")
+    missing = required - set(capabilities)
+    if missing:
+        raise RuntimeError(f"Helper did not advertise {sorted(missing)}: {capabilities}")
 
     deploy = helper_call(args.socket, "container.deploy", args.container_name, {
         "image": args.image,
@@ -73,14 +82,33 @@ def main():
         raise RuntimeError(f"Helper container.deploy failed: {deploy}")
 
     stop = None
+    route = None
+    direct_http = None
+    nginx_http = None
     try:
-        routed = wait_for_http(f"http://127.0.0.1:{args.host_port}/")
+        direct_http = wait_for_http(f"http://127.0.0.1:{args.host_port}/")
         expected = {"status": 200, "body": args.expected_body}
-        if routed != expected:
-            raise RuntimeError(f"unexpected loopback response: {routed}")
+        if direct_http != expected:
+            raise RuntimeError(f"unexpected loopback response: {direct_http}")
         listed = helper_call(args.socket, "container.list")
         if not listed.get("ok") or args.container_name not in listed.get("result", ""):
             raise RuntimeError(f"Helper container.list missed the deployed target: {listed}")
+        if args.route_port is not None:
+            route = helper_call(args.socket, "nginx.route.set", args.container_name, {
+                "listenAddress": "127.0.0.1",
+                "listenPort": args.route_port,
+                "serverName": args.server_name,
+                "healthPath": "/",
+                "backends": [{"name": "stable", "port": args.host_port, "weight": 100}],
+            })
+            if not route.get("ok"):
+                raise RuntimeError(f"Helper nginx.route.set failed: {route}")
+            nginx_http = wait_for_http(
+                f"http://127.0.0.1:{args.route_port}/",
+                host_header=args.server_name,
+            )
+            if nginx_http != expected:
+                raise RuntimeError(f"unexpected Nginx routed response: {nginx_http}")
     finally:
         stop = helper_call(args.socket, "container.stop", args.container_name)
 
@@ -95,8 +123,14 @@ def main():
         ],
         "deployOperationId": deploy["operation_id"],
         "deployResult": deploy["result"],
-        "routedHttp": {"url": f"http://127.0.0.1:{args.host_port}/", **routed},
+        "directHttp": {"url": f"http://127.0.0.1:{args.host_port}/", **direct_http},
         "listContainsContainer": True,
+        "routeOperationId": route["operation_id"] if route else None,
+        "routeResult": route["result"] if route else None,
+        "nginxRoutedHttp": (
+            {"url": f"http://127.0.0.1:{args.route_port}/", **nginx_http}
+            if args.route_port is not None else None
+        ),
         "stopOperationId": stop["operation_id"],
         "stopResult": stop["result"],
     }, indent=2))

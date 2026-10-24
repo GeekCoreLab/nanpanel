@@ -55,7 +55,8 @@ claim success from a requested weight or a successful create call alone.
    25/25 `200 v1` per host; failed-candidate compensation returned 50 `200 v1`
    responses. The Docker and Podman daemons ran on one physical machine, and
    both Helpers ran in rootless Podman sandboxes, so this does not establish
-   physical multi-host isolation or rootful Helper permissions. The earlier
+   physical multi-host isolation or the complete rootful Core-to-Agent release
+   workflow. The earlier
    nested Docker preflight documents why Docker was moved outside the Helper
    sandbox in this environment. A live acceptance restarted Core between
    operator-gated batches, preserved the paused plan and healthy routes, then
@@ -69,10 +70,10 @@ claim success from a requested weight or a successful create call alone.
    container; the route returned `200 v2` and Core ACK cleared the Agent
    journal. Execution with no durable terminal result remains `UNKNOWN` and
    is not retried as a new operation. A disposable-VM rootful Podman 5.4.2
-   probe passed Helper `container.deploy/list/stop` as the configured Agent
-   UID and served `200 v2`; the VM had no trusted host Nginx configuration, so
-   full rootful route/release acceptance and physically independent hosts
-   remain open. See
+   probe passed Helper `container.deploy/list/stop` and `nginx.route.set` as UID
+   1000; direct and managed loopback Nginx requests returned `200 v2`. The
+   complete rootful Core-to-mTLS-Agent release workflow and physically
+   independent hosts remain open. See
    `tests/p5/runs/2026-10-24-rootful-podman-helper-live.md`,
    `tests/p5/runs/2026-10-24-host-release-uncertain-result-recovery-live.md`,
    `tests/p5/runs/2026-10-24-host-release-mixed-helper-core-restart-live.md`,
@@ -110,8 +111,8 @@ claim success from a requested weight or a successful create call alone.
   approval, manual rollback, and compensation. They used separate runtime
   daemons on one physical machine. Lost callback recovery from a durable Agent
   result is also accepted. A rootful Podman 5.4.2 probe verified Helper
-  container operations and HTTP `200 v2`, but did not configure host Nginx;
-  full rootful route/release and physically independent hosts remain
+  container operations and managed Nginx routing with HTTP `200 v2`; the full
+  rootful Core-to-mTLS-Agent workflow and physically independent hosts remain
   unverified. See the [rootful Helper report](../../tests/p5/runs/2026-10-24-rootful-podman-helper-live.md)
   and [mixed-runtime report](../../tests/p5/runs/2026-10-24-host-release-mixed-rootless-live.md)
   records the Docker socket boundary and traffic evidence. Container lifecycle

@@ -1,4 +1,4 @@
-# Rootful Podman Helper permission probe
+# Rootful Podman Helper and Nginx route acceptance
 
 ## Result
 
@@ -42,16 +42,44 @@ and HTTP health endpoint in
 [`application.Containerfile`](../fixtures/application.Containerfile) and
 [`http-app.py`](../fixtures/http-app.py).
 
-## Boundary and cleanup
+## Follow-up: managed Nginx route
 
-This proves that the root Helper can use the VM's rootful Podman installation
-for the fixed container operations while retaining the Agent UID check. It
-does not prove a full rootful host release: the guest did not have a trusted
-host Nginx binary or a configured managed include directory, so
-`nginx.route.set` was not advertised and no route switch was attempted.
-Physically independent host acceptance also remains open.
+On 2026-10-25, a second disposable-VM run configured the existing trusted
+`/usr/sbin/nginx` binary and a root-owned temporary include directory. The
+temporary Nginx include listened only on `127.0.0.1:38082`; the existing
+default listener on port 80 remained unchanged and returned HTTP 404 after
+reload. The Helper advertised `nginx.route.set` alongside the container
+operations.
 
-The test container and imported image were removed, the Helper process was
-stopped, and temporary binaries, certificates, socket, and configuration were
-removed. No systemd units, K3s resources, firewall rules, or host services were
-changed.
+The same fixture ran as UID/GID `1000`, deployed
+`nanpanel-p5-rootful-route-7adeedef`, and returned HTTP `200`/`v2` directly on
+port `38081`. It then switched the managed Nginx route and returned HTTP
+`200`/`v2` through port `38082`, with Host `nanpanel-rootful.test`. The route
+result recorded `routedHttpStatus: 200`, listener `127.0.0.1:38082`, and
+stable weight 100. The container was stopped successfully afterward.
+
+| Operation | Operation ID | Result |
+| --- | --- | --- |
+| `container.deploy` | `81cd63dc-0310-4863-bf2e-3b9238a4756e` | Container `487706a93911c89374ee93080c8af1ed9fabc61bf797d8f71652f8547a027339` |
+| `nginx.route.set` | `5f8ea0b7-49d0-4e31-9684-d6ff55ee26e3` | HTTP 200, route SHA-256 `262a29d8d95090ca91eb99674adbf5b799a6d1bdf2e2026b0581bd8688f9cda5` |
+| `container.stop` | `df1a6178-a1da-489e-b2c3-ecd10632fd7d` | Succeeded |
+
+The exact guest invocation was:
+
+```sh
+python3 /tmp/rootful-podman-helper-ops.py \
+  --socket /run/nanpanel-p5-rootful-route/socket/helper.sock \
+  --image localhost/nanpanel-p5-app:v2 \
+  --container-name nanpanel-p5-rootful-route-7adeedef \
+  --host-port 38081 \
+  --route-port 38082 \
+  --server-name nanpanel-rootful.test
+```
+
+The temporary container, image, Helper, Nginx route, include file, socket, and
+configuration were removed. Nginx remains active with its original port-80
+default site. This direct Helper IPC probe closes the rootful Podman container
+and managed-route capability check; it does not exercise the complete
+Core-to-mTLS-Agent release workflow on a rootful host. Physically independent
+host acceptance also remains open. No systemd units, K3s resources, firewall
+rules, or host services were changed.
