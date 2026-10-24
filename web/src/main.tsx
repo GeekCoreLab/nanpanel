@@ -9,10 +9,11 @@ import { api, ApiError, isMock, mockBusiness } from './lib/api';
 import { DEMO_PASSWORD } from './lib/mock';
 import { createUuid } from './lib/uuid.ts';
 import { agentMaintenanceCommand, type AgentMaintenanceMode } from './lib/agent-maintenance.ts';
-import type { Host, HostPage, Agent, AgentInstallation, AgentUpdateOperation, SystemService, SystemServicePage, Operation, OperationPage, SessionContext, AdminOverview, AdminUser, AdminUserPage, PlatformSettings, AuditEventPage, WebSessionList, ApiKeyList, CreatedApiKey, BuiltinRoleList, AgentEnrollmentCreated, HostHelperOperationRequest, HostNetworkInventory, HostNetworkInterface, HostNetworkRoute, HostFileListing, SshProbeResult, SshSystemdStatusResult, SshSystemdJournalResult, HostSshConfig, SshHostKeyProbe, BastionSession, BastionSessionTicket, BastionCommand, BastionRecordingChunk, KubernetesClusterList, KubernetesRuntimeDiscovery, KubernetesRuntimeDiscoveryList, KubernetesClusterImportRequest, KubernetesClusterSummary, KubernetesClusterNodeList, KubernetesClusterNode, KubernetesManagedDeployment, KubernetesManagedDeploymentCreateRequest, KubernetesManagedDeploymentScaleRequest, KubernetesManagedDeploymentList, KubernetesTopologyNamespaceSnapshot, K3sRolloutList, K3sRolloutPlan, K3sInstallationList, K3sInstallationPlan } from './lib/types';
+import type { Host, HostPage, Agent, AgentInstallation, AgentUpdateOperation, SystemService, SystemServicePage, Operation, OperationPage, SessionContext, AdminOverview, AdminUser, AdminUserPage, PlatformSettings, AuditEventPage, WebSessionList, ApiKeyList, CreatedApiKey, BuiltinRoleList, AgentEnrollmentCreated, HostHelperOperationRequest, HostNetworkInventory, HostNetworkInterface, HostNetworkRoute, HostFileListing, SshProbeResult, SshSystemdStatusResult, SshSystemdJournalResult, HostSshConfig, SshHostKeyProbe, BastionSession, BastionSessionTicket, BastionCommand, BastionRecordingChunk, KubernetesClusterList, KubernetesRuntimeDiscovery, KubernetesRuntimeDiscoveryList, KubernetesClusterImportRequest, KubernetesClusterSummary, KubernetesClusterNodeList, KubernetesClusterNode, KubernetesManagedDeployment, KubernetesManagedDeploymentCreateRequest, KubernetesManagedDeploymentScaleRequest, KubernetesManagedDeploymentList, KubernetesTopologyNamespaceSnapshot, KubernetesApplicationRelease, KubernetesApplicationReleaseCreateRequest, KubernetesApplicationReleaseList, HostApplicationRelease, HostApplicationReleaseCreateRequest, HostApplicationReleaseList, K3sRolloutList, K3sRolloutPlan, K3sInstallationList, K3sInstallationPlan } from './lib/types';
 import './api-keys.css';
 import './kubernetes-clusters.css';
 import './kubernetes-upgrade.css';
+import './host-application-releases.css';
 import './style.css';
 const nav = [['overview', '◫', '总览'], ['hosts', '▤', '主机资产'], ['topology', '⌘', '网络拓扑'], ['clusters', '☸', 'Kubernetes 集群'], ['operations', '◷', '操作任务'], ['users', '♙', '管理员'], ['audit', '☷', '审计日志'], ['settings', '⚙', '平台设置'], ['account', '◎', '账号与会话']];
 const labels: Record<string, string> = { ONLINE: '在线', OFFLINE: '离线', UNKNOWN: '未知 / 结果未知', ACTIVE: '运行中', INACTIVE: '未运行', AVAILABLE: '可用', UNAVAILABLE: '不可用', SUCCEEDED: '成功', ACCEPTED: '已受理', FAILED: '失败', FORCE_TERMINATED: '已强制阻断', RUNNING: '执行中', PENDING: '等待中', CANCELLED: '已取消', DISABLED: '已禁用', DENIED: '已拒绝' };
@@ -67,7 +68,102 @@ function enrollmentInstallCommand(enrollment: AgentEnrollmentCreated) {
 }
 function Hosts({ notify }: { notify: (s: string) => void }) {
  const [status, setStatus] = useState(''); const [query, setQuery] = useState(''); const [selected, setSelected] = useState<Host>(); const [cursors, setCursors] = useState<(string | null)[]>([null]); const [adding, setAdding] = useState(false); const params = new URLSearchParams(); if (status) params.set('status', status); if (query.trim()) params.set('search', query.trim()); const cursor = cursors[cursors.length - 1]; if (cursor) params.set('cursor', cursor); const queryString = params.toString(); const r = useResource<HostPage>('/hosts' + (queryString ? `?${queryString}` : ''), 0, true); const visibleHosts = r.data?.items ?? [];
- return <><PageHeading title="主机资产" description="统一查看 Linux 主机、Agent 能力与系统服务。" action={<div className="host-heading-actions"><button className="primary" onClick={() => setAdding(true)}>＋ 添加主机</button><button className="secondary" onClick={r.refresh}>↻ 刷新</button></div>} /><section className="card"><div className="toolbar"><input aria-label="搜索主机" placeholder="⌕ 搜索全部主机名称…" value={query} onChange={e => { setQuery(e.target.value); setCursors([null]); }} /><select aria-label="主机状态" value={status} onChange={e => { setStatus(e.target.value); setCursors([null]); }}><option value="">全部状态</option>{['ONLINE', 'OFFLINE', 'UNKNOWN'].map(s => <option key={s} value={s}>{labels[s]}</option>)}</select><span className="muted">本页 {visibleHosts.length} 台</span></div><ResourceState {...r} /><HostTable hosts={visibleHosts} onSelect={setSelected} /><div className="form-actions"><button className="secondary" disabled={cursors.length < 2} onClick={() => setCursors(value => value.slice(0, -1))}>上一页</button><span className="muted">第 {cursors.length} 页 · 默认每页 20 台</span><button className="secondary" disabled={!r.data?.nextCursor} onClick={() => { if (r.data?.nextCursor) setCursors(value => [...value, r.data!.nextCursor]); }}>下一页</button></div></section>{selected && <HostDetail host={selected} close={() => setSelected(undefined)} notify={notify} />}{adding && <HostEnrollmentDialog close={() => setAdding(false)} onCreated={() => { setStatus(''); setCursors([null]); r.refresh(); }} />}</>;
+ return <><PageHeading title="主机资产" description="统一查看 Linux 主机、Agent 能力与系统服务。" action={<div className="host-heading-actions"><button className="primary" onClick={() => setAdding(true)}>＋ 添加主机</button><button className="secondary" onClick={r.refresh}>↻ 刷新</button></div>} /><section className="card"><div className="toolbar"><input aria-label="搜索主机" placeholder="⌕ 搜索全部主机名称…" value={query} onChange={e => { setQuery(e.target.value); setCursors([null]); }} /><select aria-label="主机状态" value={status} onChange={e => { setStatus(e.target.value); setCursors([null]); }}><option value="">全部状态</option>{['ONLINE', 'OFFLINE', 'UNKNOWN'].map(s => <option key={s} value={s}>{labels[s]}</option>)}</select><span className="muted">本页 {visibleHosts.length} 台</span></div><ResourceState {...r} /><HostTable hosts={visibleHosts} onSelect={setSelected} /><div className="form-actions"><button className="secondary" disabled={cursors.length < 2} onClick={() => setCursors(value => value.slice(0, -1))}>上一页</button><span className="muted">第 {cursors.length} 页 · 默认每页 20 台</span><button className="secondary" disabled={!r.data?.nextCursor} onClick={() => { if (r.data?.nextCursor) setCursors(value => [...value, r.data!.nextCursor]); }}>下一页</button></div></section><HostApplicationReleases notify={notify} />{selected && <HostDetail host={selected} close={() => setSelected(undefined)} notify={notify} />}{adding && <HostEnrollmentDialog close={() => setAdding(false)} onCreated={() => { setStatus(''); setCursors([null]); r.refresh(); }} />}</>;
+}
+
+function HostApplicationReleases({ notify }: { notify: (message: string) => void }) {
+ const hosts = useResource<HostPage>(isMock ? '' : '/hosts?limit=100', 30000, true);
+ const releases = useResource<HostApplicationReleaseList>(isMock ? '' : '/host-application-releases', 5000, true);
+ const [selected, setSelected] = useState<string[]>([]);
+ const [addresses, setAddresses] = useState<Record<string, string>>({});
+ const [busy, setBusy] = useState('');
+ const [error, setError] = useState('');
+ const required = ['container.deploy', 'container.start', 'container.stop', 'nginx.route.set'];
+ const selectable = (host: Host) => host.status === 'ONLINE' && required.every(capability => host.capabilities.includes(capability));
+
+ async function create(event: FormEvent<HTMLFormElement>) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const values = new FormData(form);
+  const targets = selected.flatMap(hostId => {
+   const host = hosts.data?.items.find(item => item.id === hostId);
+   return host ? [{ hostId: host.id, listenAddress: addresses[host.id]?.trim() ?? '', expectedGeneration: host.generation }] : [];
+  });
+  if (!targets.length || targets.some(target => !target.listenAddress)) {
+   setError('请选择在线且报告所需能力的主机，并为每台填写已分配的监听地址。'); return;
+  }
+  const payload: HostApplicationReleaseCreateRequest = {
+   name: String(values.get('name') ?? '').trim(), stableImage: String(values.get('stableImage') ?? '').trim(),
+   image: String(values.get('image') ?? '').trim(), containerPort: Number(values.get('containerPort')),
+   serverName: String(values.get('serverName') ?? '').trim(), listenPort: Number(values.get('listenPort')),
+   healthPath: String(values.get('healthPath') ?? '').trim(), batchSize: Number(values.get('batchSize')),
+   targets, reason: String(values.get('reason') ?? '').trim(),
+  };
+  setBusy('create'); setError('');
+  try {
+   const result = await api<HostApplicationRelease>('/host-application-releases', 'POST', payload, {}, true);
+   form.reset(); setSelected([]); setAddresses({}); releases.refresh();
+   notify(`已创建 ${payload.name} 的普通主机蓝绿发布草稿 ${result.data.id.slice(0, 8)}`);
+  } catch (cause) { setError((cause as Error).message); }
+  finally { setBusy(''); }
+ }
+
+ async function act(plan: HostApplicationRelease, action: 'start' | 'pause' | 'resume' | 'reconcile' | 'rollback') {
+  setBusy(`${plan.id}:${action}`); setError('');
+  try {
+   await api<HostApplicationRelease>(`/host-application-releases/${encodeURIComponent(plan.id)}/${action}`, 'POST', {}, {}, true);
+   releases.refresh();
+   notify(`${plan.name}：${({ start: '已启动', pause: '已暂停', resume: '已批准下一批', reconcile: '已请求对账', rollback: '已请求回滚' })[action]}`);
+  } catch (cause) { setError((cause as Error).message); releases.refresh(); }
+  finally { setBusy(''); }
+ }
+
+ return <section className="card host-release-panel">
+  <div className="card-title"><div><span className="eyebrow">DOCKER / PODMAN</span><h2>普通主机蓝绿发布</h2><p>通过 Agent 和 root Helper 部署候选容器，先验证稳定路由，再切换并检查实际 HTTP 健康响应。每批完成后需人工批准下一批。</p></div><button className="secondary" disabled={releases.loading || isMock} onClick={releases.refresh}>{releases.loading ? '读取中…' : '刷新发布'}</button></div>
+  {isMock && <div className="alert">Mock 环境不连接真实 Agent、Helper 或 Nginx。</div>}
+  {error && <div className="alert error" role="alert">{error}</div>}
+  {!isMock && <form className="host-release-form" onSubmit={event => void create(event)}>
+   <div className="host-release-grid">
+    <Field label="应用名称"><input name="name" required maxLength={63} pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?" placeholder="例如 web" /></Field>
+    <Field label="当前稳定镜像"><input name="stableImage" required maxLength={512} placeholder="registry.example/web:1.9.0" /></Field>
+    <Field label="候选镜像"><input name="image" required maxLength={512} placeholder="registry.example/web:2.0.0" /></Field>
+    <Field label="容器端口"><input name="containerPort" type="number" min={1} max={65535} defaultValue={8080} required /></Field>
+    <Field label="HTTP 主机名"><input name="serverName" required maxLength={253} pattern="[A-Za-z0-9.-]+" placeholder="app.example.com" /></Field>
+    <Field label="Nginx 监听端口"><input name="listenPort" type="number" min={1024} max={65535} defaultValue={18080} required /></Field>
+    <Field label="健康检查路径"><input name="healthPath" required maxLength={256} pattern="/[A-Za-z0-9/._~-]*" defaultValue="/health" /></Field>
+    <Field label="每批主机数"><input name="batchSize" type="number" min={1} max={50} defaultValue={1} required /></Field>
+   </div>
+   <div className="host-release-hosts"><div className="section-heading"><h3>按顺序选择主机和监听地址</h3><button type="button" className="secondary" onClick={hosts.refresh}>刷新主机</button></div><ResourceState {...hosts} />
+    {(hosts.data?.items ?? []).map(host => {
+     const order = selected.indexOf(host.id);
+     const checked = order >= 0;
+     return <label className={`host-release-target ${checked ? 'selected' : ''}`} key={host.id}>
+     <input type="checkbox" disabled={!selectable(host)} checked={checked} onChange={event => setSelected(current => event.target.checked ? [...current, host.id] : current.filter(id => id !== host.id))} />
+     <span className="host-release-target-name"><strong>{checked ? `${order + 1}. ` : ''}{host.hostname}</strong><small className="mono">{host.id.slice(0, 8)} · generation {host.generation}</small><small>{selectable(host) ? '在线并报告容器与 Nginx 路由能力' : `${host.status} · 缺少所需能力或 Agent 在线状态`}</small></span>
+     <input aria-label={`${host.hostname} Nginx 监听地址`} disabled={!checked} value={addresses[host.id] ?? ''} onChange={event => setAddresses(current => ({ ...current, [host.id]: event.target.value }))} placeholder="此主机已分配的 IPv4 / IPv6 地址" />
+     </label>;
+    })}
+    {!hosts.loading && !hosts.error && !hosts.data?.items.length && <p className="muted">尚无主机资产。</p>}
+   </div>
+   <Field label="发布原因"><textarea name="reason" required maxLength={500} placeholder="说明本次发布的变更和验证目标" /></Field>
+   <div className="alert">每台主机必须预先配置 Helper 的 NANPANEL_NGINX_INCLUDE_DIR，并确保 Nginx 主配置精确 include 该目录的 *.conf。候选流量通过专属 HTTP 监听端口接入；防火墙策略仍由运维人员配置。</div>
+   <button className="primary" disabled={!!busy || isMock || selected.length === 0}>{busy === 'create' ? '正在保存…' : '创建主机发布草稿'}</button>
+  </form>}
+  <ResourceState {...releases} />
+  <div className="host-release-list">{(releases.data?.items ?? []).map(plan => <article className="host-release-plan" key={plan.id}>
+   <div className="host-release-plan-heading"><div><strong>{plan.name} · {plan.stableImage} → {plan.image}</strong><small>{plan.serverName}:{plan.listenPort} · {plan.targets.length} 台主机 · 每批 {plan.batchSize} 台</small></div><Badge value={plan.state} /></div>
+   {plan.errorMessage && <div className="alert error">{plan.errorCode}: {plan.errorMessage}</div>}
+   <div className="table-wrap"><table><thead><tr><th>顺序</th><th>主机</th><th>状态</th><th>稳定 / 候选端口</th><th>最近步骤</th></tr></thead><tbody>{plan.targets.map(target => <tr key={`${plan.id}:${target.ordinal}`}><td>{target.ordinal + 1}</td><td className="mono">{target.hostId.slice(0, 8)} · {target.listenAddress}</td><td>{target.state}</td><td>{target.stablePort} / {target.candidatePort}</td><td>{target.detail ?? '—'}{target.operationId && <small className="mono">操作 {target.operationId.slice(0, 8)}</small>}</td></tr>)}</tbody></table></div>
+   <div className="host-release-actions">
+    {plan.state === 'DRAFT' && <button className="primary" disabled={!!busy || isMock} onClick={() => void act(plan, 'start')}>启动</button>}
+    {plan.state === 'RUNNING' && <button className="secondary" disabled={!!busy || isMock} onClick={() => void act(plan, 'pause')}>暂停</button>}
+    {plan.state === 'PAUSED' && <button className="primary" disabled={!!busy || isMock} onClick={() => void act(plan, 'resume')}>{plan.activeOrdinal > 0 && plan.activeOrdinal < plan.targets.length && plan.activeOrdinal % plan.batchSize === 0 ? '批准下一批' : '继续发布'}</button>}
+    {plan.state === 'UNKNOWN' && <button className="primary" disabled={!!busy || isMock} onClick={() => void act(plan, 'reconcile')}>对账</button>}
+    {['PAUSED', 'SUCCEEDED', 'FAILED'].includes(plan.state) && <button className="danger" disabled={!!busy || isMock} onClick={() => { if (window.confirm(`按逆序恢复 ${plan.name} 的稳定版本？`)) void act(plan, 'rollback'); }}>回滚已完成主机</button>}
+   </div>
+   <small className="mono">发布 {plan.id} · {plan.reason} · 创建于 {time(plan.createdAt)}</small>
+  </article>)}{!releases.loading && !releases.error && !releases.data?.items.length && <p className="muted">暂无普通主机发布计划。</p>}</div>
+ </section>;
 }
 function HostEnrollmentDialog({ close, onCreated }: { close: () => void; onCreated: () => void }) {
  const [hostname, setHostname] = useState(window.location.hostname);
@@ -1091,12 +1187,100 @@ function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
          {!resources.length && !deploymentLoading[resourceKey] && <p className="muted">暂无已登记的托管 Deployment。先刷新清单，或创建一个新的 Deployment。</p>}
          {deploymentLoading[resourceKey] && <p className="muted">正在读取 Namespace Deployment…</p>}
         </div>
+        <KubernetesApplicationReleases clusterId={cluster.id} namespace={selectedNamespace} notify={notify} />
        </>}
       </section>;
     })()}
    </section>;
   })}{!loading && !clusters.length && !isMock && <Empty>尚未导入 Kubernetes 集群。</Empty>}</div>
  </>;
+}
+function KubernetesApplicationReleases({ clusterId, namespace, notify }: {
+ clusterId: string; namespace: string; notify: (message: string) => void;
+}) {
+ const [items, setItems] = useState<KubernetesApplicationRelease[]>([]);
+ const [loading, setLoading] = useState(false);
+ const [busy, setBusy] = useState('');
+ const [error, setError] = useState('');
+ const path = `/kubernetes/clusters/${encodeURIComponent(clusterId)}/namespaces/${encodeURIComponent(namespace)}/application-releases`;
+ async function load() {
+  if (isMock || !namespace) return;
+  setLoading(true);
+  try {
+   const result = await api<KubernetesApplicationReleaseList>(path, 'GET', undefined, {}, true);
+   setItems(result.data.items);
+   setError('');
+  } catch (e) { setError((e as Error).message); }
+  finally { setLoading(false); }
+ }
+ useEffect(() => {
+  void load();
+  const timer = window.setInterval(() => void load(), 5000);
+  return () => window.clearInterval(timer);
+ }, [clusterId, namespace]);
+ async function create(event: FormEvent<HTMLFormElement>) {
+  event.preventDefault();
+  const formElement = event.currentTarget;
+  const values = new FormData(formElement);
+  const payload: KubernetesApplicationReleaseCreateRequest = {
+   name: String(values.get('name') ?? ''), stableImage: String(values.get('stableImage') ?? ''),
+   image: String(values.get('image') ?? ''),
+   replicas: Number(values.get('replicas')), containerPort: Number(values.get('containerPort')),
+   gatewayName: String(values.get('gatewayName') ?? ''), hostname: String(values.get('hostname') ?? ''),
+   prometheusService: String(values.get('prometheusService') ?? ''),
+   maxErrorRate: Number(values.get('maxErrorRate')), reason: String(values.get('reason') ?? '')
+  };
+  setBusy('create'); setError('');
+  try {
+   await api<KubernetesApplicationRelease>(path, 'POST', payload, {}, true);
+   formElement.reset(); await load(); notify(`已创建 ${namespace}/${payload.name} 渐进发布草稿`);
+  } catch (e) { setError((e as Error).message); }
+  finally { setBusy(''); }
+ }
+ async function act(plan: KubernetesApplicationRelease, action: 'start' | 'pause' | 'resume' | 'promote' | 'rollback') {
+  setBusy(`${plan.id}:${action}`); setError('');
+  try {
+   await api<KubernetesApplicationRelease>(`${path}/${encodeURIComponent(plan.id)}/${action}`, 'POST', {}, {}, true);
+   await load(); notify(`${plan.name}：${({ start: '已启动', pause: '已请求暂停', resume: '已请求恢复', promote: '已推进阶段', rollback: '已请求回滚' })[action]}`);
+  } catch (e) { setError((e as Error).message); await load(); }
+  finally { setBusy(''); }
+ }
+ return <section className="managed-resource-panel application-release-panel">
+  <div className="resource-panel-heading"><div><h3>渐进发布（Gateway API + Argo Rollouts）</h3><p className="muted">创建草稿后需显式启动。集群须预装 Gateway API、Argo Rollouts Gateway API 插件和可用的 Prometheus；流量由 Argo 按 10%、50%、100% 推进并在每阶段暂停。</p></div><button className="secondary" disabled={loading || isMock} onClick={() => void load()}>{loading ? '读取中…' : '刷新发布'}</button></div>
+  {isMock && <div className="alert">Mock 环境不连接真实 Kubernetes 发布控制器。</div>}
+  {error && <div className="alert error" role="alert">{error}</div>}
+  {!isMock && <form className="managed-deployment-form" onSubmit={event => void create(event)}>
+   <Field label="应用名称"><input name="name" required maxLength={63} pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?" placeholder="例如 web" /></Field>
+   <Field label="当前稳定镜像"><input name="stableImage" required maxLength={512} placeholder="例如 registry.example/web:1.9.0" /></Field>
+   <Field label="目标镜像"><input name="image" required maxLength={512} placeholder="例如 registry.example/web:2.0.0" /></Field>
+   <Field label="副本数"><input name="replicas" type="number" min={1} max={20} defaultValue={2} required /></Field>
+   <Field label="容器端口"><input name="containerPort" type="number" min={1} max={65535} defaultValue={8080} required /></Field>
+   <Field label="Gateway 名称"><input name="gatewayName" required maxLength={63} pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?" placeholder="例如 public-gateway" /></Field>
+   <Field label="HTTP 主机名"><input name="hostname" required maxLength={253} pattern="[a-z0-9.-]+" placeholder="app.example.com" /></Field>
+   <Field label="Prometheus Service"><input name="prometheusService" required maxLength={63} defaultValue="prometheus" /></Field>
+   <Field label="最大 HTTP 错误率（0.01–0.5）"><input name="maxErrorRate" type="number" min={0.01} max={0.5} step={0.01} defaultValue={0.05} required /></Field>
+   <Field label="发布原因"><input name="reason" required maxLength={500} placeholder="例如：发布 web 2.0.0" /></Field>
+   <button className="primary" disabled={!!busy || isMock}>{busy === 'create' ? '正在保存…' : '创建发布草稿'}</button>
+  </form>}
+  <div className="managed-deployment-list">
+   {items.map(plan => <article className="managed-deployment-row" key={plan.id}>
+    <div><strong>{plan.name} · {plan.stableImage} → {plan.image}</strong><Badge value={plan.state} /><small>{plan.hostname} · stable {plan.stableWeight ?? '—'}% / canary {plan.canaryWeight ?? '—'}% · Argo {plan.rolloutPhase ?? '尚未启动'} · 创建于 {time(plan.createdAt)}</small>
+     {plan.errorMessage && <small className="alert error">{plan.errorCode}: {plan.errorMessage}</small>}
+     <small className="mono">发布 {plan.id} · 原因：{plan.reason}</small>
+     {plan.stages.length > 0 && <div className="table-wrap"><table><thead><tr><th>阶段</th><th>状态</th><th>目标 canary</th><th>观测 stable / canary</th><th>AnalysisRun</th></tr></thead><tbody>{plan.stages.map(stage => <tr key={`${plan.id}:${stage.ordinal}`}><td>{stage.stage}</td><td>{stage.state}</td><td>{stage.desiredCanaryWeight ?? '—'}%</td><td>{stage.observedStableWeight ?? '—'}% / {stage.observedCanaryWeight ?? '—'}%</td><td className="mono">{stage.analysisRunName ?? '—'}</td></tr>)}</tbody></table></div>}
+     {plan.measurements.length > 0 && <small>最近测量：{plan.measurements.slice(0, 4).map(measurement => `${measurement.metricName}=${measurement.value ?? '—'} (${measurement.phase})`).join(' · ')}</small>}
+    </div>
+    <div className="managed-deployment-actions">
+     {plan.state === 'DRAFT' && <button className="primary" disabled={!!busy || isMock} onClick={() => void act(plan, 'start')}>启动</button>}
+     {plan.state === 'UNKNOWN' && <button className="primary" disabled={!!busy || isMock} onClick={() => void act(plan, 'start')}>对账并恢复</button>}
+     {plan.state === 'RUNNING' && <button className="secondary" disabled={!!busy || isMock} onClick={() => void act(plan, 'pause')}>暂停</button>}
+     {plan.state === 'PAUSED' && <><button className="secondary" disabled={!!busy || isMock} onClick={() => void act(plan, 'resume')}>恢复自动推进</button><button className="primary" disabled={!!busy || isMock} onClick={() => void act(plan, 'promote')}>批准下一阶段</button></>}
+     {['RUNNING', 'PAUSED', 'UNKNOWN'].includes(plan.state) && <button className="danger" disabled={!!busy || isMock} onClick={() => { if (window.confirm(`请求 ${plan.name} 回滚到稳定版本？`)) void act(plan, 'rollback'); }}>回滚</button>}
+    </div>
+   </article>)}
+   {!items.length && !loading && !isMock && <p className="muted">此 Namespace 暂无渐进发布计划。</p>}
+  </div>
+ </section>;
 }
 function Users({ self, notify }: { self: string; notify: (s: string) => void }) {
  const r = useResource<AdminUserPage>('/admin/users'); const roles = useResource<BuiltinRoleList>('/admin/roles'); const [create, setCreate] = useState(false); const [error, setError] = useState(''); const [busy, setBusy] = useState(false); const [editing, setEditing] = useState<{ user: AdminUser; etag: string }>(); const [editMode, setEditMode] = useState<'profile' | 'password'>('profile');

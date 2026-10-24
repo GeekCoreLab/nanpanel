@@ -10,6 +10,9 @@
     "test": "node --test scripts/*.test.mjs",
     "test:auth": "node scripts/auth-browser.mjs",
     "test:browser": "node scripts/browser-smoke.mjs",
+    "test:p5:browser": "node scripts/p5-console-browser.mjs",
+    "test:p5:live-browser": "node scripts/p5-console-live-browser.mjs",
+    "test:p5:host-live": "node scripts/p5-host-release-live-browser.mjs",
     "test:topology": "node scripts/topology-browser.mjs",
     "test:topology:core": "node scripts/topology-core-browser.mjs"
   },
