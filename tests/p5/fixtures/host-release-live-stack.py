@@ -425,21 +425,142 @@ def make_ca(directory):
 
 
 
-def rootful_vm_setup_script(paths, gateway_port, agent_id, hostname):
+def rootful_vm_setup_script(
+    paths, gateway_port, agent_id, hostname, *, nginx_mode, gateway_address
+):
     staging = shlex.quote(paths["staging"])
     base = shlex.quote(paths["base"])
     helper_dir = shlex.quote(paths["helper_dir"])
     state_dir = shlex.quote(paths["state_dir"])
     nginx_conf = shlex.quote(paths["nginx_conf"])
+    nginx_binary = shlex.quote(paths["nginx_binary"])
+    cni_conf = shlex.quote(paths["cni_conf"])
+    containers_conf = shlex.quote(paths["containers_conf"])
+    cni_bridge = shlex.quote(paths["cni_bridge"])
     hostname = shlex.quote(hostname)
+    nginx_mode = shlex.quote(nginx_mode)
+    agent_endpoint = shlex.quote(f"https://{gateway_address}:{gateway_port}")
     images = " ".join(shlex.quote(image) for image in APP_IMAGES[:3])
+    if nginx_mode == "isolated":
+        cni_setup = r"""
+if ip -4 route show table all | grep -q '^172\.'; then
+  echo 'isolated Podman CNI subnet overlaps an existing 172.16/12 route'
+  exit 1
+fi
+test -s /etc/cni/net.d/87-podman-bridge.conflist || {
+  echo 'system Podman CNI bridge config is unavailable'
+  exit 1
+}
+test ! -e "/sys/class/net/$cni_bridge" || {
+  echo 'isolated Podman CNI bridge already exists'
+  exit 1
+}
+install -d -o root -g root -m 0755 "$(dirname "$cni_conf")"
+sed \
+  -e "s/\"bridge\": \"cni-podman0\"/\"bridge\": \"$cni_bridge\"/" \
+  -e 's|"subnet": "10.88.0.0/16"|"subnet": "172.31.240.0/24"|' \
+  -e 's|"gateway": "10.88.0.1"|"gateway": "172.31.240.1"|' \
+  /etc/cni/net.d/87-podman-bridge.conflist > "$cni_conf"
+grep -Fq '"name": "podman"' "$cni_conf"
+grep -Fq "\"bridge\": \"$cni_bridge\"" "$cni_conf"
+grep -Fq '"subnet": "172.31.240.0/24"' "$cni_conf"
+cat > "$containers_conf" <<EOF
+[network]
+network_config_dir = "$(dirname "$cni_conf")"
+EOF
+custom_podman_network=$(CONTAINERS_CONF="$containers_conf" podman network inspect podman)
+printf '%s\n' "$custom_podman_network" | grep -Fq '"subnet": "172.31.240.0/24"' || {
+  echo 'Podman did not load the run-scoped CNI network configuration'
+  exit 1
+}
+"""
+        cni_cleanup = r"""
+if ip link show dev "$cni_bridge" >/dev/null 2>&1; then
+  ip link delete dev "$cni_bridge"
+fi
+test ! -e "/sys/class/net/$cni_bridge" || {
+  echo 'isolated Podman CNI bridge remains after cleanup'
+  exit 1
+}
+"""
+        container_config_env = f'  CONTAINERS_CONF="{containers_conf}" \\\n'
+        nginx_baseline = r"""
+global_nginx_service=$(systemctl is-active nginx 2>/dev/null || true)
+global_nginx_http=$(curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' http://127.0.0.1/ 2>/dev/null || true)
+test -n "$global_nginx_service" || global_nginx_service=unknown
+test -n "$global_nginx_http" || global_nginx_http=000
+printf '%s %s\n' "$global_nginx_service" "$global_nginx_http" > "$base/system-nginx-before"
+"""
+        nginx_setup = r"""
+nginx_lua_package_path=$("$nginx_real_binary" -T 2>&1 | sed -n 's/^[[:space:]]*lua_package_path[[:space:]]*"\(.*\)";[[:space:]]*$/\1/p' | head -n 1)
+nginx_lua_package_cpath=$("$nginx_real_binary" -T 2>&1 | sed -n 's/^[[:space:]]*lua_package_cpath[[:space:]]*"\(.*\)";[[:space:]]*$/\1/p' | head -n 1)
+cat > "$nginx_conf" <<EOF
+worker_processes 1;
+pid $base/nginx.pid;
+error_log $base/nginx-error.log;
+events {
+    worker_connections 256;
+}
+http {
+    access_log off;
+EOF
+if [ -n "$nginx_lua_package_path" ]; then
+  printf '    lua_package_path "%s";\n' "$nginx_lua_package_path" >> "$nginx_conf"
+fi
+if [ -n "$nginx_lua_package_cpath" ]; then
+  printf '    lua_package_cpath "%s";\n' "$nginx_lua_package_cpath" >> "$nginx_conf"
+fi
+cat >> "$nginx_conf" <<EOF
+    include $base/routes/*.conf;
+}
+EOF
+cat > "$nginx_binary" <<EOF
+#!/bin/sh
+exec "$nginx_real_binary" -c "$nginx_conf" "\$@"
+EOF
+chmod 0755 "$nginx_binary"
+"$nginx_binary" -t -q
+"$nginx_binary"
+for attempt in $(seq 1 100); do
+  if [ -s "$base/nginx.pid" ] && kill -0 "$(cat "$base/nginx.pid")" 2>/dev/null; then break; fi
+  sleep 0.1
+done
+[ -s "$base/nginx.pid" ] && kill -0 "$(cat "$base/nginx.pid")" 2>/dev/null || {
+  cat "$base/nginx-error.log" 2>/dev/null || true
+  echo 'isolated Nginx did not start'
+  exit 1
+}
+"$nginx_binary" -T >/dev/null
+"""
+    else:
+        cni_setup = ""
+        cni_cleanup = ""
+        container_config_env = ""
+        nginx_baseline = ""
+        nginx_setup = r"""
+nginx_binary="$nginx_real_binary"
+printf 'include %s/*.conf;\n' "$base/routes" > "$nginx_conf"
+"$nginx_binary" -t
+systemctl reload nginx
+systemctl is-active --quiet nginx
+default_status=$(curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' http://127.0.0.1/)
+test "$default_status" = 404 || { echo "existing Nginx default site changed: HTTP $default_status"; exit 1; }
+"""
     return f"""set -eu
+umask 077
 staging={staging}
 base={base}
 helper_dir={helper_dir}
 state_dir={state_dir}
 nginx_conf={nginx_conf}
-test ! -e "$base" && test ! -e "$helper_dir" && test ! -e "$state_dir" \
+nginx_binary={nginx_binary}
+cni_conf={cni_conf}
+containers_conf={containers_conf}
+cni_bridge={cni_bridge}
+nginx_mode={nginx_mode}
+nginx_real_binary=$(readlink -f "$(command -v nginx)")
+test -x "$nginx_real_binary"
+test ! -e "$base" && test ! -e "$helper_dir" && test ! -e "$state_dir" \\
   && test ! -e "$nginx_conf" || {{ echo 'a run-specific rootful fixture path already exists'; exit 1; }}
 for image in {images}; do
   if podman image inspect "$image" >/dev/null 2>&1; then
@@ -452,6 +573,7 @@ for file in nanpanel-agent nanpanel-helper release-images.tar ca.crt agent.crt a
 done
 install -d -o root -g root -m 0755 "$base"
 touch "$base/fixture.marker"
+{nginx_baseline}
 install -d -o root -g root -m 0755 "$base/socket" "$base/routes" "$base/managed" "$helper_dir"
 install -d -o root -g root -m 0700 "$base/managed/files"
 install -d -o root -g 1000 -m 0750 "$base/certs"
@@ -461,23 +583,20 @@ install -o root -g root -m 0755 "$staging/nanpanel-helper" "$helper_dir/nanpanel
 install -o 1000 -g 1000 -m 0644 "$staging/ca.crt" "$base/certs/ca.crt"
 install -o 1000 -g 1000 -m 0644 "$staging/agent.crt" "$base/certs/agent.crt"
 install -o 1000 -g 1000 -m 0600 "$staging/agent.key" "$base/certs/agent.key"
-printf 'podman\n' > "$base/managed/container-runtime"
+printf 'podman\\n' > "$base/managed/container-runtime"
 chmod 0644 "$base/managed/container-runtime"
 printf '%s\\n' {hostname} > "$base/agent-hostname"
 chmod 0644 "$base/agent-hostname"
 podman load --input "$staging/release-images.tar"
 for image in {images}; do podman image inspect "$image" >/dev/null; done
-printf 'include %s/*.conf;\n' "$base/routes" > "$nginx_conf"
-/usr/sbin/nginx -t
-systemctl reload nginx
-systemctl is-active --quiet nginx
-default_status=$(curl --noproxy '*' -sS -o /dev/null -w '%{{http_code}}' http://127.0.0.1/)
-test "$default_status" = 404 || {{ echo "existing Nginx default site changed: HTTP $default_status"; exit 1; }}
-nohup env \
-  NANPANEL_NGINX_INCLUDE_DIR="$base/routes" \
-  NANPANEL_NGINX_BINARY=/usr/sbin/nginx \
-  "$helper_dir/nanpanel-helper" "$base/socket/helper.sock" 1000 1000 \
-  "$base/managed" https://localhost "$base/certs/ca.crt" \
+{cni_setup}
+{nginx_setup}
+nohup env \\
+{container_config_env}\
+  NANPANEL_NGINX_INCLUDE_DIR="$base/routes" \\
+  NANPANEL_NGINX_BINARY="$nginx_binary" \\
+  "$helper_dir/nanpanel-helper" "$base/socket/helper.sock" 1000 1000 \\
+  "$base/managed" https://localhost "$base/certs/ca.crt" \\
   "$helper_dir/nanpanel-agent" > "$base/helper.log" 2>&1 </dev/null &
 echo $! > "$base/helper.pid"
 for attempt in $(seq 1 120); do
@@ -491,38 +610,98 @@ hostname_file=$1
 shift
 mount --bind "$hostname_file" /etc/hostname
 exec setpriv --reuid=1000 --regid=1000 --clear-groups env "$@"
-' nanpanel-p5-agent "$base/agent-hostname" \
-  NANPANEL_AGENT_ENDPOINTS=https://10.0.2.2:{gateway_port} \
-  NANPANEL_AGENT_TLS_DOMAIN=localhost \
-  NANPANEL_AGENT_ID={shlex.quote(agent_id)} \
-  NANPANEL_AGENT_CA="$base/certs/ca.crt" \
-  NANPANEL_AGENT_CERT="$base/certs/agent.crt" \
-  NANPANEL_AGENT_KEY="$base/certs/agent.key" \
-  NANPANEL_AGENT_HELPER_SOCKET="$base/socket/helper.sock" \
-  NANPANEL_AGENT_STATE_DIR="$state_dir" \
-  NANPANEL_AGENT_HEARTBEAT_SECS=2 \
-  NANPANEL_AGENT_RECONNECT_MIN_MS=250 \
-  NANPANEL_AGENT_RECONNECT_MAX_MS=2000 \
+' nanpanel-p5-agent "$base/agent-hostname" \\
+  NANPANEL_AGENT_ENDPOINTS={agent_endpoint} \\
+  NANPANEL_AGENT_TLS_DOMAIN=localhost \\
+  NANPANEL_AGENT_ID={shlex.quote(agent_id)} \\
+  NANPANEL_AGENT_CA="$base/certs/ca.crt" \\
+  NANPANEL_AGENT_CERT="$base/certs/agent.crt" \\
+  NANPANEL_AGENT_KEY="$base/certs/agent.key" \\
+  NANPANEL_AGENT_HELPER_SOCKET="$base/socket/helper.sock" \\
+  NANPANEL_AGENT_STATE_DIR="$state_dir" \\
+  NANPANEL_AGENT_HEARTBEAT_SECS=2 \\
+  NANPANEL_AGENT_RECONNECT_MIN_MS=250 \\
+  NANPANEL_AGENT_RECONNECT_MAX_MS=2000 \\
   "$helper_dir/nanpanel-agent" > "$base/agent.log" 2>&1 </dev/null &
 echo $! > "$base/agent.pid"
-printf 'ROOTFUL_VM_SETUP_PASS\n'
+printf 'ROOTFUL_VM_SETUP_PASS\\n'
 """
 
 
-def rootful_vm_cleanup_script(paths, container_names):
+def rootful_vm_cleanup_script(paths, container_names, *, nginx_mode):
     staging = shlex.quote(paths["staging"])
     base = shlex.quote(paths["base"])
     helper_dir = shlex.quote(paths["helper_dir"])
     state_dir = shlex.quote(paths["state_dir"])
     nginx_conf = shlex.quote(paths["nginx_conf"])
+    nginx_binary = shlex.quote(paths["nginx_binary"])
+    containers_conf = shlex.quote(paths["containers_conf"])
+    cni_bridge = shlex.quote(paths["cni_bridge"])
+    nginx_mode = shlex.quote(nginx_mode)
     images = " ".join(shlex.quote(image) for image in APP_IMAGES[:3])
     containers = " ".join(shlex.quote(name) for name in sorted(container_names))
+    if nginx_mode == "isolated":
+        cni_cleanup = r"""
+if ip link show dev "$cni_bridge" >/dev/null 2>&1; then
+  ip link delete dev "$cni_bridge"
+fi
+test ! -e "/sys/class/net/$cni_bridge" || {
+  echo 'isolated Podman CNI bridge remains after cleanup'
+  exit 1
+}
+"""
+        nginx_cleanup = r"""
+if [ -s "$base/nginx.pid" ]; then
+  nginx_pid=$(cat "$base/nginx.pid")
+  case "$nginx_pid" in ''|*[!0-9]*) echo 'invalid isolated Nginx pid file'; exit 1;; esac
+  nginx_cmdline=$(tr '\000' ' ' < "/proc/$nginx_pid/cmdline" 2>/dev/null || true)
+  case "$nginx_cmdline" in
+    *"$nginx_conf"*) "$nginx_binary" -s quit ;;
+    *) echo 'isolated Nginx pid does not identify this fixture'; exit 1 ;;
+  esac
+  for attempt in $(seq 1 100); do
+    [ -s "$base/nginx.pid" ] || break
+    sleep 0.1
+  done
+  test ! -s "$base/nginx.pid" || { echo 'isolated Nginx did not stop'; exit 1; }
+fi
+read -r expected_nginx_service expected_nginx_http < "$base/system-nginx-before"
+current_nginx_service=$(systemctl is-active nginx 2>/dev/null || true)
+current_nginx_http=$(curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' http://127.0.0.1/ 2>/dev/null || true)
+test "$current_nginx_service" = "$expected_nginx_service" || {
+  echo "system Nginx service state changed: $expected_nginx_service -> $current_nginx_service"
+  exit 1
+}
+test "$current_nginx_http" = "$expected_nginx_http" || {
+  echo "system Nginx response changed: $expected_nginx_http -> $current_nginx_http"
+  exit 1
+}
+"$nginx_real_binary" -t -q
+"""
+        post_cleanup = ""
+    else:
+        cni_cleanup = ""
+        nginx_cleanup = r"""
+rm -f "$nginx_conf"
+"$nginx_real_binary" -t
+systemctl reload nginx
+systemctl is-active --quiet nginx
+default_status=$(curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' http://127.0.0.1/)
+test "$default_status" = 404 || { echo "existing Nginx default site changed: HTTP $default_status"; exit 1; }
+"""
+        post_cleanup = "systemctl is-active --quiet nginx"
     return f"""set -eu
 staging={staging}
 base={base}
 helper_dir={helper_dir}
 state_dir={state_dir}
 nginx_conf={nginx_conf}
+nginx_binary={nginx_binary}
+cni_bridge={cni_bridge}
+containers_conf={containers_conf}
+nginx_mode={nginx_mode}
+nginx_real_binary=$(readlink -f "$(command -v nginx)")
+if [ -f "$containers_conf" ]; then export CONTAINERS_CONF="$containers_conf"; fi
 if [ -f "$base/fixture.marker" ]; then
   for pid_file in "$base/agent.pid" "$base/helper.pid"; do
     if [ -s "$pid_file" ]; then kill -TERM "$(cat "$pid_file")" 2>/dev/null || true; fi
@@ -531,17 +710,13 @@ if [ -f "$base/fixture.marker" ]; then
   for name in {containers}; do
     if podman container exists "$name"; then podman rm --force "$name"; fi
   done
-  rm -f "$nginx_conf"
-  /usr/sbin/nginx -t
-  systemctl reload nginx
-  systemctl is-active --quiet nginx
-  default_status=$(curl --noproxy '*' -sS -o /dev/null -w '%{{http_code}}' http://127.0.0.1/)
-  test "$default_status" = 404 || {{ echo "existing Nginx default site changed: HTTP $default_status"; exit 1; }}
+  {nginx_cleanup}
+  {cni_cleanup}
   for image in {images}; do
     if podman image inspect "$image" >/dev/null 2>&1; then podman image rm --force "$image"; fi
   done
   rm -rf "$base" "$helper_dir" "$state_dir"
-  test ! -e "$nginx_conf" && test ! -e "$helper_dir" && test ! -e "$state_dir"
+  test ! -e "$base" && test ! -e "$nginx_conf" && test ! -e "$helper_dir" && test ! -e "$state_dir"
   for image in {images}; do
     if podman image inspect "$image" >/dev/null 2>&1; then
       echo "fixture image remains after cleanup: $image"
@@ -551,10 +726,9 @@ if [ -f "$base/fixture.marker" ]; then
 fi
 rm -rf "$staging"
 test ! -e "$staging"
-systemctl is-active --quiet nginx
-printf 'ROOTFUL_VM_CLEANUP_PASS\n'
+{post_cleanup}
+printf 'ROOTFUL_VM_CLEANUP_PASS\\\\n'
 """
-
 
 
 def main():
@@ -569,13 +743,24 @@ def main():
     )
     parser.add_argument(
         "--rootful-vm-ssh-target",
-        help="enroll the second Agent on a disposable QEMU VM with rootful Podman and host Nginx",
+        help="enroll the second Agent on a rootful Linux host with Podman and Nginx",
     )
     parser.add_argument("--rootful-vm-ssh-port", type=int, default=22)
     parser.add_argument("--rootful-vm-ssh-key", type=pathlib.Path)
     parser.add_argument("--rootful-vm-known-hosts", type=pathlib.Path)
+    parser.add_argument(
+        "--rootful-vm-nginx-mode", choices=("system", "isolated"), default="system",
+        help="use the host Nginx service or start a run-scoped loopback-only Nginx instance",
+    )
+    parser.add_argument(
+        "--rootful-vm-reverse-gateway-tunnel", action="store_true",
+        help="forward the local Agent Gateway to the remote host over the SSH tunnel",
+    )
     args = parser.parse_args()
     rootful_vm = bool(args.rootful_vm_ssh_target)
+    if not rootful_vm and (args.rootful_vm_nginx_mode != "system"
+                           or args.rootful_vm_reverse_gateway_tunnel):
+        raise AcceptanceError("remote Nginx and Gateway tunnel options require --rootful-vm-ssh-target")
     if rootful_vm and args.runtime != "podman":
         raise AcceptanceError("--rootful-vm-ssh-target currently requires --runtime podman")
     if rootful_vm and (not args.rootful_vm_ssh_key or not args.rootful_vm_known_hosts):
@@ -614,7 +799,19 @@ def main():
             "base": f"/run/nanpanel-p5-rootful-live-{run_id}",
             "helper_dir": f"/usr/local/libexec/nanpanel-p5-rootful-live-{run_id}",
             "state_dir": f"/var/lib/nanpanel-p5-agent-{run_id}",
-            "nginx_conf": f"/etc/nginx/conf.d/nanpanel-p5-rootful-live-{run_id}.conf",
+            "nginx_conf": (
+                f"/run/nanpanel-p5-rootful-live-{run_id}/nginx.conf"
+                if args.rootful_vm_nginx_mode == "isolated"
+                else f"/etc/nginx/conf.d/nanpanel-p5-rootful-live-{run_id}.conf"
+            ),
+            "nginx_binary": (
+                f"/usr/local/libexec/nanpanel-p5-rootful-live-{run_id}/nginx-wrapper"
+                if args.rootful_vm_nginx_mode == "isolated"
+                else "/usr/sbin/nginx"
+            ),
+            "cni_conf": f"/run/nanpanel-p5-rootful-live-{run_id}/cni/87-podman-bridge.conflist",
+            "containers_conf": f"/run/nanpanel-p5-rootful-live-{run_id}/containers.conf",
+            "cni_bridge": f"cni-p5-{run_id}",
         }
     rootful_agent_id = None
     rootful_host_id = None
@@ -887,18 +1084,27 @@ RUN printf '%s\\n' 'worker_processes 1;' 'pid /run/nginx.pid;' 'events { worker_
                     args.rootful_vm_ssh_target, args.rootful_vm_ssh_port,
                     args.rootful_vm_ssh_key, args.rootful_vm_known_hosts,
                     rootful_vm_setup_script(
-                        rootful_vm_paths, gateway_port, rootful_agent_id, enrollment["hostname"]
+                        rootful_vm_paths, gateway_port, rootful_agent_id, enrollment["hostname"],
+                        nginx_mode=args.rootful_vm_nginx_mode,
+                        gateway_address=(
+                            "127.0.0.1" if args.rootful_vm_reverse_gateway_tunnel else "10.0.2.2"
+                        ),
                     ),
                     timeout=240,
                 )
                 if "ROOTFUL_VM_SETUP_PASS" not in remote_setup:
                     raise AcceptanceError(f"rootful VM setup did not confirm completion: {remote_setup}")
+                tunnel_args = [
+                    "ssh", *ssh_args, "-N", "-o", "ExitOnForwardFailure=yes",
+                    "-L", f"127.0.0.1:{route_port}:127.0.0.1:{route_port}",
+                ]
+                if args.rootful_vm_reverse_gateway_tunnel:
+                    tunnel_args.extend([
+                        "-R", f"127.0.0.1:{gateway_port}:127.0.0.1:{gateway_port}",
+                    ])
+                tunnel_args.append(args.rootful_vm_ssh_target)
                 tunnel = subprocess.Popen(
-                    [
-                        "ssh", *ssh_args, "-N", "-o", "ExitOnForwardFailure=yes",
-                        "-L", f"127.0.0.1:{route_port}:127.0.0.1:{route_port}",
-                        args.rootful_vm_ssh_target,
-                    ],
+                    tunnel_args,
                     cwd=ROOT, env=clean_runtime_environment(),
                     stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True,
                 )
@@ -1201,18 +1407,27 @@ done
                 "runtimeAssignments": {
                     host_a: runtime_assignments[0], host_b: runtime_assignments[1],
                 },
-                "runtime": "host Core/Gateway; Host A rootless Podman; Host B rootful Podman on disposable QEMU guest",
+                "runtime": (
+                    "host Core/Gateway; Host A rootless Podman; Host B rootful Podman on "
+                    + ("remote SSH host" if args.rootful_vm_reverse_gateway_tunnel
+                       else "disposable QEMU guest")
+                ),
                 "hostnames": [host_a, host_b],
                 "hostIds": [current_hosts_by_name[host_a]["id"], rootful_host_id],
                 "agentIds": [current_hosts_by_name[host_a]["agentId"], rootful_agent_id],
                 "addresses": [address_a, address_b],
                 "routePort": route_port,
                 "rootfulVm": {
+                    "nginxMode": args.rootful_vm_nginx_mode,
                     "hostStatus": rootful_host["status"],
                     "agentStatus": rootful_agent["status"],
                     "helperStatus": rootful_agent["helperStatus"],
                     "helperCapabilities": sorted(rootful_agent.get("capabilities", [])),
-                    "nginxDefaultSite": "HTTP 404 preserved before and after fixture cleanup",
+                    "nginxDefaultSite": (
+                        "system Nginx not modified; pre-run response checked after cleanup"
+                        if args.rootful_vm_nginx_mode == "isolated"
+                        else "HTTP 404 preserved before and after fixture cleanup"
+                    ),
                 },
                 "manualRollback": {
                     "planId": rolled_back["id"],
@@ -1810,7 +2025,10 @@ done
                 cleanup = ssh_script(
                     args.rootful_vm_ssh_target, args.rootful_vm_ssh_port,
                     args.rootful_vm_ssh_key, args.rootful_vm_known_hosts,
-                    rootful_vm_cleanup_script(rootful_vm_paths, rootful_container_names),
+                    rootful_vm_cleanup_script(
+                        rootful_vm_paths, rootful_container_names,
+                        nginx_mode=args.rootful_vm_nginx_mode,
+                    ),
                     timeout=180,
                 )
                 if "ROOTFUL_VM_CLEANUP_PASS" not in cleanup:

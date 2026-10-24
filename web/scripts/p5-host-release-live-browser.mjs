@@ -74,8 +74,13 @@ function routedRequest(address) {
   });
 }
 
-async function assertTraffic(address, expectedBody, count = 50) {
-  const responses = await Promise.all(Array.from({ length: count }, () => routedRequest(address)));
+async function assertTraffic(address, expectedBody, count = 50, label = 'traffic check') {
+  let responses;
+  try {
+    responses = await Promise.all(Array.from({ length: count }, () => routedRequest(address)));
+  } catch (error) {
+    throw new Error(label + ' at ' + address + ' expecting ' + expectedBody + ': ' + error.message);
+  }
   const distribution = {};
   for (const response of responses) {
     const key = `${response.status} ${response.body}`;
@@ -154,14 +159,14 @@ try {
   if (batchPause.targets[0].state !== 'SUCCEEDED' || batchPause.targets[1].state !== 'BASELINE_DEPLOY') {
     throw new Error(`The second host was not gated on operator approval: ${JSON.stringify(batchPause)}`);
   }
-  const firstHostTraffic = await assertTraffic(addressA, 'v2', 50);
+  const firstHostTraffic = await assertTraffic(addressA, 'v2', 50, 'candidate traffic Host A');
   await firstRow.getByRole('button', { name: '批准下一批' }).click();
   const completed = await waitPlan(app, firstPlan.id, plan => plan.state === 'SUCCEEDED',
     'second host batch completion');
   if (completed.targets.some(target => target.state !== 'SUCCEEDED')) {
     throw new Error(`Not all live host targets completed: ${JSON.stringify(completed.targets)}`);
   }
-  const secondHostTraffic = await assertTraffic(addressB, 'v2', 50);
+  const secondHostTraffic = await assertTraffic(addressB, 'v2', 50, 'candidate traffic Host B');
   const succeededScreenshot = screenshotPath.replace(/\.png$/, '-succeeded.png');
   await page.screenshot({ path: succeededScreenshot, fullPage: true });
 
@@ -172,8 +177,8 @@ try {
   if (rolledBack.targets[0].state !== 'ROLLED_BACK' || rolledBack.targets[1].state !== 'ROLLED_BACK') {
     throw new Error(`Both hosts were not rolled back: ${JSON.stringify(rolledBack.targets)}`);
   }
-  const rollbackA = await assertTraffic(addressA, 'v1', 25);
-  const rollbackB = await assertTraffic(addressB, 'v1', 25);
+  const rollbackA = await assertTraffic(addressA, 'v1', 25, 'manual rollback traffic Host A');
+  const rollbackB = await assertTraffic(addressB, 'v1', 25, 'manual rollback traffic Host B');
 
   await fillReleaseForm({
     name: app,
@@ -194,7 +199,7 @@ try {
   if (failed.targets[0].state !== 'FAILED') {
     throw new Error(`Unhealthy candidate did not fail its target: ${JSON.stringify(failed)}`);
   }
-  const compensationTraffic = await assertTraffic(failureAddress, 'v1', 50);
+  const compensationTraffic = await assertTraffic(failureAddress, 'v1', 50, 'automatic compensation traffic');
   await page.screenshot({ path: screenshotPath, fullPage: true });
   if (pageErrors.length) throw new Error(`Browser errors: ${pageErrors.join('\n')}`);
 
