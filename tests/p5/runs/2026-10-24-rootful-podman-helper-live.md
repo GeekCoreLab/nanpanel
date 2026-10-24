@@ -81,5 +81,7 @@ configuration were removed. Nginx remains active with its original port-80
 default site. This direct Helper IPC probe closes the rootful Podman container
 and managed-route capability check; it does not exercise the complete
 Core-to-mTLS-Agent release workflow on a rootful host. Physically independent
-host acceptance also remains open. No systemd units, K3s resources, firewall
-rules, or host services were changed.
+host acceptance also remains open. No systemd units, K3s resources, or
+firewall rules were changed. The VM's Nginx service was temporarily reloaded
+with an additive loopback-only include; that include was removed, Nginx was
+reloaded again, and the original port-80 HTTP 404 response was confirmed.

@@ -93,8 +93,6 @@ retains the operation as `UNKNOWN`, reconcile reuses its operation ID/key,
 the restarted Agent replays the result, and Core ACK clears the journal after
 the release succeeds without creating a second container. A genuinely
 indeterminate operation without a durable terminal result remains `UNKNOWN`.
-The full rootful Core-to-mTLS-Agent release workflow and physically independent
-hosts remain open.
 Docker rootless delivery and disposable K3s target acceptance are covered. The shared
 `k3s-1` cluster remains read-only; no rollout
 controller was installed there. See the
