@@ -54,9 +54,15 @@ claim success from a requested weight or a successful create call alone.
    candidate. Each host returned 50/50 `200 v2`; reverse rollback returned
    25/25 `200 v1` per host; failed-candidate compensation returned 50 `200 v1`
    responses. The Docker and Podman daemons ran on one physical machine, and
-   both Helpers ran in rootless Podman sandboxes, so this does not establish
-   physical multi-host isolation or the complete rootful Core-to-Agent release
-   workflow. The earlier
+   both Helpers ran in rootless Podman sandboxes, so that run does not establish
+   physical multi-host isolation. A separate live run now completes the
+   rootful Podman Core-to-mTLS-Agent workflow in a disposable Debian 13 guest:
+   operator-gated batches, each host returning 50/50 `200 v2`, reverse-order
+   rollback returning 25/25 `200 v1` per host, and unhealthy-candidate
+   compensation returning 50 `200 v1` responses on the rootful host. K3s was
+   stopped only inside that disposable guest because the runtime guard correctly
+   blocks host application releases while Kubernetes is active; it was restored
+   after the run. The earlier
    nested Docker preflight documents why Docker was moved outside the Helper
    sandbox in this environment. A live acceptance restarted Core between
    operator-gated batches, preserved the paused plan and healthy routes, then
@@ -72,8 +78,9 @@ claim success from a requested weight or a successful create call alone.
    is not retried as a new operation. A disposable-VM rootful Podman 5.4.2
    probe passed Helper `container.deploy/list/stop` and `nginx.route.set` as UID
    1000; direct and managed loopback Nginx requests returned `200 v2`. The
-   complete rootful Core-to-mTLS-Agent release workflow and physically
+   full rootful workflow is covered by the report below; physically
    independent hosts remain open. See
+   `tests/p5/runs/2026-10-25-host-release-rootful-podman-live.md`,
    `tests/p5/runs/2026-10-24-rootful-podman-helper-live.md`,
    `tests/p5/runs/2026-10-24-host-release-uncertain-result-recovery-live.md`,
    `tests/p5/runs/2026-10-24-host-release-mixed-helper-core-restart-live.md`,
@@ -106,17 +113,18 @@ claim success from a requested weight or a successful create call alone.
   splitting works.
 - Prometheus must expose the documented request counters for the released
   workloads. Missing or stale metrics keep the inline analysis from passing.
-- Rootless Podman and rootless Docker delivery now have live
+- Rootless Podman, rootless Docker, and rootful Podman delivery now have live
   browser-to-Core-to-Agent-to-Helper evidence for routed traffic, ordered
-  approval, manual rollback, and compensation. They used separate runtime
-  daemons on one physical machine. Lost callback recovery from a durable Agent
-  result is also accepted. A rootful Podman 5.4.2 probe verified Helper
-  container operations and managed Nginx routing with HTTP `200 v2`; the full
-  rootful Core-to-mTLS-Agent workflow and physically independent hosts remain
-  unverified. See the [rootful Helper report](../../tests/p5/runs/2026-10-24-rootful-podman-helper-live.md)
-  and [mixed-runtime report](../../tests/p5/runs/2026-10-24-host-release-mixed-rootless-live.md)
-  records the Docker socket boundary and traffic evidence. Container lifecycle
-  success by itself is not application release success.
+  approval, manual rollback, and compensation. All target hosts used in these
+  runs shared one physical machine, so physical multi-host isolation remains
+  unverified. Lost callback recovery from a durable Agent result is also
+  accepted. A rootful Podman 5.4.2 probe verified Helper container operations
+  and managed Nginx routing with HTTP `200 v2`; the full rootful workflow then
+  passed browser-to-Core-to-Agent acceptance. See the [rootful live release report](../../tests/p5/runs/2026-10-25-host-release-rootful-podman-live.md),
+  the [rootful Helper report](../../tests/p5/runs/2026-10-24-rootful-podman-helper-live.md),
+  and the [mixed-runtime report](../../tests/p5/runs/2026-10-24-host-release-mixed-rootless-live.md),
+  which documents the Docker socket boundary and traffic evidence. Container
+  lifecycle success by itself is not application release success.
 - Gateway API and Argo Rollouts acceptance now also covers a disposable real
   K3s guest, including controller readiness, Core/API and browser flows,
   weighted Gateway traffic, automatic rollback, and preservation of conflicting
