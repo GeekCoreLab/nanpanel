@@ -68,8 +68,12 @@ claim success from a requested weight or a successful create call alone.
    `SUCCEEDED` result completed the release without creating a second
    container; the route returned `200 v2` and Core ACK cleared the Agent
    journal. Execution with no durable terminal result remains `UNKNOWN` and
-   is not retried as a new operation. Rootful Helper permissions and physically
-   independent hosts remain open. See
+   is not retried as a new operation. A disposable-VM rootful Podman 5.4.2
+   probe passed Helper `container.deploy/list/stop` as the configured Agent
+   UID and served `200 v2`; the VM had no trusted host Nginx configuration, so
+   full rootful route/release acceptance and physically independent hosts
+   remain open. See
+   `tests/p5/runs/2026-10-24-rootful-podman-helper-live.md`,
    `tests/p5/runs/2026-10-24-host-release-uncertain-result-recovery-live.md`,
    `tests/p5/runs/2026-10-24-host-release-mixed-helper-core-restart-live.md`,
    `tests/p5/runs/2026-10-24-host-release-mixed-rootless-live.md`,
@@ -105,8 +109,11 @@ claim success from a requested weight or a successful create call alone.
   browser-to-Core-to-Agent-to-Helper evidence for routed traffic, ordered
   approval, manual rollback, and compensation. They used separate runtime
   daemons on one physical machine. Lost callback recovery from a durable Agent
-  result is also accepted; rootful Helper permissions and physically
-  independent hosts remain unverified. The [mixed-runtime report](../../tests/p5/runs/2026-10-24-host-release-mixed-rootless-live.md)
+  result is also accepted. A rootful Podman 5.4.2 probe verified Helper
+  container operations and HTTP `200 v2`, but did not configure host Nginx;
+  full rootful route/release and physically independent hosts remain
+  unverified. See the [rootful Helper report](../../tests/p5/runs/2026-10-24-rootful-podman-helper-live.md)
+  and [mixed-runtime report](../../tests/p5/runs/2026-10-24-host-release-mixed-rootless-live.md)
   records the Docker socket boundary and traffic evidence. Container lifecycle
   success by itself is not application release success.
 - Gateway API and Argo Rollouts acceptance now also covers a disposable real
