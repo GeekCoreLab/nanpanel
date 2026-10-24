@@ -2,8 +2,8 @@
 
 ## Status
 
-Accepted for implementation. External controller and runtime acceptance is
-tracked separately in [`tests/p5/README.md`](../../tests/p5/README.md).
+Accepted. Implementation and external controller/runtime acceptance are
+recorded in [`tests/p5/README.md`](../../tests/p5/README.md).
 
 ## Context
 
@@ -78,8 +78,17 @@ claim success from a requested weight or a successful create call alone.
    is not retried as a new operation. A disposable-VM rootful Podman 5.4.2
    probe passed Helper `container.deploy/list/stop` and `nginx.route.set` as UID
    1000; direct and managed loopback Nginx requests returned `200 v2`. The
-   full rootful workflow is covered by the report below; physically
-   independent hosts remain open. See
+   full rootful workflow is covered by the report below. On 2026-10-25, the
+   complete browser-to-Core-to-mTLS-Agent workflow also passed with Host A on
+   the local bare-metal machine and Host B on a separately SSH-reached Debian
+   12 KVM guest running rootful Podman 4.3.1. Each host returned 50/50 `200 v2`
+   candidate requests; manual reverse rollback returned 25/25 `200 v1` per
+   host; unhealthy-candidate compensation restored Host B with 50/50 `200 v1`
+   responses. Run-scoped CNI and loopback Nginx fixtures were removed, while
+   the target's system Nginx and default CNI network remained intact. This
+   closes the independent-host gate; the remote target itself was virtualized.
+   See
+   `tests/p5/runs/2026-10-25-independent-host-rootful-podman-live.md`,
    `tests/p5/runs/2026-10-25-host-release-rootful-podman-live.md`,
    `tests/p5/runs/2026-10-24-rootful-podman-helper-live.md`,
    `tests/p5/runs/2026-10-24-host-release-uncertain-result-recovery-live.md`,
@@ -115,12 +124,15 @@ claim success from a requested weight or a successful create call alone.
   workloads. Missing or stale metrics keep the inline analysis from passing.
 - Rootless Podman, rootless Docker, and rootful Podman delivery now have live
   browser-to-Core-to-Agent-to-Helper evidence for routed traffic, ordered
-  approval, manual rollback, and compensation. All target hosts used in these
-  runs shared one physical machine, so physical multi-host isolation remains
-  unverified. Lost callback recovery from a durable Agent result is also
-  accepted. A rootful Podman 5.4.2 probe verified Helper container operations
+  approval, manual rollback, and compensation. The independent-host run used a
+  local bare-metal host and a separately SSH-reached Debian 12 KVM guest, so
+  the independent-host gate passed with a virtualized remote target. Lost
+  callback recovery from a durable Agent result is also accepted. A rootful
+  Podman 5.4.2 probe verified Helper container operations
   and managed Nginx routing with HTTP `200 v2`; the full rootful workflow then
-  passed browser-to-Core-to-Agent acceptance. See the [rootful live release report](../../tests/p5/runs/2026-10-25-host-release-rootful-podman-live.md),
+  passed browser-to-Core-to-Agent acceptance. See the
+  [independent-host live release report](../../tests/p5/runs/2026-10-25-independent-host-rootful-podman-live.md),
+  the [rootful live release report](../../tests/p5/runs/2026-10-25-host-release-rootful-podman-live.md),
   the [rootful Helper report](../../tests/p5/runs/2026-10-24-rootful-podman-helper-live.md),
   and the [mixed-runtime report](../../tests/p5/runs/2026-10-24-host-release-mixed-rootless-live.md),
   which documents the Docker socket boundary and traffic evidence. Container
