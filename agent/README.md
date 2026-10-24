@@ -4,6 +4,21 @@
 
 Helper 使用 `SO_PEERCRED` 校验 Agent UID，只接收固定类型操作，不接受任意 Shell。支持 systemd unit 重启和有界 journal、软件包安装、受保护文件原子写入、主机文件浏览/读写/删除、容器管理、临时防火墙规则和 Agent 更新。操作目标使用结构化参数与固定命令；主机文件路径拒绝 `.`、`..` 和符号链接，限制文件类型、读写大小和目录项数量；容器使用只读根文件系统、资源上限、loopback 端口与 `no-new-privileges`；防火墙规则按接口、协议、端口校验，先启动 systemd 定时回滚，再由只获得 `CAP_NET_ADMIN` 的瞬时 worker 执行和验证。缺少可信 nft 或 systemd-run 时不报告该能力。`container-runtime` 可选择固定的 Docker 或 Podman CLI。安装器和维护命令会删除旧版逐项操作名单及模式文件。
 
+### 普通主机蓝绿发布（P5）
+
+普通主机发布只使用 root Helper 已配置的 Docker 或 Podman CLI，以及显式启用的受管 Nginx 路由能力。安装后在 `/etc/nanpanel/managed/container-runtime` 写入单行 `docker` 或 `podman`；Helper 只选择 `/usr/bin/docker` 或 `/usr/bin/podman`，Podman 以 rootful runtime 使用。不要把 Docker/Podman socket 暴露给 Agent。
+
+Nginx 路由能力默认关闭。先创建 root 拥有、组/其他用户不可写的 include 目录，并在现有 Nginx `http {}` 配置中精确加入 `include /etc/nginx/nanpanel-routes/*.conf;`。确认 `nginx -t` 成功后，为 Helper 添加 systemd drop-in：
+
+```ini
+[Service]
+Environment=NANPANEL_NGINX_INCLUDE_DIR=/etc/nginx/nanpanel-routes
+```
+
+若 Nginx 二进制不在 `/usr/sbin/nginx` 或 `/usr/bin/nginx`，还可设置 `NANPANEL_NGINX_BINARY` 为绝对路径。Helper 会要求二进制、父目录和 include 目录均由 root 拥有且不可被组/其他用户写入；重启 `nanpanel-helper.service` 后，主机应重新上报 `nginx.route.set` 才能创建发布计划。Helper 仅写入 `nanpanel-*` 受管文件，执行 Nginx 配置检查和 reload，并核对候选后端及监听地址的真实 HTTP 2xx 响应；监听端口绑定到指定主机接口，防火墙和 HTTPS/TLS 入口仍由运维人员配置。
+
+Core 按选定顺序逐台运行稳定版本验证、候选版本切换和 HTTP 健康检查。每批完成后计划暂停，需操作员批准下一批；故障时自动恢复稳定路由，手动回滚按相反顺序恢复已成功主机。旧稳定容器会保留为手动回滚槽位，不会自动删除。Docker 和 Podman 实机流量、故障补偿及跨 Core 重启验收仍需在隔离环境完成，不能用本地构建或 Helper 单元测试替代。
+
 SSH 固定探测、systemd 状态/日志/重启和 Agent 初始化都使用主机资产中加密保存的凭据与已确认的 host key；不再读取主控 Core 上的 alias/unit 名单或 OpenSSH alias 配置。Agent 安装使用固定脚本和一次性接入码，token 仅经 SSH stdin 传递，并等待首次 mTLS 心跳确认。管理员 PTY 堡垒 Shell 由 Core 独立建立，不经 Agent/Helper 提权通道；命令与输入/输出录像写入专用加密表，并支持强制阻断和保留清理。
 
 ### NetBird Overlay 观测（P2 实现切片）

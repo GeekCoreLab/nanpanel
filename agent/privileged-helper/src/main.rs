@@ -1,5 +1,6 @@
 use nanpanel_privileged_helper::{
-    HelperConfig, apply_network_firewall_rule, rollback_network_firewall_rule, serve,
+    HelperConfig, NginxRouteConfig, apply_network_firewall_rule, rollback_network_firewall_rule,
+    serve,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -103,15 +104,19 @@ async fn main() -> anyhow::Result<()> {
         _ => {}
     }
     let service = parse_service_args(first, args)?;
-    serve(HelperConfig::new(
-        service.socket,
-        service.allowed_agent_uid,
-        service.socket_gid,
-        service.allowed_read_root,
-        &service.controller_url,
-        service.controller_cert,
-        service.agent_binary,
-    )?)
+    let routes = NginxRouteConfig::from_environment()?;
+    serve(
+        HelperConfig::new(
+            service.socket,
+            service.allowed_agent_uid,
+            service.socket_gid,
+            service.allowed_read_root,
+            &service.controller_url,
+            service.controller_cert,
+            service.agent_binary,
+        )?
+        .with_nginx_routes(routes),
+    )
     .await
 }
 

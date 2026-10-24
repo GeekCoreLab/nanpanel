@@ -680,6 +680,24 @@ struct NetworkFirewallPayload {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct NginxRoutePayload {
+    listen_address: String,
+    listen_port: u16,
+    server_name: String,
+    health_path: String,
+    backends: Vec<NginxRouteBackend>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct NginxRouteBackend {
+    name: String,
+    port: u16,
+    weight: u8,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ContainerDeployPayload {
     image: String,
     host_port: Option<u16>,
@@ -806,6 +824,7 @@ fn valid_dispatch_target(capability: &str, target: &str) -> bool {
         | "k3s.install"
         | "k3s.upgrade"
         | "kubeedge.edgecore.join" => target.is_empty(),
+        "nginx.route.set" => valid_nginx_route_target(target),
         "systemd.restart" | "systemd.journal.read" => valid_service_unit(target),
         "file.write.protected" => valid_file_target(target),
         "container.logs" | "container.start" | "container.stop" | "container.deploy" => {
@@ -852,6 +871,8 @@ fn valid_dispatch_payload(capability: &str, payload: Option<&str>) -> bool {
                     && payload.host_port.is_none_or(|port| port > 0)
                     && payload.container_port.is_none_or(|port| port > 0)
             }),
+        ("nginx.route.set", Some(json)) => serde_json::from_str::<NginxRoutePayload>(json)
+            .is_ok_and(|payload| valid_nginx_route_payload(&payload)),
         (
             "agent.update"
             | "systemd.restart"
@@ -1000,6 +1021,68 @@ fn valid_k3s_server_url(server_url: &str) -> bool {
             }),
         None => false,
     }
+}
+
+fn valid_nginx_route_target(target: &str) -> bool {
+    target.starts_with("nanpanel-")
+        && target.len() <= 62
+        && target
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && target.as_bytes().get(9).is_some_and(u8::is_ascii_lowercase)
+}
+
+fn valid_nginx_route_payload(payload: &NginxRoutePayload) -> bool {
+    let valid_address = payload
+        .listen_address
+        .parse::<std::net::IpAddr>()
+        .is_ok_and(|address| !address.is_unspecified() && !address.is_multicast());
+    let valid_host = payload.server_name.len() <= 253
+        && payload.server_name.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label.as_bytes()[0].is_ascii_alphanumeric()
+                && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        });
+    let valid_path = payload.health_path.starts_with('/')
+        && payload.health_path.len() <= 256
+        && !payload.health_path.contains("..")
+        && payload
+            .health_path
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"/._~-".contains(&byte));
+    if !valid_address
+        || payload.listen_port == 0
+        || !valid_host
+        || !valid_path
+        || payload.backends.is_empty()
+        || payload.backends.len() > 2
+    {
+        return false;
+    }
+    let mut names = std::collections::HashSet::new();
+    let mut ports = std::collections::HashSet::new();
+    let mut weight_sum = 0_u16;
+    for backend in &payload.backends {
+        if backend.name.is_empty()
+            || backend.name.len() > 32
+            || !backend
+                .name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            || backend.port == 0
+            || backend.weight > 100
+            || !names.insert(backend.name.as_str())
+            || !ports.insert(backend.port)
+        {
+            return false;
+        }
+        weight_sum += u16::from(backend.weight);
+    }
+    weight_sum == 100 && payload.backends.iter().any(|backend| backend.weight > 0)
 }
 
 fn valid_file_target(target: &str) -> bool {
@@ -1532,6 +1615,23 @@ mod tests {
             "kubeedge.edgecore.join",
             Some(
                 r#"{"version":"v1.23.1","cloudCoreEndpoint":"cloud.example.test:10000;id","token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.cccccccccccccccccccccccccccccccccccccccc"}"#
+            ),
+        ));
+        assert!(valid_dispatch_target(
+            "nginx.route.set",
+            "nanpanel-route0123456789abcdef0123456789abcdef"
+        ));
+        assert!(!valid_dispatch_target("nginx.route.set", "customer-site"));
+        assert!(valid_dispatch_payload(
+            "nginx.route.set",
+            Some(
+                r#"{"listenAddress":"127.0.0.1","listenPort":18080,"serverName":"app.example.test","healthPath":"/health","backends":[{"name":"stable","port":20080,"weight":100},{"name":"canary","port":20081,"weight":0}]}"#
+            ),
+        ));
+        assert!(!valid_dispatch_payload(
+            "nginx.route.set",
+            Some(
+                r#"{"listenAddress":"0.0.0.0","listenPort":18080,"serverName":"app.example.test","healthPath":"/health","backends":[{"name":"stable","port":20080,"weight":100}]}"#
             ),
         ));
     }

@@ -22,6 +22,9 @@ use tokio::io::AsyncReadExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio_util::codec::{Framed, LinesCodec};
 
+mod nginx_routes;
+pub use nginx_routes::NginxRouteConfig;
+
 const MAX_FRAME: usize = 512 * 1024;
 const MAX_FILE_BYTES: usize = 64 * 1024;
 const MAX_WRITE_BYTES: usize = 32 * 1024;
@@ -74,6 +77,7 @@ pub struct HelperConfig {
     pub controller_cert: reqwest::Certificate,
     pub agent_binary: std::path::PathBuf,
     pub container_runtime: Option<std::path::PathBuf>,
+    nginx_routes: Option<nginx_routes::NginxRouteConfig>,
     network_operations_available: bool,
     netbird_binary: Option<std::path::PathBuf>,
 }
@@ -154,6 +158,7 @@ struct HelperRuntime {
     controller_cert: reqwest::Certificate,
     agent_binary: std::path::PathBuf,
     container_runtime: Option<Arc<std::path::PathBuf>>,
+    nginx_routes: Option<Arc<NginxRouteConfig>>,
     network_operations_available: bool,
     kubeedge_available: bool,
     netbird_binary: Option<Arc<std::path::PathBuf>>,
@@ -254,9 +259,15 @@ impl HelperConfig {
             controller_cert,
             agent_binary,
             container_runtime,
+            nginx_routes: None,
             network_operations_available,
             netbird_binary,
         })
+    }
+
+    pub fn with_nginx_routes(mut self, routes: Option<NginxRouteConfig>) -> Self {
+        self.nginx_routes = routes;
+        self
     }
 }
 
@@ -282,6 +293,7 @@ pub async fn serve(config: HelperConfig) -> Result<()> {
         controller_cert: config.controller_cert,
         agent_binary: config.agent_binary,
         container_runtime: config.container_runtime.map(Arc::new),
+        nginx_routes: config.nginx_routes.map(Arc::new),
         network_operations_available: config.network_operations_available,
         kubeedge_available,
         netbird_binary: config.netbird_binary.map(Arc::new),
@@ -376,6 +388,7 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                     runtime.container_runtime.is_some(),
                                     runtime.network_operations_available,
                                     runtime.netbird_binary.is_some(),
+                                    runtime.nginx_routes.is_some(),
                                 )
                             }) {
                                 Err(error) => Err(error),
@@ -387,6 +400,7 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                             runtime.network_operations_available,
                                             runtime.netbird_binary.is_some(),
                                             runtime.kubeedge_available,
+                                            runtime.nginx_routes.is_some(),
                                         ))
                                         .to_string())
                                     }
@@ -453,6 +467,20 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                         )
                                         .await
                                     }
+                                    "nginx.route.set" => match runtime.nginx_routes.as_deref() {
+                                        Some(routes) => {
+                                            routes
+                                                .set_route(
+                                                    &request.target,
+                                                    request.payload_json.as_deref(),
+                                                )
+                                                .await
+                                        }
+                                        None => Err(
+                                            "DENIED: managed Nginx route support is not configured"
+                                                .to_owned(),
+                                        ),
+                                    },
                                     "k3s.preflight" => k3s_preflight(&request),
                                     "k3s.install" => {
                                         k3s_install(&request, &runtime.host_root).await
@@ -562,10 +590,17 @@ fn validate_capability_target(
     has_container_runtime: bool,
     network_operations_available: bool,
     netbird_status_available: bool,
+    nginx_routes_available: bool,
 ) -> std::result::Result<(), String> {
     match capability {
         "helper.status" | "helper.capabilities" | "agent.update" if target.is_empty() => Ok(()),
         "network.overlay.peer_paths.read" if target.is_empty() && netbird_status_available => {
+            Ok(())
+        }
+        "nginx.route.set"
+            if nginx_routes_available
+                && nginx_routes::NginxRouteConfig::validate_target(target) =>
+        {
             Ok(())
         }
         "k3s.preflight" | "k3s.install" | "k3s.upgrade" | "kubeedge.edgecore.join"
@@ -613,7 +648,8 @@ fn validate_capability_target(
         | "container.start"
         | "container.stop"
         | "container.deploy"
-        | "network.firewall.expose" => Err("DENIED: target or parameters are invalid".to_owned()),
+        | "network.firewall.expose"
+        | "nginx.route.set" => Err("DENIED: target or parameters are invalid".to_owned()),
         _ => Err("DENIED: unsupported capability or target".to_owned()),
     }
 }
@@ -625,10 +661,12 @@ fn validate_payload_presence(request: &Request) -> std::result::Result<(), Strin
             | "file.write.protected"
             | "network.firewall.expose"
             | "file.write"
+            | "container.deploy"
             | "k3s.preflight"
             | "k3s.install"
             | "k3s.upgrade"
             | "kubeedge.edgecore.join"
+            | "nginx.route.set"
     );
     if required != request.payload_json.is_some() {
         return Err("DENIED: payload presence does not match capability schema".to_owned());
@@ -651,6 +689,7 @@ fn available_capabilities(
     network_operations_available: bool,
     netbird_status_available: bool,
     kubeedge_available: bool,
+    nginx_routes_available: bool,
 ) -> Vec<&'static str> {
     let mut capabilities = vec![
         "systemd.restart",
@@ -683,6 +722,9 @@ fn available_capabilities(
     }
     if kubeedge_available {
         capabilities.push("kubeedge.edgecore.join");
+    }
+    if nginx_routes_available {
+        capabilities.push("nginx.route.set");
     }
     capabilities
 }
@@ -3416,8 +3458,15 @@ mod tests {
         assert!(validate_envelope(&request).is_ok());
         assert!(validate_payload_presence(&request).is_ok());
         assert!(
-            validate_capability_target(&request.capability, &request.target, false, false, false,)
-                .is_ok()
+            validate_capability_target(
+                &request.capability,
+                &request.target,
+                false,
+                false,
+                false,
+                false
+            )
+            .is_ok()
         );
         assert!(
             serde_json::from_str::<KubeEdgeJoinPayload>(
@@ -3543,27 +3592,74 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .context("system clock is before Unix epoch")?
             .as_millis() as i64;
-        let validate = |capability, target, containers, firewall| {
-            validate_capability_target(capability, target, containers, firewall, false)
+        let validate = |capability, target, containers, firewall, nginx| {
+            validate_capability_target(capability, target, containers, firewall, false, nginx)
         };
-        assert!(validate("agent.update", "", false, false).is_ok());
-        assert!(validate("systemd.restart", "ssh.service", false, false).is_ok());
-        assert!(validate("systemd.journal.read", "cron.service", false, false).is_ok());
-        assert!(validate("systemd.restart", "--help.service", false, false).is_err());
-        assert!(validate("systemd.restart", "bad;command.service", false, false).is_err());
-        assert!(validate("package.install", "", false, false).is_ok());
-        assert!(validate("file.write.protected", "app.conf", false, false).is_ok());
-        assert!(validate("file.write.protected", "../app.conf", false, false).is_err());
-        assert!(validate("file.list", "/", false, false).is_ok());
-        assert!(validate("file.read", "/etc/hosts", false, false).is_ok());
-        assert!(validate("file.read", "/etc/../passwd", false, false).is_err());
-        assert!(validate("container.list", "", false, false).is_err());
-        assert!(validate("container.list", "", true, false).is_ok());
-        assert!(validate("container.start", "web-test", true, false).is_ok());
-        assert!(validate("container.start", "--help", true, false).is_err());
-        assert!(validate("network.firewall.expose", "temporary-test", false, false).is_err());
-        assert!(validate("network.firewall.expose", "temporary-test", false, true).is_ok());
-        assert!(validate("network.firewall.expose", "bad;name", false, true).is_err());
+        assert!(validate("agent.update", "", false, false, false).is_ok());
+        assert!(validate("systemd.restart", "ssh.service", false, false, false).is_ok());
+        assert!(validate("systemd.journal.read", "cron.service", false, false, false).is_ok());
+        assert!(validate("systemd.restart", "--help.service", false, false, false).is_err());
+        assert!(
+            validate(
+                "systemd.restart",
+                "bad;command.service",
+                false,
+                false,
+                false
+            )
+            .is_err()
+        );
+        assert!(validate("package.install", "", false, false, false).is_ok());
+        assert!(validate("file.write.protected", "app.conf", false, false, false).is_ok());
+        assert!(validate("file.write.protected", "../app.conf", false, false, false).is_err());
+        assert!(validate("file.list", "/", false, false, false).is_ok());
+        assert!(validate("file.read", "/etc/hosts", false, false, false).is_ok());
+        assert!(validate("file.read", "/etc/../passwd", false, false, false).is_err());
+        assert!(validate("container.list", "", false, false, false).is_err());
+        assert!(validate("container.list", "", true, false, false).is_ok());
+        assert!(validate("container.start", "web-test", true, false, false).is_ok());
+        assert!(validate("container.start", "--help", true, false, false).is_err());
+        assert!(
+            validate(
+                "network.firewall.expose",
+                "temporary-test",
+                false,
+                false,
+                false
+            )
+            .is_err()
+        );
+        assert!(
+            validate(
+                "network.firewall.expose",
+                "temporary-test",
+                false,
+                true,
+                false
+            )
+            .is_ok()
+        );
+        assert!(validate("network.firewall.expose", "bad;name", false, true, false).is_err());
+        assert!(
+            validate(
+                "nginx.route.set",
+                "nanpanel-route0123456789abcdef0123456789abcdef",
+                false,
+                false,
+                true
+            )
+            .is_ok()
+        );
+        assert!(
+            validate(
+                "nginx.route.set",
+                "nanpanel-route0123456789abcdef0123456789abcdef",
+                false,
+                false,
+                false
+            )
+            .is_err()
+        );
         assert!(validate_envelope(&request("agent.update", "", now + 30_000)).is_ok());
         assert!(valid_package_name("libssl3"));
         assert!(!valid_package_name("-y"));
@@ -3572,7 +3668,7 @@ mod tests {
         assert!(!valid_container_image("./nginx"));
         assert!(valid_network_interface("br-0"));
         assert!(!valid_network_interface("-eth0"));
-        let capabilities = available_capabilities(true, true, true, true);
+        let capabilities = available_capabilities(true, true, true, true, true);
         for capability in [
             "systemd.restart",
             "systemd.journal.read",
@@ -3587,19 +3683,58 @@ mod tests {
             "k3s.preflight",
             "kubeedge.edgecore.join",
             "network.overlay.peer_paths.read",
+            "nginx.route.set",
         ] {
             assert!(capabilities.contains(&capability));
         }
         assert!(
-            validate_capability_target("network.overlay.peer_paths.read", "", false, false, true,)
-                .is_ok()
+            validate_capability_target(
+                "network.overlay.peer_paths.read",
+                "",
+                false,
+                false,
+                true,
+                false
+            )
+            .is_ok()
         );
         assert!(
-            validate_capability_target("network.overlay.peer_paths.read", "", false, false, false,)
-                .is_err()
+            validate_capability_target(
+                "network.overlay.peer_paths.read",
+                "",
+                false,
+                false,
+                false,
+                false
+            )
+            .is_err()
         );
-        assert!(validate_capability_target("k3s.preflight", "", false, false, false).is_ok());
+        assert!(
+            validate_capability_target("k3s.preflight", "", false, false, false, false).is_ok()
+        );
         Ok(())
+    }
+
+    #[test]
+    fn container_deploy_requires_a_typed_payload() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let mut deploy = request("container.deploy", "nanpanel-test", now + 30_000);
+        assert!(validate_payload_presence(&deploy).is_err());
+
+        deploy.payload_json = Some(
+            r#"{"image":"registry.example.test/web:2.0","hostPort":18080,"containerPort":8080}"#
+                .to_owned(),
+        );
+        assert!(validate_payload_presence(&deploy).is_ok());
+        assert!(parse_container_deploy_spec(&deploy).is_ok());
+
+        deploy.payload_json =
+            Some(r#"{"image":"registry.example.test/web:2.0","command":"id"}"#.to_owned());
+        assert!(validate_payload_presence(&deploy).is_ok());
+        assert!(parse_container_deploy_spec(&deploy).is_err());
     }
 
     #[test]
@@ -3631,28 +3766,45 @@ mod tests {
     #[test]
     fn firewall_capability_depends_on_system_tools_not_rule_configuration() {
         assert!(
-            validate_capability_target("network.firewall.expose", "ssh-temp", false, false, false)
-                .is_err()
+            validate_capability_target(
+                "network.firewall.expose",
+                "ssh-temp",
+                false,
+                false,
+                false,
+                false
+            )
+            .is_err()
         );
         assert!(
-            validate_capability_target("network.firewall.expose", "ssh-temp", false, true, false)
-                .is_ok()
+            validate_capability_target(
+                "network.firewall.expose",
+                "ssh-temp",
+                false,
+                true,
+                false,
+                false
+            )
+            .is_ok()
         );
         assert!(
-            available_capabilities(false, false, false, true).contains(&"kubeedge.edgecore.join")
+            available_capabilities(false, false, false, true, false)
+                .contains(&"kubeedge.edgecore.join")
         );
         assert!(
-            !available_capabilities(false, false, false, false).contains(&"kubeedge.edgecore.join")
+            !available_capabilities(false, false, false, false, false)
+                .contains(&"kubeedge.edgecore.join")
         );
         assert!(
-            !available_capabilities(false, false, false, false)
+            !available_capabilities(false, false, false, false, false)
                 .contains(&"network.firewall.expose")
         );
         assert!(
-            available_capabilities(false, true, false, false).contains(&"network.firewall.expose")
+            available_capabilities(false, true, false, false, false)
+                .contains(&"network.firewall.expose")
         );
         assert!(
-            !available_capabilities(false, false, false, false)
+            !available_capabilities(false, false, false, false, false)
                 .contains(&"network.overlay.peer_paths.read")
         );
     }
