@@ -942,6 +942,328 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
+  /api/v1/kubernetes/clusters/{clusterId}/namespaces/{namespace}/application-releases:
+    parameters:
+    - name: clusterId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    - name: namespace
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 63
+        pattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
+    get:
+      tags: [KubernetesClusters]
+      operationId: listKubernetesApplicationReleases
+      summary: 查询当前管理员在 Namespace 中创建的渐进发布
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 持久化发布状态、流量权重和 AnalysisRun 测量。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationReleaseList' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [KubernetesClusters]
+      operationId: createKubernetesApplicationRelease
+      summary: 创建渐进发布草稿
+      description: 创建只会持久化草稿。启动时检查 Gateway API、Argo Rollouts、Gateway 与 Prometheus 前置条件，再创建带所有权标记的 Rollout、AnalysisTemplate、HTTPRoute 和稳定/金丝雀 Service。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/KubernetesApplicationReleaseCreateRequest' }
+      responses:
+        '201':
+          description: 已保存为 DRAFT 的渐进发布计划。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationRelease' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          description: 镜像、路由、阈值或操作原因无效。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /api/v1/kubernetes/clusters/{clusterId}/namespaces/{namespace}/application-releases/{releaseId}:
+    parameters:
+    - name: clusterId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    - name: namespace
+      in: path
+      required: true
+      schema: { type: string, maxLength: 63 }
+    - name: releaseId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    get:
+      tags: [KubernetesClusters]
+      operationId: getKubernetesApplicationRelease
+      summary: 读取发布计划和最新集群观测
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 发布计划、阶段、流量权重与测量历史。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationRelease' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/kubernetes/clusters/{clusterId}/namespaces/{namespace}/application-releases/{releaseId}/start:
+    parameters:
+    - { name: clusterId, in: path, required: true, schema: { type: string, format: uuid } }
+    - { name: namespace, in: path, required: true, schema: { type: string, maxLength: 63 } }
+    - { name: releaseId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [KubernetesClusters]
+      operationId: startKubernetesApplicationRelease
+      summary: 显式启动渐进发布
+      x-implementation-status: implemented
+      security: [{ cookieAuth: [], csrfToken: [] }]
+      responses:
+        '200':
+          description: 发布资源已创建，后续由 Argo Rollouts 推进。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationRelease' }
+        '409':
+          description: 集群控制器、Gateway、流量路由或发布状态不满足前置条件。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /api/v1/kubernetes/clusters/{clusterId}/namespaces/{namespace}/application-releases/{releaseId}/pause:
+    parameters:
+    - { name: clusterId, in: path, required: true, schema: { type: string, format: uuid } }
+    - { name: namespace, in: path, required: true, schema: { type: string, maxLength: 63 } }
+    - { name: releaseId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [KubernetesClusters]
+      operationId: pauseKubernetesApplicationRelease
+      summary: 暂停发布
+      x-implementation-status: implemented
+      security: [{ cookieAuth: [], csrfToken: [] }]
+      responses:
+        '200':
+          description: 已请求 Argo Rollouts 暂停。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationRelease' }
+  /api/v1/kubernetes/clusters/{clusterId}/namespaces/{namespace}/application-releases/{releaseId}/resume:
+    parameters:
+    - { name: clusterId, in: path, required: true, schema: { type: string, format: uuid } }
+    - { name: namespace, in: path, required: true, schema: { type: string, maxLength: 63 } }
+    - { name: releaseId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [KubernetesClusters]
+      operationId: resumeKubernetesApplicationRelease
+      summary: 恢复发布
+      x-implementation-status: implemented
+      security: [{ cookieAuth: [], csrfToken: [] }]
+      responses:
+        '200':
+          description: 已请求 Argo Rollouts 恢复。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationRelease' }
+  /api/v1/kubernetes/clusters/{clusterId}/namespaces/{namespace}/application-releases/{releaseId}/promote:
+    parameters:
+    - { name: clusterId, in: path, required: true, schema: { type: string, format: uuid } }
+    - { name: namespace, in: path, required: true, schema: { type: string, maxLength: 63 } }
+    - { name: releaseId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [KubernetesClusters]
+      operationId: promoteKubernetesApplicationRelease
+      summary: 人工批准并推进到下一灰度阶段
+      x-implementation-status: implemented
+      security: [{ cookieAuth: [], csrfToken: [] }]
+      responses:
+        '200':
+          description: 已推进 Argo Rollouts 的暂停阶段。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationRelease' }
+  /api/v1/kubernetes/clusters/{clusterId}/namespaces/{namespace}/application-releases/{releaseId}/rollback:
+    parameters:
+    - { name: clusterId, in: path, required: true, schema: { type: string, format: uuid } }
+    - { name: namespace, in: path, required: true, schema: { type: string, maxLength: 63 } }
+    - { name: releaseId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [KubernetesClusters]
+      operationId: rollbackKubernetesApplicationRelease
+      summary: 请求恢复稳定版本
+      x-implementation-status: implemented
+      security: [{ cookieAuth: [], csrfToken: [] }]
+      responses:
+        '200':
+          description: 已请求 Argo Rollouts 中止金丝雀并恢复稳定路由。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationRelease' }
+  /api/v1/host-application-releases:
+    get:
+      tags: [Hosts]
+      operationId: listHostApplicationReleases
+      summary: 查询当前管理员创建的普通主机蓝绿发布
+      x-implementation-status: implemented
+      security: [{ cookieAuth: [] }]
+      responses:
+        '200':
+          description: 持久化发布阶段和有序主机目标。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HostApplicationReleaseList' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Hosts]
+      operationId: createHostApplicationRelease
+      summary: 创建普通主机蓝绿发布草稿
+      description: 要求每台目标主机在线并具备 Docker 或 Podman、Nginx 路由能力；按提交顺序逐台切换，每批结束后等待人工批准。Kubernetes/KubeEdge 管理的主机会被拒绝。
+      x-implementation-status: implemented
+      security: [{ cookieAuth: [], csrfToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/HostApplicationReleaseCreateRequest' }
+      responses:
+        '201':
+          description: 已保存为 DRAFT 的普通主机发布计划。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HostApplicationRelease' }
+        '409':
+          description: 主机离线、缺少 Helper 能力、由 Kubernetes 管理或存在冲突的发布。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '412':
+          description: 主机资产 generation 已变化。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: 镜像、路由、批次或目标列表无效。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /api/v1/host-application-releases/{releaseId}:
+    parameters:
+    - { name: releaseId, in: path, required: true, schema: { type: string, format: uuid } }
+    get:
+      tags: [Hosts]
+      operationId: getHostApplicationRelease
+      summary: 查询普通主机发布和逐主机阶段
+      x-implementation-status: implemented
+      security: [{ cookieAuth: [] }]
+      responses:
+        '200':
+          description: 当前管理员拥有的发布计划和有序主机状态。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HostApplicationRelease' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/host-application-releases/{releaseId}/start:
+    parameters:
+    - { name: releaseId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Hosts]
+      operationId: startHostApplicationRelease
+      summary: 启动普通主机发布
+      x-implementation-status: implemented
+      security: [{ cookieAuth: [], csrfToken: [] }]
+      responses:
+        '200':
+          description: 已启动持久化发布状态机。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HostApplicationRelease' }
+  /api/v1/host-application-releases/{releaseId}/pause:
+    parameters:
+    - { name: releaseId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Hosts]
+      operationId: pauseHostApplicationRelease
+      summary: 暂停普通主机发布
+      x-implementation-status: implemented
+      security: [{ cookieAuth: [], csrfToken: [] }]
+      responses:
+        '200':
+          description: 已暂停发布计划。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HostApplicationRelease' }
+  /api/v1/host-application-releases/{releaseId}/resume:
+    parameters:
+    - { name: releaseId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Hosts]
+      operationId: approveHostApplicationReleaseBatch
+      summary: 批准并执行下一主机批次
+      x-implementation-status: implemented
+      security: [{ cookieAuth: [], csrfToken: [] }]
+      responses:
+        '200':
+          description: 已恢复发布状态机。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HostApplicationRelease' }
+  /api/v1/host-application-releases/{releaseId}/reconcile:
+    parameters:
+    - { name: releaseId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Hosts]
+      operationId: reconcileHostApplicationRelease
+      summary: 根据原 Helper 操作 ID 对账未知发布
+      x-implementation-status: implemented
+      security: [{ cookieAuth: [], csrfToken: [] }]
+      responses:
+        '200':
+          description: 已请求对账。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HostApplicationRelease' }
+  /api/v1/host-application-releases/{releaseId}/rollback:
+    parameters:
+    - { name: releaseId, in: path, required: true, schema: { type: string, format: uuid } }
+    post:
+      tags: [Hosts]
+      operationId: rollbackHostApplicationRelease
+      summary: 按逆序恢复此前已成功的稳定实例和路由
+      x-implementation-status: implemented
+      security: [{ cookieAuth: [], csrfToken: [] }]
+      responses:
+        '200':
+          description: 已请求回滚。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HostApplicationRelease' }
+        '409':
+          description: 发布仍有未确认操作或当前状态不允许回滚。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
   /api/v1/kubernetes/clusters/{clusterId}/namespaces/{namespace}/deployments/{name}/scale:
     parameters:
     - name: clusterId
@@ -5443,6 +5765,217 @@ components:
         observedAt:
           type: string
           format: date-time
+    KubernetesApplicationReleaseCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [name, stableImage, image, replicas, containerPort, gatewayName, hostname, prometheusService, reason]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 63
+          pattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
+        image:
+          type: string
+          minLength: 1
+          maxLength: 512
+        stableImage:
+          type: string
+          minLength: 1
+          maxLength: 512
+        replicas:
+          type: integer
+          minimum: 1
+          maximum: 20
+        containerPort:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        gatewayName:
+          type: string
+          minLength: 1
+          maxLength: 63
+          pattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
+        hostname:
+          type: string
+          minLength: 1
+          maxLength: 253
+        prometheusService:
+          type: string
+          minLength: 1
+          maxLength: 63
+          pattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
+        maxErrorRate:
+          type: number
+          minimum: 0.01
+          maximum: 0.5
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+    KubernetesApplicationReleaseList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items: { $ref: '#/components/schemas/KubernetesApplicationRelease' }
+    KubernetesApplicationRelease:
+      type: object
+      additionalProperties: false
+      required: [id, clusterId, namespace, name, rolloutName, routeName, hostname, stableImage, image,
+        containerPort, replicas, maxErrorRate, reason, state, stableWeight, canaryWeight,
+        rolloutPhase, currentStepMessage, errorCode, errorMessage, requestedBy, createdAt,
+        startedAt, observedAt, finishedAt, stages, measurements]
+      properties:
+        id: { type: string, format: uuid }
+        clusterId: { type: string, format: uuid }
+        namespace: { type: string, maxLength: 63 }
+        name: { type: string, maxLength: 63 }
+        rolloutName: { type: string, maxLength: 63 }
+        routeName: { type: string, maxLength: 63 }
+        hostname: { type: string, maxLength: 253 }
+        stableImage: { type: string, maxLength: 512 }
+        image: { type: string, maxLength: 512 }
+        containerPort: { type: integer, minimum: 1, maximum: 65535 }
+        replicas: { type: integer, minimum: 1, maximum: 20 }
+        maxErrorRate: { type: number, minimum: 0.01, maximum: 0.5 }
+        reason: { type: string, maxLength: 500 }
+        state:
+          type: string
+          enum: [DRAFT, STARTING, RUNNING, PAUSED, SUCCEEDED, ROLLED_BACK, FAILED, UNKNOWN]
+        stableWeight: { type: [integer, 'null'], minimum: 0, maximum: 100 }
+        canaryWeight: { type: [integer, 'null'], minimum: 0, maximum: 100 }
+        rolloutPhase: { type: [string, 'null'], maxLength: 32 }
+        currentStepMessage: { type: [string, 'null'], maxLength: 1000 }
+        errorCode: { type: [string, 'null'], maxLength: 64 }
+        errorMessage: { type: [string, 'null'], maxLength: 1000 }
+        requestedBy: { type: string, format: uuid }
+        createdAt: { type: string, format: date-time }
+        startedAt: { type: [string, 'null'], format: date-time }
+        observedAt: { type: [string, 'null'], format: date-time }
+        finishedAt: { type: [string, 'null'], format: date-time }
+        stages:
+          type: array
+          items: { $ref: '#/components/schemas/KubernetesApplicationReleaseStage' }
+        measurements:
+          type: array
+          items: { $ref: '#/components/schemas/KubernetesApplicationReleaseMeasurement' }
+    KubernetesApplicationReleaseStage:
+      type: object
+      additionalProperties: false
+      required: [ordinal, stage, state, desiredCanaryWeight, observedCanaryWeight,
+        observedStableWeight, analysisRunName, detail, startedAt, finishedAt]
+      properties:
+        ordinal: { type: integer, minimum: 0 }
+        stage: { type: string, maxLength: 32 }
+        state: { type: string, enum: [PENDING, ACTIVE, OBSERVED, SUCCEEDED, INCONCLUSIVE, FAILED] }
+        desiredCanaryWeight: { type: [integer, 'null'], minimum: 0, maximum: 100 }
+        observedCanaryWeight: { type: [integer, 'null'], minimum: 0, maximum: 100 }
+        observedStableWeight: { type: [integer, 'null'], minimum: 0, maximum: 100 }
+        analysisRunName: { type: [string, 'null'], maxLength: 253 }
+        detail: { type: [string, 'null'], maxLength: 1000 }
+        startedAt: { type: [string, 'null'], format: date-time }
+        finishedAt: { type: [string, 'null'], format: date-time }
+    KubernetesApplicationReleaseMeasurement:
+      type: object
+      additionalProperties: false
+      required: [analysisRunName, metricName, measurementOrdinal, phase, value, detail, sampledAt]
+      properties:
+        analysisRunName: { type: string, maxLength: 253 }
+        metricName: { type: string, maxLength: 128 }
+        measurementOrdinal: { type: integer, minimum: 0 }
+        phase: { type: string, enum: [RUNNING, SUCCESSFUL, FAILED, INCONCLUSIVE, ERROR] }
+        value: { type: [number, 'null'] }
+        detail: { type: [string, 'null'], maxLength: 1000 }
+        sampledAt: { type: string, format: date-time }
+    HostApplicationReleaseCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [name, stableImage, image, containerPort, serverName, listenPort, healthPath, batchSize, targets, reason]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 63, pattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$' }
+        stableImage: { type: string, minLength: 1, maxLength: 512, pattern: '^[A-Za-z0-9][A-Za-z0-9._/:@+-]{0,511}$' }
+        image: { type: string, minLength: 1, maxLength: 512, pattern: '^[A-Za-z0-9][A-Za-z0-9._/:@+-]{0,511}$' }
+        containerPort: { type: integer, minimum: 1, maximum: 65535 }
+        serverName: { type: string, minLength: 1, maxLength: 253, pattern: '^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$' }
+        listenPort: { type: integer, minimum: 1024, maximum: 65535 }
+        healthPath: { type: string, minLength: 1, maxLength: 256, pattern: '^/[A-Za-z0-9/._~-]*$' }
+        batchSize: { type: integer, minimum: 1, maximum: 50 }
+        targets:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items: { $ref: '#/components/schemas/HostApplicationReleaseTargetRequest' }
+        reason: { type: string, minLength: 1, maxLength: 500 }
+    HostApplicationReleaseTargetRequest:
+      type: object
+      additionalProperties: false
+      required: [hostId, listenAddress, expectedGeneration]
+      properties:
+        hostId: { type: string, format: uuid }
+        listenAddress:
+          type: string
+          minLength: 2
+          maxLength: 64
+          description: Assigned IPv4 or IPv6 address on this host; wildcard addresses are rejected.
+        expectedGeneration: { type: integer, minimum: 1, format: int64 }
+    HostApplicationReleaseList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items: { $ref: '#/components/schemas/HostApplicationRelease' }
+    HostApplicationRelease:
+      type: object
+      additionalProperties: false
+      required: [id, name, stableImage, image, containerPort, serverName, listenPort, healthPath,
+        batchSize, activeOrdinal, state, reason, errorCode, errorMessage, requestedBy,
+        createdAt, startedAt, finishedAt, targets]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string, maxLength: 63 }
+        stableImage: { type: string, maxLength: 512 }
+        image: { type: string, maxLength: 512 }
+        containerPort: { type: integer, minimum: 1, maximum: 65535 }
+        serverName: { type: string, maxLength: 253 }
+        listenPort: { type: integer, minimum: 1, maximum: 65535 }
+        healthPath: { type: string, maxLength: 256 }
+        batchSize: { type: integer, minimum: 1, maximum: 50 }
+        activeOrdinal: { type: integer, minimum: 0 }
+        state: { type: string, enum: [DRAFT, RUNNING, PAUSED, ROLLING_BACK, SUCCEEDED, ROLLED_BACK, FAILED, UNKNOWN] }
+        reason: { type: string, maxLength: 500 }
+        errorCode: { type: [string, 'null'], maxLength: 64 }
+        errorMessage: { type: [string, 'null'], maxLength: 1000 }
+        requestedBy: { type: string, format: uuid }
+        createdAt: { type: string, format: date-time }
+        startedAt: { type: [string, 'null'], format: date-time }
+        finishedAt: { type: [string, 'null'], format: date-time }
+        targets:
+          type: array
+          maxItems: 50
+          items: { $ref: '#/components/schemas/HostApplicationReleaseTarget' }
+    HostApplicationReleaseTarget:
+      type: object
+      additionalProperties: false
+      required: [ordinal, hostId, listenAddress, routeName, stablePort, candidatePort, state,
+        detail, operationId, expectedGeneration]
+      properties:
+        ordinal: { type: integer, minimum: 0 }
+        hostId: { type: string, format: uuid }
+        listenAddress: { type: string, maxLength: 64 }
+        routeName: { type: string, maxLength: 63 }
+        stablePort: { type: integer, minimum: 1, maximum: 65535 }
+        candidatePort: { type: integer, minimum: 1, maximum: 65535 }
+        state: { type: string, maxLength: 40 }
+        detail: { type: [string, 'null'], maxLength: 1000 }
+        operationId: { type: [string, 'null'], format: uuid }
+        expectedGeneration: { type: integer, format: int64 }
     KubernetesManagedDeploymentList:
       type: object
       additionalProperties: false

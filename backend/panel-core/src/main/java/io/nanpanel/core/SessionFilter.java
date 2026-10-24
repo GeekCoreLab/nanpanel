@@ -25,6 +25,10 @@ public class SessionFilter
   @ConfigProperty(name = "nanpanel.auth.origin",
                   defaultValue = "https://localhost")
   String origin;
+  @Inject
+  @ConfigProperty(name = "nanpanel.auth.rate-limit.requests-per-minute",
+                  defaultValue = "20")
+  int requestsPerMinute;
   private final Map<String, long[]> attempts = new ConcurrentHashMap<>();
   synchronized void limit(String key) {
     long now = System.currentTimeMillis();
@@ -32,7 +36,7 @@ public class SessionFilter
     if (attempts.size() > 10000)
       throw fail(429, "RATE_LIMITED", "请求过于频繁");
     var entry = attempts.computeIfAbsent(key, k -> new long[] {now, 0});
-    if (++entry[1] > 20)
+    if (++entry[1] > requestsPerMinute)
       throw new jakarta.ws.rs.WebApplicationException(
           jakarta.ws.rs.core.Response.status(429)
               .header("Retry-After", "60")

@@ -4,6 +4,8 @@ import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.QuarkusTestProfile;
+import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -14,7 +16,16 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 @QuarkusTest
+@TestProfile(SystemResourceTest.SystemResourceProfile.class)
 class SystemResourceTest {
+  public static class SystemResourceProfile implements QuarkusTestProfile {
+    @Override
+    public Map<String, String> getConfigOverrides() {
+      return Map.of("quarkus.datasource.jdbc.url",
+          "jdbc:h2:mem:system_resource;DB_CLOSE_DELAY=-1;MODE=PostgreSQL");
+    }
+  }
+
   @Inject AuthStore store;
   @Inject KubernetesClusterRegistryService kubernetesClusters;
 
@@ -616,7 +627,8 @@ class SystemResourceTest {
         "host.inventory", "agent.heartbeat", "agent.self_update", "systemd.read",
         "systemd.restart", "systemd.journal.read", "package.install", "file.write.protected",
         "container.list", "container.logs", "container.start", "container.stop",
-        "container.deploy", "network.firewall.expose", "k3s.preflight", "k3s.install",
+        "container.deploy", "nginx.route.set", "network.firewall.expose",
+        "k3s.preflight", "k3s.install",
         "k3s.upgrade",
         "network.inventory",
         "network.overlay.observe", "network.overlay.peer_paths.observe"));
@@ -1327,11 +1339,12 @@ class SystemResourceTest {
         "detail", "UNCERTAIN: result was not available during reconnect");
     given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
         .contentType("application/json").body(uncertainResultReport)
-        .post("/internal/agent-control-results").then().statusCode(204)
-        .header("X-NanPanel-Result-Ack", equalTo("true"));
+        .post("/internal/agent-control-results").then().statusCode(202)
+        .header("X-NanPanel-Result-Ack", nullValue());
     given().header("X-NanPanel-Gateway-Token", "test-gateway-token")
         .contentType("application/json").body(uncertainResultReport)
-        .post("/internal/agent-control-results").then().statusCode(204);
+        .post("/internal/agent-control-results").then().statusCode(202)
+        .header("X-NanPanel-Result-Ack", nullValue());
     var resultReport = Map.of("agentId", agentId, "operationId", operationId,
         "idempotencyKey", operationKey, "status", "SUCCEEDED",
         "detail", "{\"activeState\":\"ACTIVE\",\"evidence\":\"systemd is active\"}");

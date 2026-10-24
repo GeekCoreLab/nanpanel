@@ -44,7 +44,7 @@ public class HostHelperOperationResource {
       "package.install", "file.write.protected", "container.list", "container.logs",
       "container.start", "container.stop", "container.deploy", "network.firewall.expose",
       "file.list", "file.read", "file.write", "file.delete", "k3s.preflight", "k3s.install",
-      "k3s.upgrade", "kubeedge.edgecore.join");
+      "k3s.upgrade", "kubeedge.edgecore.join", "nginx.route.set");
   private static final java.util.regex.Pattern PACKAGE_NAME =
       java.util.regex.Pattern.compile("[A-Za-z0-9][A-Za-z0-9+_.:-]{0,127}");
   private static final java.util.regex.Pattern FILE_NAME =
@@ -57,6 +57,8 @@ public class HostHelperOperationResource {
       java.util.regex.Pattern.compile("[A-Za-z0-9_][A-Za-z0-9_.-]{0,14}");
   private static final java.util.regex.Pattern NETWORK_RULE_NAME =
       java.util.regex.Pattern.compile("[A-Za-z0-9][A-Za-z0-9_.-]{0,62}");
+  private static final java.util.regex.Pattern NGINX_ROUTE_NAME =
+      java.util.regex.Pattern.compile("nanpanel-[a-z][a-z0-9-]{0,52}");
 
   @Inject AuthStore store;
   @Inject ObjectMapper mapper;
@@ -176,8 +178,13 @@ public class HostHelperOperationResource {
         .header("Idempotency-Replayed", Boolean.toString(replayed)).build();
   }
 
-  private Response submitAs(UUID hostId, String idempotencyKey, HelperOperationRequest input,
+  Response submitAs(UUID hostId, String idempotencyKey, HelperOperationRequest input,
                             String actor, String remoteAddress) {
+    return submitAs(hostId, idempotencyKey, input, actor, remoteAddress, false);
+  }
+
+  Response submitAs(UUID hostId, String idempotencyKey, HelperOperationRequest input,
+                    String actor, String remoteAddress, boolean redispatchUnresolvedReplay) {
     String key = validateIdempotencyKey(idempotencyKey);
     if (input == null || !CAPABILITIES.contains(input.capability()))
       throw fail(422, "OPERATION_UNSUPPORTED", "该主机 Helper 操作能力不受支持");
@@ -300,7 +307,9 @@ public class HostHelperOperationResource {
           input.capability(), target, payloadJson, deadline.toEpochMilli());
     });
 
-    if (!decision.replayed()) dispatch(decision, actor, hostId, key, remoteAddress);
+    if (!decision.replayed() || (redispatchUnresolvedReplay
+        && Set.of("RUNNING", "UNKNOWN").contains(decision.operation().get("status"))))
+      dispatch(decision, actor, hostId, key, remoteAddress);
     return Response.status(decision.status()).entity(decision.operation())
         .header("Location", "/api/v1/operations/" + decision.operation().get("id"))
         .header("Retry-After", "2")
@@ -428,7 +437,7 @@ public class HostHelperOperationResource {
     });
   }
 
-  private void validateTargetAndPayload(String capability, String target, JsonNode payload) {
+  void validateTargetAndPayload(String capability, String target, JsonNode payload) {
     boolean validTarget = switch (capability) {
       case "package.install", "container.list", "k3s.preflight", "k3s.install", "k3s.upgrade",
           "kubeedge.edgecore.join" -> target.isEmpty();
@@ -438,6 +447,7 @@ public class HostHelperOperationResource {
       case "container.logs", "container.start", "container.stop", "container.deploy" ->
           CONTAINER_NAME.matcher(target).matches();
       case "network.firewall.expose" -> NETWORK_RULE_NAME.matcher(target).matches();
+      case "nginx.route.set" -> NGINX_ROUTE_NAME.matcher(target).matches();
       default -> false;
     };
     if (!validTarget) throw fail(422, "VALIDATION_FAILED", "操作目标格式无效");
@@ -555,8 +565,84 @@ public class HostHelperOperationResource {
         throw fail(422, "VALIDATION_FAILED", "网络接口、协议、端口或回滚时间无效");
       return;
     }
+    if (capability.equals("nginx.route.set")) {
+      validateNginxRoute(payload);
+      return;
+    }
     if (payload != null && !payload.isNull())
       throw fail(422, "VALIDATION_FAILED", "该 Helper 操作不接受附加参数");
+  }
+
+  private void validateNginxRoute(JsonNode payload) {
+    JsonNode address = payload == null ? null : payload.get("listenAddress");
+    JsonNode port = payload == null ? null : payload.get("listenPort");
+    JsonNode hostname = payload == null ? null : payload.get("serverName");
+    JsonNode healthPath = payload == null ? null : payload.get("healthPath");
+    JsonNode backends = payload == null ? null : payload.get("backends");
+    boolean validAddress = address != null && address.isTextual()
+        && validHostAddress(address.asText());
+    boolean validHostname = hostname != null && hostname.isTextual()
+        && hostname.asText().length() <= 253
+        && java.util.Arrays.stream(hostname.asText().split("\\.", -1)).allMatch(label ->
+            label.length() >= 1 && label.length() <= 63
+                && label.matches("[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"));
+    boolean validHealthPath = healthPath != null && healthPath.isTextual()
+        && healthPath.asText().startsWith("/") && healthPath.asText().length() <= 256
+        && !healthPath.asText().contains("..")
+        && healthPath.asText().matches("/[A-Za-z0-9/._~-]*");
+    if (payload == null || !payload.isObject() || payload.size() != 5 || !validAddress
+        || !validPort(port) || !validHostname || !validHealthPath || backends == null
+        || !backends.isArray() || backends.isEmpty() || backends.size() > 2) {
+      throw fail(422, "VALIDATION_FAILED", "Nginx 路由监听地址、主机名或健康检查参数无效");
+    }
+    var names = new java.util.HashSet<String>();
+    var ports = new java.util.HashSet<Integer>();
+    int weightSum = 0;
+    boolean hasPositiveWeight = false;
+    for (JsonNode backend : backends) {
+      JsonNode name = backend.get("name");
+      JsonNode backendPort = backend.get("port");
+      JsonNode weight = backend.get("weight");
+      if (!backend.isObject() || backend.size() != 3 || name == null || !name.isTextual()
+          || !name.asText().matches("[a-z0-9][a-z0-9-]{0,31}")
+          || !names.add(name.asText()) || !validPort(backendPort) || weight == null
+          || !weight.isIntegralNumber() || !weight.canConvertToInt()
+          || weight.intValue() < 0 || weight.intValue() > 100
+          || !ports.add(backendPort.intValue())) {
+        throw fail(422, "VALIDATION_FAILED", "Nginx 后端名称、端口或权重无效");
+      }
+      weightSum += weight.intValue();
+      hasPositiveWeight |= weight.intValue() > 0;
+    }
+    if (weightSum != 100 || !hasPositiveWeight) {
+      throw fail(422, "VALIDATION_FAILED", "Nginx 后端权重总和必须为 100");
+    }
+  }
+
+  private boolean validHostAddress(String value) {
+    if (value == null || value.contains("%")) return false;
+    try {
+      java.net.InetAddress address;
+      if (value.matches("[0-9.]+")) {
+        String[] octets = value.split("\\.", -1);
+        if (octets.length != 4) return false;
+        for (String octet : octets) {
+          int number = Integer.parseInt(octet);
+          if (number < 0 || number > 255) return false;
+        }
+        address = java.net.InetAddress.getByAddress(new byte[] {
+            (byte)Integer.parseInt(octets[0]), (byte)Integer.parseInt(octets[1]),
+            (byte)Integer.parseInt(octets[2]), (byte)Integer.parseInt(octets[3])});
+      } else if (value.contains(":")) {
+        address = java.net.InetAddress.getByName(value);
+        if (!(address instanceof java.net.Inet6Address)) return false;
+      } else {
+        return false;
+      }
+      return !address.isAnyLocalAddress() && !address.isMulticastAddress();
+    } catch (java.net.UnknownHostException | NumberFormatException invalid) {
+      return false;
+    }
   }
 
   boolean validK3sServerUrl(String value) {

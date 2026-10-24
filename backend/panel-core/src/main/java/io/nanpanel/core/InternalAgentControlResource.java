@@ -94,7 +94,7 @@ public class InternalAgentControlResource {
         JsonNode previousError = mapper.readTree(String.valueOf(operation.get("error_json")));
         if ("EXECUTION_OUTCOME_UNKNOWN".equals(previousError.path("code").asText()) &&
             report.detail().equals(previousError.path("agentDetail").asText()))
-          return acknowledgeResult();
+          return retainUncertainResult();
       }
       if ("SYSTEMD_JOURNAL_READ".equals(operation.get("kind")))
         return journalResult(c, operation, report, operationId);
@@ -158,6 +158,7 @@ public class InternalAgentControlResource {
             "system_service", serviceId.toString(), denied ? "DENIED" :
                 "UNKNOWN".equals(status) ? "UNKNOWN" : "FAILED", null,
             message);
+        return "UNKNOWN".equals(status) ? retainUncertainResult() : acknowledgeResult();
       }
       return acknowledgeResult();
     });
@@ -206,7 +207,7 @@ public class InternalAgentControlResource {
     audit(c, String.valueOf(operation.get("requested_by")), "systemd.journal.read",
         "system_service", serviceId.toString(), denied ? "DENIED" :
             "UNKNOWN".equals(status) ? "UNKNOWN" : "FAILED", null, message);
-    return acknowledgeResult();
+    return "UNKNOWN".equals(status) ? retainUncertainResult() : acknowledgeResult();
   }
 
   private Response helperOperationResult(java.sql.Connection c, Map<String, Object> operation,
@@ -251,11 +252,15 @@ public class InternalAgentControlResource {
     audit(c, String.valueOf(operation.get("requested_by")), capability,
         "host", hostId.toString(), denied ? "DENIED" :
             "UNKNOWN".equals(status) ? "UNKNOWN" : "FAILED", null, message);
-    return acknowledgeResult();
+    return "UNKNOWN".equals(status) ? retainUncertainResult() : acknowledgeResult();
   }
 
   private Response acknowledgeResult() {
     return Response.noContent().header("X-NanPanel-Result-Ack", "true").build();
+  }
+
+  private Response retainUncertainResult() {
+    return Response.accepted().build();
   }
 
   private UUID parseUuid(String value, String field) {

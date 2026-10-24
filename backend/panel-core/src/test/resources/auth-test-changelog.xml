@@ -126,4 +126,7 @@
         <sql>ALTER TABLE cluster_provider_operation ADD COLUMN host_operation_id UUID REFERENCES operation(id);</sql>
         <sql>CREATE UNIQUE INDEX cluster_provider_host_operation_unique ON cluster_provider_operation(host_operation_id);</sql>
     </changeSet>
+    <changeSet id="host-application-releases-test" author="nanpanel">
+        <sqlFile path="db/changelog/038-host-application-releases-test.sql"/>
+    </changeSet>
 </databaseChangeLog>
