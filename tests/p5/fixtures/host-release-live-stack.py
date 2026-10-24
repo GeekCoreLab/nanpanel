@@ -13,6 +13,7 @@ import os
 import pathlib
 import secrets
 import shutil
+import shlex
 import signal
 import socket
 import subprocess
@@ -79,6 +80,40 @@ def command(args, *, env=None, cwd=ROOT, timeout=300, capture=True):
             f"command failed ({result.returncode}): {' '.join(map(str, args))}\n{output[-6000:]}"
         )
     return result.stdout.strip() if capture else ""
+
+
+def ssh_options(port, identity, known_hosts):
+    return [
+        "-p", str(port), "-i", str(identity),
+        "-o", "IdentitiesOnly=yes",
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=yes",
+        "-o", f"UserKnownHostsFile={known_hosts}",
+    ]
+
+
+def ssh_script(target, port, identity, known_hosts, script, *, timeout=120):
+    result = subprocess.run(
+        ["ssh", *ssh_options(port, identity, known_hosts), target, "sudo -n bash -s"],
+        input=script, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        timeout=timeout,
+    )
+    if result.returncode:
+        raise AcceptanceError(
+            f"remote disposable VM command failed ({result.returncode}):\n{result.stdout[-6000:]}"
+        )
+    return result.stdout.strip()
+
+
+def scp_to_vm(target, port, identity, known_hosts, source, destination, *, timeout=600):
+    command([
+        "scp", "-P", str(port), "-i", identity,
+        "-o", "IdentitiesOnly=yes",
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=yes",
+        "-o", f"UserKnownHostsFile={known_hosts}",
+        source, f"{target}:{destination}",
+    ], timeout=timeout)
 
 
 def free_port(bind_address="127.0.0.1"):
@@ -389,6 +424,139 @@ def make_ca(directory):
     return ca_key, ca_cert, gateway_key, gateway_cert
 
 
+
+def rootful_vm_setup_script(paths, gateway_port, agent_id, hostname):
+    staging = shlex.quote(paths["staging"])
+    base = shlex.quote(paths["base"])
+    helper_dir = shlex.quote(paths["helper_dir"])
+    state_dir = shlex.quote(paths["state_dir"])
+    nginx_conf = shlex.quote(paths["nginx_conf"])
+    hostname = shlex.quote(hostname)
+    images = " ".join(shlex.quote(image) for image in APP_IMAGES[:3])
+    return f"""set -eu
+staging={staging}
+base={base}
+helper_dir={helper_dir}
+state_dir={state_dir}
+nginx_conf={nginx_conf}
+test ! -e "$base" && test ! -e "$helper_dir" && test ! -e "$state_dir" \
+  && test ! -e "$nginx_conf" || {{ echo 'a run-specific rootful fixture path already exists'; exit 1; }}
+for image in {images}; do
+  if podman image inspect "$image" >/dev/null 2>&1; then
+    echo "refusing to replace pre-existing rootful Podman image $image"
+    exit 1
+  fi
+done
+for file in nanpanel-agent nanpanel-helper release-images.tar ca.crt agent.crt agent.key; do
+  test -s "$staging/$file" || {{ echo "missing staged rootful fixture file: $file"; exit 1; }}
+done
+install -d -o root -g root -m 0755 "$base"
+touch "$base/fixture.marker"
+install -d -o root -g root -m 0755 "$base/socket" "$base/routes" "$base/managed" "$helper_dir"
+install -d -o root -g root -m 0700 "$base/managed/files"
+install -d -o root -g 1000 -m 0750 "$base/certs"
+install -d -o 1000 -g 1000 -m 0700 "$state_dir"
+install -o root -g root -m 0755 "$staging/nanpanel-agent" "$helper_dir/nanpanel-agent"
+install -o root -g root -m 0755 "$staging/nanpanel-helper" "$helper_dir/nanpanel-helper"
+install -o 1000 -g 1000 -m 0644 "$staging/ca.crt" "$base/certs/ca.crt"
+install -o 1000 -g 1000 -m 0644 "$staging/agent.crt" "$base/certs/agent.crt"
+install -o 1000 -g 1000 -m 0600 "$staging/agent.key" "$base/certs/agent.key"
+printf 'podman\n' > "$base/managed/container-runtime"
+chmod 0644 "$base/managed/container-runtime"
+printf '%s\\n' {hostname} > "$base/agent-hostname"
+chmod 0644 "$base/agent-hostname"
+podman load --input "$staging/release-images.tar"
+for image in {images}; do podman image inspect "$image" >/dev/null; done
+printf 'include %s/*.conf;\n' "$base/routes" > "$nginx_conf"
+/usr/sbin/nginx -t
+systemctl reload nginx
+systemctl is-active --quiet nginx
+default_status=$(curl --noproxy '*' -sS -o /dev/null -w '%{{http_code}}' http://127.0.0.1/)
+test "$default_status" = 404 || {{ echo "existing Nginx default site changed: HTTP $default_status"; exit 1; }}
+nohup env \
+  NANPANEL_NGINX_INCLUDE_DIR="$base/routes" \
+  NANPANEL_NGINX_BINARY=/usr/sbin/nginx \
+  "$helper_dir/nanpanel-helper" "$base/socket/helper.sock" 1000 1000 \
+  "$base/managed" https://localhost "$base/certs/ca.crt" \
+  "$helper_dir/nanpanel-agent" > "$base/helper.log" 2>&1 </dev/null &
+echo $! > "$base/helper.pid"
+for attempt in $(seq 1 120); do
+  if [ -S "$base/socket/helper.sock" ]; then break; fi
+  kill -0 "$(cat "$base/helper.pid")" 2>/dev/null || {{ cat "$base/helper.log"; exit 1; }}
+  sleep 0.1
+done
+[ -S "$base/socket/helper.sock" ] || {{ cat "$base/helper.log"; exit 1; }}
+nohup unshare --mount --propagation private sh -c '
+hostname_file=$1
+shift
+mount --bind "$hostname_file" /etc/hostname
+exec setpriv --reuid=1000 --regid=1000 --clear-groups env "$@"
+' nanpanel-p5-agent "$base/agent-hostname" \
+  NANPANEL_AGENT_ENDPOINTS=https://10.0.2.2:{gateway_port} \
+  NANPANEL_AGENT_TLS_DOMAIN=localhost \
+  NANPANEL_AGENT_ID={shlex.quote(agent_id)} \
+  NANPANEL_AGENT_CA="$base/certs/ca.crt" \
+  NANPANEL_AGENT_CERT="$base/certs/agent.crt" \
+  NANPANEL_AGENT_KEY="$base/certs/agent.key" \
+  NANPANEL_AGENT_HELPER_SOCKET="$base/socket/helper.sock" \
+  NANPANEL_AGENT_STATE_DIR="$state_dir" \
+  NANPANEL_AGENT_HEARTBEAT_SECS=2 \
+  NANPANEL_AGENT_RECONNECT_MIN_MS=250 \
+  NANPANEL_AGENT_RECONNECT_MAX_MS=2000 \
+  "$helper_dir/nanpanel-agent" > "$base/agent.log" 2>&1 </dev/null &
+echo $! > "$base/agent.pid"
+printf 'ROOTFUL_VM_SETUP_PASS\n'
+"""
+
+
+def rootful_vm_cleanup_script(paths, container_names):
+    staging = shlex.quote(paths["staging"])
+    base = shlex.quote(paths["base"])
+    helper_dir = shlex.quote(paths["helper_dir"])
+    state_dir = shlex.quote(paths["state_dir"])
+    nginx_conf = shlex.quote(paths["nginx_conf"])
+    images = " ".join(shlex.quote(image) for image in APP_IMAGES[:3])
+    containers = " ".join(shlex.quote(name) for name in sorted(container_names))
+    return f"""set -eu
+staging={staging}
+base={base}
+helper_dir={helper_dir}
+state_dir={state_dir}
+nginx_conf={nginx_conf}
+if [ -f "$base/fixture.marker" ]; then
+  for pid_file in "$base/agent.pid" "$base/helper.pid"; do
+    if [ -s "$pid_file" ]; then kill -TERM "$(cat "$pid_file")" 2>/dev/null || true; fi
+  done
+  sleep 1
+  for name in {containers}; do
+    if podman container exists "$name"; then podman rm --force "$name"; fi
+  done
+  rm -f "$nginx_conf"
+  /usr/sbin/nginx -t
+  systemctl reload nginx
+  systemctl is-active --quiet nginx
+  default_status=$(curl --noproxy '*' -sS -o /dev/null -w '%{{http_code}}' http://127.0.0.1/)
+  test "$default_status" = 404 || {{ echo "existing Nginx default site changed: HTTP $default_status"; exit 1; }}
+  for image in {images}; do
+    if podman image inspect "$image" >/dev/null 2>&1; then podman image rm --force "$image"; fi
+  done
+  rm -rf "$base" "$helper_dir" "$state_dir"
+  test ! -e "$nginx_conf" && test ! -e "$helper_dir" && test ! -e "$state_dir"
+  for image in {images}; do
+    if podman image inspect "$image" >/dev/null 2>&1; then
+      echo "fixture image remains after cleanup: $image"
+      exit 1
+    fi
+  done
+fi
+rm -rf "$staging"
+test ! -e "$staging"
+systemctl is-active --quiet nginx
+printf 'ROOTFUL_VM_CLEANUP_PASS\n'
+"""
+
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -399,9 +567,28 @@ def main():
         "--docker-host-socket", type=pathlib.Path,
         help="use an already-running Docker Engine socket for Docker Helpers instead of starting a nested daemon",
     )
+    parser.add_argument(
+        "--rootful-vm-ssh-target",
+        help="enroll the second Agent on a disposable QEMU VM with rootful Podman and host Nginx",
+    )
+    parser.add_argument("--rootful-vm-ssh-port", type=int, default=22)
+    parser.add_argument("--rootful-vm-ssh-key", type=pathlib.Path)
+    parser.add_argument("--rootful-vm-known-hosts", type=pathlib.Path)
     args = parser.parse_args()
+    rootful_vm = bool(args.rootful_vm_ssh_target)
+    if rootful_vm and args.runtime != "podman":
+        raise AcceptanceError("--rootful-vm-ssh-target currently requires --runtime podman")
+    if rootful_vm and (not args.rootful_vm_ssh_key or not args.rootful_vm_known_hosts):
+        raise AcceptanceError(
+            "--rootful-vm-ssh-target requires --rootful-vm-ssh-key and --rootful-vm-known-hosts"
+        )
+    if rootful_vm and (
+        not args.rootful_vm_ssh_key.is_file() or not args.rootful_vm_known_hosts.is_file()
+    ):
+        raise AcceptanceError("rootful VM SSH identity or known-hosts file is missing")
     runtime_assignments = (
-        ["podman", "docker"] if args.runtime == "both"
+        ["podman", "rootful-podman"] if rootful_vm
+        else ["podman", "docker"] if args.runtime == "both"
         else [args.runtime, args.runtime]
     )
     docker_host_socket = args.docker_host_socket.resolve() if args.docker_host_socket else None
@@ -420,6 +607,20 @@ def main():
 
     run_id = uuid.uuid4().hex[:8]
     root = pathlib.Path(tempfile.mkdtemp(prefix=f"nanpanel-p5-live-{run_id}-"))
+    rootful_vm_paths = None
+    if rootful_vm:
+        rootful_vm_paths = {
+            "staging": f"/tmp/nanpanel-p5-rootful-live-{run_id}",
+            "base": f"/run/nanpanel-p5-rootful-live-{run_id}",
+            "helper_dir": f"/usr/local/libexec/nanpanel-p5-rootful-live-{run_id}",
+            "state_dir": f"/var/lib/nanpanel-p5-agent-{run_id}",
+            "nginx_conf": f"/etc/nginx/conf.d/nanpanel-p5-rootful-live-{run_id}.conf",
+        }
+    rootful_agent_id = None
+    rootful_host_id = None
+    rootful_container_names = set()
+    address_a = "127.0.0.2"
+    address_b = "127.0.0.1" if rootful_vm else "127.0.0.3"
     logs = root / "logs"
     logs.mkdir()
     processes = []
@@ -447,10 +648,10 @@ def main():
     gateway_port = unique_port()
     control_port = unique_port()
     web_port = unique_port()
-    route_port = unique_port("127.0.0.2")
+    route_port = unique_port("127.0.0.1" if rootful_vm else "127.0.0.2")
     while route_port < 1024 or route_port == 0:
         selected_ports.discard(route_port)
-        route_port = unique_port("127.0.0.2")
+        route_port = unique_port("127.0.0.1" if rootful_vm else "127.0.0.2")
     restart_route_port = unique_port("127.0.0.2")
     while restart_route_port < 1024 or restart_route_port == 0:
         selected_ports.discard(restart_route_port)
@@ -463,7 +664,9 @@ def main():
     database = f"jdbc:postgresql://127.0.0.1:{db_port}/nanpanel"
     db_name = f"p5-live-db-{run_id}"
     acceptance_complete = False
+    rootful_vm_touched = False
     helper_names = []
+    api = None
     callback_proxy = None
     helper_images = {}
     helper_image_caches = {}
@@ -547,6 +750,7 @@ def main():
 
         callback_proxy = CoreCallbackProxy(api_origin)
         gateway_env = clean_runtime_environment() | {
+            # QEMU user networking forwards 10.0.2.2 to the host loopback listener.
             "NANPANEL_GATEWAY_LISTEN": f"127.0.0.1:{gateway_port}",
             "NANPANEL_GATEWAY_CONTROL_LISTEN": f"127.0.0.1:{control_port}",
             "NANPANEL_GATEWAY_CLIENT_CA": str(ca_cert),
@@ -575,13 +779,15 @@ def main():
         ]
 
         release_images = root / "release-images.tar"
-        if "docker" in runtime_assignments and docker_host_socket is None:
+        if (("docker" in runtime_assignments and docker_host_socket is None) or rootful_vm):
             command([
                 "podman", "save", "--multi-image-archive", "--format", "docker-archive",
                 "-o", release_images, *APP_IMAGES[:3],
             ], timeout=300)
 
         for runtime in dict.fromkeys(runtime_assignments):
+            if runtime == "rootful-podman":
+                continue
             containerfile_dir = root / f"helper-agent-image-{runtime}"
             containerfile_dir.mkdir()
             shutil.copyfile(AGENT, containerfile_dir / "nanpanel-agent")
@@ -650,6 +856,56 @@ RUN printf '%s\\n' 'worker_processes 1;' 'pid /run/nginx.pid;' 'events { worker_
             helper_name = f"p5-live-agent-{run_id}-{ordinal}"
             cert_mount = enrollment["certDir"]
             runtime = runtime_assignments[ordinal]
+            if runtime == "rootful-podman":
+                rootful_agent_id = enrollment["agentId"]
+                rootful_host_id = enrollment["hostId"]
+                staging = rootful_vm_paths["staging"]
+                ssh_args = ssh_options(
+                    args.rootful_vm_ssh_port,
+                    args.rootful_vm_ssh_key,
+                    args.rootful_vm_known_hosts,
+                )
+                command([
+                    "ssh", *ssh_args, args.rootful_vm_ssh_target,
+                    f"test ! -e {shlex.quote(staging)} && mkdir -m 0700 {shlex.quote(staging)}",
+                ], timeout=30)
+                rootful_vm_touched = True
+                for source, filename in (
+                    (AGENT, "nanpanel-agent"),
+                    (HELPER, "nanpanel-helper"),
+                    (release_images, "release-images.tar"),
+                    (root / "ca.crt", "ca.crt"),
+                    (cert_mount / "agent.crt", "agent.crt"),
+                    (cert_mount / "agent.key", "agent.key"),
+                ):
+                    scp_to_vm(
+                        args.rootful_vm_ssh_target, args.rootful_vm_ssh_port,
+                        args.rootful_vm_ssh_key, args.rootful_vm_known_hosts,
+                        source, f"{staging}/{filename}",
+                    )
+                remote_setup = ssh_script(
+                    args.rootful_vm_ssh_target, args.rootful_vm_ssh_port,
+                    args.rootful_vm_ssh_key, args.rootful_vm_known_hosts,
+                    rootful_vm_setup_script(
+                        rootful_vm_paths, gateway_port, rootful_agent_id, enrollment["hostname"]
+                    ),
+                    timeout=240,
+                )
+                if "ROOTFUL_VM_SETUP_PASS" not in remote_setup:
+                    raise AcceptanceError(f"rootful VM setup did not confirm completion: {remote_setup}")
+                tunnel = subprocess.Popen(
+                    [
+                        "ssh", *ssh_args, "-N", "-o", "ExitOnForwardFailure=yes",
+                        "-L", f"127.0.0.1:{route_port}:127.0.0.1:{route_port}",
+                        args.rootful_vm_ssh_target,
+                    ],
+                    cwd=ROOT, env=clean_runtime_environment(),
+                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=True,
+                )
+                processes.append(tunnel)
+                wait_port(route_port, tunnel, "rootful VM Nginx SSH tunnel", timeout=30)
+                print(f"[{run_id}] rootful Podman Helper and Agent are running in the disposable VM", flush=True)
+                continue
             helper_image = helper_images[runtime]
             if runtime == "docker":
                 runtime_setup = """
@@ -831,7 +1087,14 @@ done
         else:
             raise AcceptanceError(
                 "two enrolled Agents did not report required Helper capabilities: "
-                + json.dumps({"hosts": hosts_by_name, "agents": agents_by_host}, sort_keys=True)
+                + json.dumps({
+                    "enrollments": [
+                        {"hostname": item["hostname"], "hostId": item["hostId"], "agentId": item["agentId"]}
+                        for item in enrollments
+                    ],
+                    "hosts": hosts_by_name,
+                    "agents": agents_by_host,
+                }, sort_keys=True)
             )
 
         print(f"[{run_id}] both enrolled Agents report release Helper capabilities", flush=True)
@@ -854,8 +1117,10 @@ done
             "NANPANEL_P5_RUN_ID": run_id,
             "NANPANEL_P5_HOST_A": host_a,
             "NANPANEL_P5_HOST_B": host_b,
-            "NANPANEL_P5_FAILURE_HOST": host_b if args.runtime == "both" else host_a,
-            "NANPANEL_P5_FAILURE_ADDRESS": "127.0.0.3" if args.runtime == "both" else "127.0.0.2",
+            "NANPANEL_P5_ADDRESS_A": address_a,
+            "NANPANEL_P5_ADDRESS_B": address_b,
+            "NANPANEL_P5_FAILURE_HOST": host_b if rootful_vm or args.runtime == "both" else host_a,
+            "NANPANEL_P5_FAILURE_ADDRESS": address_b if rootful_vm or args.runtime == "both" else address_a,
             "NANPANEL_P5_RUNTIME_ASSIGNMENTS": ",".join(runtime_assignments),
             "NANPANEL_P5_LISTEN_PORT": str(route_port),
             "NANPANEL_P5_SCREENSHOT": str(ROOT / "tests/p5/artifacts" / f"host-release-live-{run_id}.png"),
@@ -868,6 +1133,102 @@ done
         output["browserResult"] = browser
         print(f"[{run_id}] browser host release, rollback, and compensation passed", flush=True)
         stable_route_host = f"p5app{run_id}.example.test"
+
+        if rootful_vm:
+            _, current_hosts = api.request("GET", "/hosts?limit=100")
+            current_hosts_by_name = {
+                host["hostname"]: host for host in current_hosts.get("items", [])
+                if host.get("hostname") in (host_a, host_b)
+            }
+            rootful_host = current_hosts_by_name.get(host_b)
+            if not rootful_host or rootful_host.get("id") != rootful_host_id:
+                raise AcceptanceError("the enrolled rootful VM host is missing from Core inventory")
+            if rootful_host.get("status") != "ONLINE":
+                raise AcceptanceError(f"rootful VM host is not online: {rootful_host}")
+            _, rootful_agent = api.request("GET", f"/agents/{rootful_agent_id}")
+            if (rootful_agent.get("status") != "ONLINE"
+                    or rootful_agent.get("helperStatus") != "AVAILABLE"):
+                raise AcceptanceError(f"rootful VM Agent or Helper is unavailable: {rootful_agent}")
+
+            _, release_plans = api.request("GET", "/host-application-releases?limit=100")
+            run_plans = [
+                plan for plan in release_plans.get("items", [])
+                if plan.get("name") == f"p5app{run_id}"
+            ]
+            rolled_back = next(
+                (plan for plan in run_plans if plan.get("state") == "ROLLED_BACK"), None
+            )
+            compensated = next(
+                (plan for plan in run_plans if plan.get("state") == "FAILED"), None
+            )
+            if not rolled_back or not compensated:
+                raise AcceptanceError(
+                    "Core did not persist completed rollback and failed-compensation plans: "
+                    + json.dumps(run_plans, sort_keys=True)
+                )
+            if [target.get("state") for target in rolled_back.get("targets", [])] != [
+                "ROLLED_BACK", "ROLLED_BACK",
+            ]:
+                raise AcceptanceError("Core did not persist both manual rollback target results")
+            if ([target.get("state") for target in compensated.get("targets", [])] != ["FAILED"]
+                    or compensated["targets"][0].get("hostId") != rootful_host_id):
+                raise AcceptanceError("failed compensation did not target the rootful VM host")
+
+            rollback_a = routed_http(address_a, route_port, stable_route_host)
+            rollback_b = routed_http(address_b, route_port, stable_route_host)
+            compensation_b = routed_http(address_b, route_port, stable_route_host)
+            if rollback_a != (200, "v1") or rollback_b != (200, "v1"):
+                raise AcceptanceError(
+                    "manual rollback did not restore both stable routes: "
+                    + json.dumps({"hostA": rollback_a, "rootfulHost": rollback_b})
+                )
+            if compensation_b != (200, "v1"):
+                raise AcceptanceError(
+                    "automatic compensation did not keep the rootful stable route: "
+                    + json.dumps(compensation_b)
+                )
+
+            for plan in (rolled_back, compensated):
+                suffix = plan["id"].replace("-", "")[:10]
+                for ordinal, target in enumerate(plan.get("targets", [])):
+                    if target.get("hostId") == rootful_host_id:
+                        rootful_container_names.update({
+                            f"npapp-{suffix}-{ordinal}-s",
+                            f"npapp-{suffix}-{ordinal}-c",
+                        })
+            output.update({
+                "runId": run_id,
+                "runtimeAssignments": {
+                    host_a: runtime_assignments[0], host_b: runtime_assignments[1],
+                },
+                "runtime": "host Core/Gateway; Host A rootless Podman; Host B rootful Podman on disposable QEMU guest",
+                "hostnames": [host_a, host_b],
+                "hostIds": [current_hosts_by_name[host_a]["id"], rootful_host_id],
+                "agentIds": [current_hosts_by_name[host_a]["agentId"], rootful_agent_id],
+                "addresses": [address_a, address_b],
+                "routePort": route_port,
+                "rootfulVm": {
+                    "hostStatus": rootful_host["status"],
+                    "agentStatus": rootful_agent["status"],
+                    "helperStatus": rootful_agent["helperStatus"],
+                    "helperCapabilities": sorted(rootful_agent.get("capabilities", [])),
+                    "nginxDefaultSite": "HTTP 404 preserved before and after fixture cleanup",
+                },
+                "manualRollback": {
+                    "planId": rolled_back["id"],
+                    "state": rolled_back["state"],
+                    "traffic": {"hostA": rollback_a, "rootfulHost": rollback_b},
+                },
+                "automaticCompensation": {
+                    "planId": compensated["id"],
+                    "state": compensated["state"],
+                    "rootfulTraffic": compensation_b,
+                },
+                "kubernetesContextChanged": False,
+            })
+            print(json.dumps(output, indent=2, sort_keys=True))
+            acceptance_complete = True
+            return
 
         _, current_hosts = api.request("GET", "/hosts?limit=100")
         current_hosts_by_name = {
@@ -1397,6 +1758,22 @@ done
         acceptance_complete = True
     except Exception:
         print("P5 live host acceptance failed. Local service logs:", file=sys.stderr)
+        if rootful_vm and rootful_vm_touched:
+            remote_logs = " ".join(
+                shlex.quote(f"{rootful_vm_paths['base']}/{name}")
+                for name in ("agent.log", "helper.log")
+            )
+            try:
+                details = ssh_script(
+                    args.rootful_vm_ssh_target, args.rootful_vm_ssh_port,
+                    args.rootful_vm_ssh_key, args.rootful_vm_known_hosts,
+                    f"for log in {remote_logs}; do if test -f \"$log\"; then echo --- \"$log\" ---; tail -n 80 \"$log\"; fi; done",
+                    timeout=30,
+                )
+                if details:
+                    print(f"--- rootful VM Agent and Helper ---\n{details}", file=sys.stderr)
+            except Exception as error:
+                print(f"could not collect rootful VM logs: {error}", file=sys.stderr)
         if podman_socket.exists():
             for helper_name in helper_names:
                 helper_logs = subprocess.run(
@@ -1413,6 +1790,36 @@ done
                 print(f"--- {label} ---\n{snippet}", file=sys.stderr)
         raise
     finally:
+        if rootful_vm and rootful_vm_touched:
+            try:
+                if api is not None and rootful_host_id:
+                    try:
+                        _, release_plans = api.request("GET", "/host-application-releases?limit=100")
+                        for plan in release_plans.get("items", []):
+                            if not plan.get("name", "").startswith(f"p5app{run_id}"):
+                                continue
+                            suffix = plan["id"].replace("-", "")[:10]
+                            for ordinal, target in enumerate(plan.get("targets", [])):
+                                if target.get("hostId") == rootful_host_id:
+                                    rootful_container_names.update({
+                                        f"npapp-{suffix}-{ordinal}-s",
+                                        f"npapp-{suffix}-{ordinal}-c",
+                                    })
+                    except Exception as error:
+                        print(f"could not enumerate rootful release containers for cleanup: {error}", file=sys.stderr)
+                cleanup = ssh_script(
+                    args.rootful_vm_ssh_target, args.rootful_vm_ssh_port,
+                    args.rootful_vm_ssh_key, args.rootful_vm_known_hosts,
+                    rootful_vm_cleanup_script(rootful_vm_paths, rootful_container_names),
+                    timeout=180,
+                )
+                if "ROOTFUL_VM_CLEANUP_PASS" not in cleanup:
+                    raise AcceptanceError(f"rootful VM cleanup did not confirm completion: {cleanup}")
+                print(f"[{run_id}] rootful VM fixture cleanup passed", flush=True)
+            except Exception as error:
+                print(f"rootful VM fixture cleanup failed: {error}", file=sys.stderr)
+                if acceptance_complete:
+                    raise
         if podman_socket.exists():
             isolated_env = remote_env | {"CONTAINER_HOST": podman_uri}
             try:

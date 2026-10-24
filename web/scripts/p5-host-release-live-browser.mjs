@@ -9,8 +9,10 @@ const password = process.env.NANPANEL_BROWSER_PASSWORD;
 const runId = process.env.NANPANEL_P5_RUN_ID;
 const hostA = process.env.NANPANEL_P5_HOST_A;
 const hostB = process.env.NANPANEL_P5_HOST_B;
+const addressA = process.env.NANPANEL_P5_ADDRESS_A ?? '127.0.0.2';
+const addressB = process.env.NANPANEL_P5_ADDRESS_B ?? '127.0.0.3';
 const failureHost = process.env.NANPANEL_P5_FAILURE_HOST ?? hostA;
-const failureAddress = process.env.NANPANEL_P5_FAILURE_ADDRESS ?? '127.0.0.2';
+const failureAddress = process.env.NANPANEL_P5_FAILURE_ADDRESS ?? addressA;
 const runtimeAssignments = process.env.NANPANEL_P5_RUNTIME_ASSIGNMENTS ?? 'podman,podman';
 const listenPort = Number(process.env.NANPANEL_P5_LISTEN_PORT);
 const screenshotPath = process.env.NANPANEL_P5_SCREENSHOT;
@@ -126,9 +128,19 @@ try {
   await fillReleaseForm({
     name: app,
     image: 'localhost/nanpanel-p5-app:v2',
-    targets: [[hostA, '127.0.0.2'], [hostB, '127.0.0.3']],
+    targets: [[hostA, addressA], [hostB, addressB]],
   });
-  await panel.getByText(new RegExp(`${app} · localhost/nanpanel-p5-app:v1 → localhost/nanpanel-p5-app:v2`)).waitFor();
+  try {
+    await panel.getByText(new RegExp(`${app} · localhost/nanpanel-p5-app:v1 → localhost/nanpanel-p5-app:v2`)).waitFor();
+  } catch (error) {
+    const pageState = await panel.innerText();
+    const plans = await page.evaluate(async () => {
+      const response = await fetch('/api/v1/host-application-releases', { credentials: 'include' });
+      return { status: response.status, body: await response.json() };
+    });
+    await page.screenshot({ path: screenshotPath, fullPage: true });
+    throw new Error(`Core did not show the created release draft: ${error.message}; panel=${pageState}; plans=${JSON.stringify(plans)}`);
+  }
   const firstPlan = await currentPlan(app);
   if (!firstPlan || firstPlan.state !== 'DRAFT' || firstPlan.targets.length !== 2) {
     throw new Error(`Core did not persist the browser-created draft: ${JSON.stringify(firstPlan)}`);
@@ -142,14 +154,14 @@ try {
   if (batchPause.targets[0].state !== 'SUCCEEDED' || batchPause.targets[1].state !== 'BASELINE_DEPLOY') {
     throw new Error(`The second host was not gated on operator approval: ${JSON.stringify(batchPause)}`);
   }
-  const firstHostTraffic = await assertTraffic('127.0.0.2', 'v2', 50);
+  const firstHostTraffic = await assertTraffic(addressA, 'v2', 50);
   await firstRow.getByRole('button', { name: '批准下一批' }).click();
   const completed = await waitPlan(app, firstPlan.id, plan => plan.state === 'SUCCEEDED',
     'second host batch completion');
   if (completed.targets.some(target => target.state !== 'SUCCEEDED')) {
     throw new Error(`Not all live host targets completed: ${JSON.stringify(completed.targets)}`);
   }
-  const secondHostTraffic = await assertTraffic('127.0.0.3', 'v2', 50);
+  const secondHostTraffic = await assertTraffic(addressB, 'v2', 50);
   const succeededScreenshot = screenshotPath.replace(/\.png$/, '-succeeded.png');
   await page.screenshot({ path: succeededScreenshot, fullPage: true });
 
@@ -160,8 +172,8 @@ try {
   if (rolledBack.targets[0].state !== 'ROLLED_BACK' || rolledBack.targets[1].state !== 'ROLLED_BACK') {
     throw new Error(`Both hosts were not rolled back: ${JSON.stringify(rolledBack.targets)}`);
   }
-  const rollbackA = await assertTraffic('127.0.0.2', 'v1', 25);
-  const rollbackB = await assertTraffic('127.0.0.3', 'v1', 25);
+  const rollbackA = await assertTraffic(addressA, 'v1', 25);
+  const rollbackB = await assertTraffic(addressB, 'v1', 25);
 
   await fillReleaseForm({
     name: app,
@@ -189,7 +201,7 @@ try {
   console.log(JSON.stringify({
     result: 'PASS',
     flow: 'real-browser -> Core -> mTLS Agent -> Unix-socket Helper -> configured container runtime -> Nginx HTTP',
-    runtimeBoundary: `${runtimeAssignments} assigned to two enrolled Agent identities in separate user-namespace Helper sandboxes`,
+    runtimeBoundary: `${runtimeAssignments} assigned to two separately enrolled Agent identities`,
     releaseId: firstPlan.id,
     releaseState: rolledBack.state,
     orderedBatchStates: batchPause.targets.map(target => target.state),
