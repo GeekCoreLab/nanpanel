@@ -19,6 +19,16 @@ versions, runtime type, fixture images, commands, observed weights and request
 counts, rollback route, and limitations. Unit/API fixtures alone do not close
 the traffic acceptance gate.
 
+## k3s-1 panel deployment
+
+On 2026-10-25, the P5-enabled Core and Web images were deployed to the
+single-node test cluster from commit `b24800f8b8a8b2455e54d778c14a847829198b2d`
+after its exact-SHA Actions validation and GHCR publication succeeded. Core,
+Web, database migrations, Agent synchronization, external readiness, and the
+browser login shell were verified. The cluster hosts NaNPanel itself; it was
+not used for P5 rollout-controller or canary-traffic experiments. See the
+[`k3s-1 panel deployment report`](runs/2026-10-25-k3s1-panel-deployment.md).
+
 ## Current evidence
 
 Two disposable Kind runs cover external controller behavior and the
