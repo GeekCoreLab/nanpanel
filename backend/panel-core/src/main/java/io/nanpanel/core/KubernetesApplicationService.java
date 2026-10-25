@@ -8,9 +8,11 @@ import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.IntOrString;
 import io.fabric8.kubernetes.api.model.ObjectMetaBuilder;
 import io.fabric8.kubernetes.api.model.Service;
+import io.fabric8.kubernetes.api.model.ServiceBuilder;
 import io.fabric8.kubernetes.api.model.ServiceAccount;
 import io.fabric8.kubernetes.api.model.ServicePort;
 import io.fabric8.kubernetes.api.model.apps.Deployment;
+import io.fabric8.kubernetes.api.model.apps.DeploymentBuilder;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.KubernetesClientException;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -292,8 +294,11 @@ public class KubernetesApplicationService {
       Integer servicePort, Map<String, String> environment, String definition) {}
   public record ApplicationPreview(Map<String, Integer> resourceCounts, int totalResources,
       String manifestYaml, List<String> notes) {}
-  public record DraftRequest(Integer baseVersion, List<TopologyEdit> edits) {}
+  public record DraftRequest(Integer baseVersion, List<TopologyEdit> edits,
+      List<TopologyAddition> additions) {}
   public record TopologyEdit(String resourceId, Integer replicas, String image,
+      String targetDeployment, Integer servicePort, String targetPort, String serviceProtocol) {}
+  public record TopologyAddition(String kind, String name, Integer replicas, String image,
       String targetDeployment, Integer servicePort, String targetPort, String serviceProtocol) {}
   public record ApplicationList(List<ApplicationView> items) {}
   public record ApplicationView(UUID id, UUID clusterId, String clusterName, String namespace,
@@ -482,9 +487,13 @@ public class KubernetesApplicationService {
 
   public ApplicationDetail createDraft(String actor, String remoteAddress, UUID applicationId,
       DraftRequest input) {
+    List<TopologyEdit> edits = input == null || input.edits() == null ? List.of() : input.edits();
+    List<TopologyAddition> additions = input == null || input.additions() == null
+        ? List.of() : input.additions();
     if (input == null || input.baseVersion() == null || input.baseVersion() < 1
-        || input.edits() == null || input.edits().isEmpty() || input.edits().size() > 32) {
-      throw invalid("A version draft requires a base version and 1–32 topology edits");
+        || edits.size() + additions.size() < 1 || edits.size() + additions.size() > 32
+        || additions.size() > 32) {
+      throw invalid("版本草稿需要基础版本及 1–32 项拓扑修改或新增资源");
     }
     AppRow app = app(applicationId);
     if (!"DEPLOYED".equals(app.state())) {
@@ -500,12 +509,17 @@ public class KubernetesApplicationService {
       if (current == null) throw new ApplicationException(409,
           "KUBERNETES_APPLICATION_VERSION_MISSING", "找不到当前应用版本清单");
       List<HasMetadata> before = parse(client, current.manifestYaml());
-      List<HasMetadata> after = applyEdits(before, input.edits());
+      List<HasMetadata> after = applyEdits(before, edits, additions);
+      after = applyAdditions(client, app.namespace(), applicationId, after, additions);
       String newYaml = serialize(after);
       String diff = resourceDiff(before, after);
-      if (diff.isBlank()) throw invalid("拓扑没有产生 YAML 变化，请调整副本数、镜像或 Service 连接");
+      if (diff.isBlank()) throw invalid("拓扑没有产生 YAML 变化，请修改已有资源或添加 Deployment / Service");
+      Map<String, String> knownResourceUids = resourceUids(applicationId);
+      Set<String> pendingResourceIds = additions.stream()
+          .map(addition -> addition.kind() + "/" + addition.name())
+          .collect(java.util.stream.Collectors.toSet());
       Topology candidateTopology = topology(client, app.id(), app.namespace(), after,
-          resourceUids(applicationId));
+          knownResourceUids, pendingResourceIds);
       Instant now = Instant.now();
       int nextVersion = store.transaction(connection -> {
         List<Map<String, Object>> locked = query(connection,
@@ -587,15 +601,26 @@ public class KubernetesApplicationService {
       List<HasMetadata> before = parse(client, previous.manifestYaml());
       List<HasMetadata> desired = parse(client, desiredVersion.manifestYaml());
       Map<String, String> resourceUids = resourceUids(applicationId);
+      Map<String, String> previouslyRegistered = Map.copyOf(resourceUids);
+      List<HasMetadata> addedResources = desired.stream()
+          .filter(resource -> !previouslyRegistered.containsKey(resourceId(resource))).toList();
       List<HasMetadata> changed = new ArrayList<>();
       try {
         for (HasMetadata resource : desired) {
           applyOwned(client, app.namespace(), applicationId, resourceUids, resource);
           changed.add(resource);
         }
+        if (!addedResources.isEmpty()) recordResources(applicationId, addedResources);
       } catch (RuntimeException applyFailure) {
         boolean restored = restoreResources(client, app.namespace(), applicationId, resourceUids,
             before, changed);
+        if (restored && !addedResources.isEmpty()) {
+          try {
+            removeResourceRecords(applicationId, addedResources, resourceUids);
+          } catch (RuntimeException cleanupFailure) {
+            restored = false;
+          }
+        }
         boolean knownRejected = applyFailure instanceof ApplicationException
             || applyFailure instanceof KubernetesClientException clientFailure
                 && clientFailure.getCode() >= 400 && clientFailure.getCode() < 500;
@@ -928,6 +953,20 @@ public class KubernetesApplicationService {
     });
   }
 
+  private void removeResourceRecords(UUID applicationId, List<HasMetadata> resources,
+      Map<String, String> resourceUids) {
+    store.transaction(connection -> {
+      for (HasMetadata resource : resources) {
+        String uid = resourceUids.get(resourceId(resource));
+        if (uid != null) update(connection,
+            "DELETE FROM kubernetes_application_resource WHERE application_id=? "
+                + "AND resource_kind=? AND resource_name=? AND resource_uid=?",
+            applicationId, resource.getKind(), resource.getMetadata().getName(), uid);
+      }
+      return null;
+    });
+  }
+
   private Map<String, String> resourceUids(UUID applicationId) {
     List<Map<String, Object>> rows = store.transaction(connection -> query(connection,
         "SELECT resource_kind,resource_name,resource_uid FROM kubernetes_application_resource "
@@ -960,7 +999,7 @@ public class KubernetesApplicationService {
   }
 
   private static List<HasMetadata> applyEdits(List<HasMetadata> source,
-      List<TopologyEdit> edits) {
+      List<TopologyEdit> edits, List<TopologyAddition> additions) {
     Map<String, HasMetadata> resources = new LinkedHashMap<>();
     Map<String, String> validTargets = new HashMap<>();
     for (HasMetadata item : source) {
@@ -969,6 +1008,12 @@ public class KubernetesApplicationService {
       if (item instanceof Deployment deployment) {
         String app = deployment.getSpec().getTemplate().getMetadata().getLabels().get("app");
         if (app != null) validTargets.put(app, app);
+      }
+    }
+    for (TopologyAddition addition : additions) {
+      if (addition != null && "Deployment".equals(addition.kind())
+          && validResourceName(addition.name())) {
+        validTargets.put(addition.name(), addition.name());
       }
     }
     Set<String> edited = new HashSet<>();
@@ -1034,8 +1079,95 @@ public class KubernetesApplicationService {
     return new ArrayList<>(resources.values());
   }
 
+  private static List<HasMetadata> applyAdditions(KubernetesClient client, String namespace,
+      UUID applicationId, List<HasMetadata> source, List<TopologyAddition> additions) {
+    if (additions.isEmpty()) return source;
+    if (source.size() + additions.size() > 64) {
+      throw invalid("应用清单资源总数不能超过 64 个");
+    }
+    List<HasMetadata> resources = new ArrayList<>(source);
+    Set<String> ids = new HashSet<>();
+    Map<String, String> deploymentLabels = new HashMap<>();
+    for (HasMetadata resource : source) {
+      ids.add(resourceId(resource));
+      if (resource instanceof Deployment deployment
+          && deployment.getSpec().getTemplate().getMetadata().getLabels() != null) {
+        String appLabel = deployment.getSpec().getTemplate().getMetadata().getLabels().get("app");
+        if (appLabel != null) deploymentLabels.put(appLabel, appLabel);
+      }
+    }
+    for (TopologyAddition addition : additions) {
+      if (addition != null && "Deployment".equals(addition.kind())
+          && validResourceName(addition.name())) {
+        deploymentLabels.put(addition.name(), addition.name());
+      }
+    }
+    for (TopologyAddition addition : additions) {
+      if (addition == null || !("Deployment".equals(addition.kind()) || "Service".equals(addition.kind()))
+          || !validResourceName(addition.name())) {
+        throw invalid("新增资源只支持名称有效的 Deployment 或 Service");
+      }
+      String id = addition.kind() + "/" + addition.name();
+      if (!ids.add(id)) throw invalid("应用清单包含重复资源: " + id);
+      HasMetadata resource;
+      if ("Deployment".equals(addition.kind())) {
+        if (addition.replicas() == null || addition.replicas() < 0
+            || addition.replicas() > MAX_REPLICAS || addition.image() == null
+            || !IMAGE.matcher(addition.image().trim()).matches()
+            || addition.targetDeployment() != null || addition.servicePort() != null
+            || addition.targetPort() != null || addition.serviceProtocol() != null) {
+          throw invalid("新增 Deployment 必须提供有效副本数和镜像，且不接受 Service 配置");
+        }
+        String image = addition.image().trim();
+        String label = addition.name();
+        resource = new DeploymentBuilder()
+            .withNewMetadata().withName(addition.name()).endMetadata()
+            .withNewSpec().withReplicas(addition.replicas())
+              .withNewSelector().addToMatchLabels("app", label).endSelector()
+              .withNewTemplate()
+                .withNewMetadata().addToLabels("app", label).endMetadata()
+                .withNewSpec().addNewContainer().withName("app").withImage(image)
+                  .withImagePullPolicy("IfNotPresent").endContainer().endSpec()
+              .endTemplate()
+            .endSpec().build();
+        deploymentLabels.put(label, label);
+      } else {
+        String target = addition.targetDeployment() == null ? ""
+            : addition.targetDeployment().trim();
+        int port = addition.servicePort() == null ? 0 : addition.servicePort();
+        String targetPort = addition.targetPort() == null ? "" : addition.targetPort().trim();
+        String protocol = addition.serviceProtocol() == null ? "TCP"
+            : addition.serviceProtocol().trim().toUpperCase(java.util.Locale.ROOT);
+        if (!deploymentLabels.containsKey(target) || port < 1 || port > 65535
+            || !Set.of("TCP", "UDP", "SCTP").contains(protocol)) {
+          throw invalid("新增 Service 必须选择应用内 Deployment，并提供有效端口和协议");
+        }
+        IntOrString parsedTargetPort = parseTargetPort(targetPort);
+        resource = new ServiceBuilder()
+            .withNewMetadata().withName(addition.name()).endMetadata()
+            .withNewSpec().withType("ClusterIP").addToSelector("app", target)
+              .addNewPort().withName("http").withPort(port).withProtocol(protocol)
+                .withTargetPort(parsedTargetPort).endPort()
+            .endSpec().build();
+      }
+      normalizeResource(resource, namespace, applicationId);
+      if (fetch(client, addition.kind(), namespace, addition.name()) != null) {
+        throw new ApplicationException(409, "KUBERNETES_APPLICATION_RESOURCE_CONFLICT",
+            id + " 已存在，未接管该资源");
+      }
+      resources.add(resource);
+    }
+    validateApplicationResources(resources);
+    return resources;
+  }
+
   private static Topology topology(KubernetesClient client, UUID applicationId, String namespace,
       List<HasMetadata> resources, Map<String, String> resourceUids) {
+    return topology(client, applicationId, namespace, resources, resourceUids, Set.of());
+  }
+
+  private static Topology topology(KubernetesClient client, UUID applicationId, String namespace,
+      List<HasMetadata> resources, Map<String, String> resourceUids, Set<String> pendingResourceIds) {
     List<TopologyNode> nodes = new ArrayList<>();
     List<TopologyEdge> edges = new ArrayList<>();
     List<Deployment> deployments = resources.stream().filter(Deployment.class::isInstance)
@@ -1044,26 +1176,29 @@ public class KubernetesApplicationService {
       if (item instanceof Deployment deployment) {
         String id = resourceId(item);
         String expectedUid = resourceUids.get(id);
-        if (expectedUid == null) throw ownershipConflict(id);
+        boolean pending = pendingResourceIds.contains(id);
+        if (expectedUid == null && !pending) throw ownershipConflict(id);
         Integer replicas = deployment.getSpec().getReplicas();
-        Integer ready = null;
-        String state = "UNKNOWN";
-        try {
-          Deployment live = (Deployment) fetch(client, "Deployment", namespace,
-              deployment.getMetadata().getName());
-          if (live == null) state = "MISSING";
-          else {
-            requireOwned(live, applicationId, expectedUid);
-            ready = live.getStatus() == null ? 0 : live.getStatus().getReadyReplicas();
-            if (ready == null) ready = 0;
-            int desired = live.getSpec() == null || live.getSpec().getReplicas() == null
-                ? 1 : live.getSpec().getReplicas();
-            state = ready >= desired ? "READY" : "PROGRESSING";
+        Integer ready = pending ? 0 : null;
+        String state = pending ? "PENDING" : "UNKNOWN";
+        if (!pending) {
+          try {
+            Deployment live = (Deployment) fetch(client, "Deployment", namespace,
+                deployment.getMetadata().getName());
+            if (live == null) state = "MISSING";
+            else {
+              requireOwned(live, applicationId, expectedUid);
+              ready = live.getStatus() == null ? 0 : live.getStatus().getReadyReplicas();
+              if (ready == null) ready = 0;
+              int desired = live.getSpec() == null || live.getSpec().getReplicas() == null
+                  ? 1 : live.getSpec().getReplicas();
+              state = ready >= desired ? "READY" : "PROGRESSING";
+            }
+          } catch (ApplicationException conflict) {
+            throw conflict;
+          } catch (RuntimeException failure) {
+            state = "UNAVAILABLE";
           }
-        } catch (ApplicationException conflict) {
-          throw conflict;
-        } catch (RuntimeException failure) {
-          state = "UNAVAILABLE";
         }
         String image = deployment.getSpec().getTemplate().getSpec().getContainers().stream()
             .map(container -> container.getImage()).filter(value -> value != null).findFirst().orElse(null);
@@ -1073,7 +1208,8 @@ public class KubernetesApplicationService {
       } else if (item instanceof Service service) {
         String id = resourceId(item);
         String expectedUid = resourceUids.get(id);
-        if (expectedUid == null) throw ownershipConflict(id);
+        boolean pending = pendingResourceIds.contains(id);
+        if (expectedUid == null && !pending) throw ownershipConflict(id);
         String target = service.getSpec().getSelector() == null ? null
             : service.getSpec().getSelector().get("app");
         ServicePort firstPort = service.getSpec().getPorts().getFirst();
@@ -1081,15 +1217,17 @@ public class KubernetesApplicationService {
         String targetPort = serviceTargetPort == null ? String.valueOf(firstPort.getPort())
             : String.valueOf(serviceTargetPort.getValue());
         String protocol = firstPort.getProtocol() == null ? "TCP" : firstPort.getProtocol();
-        String state = "ACTIVE";
-        try {
-          HasMetadata live = fetch(client, "Service", namespace, service.getMetadata().getName());
-          if (live == null) state = "MISSING";
-          else requireOwned(live, applicationId, expectedUid);
-        } catch (ApplicationException conflict) {
-          throw conflict;
-        } catch (RuntimeException failure) {
-          state = "UNAVAILABLE";
+        String state = pending ? "PENDING" : "ACTIVE";
+        if (!pending) {
+          try {
+            HasMetadata live = fetch(client, "Service", namespace, service.getMetadata().getName());
+            if (live == null) state = "MISSING";
+            else requireOwned(live, applicationId, expectedUid);
+          } catch (ApplicationException conflict) {
+            throw conflict;
+          } catch (RuntimeException failure) {
+            state = "UNAVAILABLE";
+          }
         }
         nodes.add(new TopologyNode(id, "Service", service.getMetadata().getName(),
             null, null, null, target, firstPort.getPort(), targetPort, protocol, state));
@@ -1190,7 +1328,31 @@ public class KubernetesApplicationService {
   private static void applyOwned(KubernetesClient client, String namespace, UUID applicationId,
       Map<String, String> resourceUids, HasMetadata desired) {
     HasMetadata live = fetch(client, desired.getKind(), namespace, desired.getMetadata().getName());
-    requireOwned(live, applicationId, resourceUids.get(resourceId(desired)));
+    String id = resourceId(desired);
+    String expectedUid = resourceUids.get(id);
+    if (expectedUid == null) {
+      if (live != null) {
+        throw new ApplicationException(409, "KUBERNETES_APPLICATION_RESOURCE_CONFLICT",
+            "新增资源名称已被占用，未接管该资源：" + id);
+      }
+      Map<String, String> labels = desired.getMetadata().getLabels() == null
+          ? new HashMap<>() : new HashMap<>(desired.getMetadata().getLabels());
+      labels.put(MANAGED_BY, "nanpanel");
+      labels.put(APPLICATION_ID, applicationId.toString());
+      desired.getMetadata().setNamespace(namespace);
+      desired.getMetadata().setLabels(labels);
+      HasMetadata created = client.resource(desired).create();
+      if (created == null || created.getMetadata() == null || created.getMetadata().getUid() == null
+          || created.getMetadata().getUid().isBlank()) {
+        throw new ApplicationException(502, "KUBERNETES_RESOURCE_UID_MISSING",
+            "Kubernetes 未返回新增资源 UID，部署结果需要核对");
+      }
+      String createdUid = created.getMetadata().getUid();
+      desired.getMetadata().setUid(createdUid);
+      resourceUids.put(id, createdUid);
+      return;
+    }
+    requireOwned(live, applicationId, expectedUid);
     String resourceVersion = live.getMetadata().getResourceVersion();
     if (resourceVersion == null || resourceVersion.isBlank()) {
       throw new ApplicationException(502, "KUBERNETES_RESOURCE_VERSION_MISSING",
@@ -1208,10 +1370,19 @@ public class KubernetesApplicationService {
     before.forEach(item -> old.put(resourceId(item), item));
     boolean restored = true;
     for (int i = attempted.size() - 1; i >= 0; i--) {
-      HasMetadata desired = old.get(resourceId(attempted.get(i)));
-      if (desired == null) continue;
+      HasMetadata attemptedResource = attempted.get(i);
+      HasMetadata desired = old.get(resourceId(attemptedResource));
       try {
-        HasMetadata live = fetch(client, desired.getKind(), namespace, desired.getMetadata().getName());
+        HasMetadata live = fetch(client, attemptedResource.getKind(), namespace,
+            attemptedResource.getMetadata().getName());
+        if (desired == null) {
+          if (live == null) continue;
+          requireOwned(live, applicationId, resourceUids.get(resourceId(attemptedResource)));
+          client.resource(live).delete();
+          if (fetch(client, attemptedResource.getKind(), namespace,
+              attemptedResource.getMetadata().getName()) != null) restored = false;
+          continue;
+        }
         requireOwned(live, applicationId, resourceUids.get(resourceId(desired)));
         String resourceVersion = live.getMetadata().getResourceVersion();
         if (resourceVersion == null) {
