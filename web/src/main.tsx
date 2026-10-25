@@ -15,7 +15,15 @@ import './kubernetes-clusters.css';
 import './kubernetes-upgrade.css';
 import './host-application-releases.css';
 import './style.css';
+import './kubernetes-management.css';
 const nav = [['overview', '◫', '总览'], ['hosts', '▤', '主机资产'], ['topology', '⌘', '网络拓扑'], ['clusters', '☸', 'Kubernetes 集群'], ['operations', '◷', '操作任务'], ['users', '♙', '管理员'], ['audit', '☷', '审计日志'], ['settings', '⚙', '平台设置'], ['account', '◎', '账号与会话']];
+type KubernetesWorkspace = 'overview' | 'clusters' | 'nodes' | 'upgrades' | 'installation';
+const kubernetesTabs: { id: Exclude<KubernetesWorkspace, 'installation'>; icon: string; label: string; description: string }[] = [
+ { id: 'overview', icon: '◫', label: '集群概览', description: '健康状态与资源入口' },
+ { id: 'clusters', icon: '▦', label: '集群管理', description: '登记、连接与资源' },
+ { id: 'nodes', icon: '▤', label: '节点管理', description: 'Node 状态与主机映射' },
+ { id: 'upgrades', icon: '↻', label: '集群升级', description: '逐节点升级计划' },
+];
 const labels: Record<string, string> = { ONLINE: '在线', OFFLINE: '离线', UNKNOWN: '未知 / 结果未知', ACTIVE: '运行中', INACTIVE: '未运行', AVAILABLE: '可用', UNAVAILABLE: '不可用', SUCCEEDED: '成功', ACCEPTED: '已受理', FAILED: '失败', FORCE_TERMINATED: '已强制阻断', RUNNING: '执行中', PENDING: '等待中', CANCELLED: '已取消', DISABLED: '已禁用', DENIED: '已拒绝' };
 function Badge({ value }: { value: string }) { return <span className={`badge ${value.toLowerCase()}`}><i />{labels[value] ?? value}</span>; }
 function Empty({ children = '暂无数据' }: { children?: ReactNode }) { return <div className="empty"><span>▧</span><p>{children}</p></div>; }
@@ -913,6 +921,7 @@ function Operations() {
 }
 function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
  const [clusters, setClusters] = useState<KubernetesClusterSummary[]>([]); const [hosts, setHosts] = useState<Host[]>([]); const [discoveries, setDiscoveries] = useState<KubernetesRuntimeDiscovery[]>([]); const [nodes, setNodes] = useState<Record<string, KubernetesClusterNode[]>>({});
+ const [workspace, setWorkspace] = useState<KubernetesWorkspace>('overview'); const [returnWorkspace, setReturnWorkspace] = useState<KubernetesWorkspace>('overview'); const [selectedNodeClusterId, setSelectedNodeClusterId] = useState(''); const [showImportForm, setShowImportForm] = useState(false);
  const [rollouts, setRollouts] = useState<K3sRolloutPlan[]>([]); const [rolloutClusterId, setRolloutClusterId] = useState(''); const [rolloutVersion, setRolloutVersion] = useState(''); const [rolloutReason, setRolloutReason] = useState(''); const [rolloutConfirmed, setRolloutConfirmed] = useState(false); const [rolloutBusy, setRolloutBusy] = useState(false);
  const [installations, setInstallations] = useState<K3sInstallationPlan[]>([]); const [installServerHostId, setInstallServerHostId] = useState(''); const [installAgentHostIds, setInstallAgentHostIds] = useState<string[]>([]); const [installVersion, setInstallVersion] = useState(''); const [installServerUrl, setInstallServerUrl] = useState(''); const [installToken, setInstallToken] = useState(''); const [installReason, setInstallReason] = useState(''); const [installConfirmed, setInstallConfirmed] = useState(false); const [installClusterIds, setInstallClusterIds] = useState<Record<string, string>>({}); const [installBusy, setInstallBusy] = useState(false);
  const [name, setName] = useState(''); const [kind, setKind] = useState<KubernetesClusterImportRequest['kind']>('K3S'); const [contextName, setContextName] = useState(''); const [kubeconfig, setKubeconfig] = useState('');
@@ -933,6 +942,7 @@ function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
    setClusters(clusterResult.data.items); setHosts(hostResult.data.items); setDiscoveries(discoveryResult.data.items);
    setRollouts(rolloutResult.data.items);
    setInstallations(installationResult.data.items);
+   setSelectedNodeClusterId(current => current || clusterResult.data.items[0]?.id || '');
    setInstallServerHostId(current => current || hostResult.data.items.find(host => host.capabilities.includes('k3s.install'))?.id || '');
    setRolloutClusterId(current => current || clusterResult.data.items.find(cluster => cluster.kind === 'K3S')?.id || '');
   } catch (e) { setError((e as Error).message); }
@@ -955,7 +965,8 @@ function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
   try {
    const result = await api<KubernetesClusterSummary>('/kubernetes/clusters', 'POST', request, {}, true);
    setClusters(current => [...current, result.data].sort((a, b) => a.name.localeCompare(b.name)));
-   setName(''); setContextName(''); setKubeconfig(''); notify(`已导入 Kubernetes 集群 ${result.data.name}`);
+   setSelectedNodeClusterId(current => current || result.data.id);
+   setName(''); setContextName(''); setKubeconfig(''); setShowImportForm(false); notify(`已导入 Kubernetes 集群 ${result.data.name}`);
   } catch (e) { setError((e as Error).message); }
   finally { setBusy(false); }
  }
@@ -1017,7 +1028,7 @@ function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
   setName(`${discovery.hostname}-${discovery.runtimeKind.toLowerCase()}`.slice(0, 80));
   setKind(discovery.runtimeKind === 'K3S' ? 'K3S' : 'KUBERNETES');
   setContextName(discovery.runtimeKind === 'K3S' ? 'default' : 'kubernetes-admin@kubernetes');
-  document.querySelector('.cluster-import-form')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  setWorkspace('clusters'); setShowImportForm(true);
   notify(`已为 ${discovery.hostname} 填入导入信息；请粘贴 kubeconfig 完成凭据验证`);
  }
  async function refreshClusterStatus(clusterId: string) {
@@ -1097,10 +1108,39 @@ function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
   } catch (e) { setError((e as Error).message); await refreshClusterStatus(clusterId); }
   finally { setDeploymentBusy(current => ({ ...current, [key]: false })); }
  }
- return <><PageHeading title="Kubernetes 集群" description="导入独立集群、刷新 Node 清单，并将 Kubernetes Node 映射到主机资产。" action={<button className="secondary" onClick={() => void load()} disabled={loading || isMock}>↻ 刷新</button>} />
+ const selectedNodeCluster = clusters.find(cluster => cluster.id === selectedNodeClusterId);
+ const selectedNodes = selectedNodeCluster ? nodes[selectedNodeCluster.id] : undefined;
+ const totalNodes = clusters.reduce((total, cluster) => total + cluster.nodeCount, 0);
+ const healthyClusters = clusters.filter(cluster => cluster.healthStatus === 'HEALTHY' && !cluster.observationsStale).length;
+ const unmappedDiscoveries = discoveries.filter(discovery => !clusters.some(cluster => cluster.discoveredHostId === discovery.hostId)).length;
+ const openInstallations = installations.filter(plan => !['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(plan.state)).length;
+ const openRollouts = rollouts.filter(plan => !['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(plan.state)).length;
+ const presentNodes = selectedNodes?.filter(node => node.nodePresent) ?? [];
+ const readyNodes = presentNodes.filter(node => node.ready).length;
+ const mappedNodes = presentNodes.filter(node => node.hostId).length;
+ const workspaceHeadings: Record<KubernetesWorkspace, { title: string; description: string }> = {
+  overview: { title: 'Kubernetes 集群管理', description: '统一查看集群健康、节点状态与生命周期任务。' },
+  clusters: { title: '集群管理', description: '登记 Kubernetes 集群、查看连接状态并管理集群资源。' },
+  nodes: { title: '节点管理', description: '查看 Node 健康状态，并维护主机资产映射。' },
+  upgrades: { title: '集群升级', description: '创建并跟踪逐节点升级计划。' },
+  installation: { title: '安装 K3s 集群', description: '通过持久化计划逐台安装 Server 与 Agent；每一步都会等待集群和节点状态确认。' },
+ };
+ const heading = workspaceHeadings[workspace];
+ return <><PageHeading title={heading.title} description={heading.description} action={workspace === 'installation' ? <button className="secondary" onClick={() => setWorkspace(returnWorkspace === 'installation' ? 'overview' : returnWorkspace)}>← 返回集群管理</button> : <div className="k8s-heading-actions"><button className="secondary" onClick={() => void load()} disabled={loading || isMock}>↻ 刷新</button><button className="primary" onClick={() => { setReturnWorkspace(workspace); setWorkspace('installation'); }} disabled={isMock}>＋ 安装集群</button></div>} />
   {isMock && <div className="alert">当前是纯 Mock 演示模式，集群管理 API 已停用。切换到 hybrid 或 live 模式后可导入真实集群。</div>}
   {error && <div className="alert error" role="alert">{error}</div>}
-  {!isMock && <section className="card"><div className="card-title"><div><h2>K3s 多节点首次安装</h2><p>计划先在空白主机安装一个 Server，随后等待你导入该集群并把 Server Node 映射到主机；每安装一台 Agent 后，也要等对应 Node Ready 并完成主机映射才会继续。令牌加密保存，不在计划详情中返回。</p></div></div>
+  <div className={`k8s-workspace${workspace === 'installation' ? ' is-installation' : ''}`}>
+   {workspace !== 'installation' && <aside className="k8s-subnav" aria-label="Kubernetes 管理菜单"><div className="k8s-subnav-heading"><span className="eyebrow">CLUSTER MANAGEMENT</span><strong>集群工作区</strong><small>资源与生命周期管理</small></div><div role="tablist" aria-label="Kubernetes 工作区">{kubernetesTabs.map(tab => <button id={`k8s-tab-${tab.id}`} role="tab" aria-selected={workspace === tab.id} aria-controls="k8s-workspace-panel" className={workspace === tab.id ? 'active' : ''} key={tab.id} onClick={() => setWorkspace(tab.id)}><span className="k8s-tab-icon">{tab.icon}</span><span className="k8s-tab-copy"><strong>{tab.label}</strong><small>{tab.description}</small></span>{tab.id === 'clusters' ? <span className="k8s-tab-count">{clusters.length}</span> : tab.id === 'nodes' ? <span className="k8s-tab-count">{totalNodes}</span> : tab.id === 'upgrades' ? <span className="k8s-tab-count">{openRollouts}</span> : null}</button>)}</div><div className="k8s-subnav-footer"><span className={`k8s-status-dot ${loading ? 'is-loading' : clusters.length && healthyClusters === clusters.length ? 'is-ready' : 'is-muted'}`} />{loading ? '正在同步集群' : clusters.length ? `${healthyClusters}/${clusters.length} 个集群健康` : '尚未登记集群'}</div></aside>}
+   <div className="k8s-workspace-panel" id="k8s-workspace-panel" role="tabpanel" aria-labelledby={workspace === 'installation' ? undefined : `k8s-tab-${workspace}`}>
+  {workspace === 'overview' && <div className="k8s-overview-view"><div className="k8s-view-heading"><div><span className="eyebrow">OVERVIEW</span><h2>集群概览</h2><p>从集群健康、节点数量和发现状态快速进入管理工作区。</p></div><span className="k8s-last-sync">{loading ? '正在更新…' : `登记 ${clusters.length} 个集群`}</span></div><div className="k8s-metric-grid"><article className="k8s-metric-card"><span>已纳管集群</span><strong>{loading ? '—' : clusters.length}</strong><small>连接到控制面的集群</small><i className="k8s-metric-symbol blue">▦</i></article><article className="k8s-metric-card"><span>健康集群</span><strong>{loading ? '—' : healthyClusters}</strong><small>{clusters.length ? `共 ${clusters.length} 个集群` : '等待导入集群'}</small><i className="k8s-metric-symbol green">✓</i></article><article className="k8s-metric-card"><span>集群节点</span><strong>{loading ? '—' : totalNodes}</strong><small>来自最近一次 Node 清单</small><i className="k8s-metric-symbol purple">▤</i></article><article className="k8s-metric-card"><span>待处理任务</span><strong>{loading ? '—' : openInstallations + openRollouts}</strong><small>{openInstallations} 个安装 · {openRollouts} 个升级</small><i className="k8s-metric-symbol amber">◷</i></article></div><div className="k8s-overview-grid"><section className="card k8s-overview-card"><div className="card-title"><div><h2>集群列表</h2><p>健康状态与最近观测</p></div><button className="link" onClick={() => setWorkspace('clusters')}>管理集群 →</button></div>{clusters.length ? <div className="k8s-overview-clusters">{clusters.slice(0, 5).map(cluster => <div className="k8s-overview-cluster" key={cluster.id}><span className="k8s-cluster-kind">{cluster.kind === 'K3S' ? 'K3s' : cluster.kind}</span><div className="k8s-overview-cluster-main"><strong>{cluster.name}</strong><small>{cluster.endpoint} · {cluster.nodeCount} 个 Node · {cluster.observationsStale ? '观测已过期' : `更新于 ${time(cluster.observedAt)}`}</small></div><span className={`k8s-health-mark ${cluster.healthStatus === 'HEALTHY' && !cluster.observationsStale ? 'healthy' : 'unhealthy'}`}><i />{cluster.healthStatus === 'HEALTHY' && !cluster.observationsStale ? '健康' : '需检查'}</span></div>)}</div> : <Empty>{loading ? '正在读取集群信息…' : '还没有纳管集群。可以导入已有集群，或安装一套新的 K3s 集群。'}</Empty>}</section><section className="card k8s-overview-card"><div className="card-title"><div><h2>运行状态</h2><p>只展示控制面已观测到的信息</p></div></div><div className="k8s-status-list"><div><span className="k8s-status-symbol blue">◉</span><div><strong>运行中安装计划</strong><small>Server 安装、集群登记与 Node 映射</small></div><b>{loading ? '—' : openInstallations}</b></div><div><span className="k8s-status-symbol amber">↻</span><div><strong>运行中升级计划</strong><small>逐节点处理并等待 Ready 确认</small></div><b>{loading ? '—' : openRollouts}</b></div><div><span className="k8s-status-symbol purple">⌕</span><div><strong>待确认的运行时发现</strong><small>Agent 报告的 K3s/Kubernetes 主机</small></div><b>{loading ? '—' : unmappedDiscoveries}</b></div></div><div className="k8s-quick-links"><button className="secondary" onClick={() => setWorkspace('nodes')}>查看节点 →</button><button className="secondary" onClick={() => setWorkspace('upgrades')}>升级计划 →</button></div></section></div></div>}
+  {workspace === 'nodes' && <section className="card k8s-node-workspace"><div className="card-title"><div><span className="eyebrow">NODE MANAGEMENT</span><h2>节点管理</h2><p>查看所选集群的 Node 就绪状态，并维护 Node 与主机资产的映射关系。</p></div><div className="k8s-node-toolbar"><label>集群<select aria-label="选择要管理节点的集群" value={selectedNodeClusterId} onChange={event => { const clusterId = event.target.value; setSelectedNodeClusterId(clusterId); if (clusterId) void refreshNodes(clusterId); }}><option value="">选择集群</option>{clusters.map(cluster => <option value={cluster.id} key={cluster.id}>{cluster.name} · {cluster.kind}</option>)}</select></label><button className="secondary" disabled={!selectedNodeCluster || !!nodeLoading[selectedNodeCluster.id] || isMock} onClick={() => selectedNodeCluster && void refreshNodes(selectedNodeCluster.id)}>{selectedNodeCluster && nodeLoading[selectedNodeCluster.id] ? '读取中…' : '↻ 刷新 Node'}</button></div></div>
+   {!clusters.length ? <Empty>{loading ? '正在读取集群信息…' : '尚无已纳管集群。先在“集群管理”中导入集群，或使用“安装集群”创建 K3s。'}</Empty> : selectedNodeCluster ? <><div className="k8s-node-metrics"><div><span>节点总数</span><strong>{selectedNodes ? presentNodes.length : selectedNodeCluster.nodeCount}</strong></div><div><span>Ready</span><strong>{selectedNodes ? readyNodes : '—'}</strong></div><div><span>已映射主机</span><strong>{selectedNodes ? mappedNodes : '—'}</strong></div><div><span>观测状态</span><strong className={selectedNodeCluster.observationsStale ? 'is-stale' : 'is-fresh'}>{selectedNodeCluster.observationsStale ? '已过期' : '最新'}</strong></div></div>{selectedNodes ? selectedNodes.length ? <div className="table-wrap k8s-node-table"><table><thead><tr><th>Node</th><th>角色</th><th>就绪状态</th><th>容器所有者</th><th>主机资产映射</th></tr></thead><tbody>{selectedNodes.map(node => {
+    const edgeStatus = { NOT_EDGE_NODE: '非 Edge 节点', NOT_PRESENT: 'Node 已移除', REGISTERED_NOT_READY: '已注册 · NotReady', REGISTERED_READY: '已注册 · Ready' }[node.edgeCoreRegistrationStatus];
+    const edgeProcessStatus = { NOT_APPLICABLE: '不适用', NOT_MAPPED: '未映射主机', NOT_OBSERVED: '尚无服务观测', STALE: '观测过期', ACTIVE: '运行中', INACTIVE: '未运行', UNKNOWN: '状态未知' }[node.edgeCoreProcessStatus];
+    return <tr key={node.nodeUid}><td><strong>{node.nodeName}</strong><small className="mono">UID {node.nodeUid}</small></td><td>{node.roles.join(', ') || 'worker'}{selectedNodeCluster.kind === 'KUBEEDGE' && <small>EdgeCore：{edgeStatus} · 进程 {edgeProcessStatus}{node.edgeCoreProcessObservedAt ? ` · ${time(node.edgeCoreProcessObservedAt)}` : ''}</small>}</td><td><span className={`k8s-node-ready ${node.nodePresent && node.ready ? 'ready' : node.nodePresent ? 'not-ready' : 'removed'}`}><i />{node.nodePresent ? node.ready ? 'Ready' : 'NotReady' : '已移除'}</span></td><td>{node.containerOwner}</td><td><select aria-label={`映射 ${node.nodeName} 到主机资产`} value={node.hostId ?? ''} onChange={event => void mapHost(selectedNodeCluster.id, node, event.target.value)} disabled={!!nodeLoading[selectedNodeCluster.id] || isMock || (!node.nodePresent && !node.hostId)}><option value="">未映射</option>{hosts.map(host => <option value={host.id} key={host.id}>{host.hostname}</option>)}</select></td></tr>;
+   })}</tbody></table></div> : <Empty>该集群当前没有 Node 记录。</Empty> : <Empty>点击“刷新 Node”读取集群节点清单。</Empty>}</> : null}
+  </section>}
+  {workspace === 'installation' && !isMock && <section className="card k8s-installation-card"><div className="card-title"><div><span className="eyebrow">NEW CLUSTER</span><h2>K3s 多节点首次安装</h2><p>先在空白主机安装 Server，再等待集群登记和 Node 映射后逐台加入 Agent。安装过程由持久化计划推进。</p></div></div>
    <form className="managed-deployment-form" onSubmit={event => void createInstallation(event)}>
     <Field label="K3s Server 主机"><select required value={installServerHostId} onChange={event => setInstallServerHostId(event.target.value)}><option value="">选择 Server 主机资产</option>{hosts.filter(host => host.capabilities.includes('k3s.install')).map(host => <option key={host.id} value={host.id}>{host.hostname} · {host.status}</option>)}</select></Field>
     <Field label="K3s Agent 主机（可多选）"><select multiple size={Math.min(5, Math.max(2, hosts.filter(host => host.capabilities.includes('k3s.install') && host.id !== installServerHostId).length))} value={installAgentHostIds} onChange={event => setInstallAgentHostIds(Array.from(event.currentTarget.selectedOptions, option => option.value))}>{hosts.filter(host => host.capabilities.includes('k3s.install') && host.id !== installServerHostId).map(host => <option key={host.id} value={host.id}>{host.hostname} · {host.status}</option>)}</select><small className="muted">仅显示已上报 k3s.install 能力的主机。实际安装前 Helper 仍会执行空白主机与系统条件校验。</small></Field>
@@ -1112,8 +1152,8 @@ function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
    </form>
    {installations.map(plan => <article className="managed-deployment-row" key={plan.id}>
     <div><strong>K3s 安装 → {plan.targetVersion}</strong><span className={`badge ${plan.state.toLowerCase()}`}>{plan.state}</span><small>{plan.reason} · {plan.steps.length} 台主机 · 创建于 {time(plan.createdAt)}</small>{plan.errorMessage && <small className="alert">{plan.errorCode}: {plan.errorMessage}</small>}
-     {plan.state === 'AWAITING_CLUSTER_REGISTRATION' && <div className="form-actions"><select aria-label="已导入的 K3s 集群" value={installClusterIds[plan.id] ?? ''} onChange={event => setInstallClusterIds(current => ({ ...current, [plan.id]: event.target.value }))}><option value="">先导入并选择 K3s 集群</option>{clusters.filter(cluster => cluster.kind === 'K3S').map(cluster => <option key={cluster.id} value={cluster.id}>{cluster.name} · {cluster.healthStatus}</option>)}</select><button className="secondary" disabled={installBusy || !installClusterIds[plan.id]} onClick={() => void registerInstallationCluster(plan)}>校验 Server 映射并继续</button><small className="muted">先在下方“导入集群”，再在对应 Node 行映射到 Server 主机资产。</small></div>}
-     {plan.state === 'AWAITING_NODE_MAPPING' && <small className="alert">Agent 已安装。请刷新关联集群的 Node 清单，并把新 Ready Node 映射到该步骤主机；映射成功后计划会自动继续。</small>}
+     {plan.state === 'AWAITING_CLUSTER_REGISTRATION' && <div className="form-actions"><select aria-label="已导入的 K3s 集群" value={installClusterIds[plan.id] ?? ''} onChange={event => setInstallClusterIds(current => ({ ...current, [plan.id]: event.target.value }))}><option value="">先导入并选择 K3s 集群</option>{clusters.filter(cluster => cluster.kind === 'K3S').map(cluster => <option key={cluster.id} value={cluster.id}>{cluster.name} · {cluster.healthStatus}</option>)}</select><button className="secondary" disabled={installBusy || !installClusterIds[plan.id]} onClick={() => void registerInstallationCluster(plan)}>校验 Server 映射并继续</button><small className="muted">集群登记后，前往“节点管理”将 Server Node 映射到对应主机资产。</small></div>}
+     {plan.state === 'AWAITING_NODE_MAPPING' && <small className="alert">Agent 已安装。请前往“节点管理”刷新关联集群的 Node 清单，并把新 Ready Node 映射到该步骤主机；映射成功后计划会自动继续。</small>}
      <div className="table-wrap"><table><thead><tr><th>顺序</th><th>主机</th><th>角色</th><th>步骤状态</th></tr></thead><tbody>{plan.steps.map(step => <tr key={`${plan.id}:${step.ordinal}`}><td>{step.ordinal + 1}</td><td>{hosts.find(host => host.id === step.hostId)?.hostname ?? step.hostId}<small className="mono">{step.hostId}</small></td><td>{step.role === 'server' ? 'Server' : 'Agent'}</td><td>{step.state}{step.operationId && <small className="mono">任务 {step.operationId}</small>}</td></tr>)}</tbody></table></div>
     </div>
     <div className="managed-deployment-actions">{plan.state === 'DRAFT' && <button className="primary" disabled={installBusy || !installConfirmed} onClick={() => void startInstallation(plan)}>启动计划</button>}</div>
@@ -1121,7 +1161,7 @@ function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
    {installations.some(plan => plan.state === 'DRAFT') && <label className="check-field"><input type="checkbox" checked={installConfirmed} onChange={event => setInstallConfirmed(event.target.checked)} /><span>我已确认所选主机是空白安装目标，API 地址可由 Agent 访问，且理解计划会等待集群导入与 Node 映射。</span></label>}
    {!installations.length && <p className="muted">尚无 K3s 安装计划。</p>}
   </section>}
-  {!isMock && <section className="card"><div className="card-title"><div><h2>K3s 逐节点升级计划</h2><p>创建草稿不会执行升级。启动后按 Server 优先、Agent 随后的顺序逐台处理；每步都要刷新并确认所有 Node Ready，未知结果会停止计划。</p></div></div>
+  {workspace === 'upgrades' && !isMock && <section className="card k8s-upgrade-card"><div className="card-title"><div><span className="eyebrow">LIFECYCLE</span><h2>K3s 逐节点升级计划</h2><p>创建草稿不会执行升级。启动后按 Server 优先、Agent 随后的顺序逐台处理；每步都要刷新并确认所有 Node Ready，未知结果会停止计划。</p></div></div>
    <form className="managed-deployment-form" onSubmit={event => void createRollout(event)}>
     <Field label="K3s 集群"><select required value={rolloutClusterId} onChange={event => setRolloutClusterId(event.target.value)}><option value="">选择已登记的 K3s 集群</option>{clusters.filter(cluster => cluster.kind === 'K3S').map(cluster => <option key={cluster.id} value={cluster.id}>{cluster.name} · {cluster.healthStatus}</option>)}</select></Field>
     <Field label="目标版本"><input required maxLength={32} pattern="v[0-9]+\.[0-9]+\.[0-9]+\+k3s[0-9]+" value={rolloutVersion} onChange={event => setRolloutVersion(event.target.value)} placeholder="v1.34.0+k3s1" /></Field>
@@ -1138,27 +1178,20 @@ function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
    {rollouts.some(plan => plan.state === 'DRAFT') && <label className="check-field"><input type="checkbox" checked={rolloutConfirmed} onChange={event => setRolloutConfirmed(event.target.checked)} /><span>我已核对草稿中的节点顺序、目标版本和维护窗口，确认启动后将按计划逐台升级。</span></label>}
    {!rollouts.length && <p className="muted">尚无 K3s 升级计划。</p>}
   </section>}
-  {discoveries.length > 0 && <section className="card"><div className="card-title"><div><h2>Agent 自动发现</h2><p>Agent 持续报告 kubelet/K3s 状态。Core 与本机 K3s 属于同一集群且节点 Ready 时会使用 Core 的集群内只读身份自动纳管；其他主机仍可验证后导入 kubeconfig。</p></div></div><div className="table-wrap"><table><thead><tr><th>主机</th><th>运行时</th><th>本机 API</th><th>最近心跳</th><th /></tr></thead><tbody>{discoveries.map(discovery => <tr key={discovery.hostId}><td>{discovery.hostname}<small className="mono">{discovery.hostId}</small></td><td>{discovery.runtimeKind} · kubelet 运行中</td><td>{discovery.apiServerLocal ? '127.0.0.1:6443 可连接' : '本机 6443 不可连接'}</td><td>{time(discovery.agentLastSeen)}</td><td>{clusters.some(cluster => cluster.discoveredHostId === discovery.hostId) ? <span className="badge online">已自动纳管</span> : <button className="link" onClick={() => prepareDiscoveredImport(discovery)}>准备导入</button>}</td></tr>)}</tbody></table></div></section>}
-  <section className="card"><div className="card-title"><div><h2>导入集群</h2><p>选择 kubeconfig 中的单一 context。凭据只发送到 Core 并加密保存，页面不会持久化副本。</p></div></div>
-   <form className="cluster-import-form" onSubmit={event => void importCluster(event)}>
+  {workspace === 'clusters' && discoveries.length > 0 && <section className="card k8s-discovery-card"><div className="card-title"><div><h2>Agent 自动发现</h2><p>Agent 持续报告 kubelet/K3s 状态。Core 与本机 K3s 属于同一集群且节点 Ready 时会使用 Core 的集群内只读身份自动纳管；其他主机仍可验证后导入 kubeconfig。</p></div></div><div className="table-wrap"><table><thead><tr><th>主机</th><th>运行时</th><th>本机 API</th><th>最近心跳</th><th /></tr></thead><tbody>{discoveries.map(discovery => <tr key={discovery.hostId}><td>{discovery.hostname}<small className="mono">{discovery.hostId}</small></td><td>{discovery.runtimeKind} · kubelet 运行中</td><td>{discovery.apiServerLocal ? '127.0.0.1:6443 可连接' : '本机 6443 不可连接'}</td><td>{time(discovery.agentLastSeen)}</td><td>{clusters.some(cluster => cluster.discoveredHostId === discovery.hostId) ? <span className="badge online">已自动纳管</span> : <button className="link" onClick={() => prepareDiscoveredImport(discovery)}>准备导入</button>}</td></tr>)}</tbody></table></div></section>}
+  {workspace === 'clusters' && <section className="card k8s-import-card"><div className="card-title"><div><span className="eyebrow">CLUSTER REGISTRY</span><h2>导入已有集群</h2><p>选择 kubeconfig 中的单一 context。凭据只发送到 Core 并加密保存，页面不会持久化副本。</p></div><button className="primary" disabled={isMock} onClick={() => setShowImportForm(current => !current)}>{showImportForm ? '收起导入表单' : '＋ 导入集群'}</button></div>
+   {showImportForm && <form className="cluster-import-form" onSubmit={event => void importCluster(event)}>
     <Field label="集群名称"><input required maxLength={80} value={name} onChange={event => setName(event.target.value)} placeholder="例如 production-k3s" /></Field>
     <Field label="集群类型"><select value={kind} onChange={event => setKind(event.target.value as KubernetesClusterImportRequest['kind'])}><option value="K3S">K3s</option><option value="KUBERNETES">Kubernetes</option><option value="KUBEEDGE">KubeEdge</option></select></Field>
     <Field label="kubeconfig context"><input required maxLength={128} value={contextName} onChange={event => setContextName(event.target.value)} placeholder="明确填写 context 名称" /></Field>
     <Field label="kubeconfig"><textarea required maxLength={1048576} rows={10} value={kubeconfig} onChange={event => setKubeconfig(event.target.value)} autoComplete="off" spellCheck={false} placeholder="粘贴 kubeconfig YAML" /></Field>
     <div className="form-actions"><button className="primary" disabled={busy || loading || isMock || !kubeconfig.trim()}>{busy ? '验证并导入…' : '验证并导入集群'}</button></div>
-   </form>
-  </section>
-  <ResourceState loading={loading} error="" />
+   </form>}
+  </section>}
+  {workspace === 'clusters' && <><ResourceState loading={loading} error="" />
   <div className="cluster-list">{clusters.map(cluster => {
-   const clusterNodes = nodes[cluster.id] ?? [];
    return <section className="card cluster-card" key={cluster.id}>
-    <div className="card-title"><div><span className="eyebrow">{cluster.kind}</span><h2>{cluster.name}</h2><p className="mono">{cluster.endpoint} · context {cluster.contextName}</p><p className="muted">凭据来源：{cluster.credentialSource === 'IN_CLUSTER' ? `集群内只读身份 · Agent 主机 ${cluster.discoveredHostId ?? '自动发现'}` : '加密保存的 kubeconfig'} · 最近观测 {time(cluster.observedAt)}{cluster.observationsStale ? ' · 观测已过期' : ' · 观测新鲜'}{cluster.lastErrorCode ? ` · ${cluster.lastErrorCode}` : ''}</p>{cluster.kind === 'KUBEEDGE' && <p className="muted">CloudCore：{cluster.cloudCoreStatus} · 观测于 {time(cluster.cloudCoreObservedAt)}</p>}</div><div className="cluster-actions"><span className={`badge ${cluster.healthStatus === 'HEALTHY' ? 'online' : 'offline'}`}>{cluster.healthStatus === 'HEALTHY' ? '健康' : '不可用'}</span><button className="secondary" disabled={!!nodeLoading[cluster.id] || isMock} onClick={() => void refreshNodes(cluster.id)}>{nodeLoading[cluster.id] ? '读取中…' : `刷新 Node (${cluster.nodeCount})`}</button></div></div>
-    {clusterNodes.length > 0 && <div className="table-wrap"><table><thead><tr><th>Node</th><th>角色 / 运行状态</th><th>容器所有者</th><th>主机资产映射</th></tr></thead><tbody>{clusterNodes.map(node => {
-     const edgeStatus = { NOT_EDGE_NODE: '非 Edge 节点', NOT_PRESENT: 'Node 已移除', REGISTERED_NOT_READY: '已注册 · NotReady', REGISTERED_READY: '已注册 · Ready' }[node.edgeCoreRegistrationStatus];
-     const edgeProcessStatus = { NOT_APPLICABLE: '不适用', NOT_MAPPED: '未映射主机', NOT_OBSERVED: '尚无服务观测', STALE: '观测过期', ACTIVE: '运行中', INACTIVE: '未运行', UNKNOWN: '状态未知' }[node.edgeCoreProcessStatus];
-     return <tr key={node.nodeUid}><td><strong>{node.nodeName}</strong><small className="mono">UID {node.nodeUid}</small></td><td>{node.nodePresent ? `${node.roles.join(', ') || 'worker'} · ${node.ready ? 'Ready' : 'NotReady'}${cluster.kind === 'KUBEEDGE' ? ` · EdgeCore 注册 ${edgeStatus} · 进程 ${edgeProcessStatus}${node.edgeCoreProcessObservedAt ? `（${time(node.edgeCoreProcessObservedAt)}）` : ''}` : ''}` : '已从集群移除 · 映射保留'}</td><td>{node.containerOwner}</td><td><select aria-label={`映射 ${node.nodeName} 到主机资产`} value={node.hostId ?? ''} onChange={event => void mapHost(cluster.id, node, event.target.value)} disabled={!!nodeLoading[cluster.id] || isMock || (!node.nodePresent && !node.hostId)}><option value="">未映射</option>{hosts.map(host => <option value={host.id} key={host.id}>{host.hostname}</option>)}</select></td></tr>;
-    })}</tbody></table></div>}
-    {!clusterNodes.length && <p className="muted">尚未读取 Node 清单。刷新后可以建立主机资产映射。</p>}
+    <div className="card-title"><div><span className="eyebrow">{cluster.kind}</span><h2>{cluster.name}</h2><p className="mono">{cluster.endpoint} · context {cluster.contextName}</p><p className="muted">凭据来源：{cluster.credentialSource === 'IN_CLUSTER' ? `集群内只读身份 · Agent 主机 ${cluster.discoveredHostId ?? '自动发现'}` : '加密保存的 kubeconfig'} · 最近观测 {time(cluster.observedAt)}{cluster.observationsStale ? ' · 观测已过期' : ' · 观测新鲜'}{cluster.lastErrorCode ? ` · ${cluster.lastErrorCode}` : ''}</p>{cluster.kind === 'KUBEEDGE' && <p className="muted">CloudCore：{cluster.cloudCoreStatus} · 观测于 {time(cluster.cloudCoreObservedAt)}</p>}</div><div className="cluster-actions"><span className={`badge ${cluster.healthStatus === 'HEALTHY' && !cluster.observationsStale ? 'online' : 'offline'}`}>{cluster.healthStatus === 'HEALTHY' && !cluster.observationsStale ? '健康' : '需检查'}</span><button className="secondary" onClick={() => { setSelectedNodeClusterId(cluster.id); setWorkspace('nodes'); void refreshNodes(cluster.id); }}>管理节点</button><button className="secondary" disabled={loading || isMock} onClick={() => void refreshClusterStatus(cluster.id)}>刷新状态</button></div></div>
     <div className="cluster-resource-actions"><button className="secondary" disabled={!!deploymentLoading[`${cluster.id}:namespaces`] || isMock} onClick={() => void loadNamespaces(cluster.id)}>{deploymentLoading[`${cluster.id}:namespaces`] ? '读取中…' : namespaceSnapshots[cluster.id] ? '↻ 刷新 Namespace' : '读取 Namespace 与资源管理'}</button></div>
     {namespaceSnapshots[cluster.id] && (() => {
       const snapshot = namespaceSnapshots[cluster.id];
@@ -1192,7 +1225,9 @@ function KubernetesClusters({ notify }: { notify: (message: string) => void }) {
       </section>;
     })()}
    </section>;
-  })}{!loading && !clusters.length && !isMock && <Empty>尚未导入 Kubernetes 集群。</Empty>}</div>
+  })}{!loading && !clusters.length && !isMock && <Empty>尚未导入 Kubernetes 集群。</Empty>}</div></>}
+   </div>
+  </div>
  </>;
 }
 function KubernetesApplicationReleases({ clusterId, namespace, notify }: {
