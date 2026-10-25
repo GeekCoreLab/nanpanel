@@ -541,9 +541,11 @@ Agent Kubernetes runtime discovery 的代码测试和 `k3s-1` 部署证据见[�
 
 2026-10-26 第五切片为同一 `linux-netns` Provider 增加可选 `OPENVSWITCH` switch backend：Core/OpenAPI/Web/Agent/Root Helper 贯通后端选择；Helper 在 Revision 专属 netns 中启动私有 OVSDB 与 `ovs-vswitchd`，以 `netdev` datapath 创建受归属标记保护的 Bridge/Port，并在 Verify/Compensate 中校验、停止对应实例。只有可信 OVS 工具、schema 和可打开的 `/dev/net/tun` 全部就绪时 Helper 才报告 `network.topology.ovs`；Core 与 Helper 分别拒绝未声明 OVS 能力的 APPLY，OVS 计划不与同一 Provider 下 Firewall/Packet Tap 混用。Core 78 项测试、Rust 四项规定检查（64 项测试）、Web 18 项测试/构建/Playwright 和隔离容器中的 OVS 3.1 `netdev` 自定义 EtherType 转发实验通过，宿主默认路由哈希不变。Commit `42fae125d6ef12b26ea0becbd07a42f35512142a` 的 Actions run `40228869901` validate/publish 成功；不可变 GHCR Core/Web 镜像已部署到 `k3s-1`，rollout、数据库健康、原 5 GiB PVC、Helper/Agent 哈希、公开页面/资源及 Helper 只读能力复核通过。目标机没有 OVS 可执行文件，Helper 继续报告 `network.topology.reconcile` 但不报告 `network.topology.ovs`；没有在生产拓扑执行 Provider Apply。详见[OVS Provider 切片与部署验收](tests/p6/runs/2026-10-26-ovs-provider-slice.md)。
 
+2026-10-26 第六切片在同一 `linux-netns` Provider 中加入多 Router 独立 IPv4 路由表：每个 Router 在拓扑 Revision 专属 netns 中拥有独立 VRF/table，允许不同 Router 配置相同目的前缀；Core、Agent 与 Helper 加强累计 64 条路由、接口地址、直连网段重叠、网关和路由覆盖校验，Helper Verify 检查 VRF 归属、接口 master、精确表路由和 l3mdev rule。Rust 四项规定检查（65 项测试）、Core 78 项测试以及两个隔离网络实验通过；多 Router 实验验证两个 VRF 分别转发 TCP、相同前缀选择不同下一跳，宿主默认路由哈希保持不变。Commit `bdab42ae5ec099295497cc94564d8af2d7313aab` 的 Actions run `40231598027` validate/publish 成功并部署到 `k3s-1`；Core/Web 各 1/1 Ready，PostgreSQL 与原 5 GiB PVC 保持 Ready/Bound，HTTPS 页面和数据库健康检查通过，Helper/Agent 镜像与主机二进制哈希匹配，Helper 只读能力报告 `network.topology.vrf`。没有在目标生产拓扑执行 Provider Apply。详见[Multi-Router VRF 切片与部署验收](tests/p6/runs/2026-10-26-multi-router-vrf-provider-slice.md)。
+
 - [x] root L2/Ethernet 图的隔离 Linux Bridge/Firewall/Packet Tap 与单 Router IPv4 静态路由 Provider；生产拓扑 Apply 不在本项验收边界内，详见[部署报告](tests/p6/runs/2026-10-26-router-provider-slice.md)。
 - [x] OVS netdev switch backend 已并入隔离 `linux-netns` Provider 并部署；执行仍要求目标 Helper 报告 `network.topology.ovs`，当前 `k3s-1` 缺少 OVS 主机前置条件，未在其生产拓扑 Apply。
-- [ ] 多 Router 独立路由表，以及更完整的 L3 地址/路由校验。
+- [x] 多 Router 独立 VRF 路由表，以及 L3 地址/路由校验；见[Multi-Router VRF 切片与部署验收](tests/p6/runs/2026-10-26-multi-router-vrf-provider-slice.md)。
 - [x] 当前 L2/Ethernet Provider 的虚拟网线 RX/TX 指标、端口能力与 Firewall 策略匹配校验。
 - [x] 设备插入、Packet Tap 镜像、拓扑版本比较与回放：Canvas context menu 支持添加/调整设备；版本差异按节点与连接稳定 ID 展示，历史 Revision 仅回放为未保存草稿；Playwright 已覆盖这些路径，Packet Tap 内核镜像见[切片验收](tests/p6/runs/2026-10-26-packet-tap-slice.md)。
 
