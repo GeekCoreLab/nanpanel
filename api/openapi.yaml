@@ -6012,7 +6012,7 @@ components:
     KubernetesApplicationTopologyNode:
       type: object
       additionalProperties: false
-      required: [id, kind, name, replicas, readyReplicas, image, targetDeployment, state]
+      required: [id, kind, name, replicas, readyReplicas, image, targetDeployment, servicePort, targetPort, serviceProtocol, state]
       properties:
         id:
           type: string
@@ -6036,6 +6036,16 @@ components:
         targetDeployment:
           type: [string, 'null']
           maxLength: 63
+        servicePort:
+          type: [integer, 'null']
+          minimum: 1
+          maximum: 65535
+        targetPort:
+          type: [string, 'null']
+          maxLength: 15
+        serviceProtocol:
+          type: [string, 'null']
+          enum: [TCP, UDP, SCTP, null]
         state:
           type: string
           enum: [READY, PROGRESSING, MISSING, UNAVAILABLE, ACTIVE, CONFIGURED, UNKNOWN]
@@ -6070,7 +6080,7 @@ components:
     KubernetesApplicationTopologyEdit:
       type: object
       additionalProperties: false
-      required: [resourceId, replicas, image, targetDeployment]
+      required: [resourceId, replicas, image, targetDeployment, servicePort, targetPort, serviceProtocol]
       properties:
         resourceId:
           type: string
@@ -6086,6 +6096,16 @@ components:
         targetDeployment:
           type: [string, 'null']
           maxLength: 63
+        servicePort:
+          type: [integer, 'null']
+          minimum: 1
+          maximum: 65535
+        targetPort:
+          type: [string, 'null']
+          maxLength: 15
+        serviceProtocol:
+          type: [string, 'null']
+          enum: [TCP, UDP, SCTP, null]
     KubernetesApplicationVersionList:
       type: object
       additionalProperties: false

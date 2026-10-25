@@ -5,9 +5,11 @@ import static io.nanpanel.core.AuthStore.query;
 import static io.nanpanel.core.AuthStore.update;
 
 import io.fabric8.kubernetes.api.model.HasMetadata;
+import io.fabric8.kubernetes.api.model.IntOrString;
 import io.fabric8.kubernetes.api.model.ObjectMetaBuilder;
 import io.fabric8.kubernetes.api.model.Service;
 import io.fabric8.kubernetes.api.model.ServiceAccount;
+import io.fabric8.kubernetes.api.model.ServicePort;
 import io.fabric8.kubernetes.api.model.apps.Deployment;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.KubernetesClientException;
@@ -46,6 +48,7 @@ public class KubernetesApplicationService {
       Pattern.compile("[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?");
   private static final Pattern IMAGE =
       Pattern.compile("[A-Za-z0-9][A-Za-z0-9._/:@+-]{0,511}");
+  private static final Pattern SERVICE_PORT_NAME = Pattern.compile("[a-z](?:[a-z0-9-]{0,13}[a-z0-9])?");
 
   private static final String BOOKINFO_MANIFEST = """
       apiVersion: v1
@@ -291,13 +294,14 @@ public class KubernetesApplicationService {
       String manifestYaml, List<String> notes) {}
   public record DraftRequest(Integer baseVersion, List<TopologyEdit> edits) {}
   public record TopologyEdit(String resourceId, Integer replicas, String image,
-      String targetDeployment) {}
+      String targetDeployment, Integer servicePort, String targetPort, String serviceProtocol) {}
   public record ApplicationList(List<ApplicationView> items) {}
   public record ApplicationView(UUID id, UUID clusterId, String clusterName, String namespace,
       String name, String displayName, String templateId, int currentVersion, String state,
       Instant createdAt, Instant updatedAt) {}
   public record TopologyNode(String id, String kind, String name, Integer replicas,
-      Integer readyReplicas, String image, String targetDeployment, String state) {}
+      Integer readyReplicas, String image, String targetDeployment, Integer servicePort,
+      String targetPort, String serviceProtocol, String state) {}
   public record TopologyEdge(String id, String source, String target) {}
   public record Topology(List<TopologyNode> nodes, List<TopologyEdge> edges) {}
   public record ApplicationDetail(ApplicationView application, Topology topology,
@@ -988,7 +992,8 @@ public class KubernetesApplicationService {
           if (containers == null || containers.isEmpty()) throw invalid("Deployment 没有可编辑的容器");
           containers.forEach(container -> container.setImage(image));
         }
-        if (edit.targetDeployment() != null) throw invalid("Deployment 不接受 Service 连接修改");
+        if (edit.targetDeployment() != null || edit.servicePort() != null || edit.targetPort() != null
+            || edit.serviceProtocol() != null) throw invalid("Deployment 不接受 Service 配置修改");
       } else if (item instanceof Service service) {
         if (edit.replicas() != null || edit.image() != null) {
           throw invalid("Service 不接受副本数或镜像修改");
@@ -998,7 +1003,31 @@ public class KubernetesApplicationService {
           if (!validTargets.containsKey(target)) throw invalid("Service 连接目标不属于应用中的 Deployment");
           service.getSpec().setSelector(Map.of("app", target));
         }
-      } else if (edit.replicas() != null || edit.image() != null || edit.targetDeployment() != null) {
+        if (edit.servicePort() != null || edit.targetPort() != null || edit.serviceProtocol() != null) {
+          List<ServicePort> ports = service.getSpec().getPorts();
+          if (ports == null || ports.isEmpty()) throw invalid("Service 没有可编辑的端口");
+          ServicePort primary = ports.getFirst();
+          int nextPort = edit.servicePort() == null ? primary.getPort() : edit.servicePort();
+          if (nextPort < 1 || nextPort > 65535) throw invalid("Service 端口必须在 1–65535 之间");
+          String nextProtocol = edit.serviceProtocol() == null || edit.serviceProtocol().isBlank()
+              ? (primary.getProtocol() == null ? "TCP" : primary.getProtocol())
+              : edit.serviceProtocol().trim().toUpperCase(java.util.Locale.ROOT);
+          if (!Set.of("TCP", "UDP", "SCTP").contains(nextProtocol)) {
+            throw invalid("Service 协议只支持 TCP、UDP 或 SCTP");
+          }
+          for (int index = 1; index < ports.size(); index++) {
+            ServicePort other = ports.get(index);
+            String otherProtocol = other.getProtocol() == null ? "TCP" : other.getProtocol();
+            if (other.getPort() != null && other.getPort() == nextPort && otherProtocol.equals(nextProtocol)) {
+              throw invalid("同协议下 Service 端口不能重复");
+            }
+          }
+          primary.setPort(nextPort);
+          primary.setProtocol(nextProtocol);
+          if (edit.targetPort() != null) primary.setTargetPort(parseTargetPort(edit.targetPort()));
+        }
+      } else if (edit.replicas() != null || edit.image() != null || edit.targetDeployment() != null
+          || edit.servicePort() != null || edit.targetPort() != null || edit.serviceProtocol() != null) {
         throw invalid("ServiceAccount 不包含可编辑的拓扑属性");
       }
     }
@@ -1040,13 +1069,18 @@ public class KubernetesApplicationService {
             .map(container -> container.getImage()).filter(value -> value != null).findFirst().orElse(null);
         nodes.add(new TopologyNode(id, "Deployment", deployment.getMetadata().getName(),
             replicas, ready, image, deployment.getSpec().getTemplate().getMetadata().getLabels()
-                .get("app"), state));
+                .get("app"), null, null, null, state));
       } else if (item instanceof Service service) {
         String id = resourceId(item);
         String expectedUid = resourceUids.get(id);
         if (expectedUid == null) throw ownershipConflict(id);
         String target = service.getSpec().getSelector() == null ? null
             : service.getSpec().getSelector().get("app");
+        ServicePort firstPort = service.getSpec().getPorts().getFirst();
+        IntOrString serviceTargetPort = firstPort.getTargetPort();
+        String targetPort = serviceTargetPort == null ? String.valueOf(firstPort.getPort())
+            : String.valueOf(serviceTargetPort.getValue());
+        String protocol = firstPort.getProtocol() == null ? "TCP" : firstPort.getProtocol();
         String state = "ACTIVE";
         try {
           HasMetadata live = fetch(client, "Service", namespace, service.getMetadata().getName());
@@ -1058,7 +1092,7 @@ public class KubernetesApplicationService {
           state = "UNAVAILABLE";
         }
         nodes.add(new TopologyNode(id, "Service", service.getMetadata().getName(),
-            null, null, null, target, state));
+            null, null, null, target, firstPort.getPort(), targetPort, protocol, state));
         for (Deployment deployment : deployments) {
           Map<String, String> labels = deployment.getSpec().getTemplate().getMetadata().getLabels();
           if (matches(service.getSpec().getSelector(), labels)) {
@@ -1080,7 +1114,7 @@ public class KubernetesApplicationService {
           state = "UNAVAILABLE";
         }
         nodes.add(new TopologyNode(id, "ServiceAccount", account.getMetadata().getName(),
-            null, null, null, null, state));
+            null, null, null, null, null, null, null, state));
       }
     }
     nodes.sort(Comparator.comparing(TopologyNode::kind).thenComparing(TopologyNode::name));
@@ -1092,6 +1126,19 @@ public class KubernetesApplicationService {
     if (selector == null || selector.isEmpty()) return false;
     return labels != null && selector.entrySet().stream()
         .allMatch(entry -> entry.getValue().equals(labels.get(entry.getKey())));
+  }
+
+  private static IntOrString parseTargetPort(String value) {
+    String target = value == null ? "" : value.trim();
+    if (target.matches("[0-9]{1,5}")) {
+      int port = Integer.parseInt(target);
+      if (port >= 1 && port <= 65535) return new IntOrString(port);
+      throw invalid("Service 目标端口必须在 1–65535 之间");
+    }
+    if (!SERVICE_PORT_NAME.matcher(target).matches()) {
+      throw invalid("Service 目标端口必须是 1–65535 的数字或有效命名端口");
+    }
+    return new IntOrString(target);
   }
 
   private static String resourceId(HasMetadata item) {

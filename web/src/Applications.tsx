@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import {
-  Background, ConnectionMode, Controls, Handle, MarkerType, Position, ReactFlow, ReactFlowProvider,
+  ConnectionMode, Handle, MarkerType, Position, ReactFlowProvider,
   useNodesState, useReactFlow,
   type Connection, type Edge, type Node, type NodeProps,
 } from '@xyflow/react';
@@ -19,10 +19,11 @@ import type {
   KubernetesClusterSummary,
   KubernetesTopologyNamespaceSnapshot,
 } from './lib/types';
+import { TopologyCanvas } from './topology/TopologyCanvas';
 import './applications.css';
 
 type View = 'topology' | 'versions';
-type Editable = { replicas?: number; image?: string; targetDeployment?: string };
+type Editable = { replicas?: number; image?: string; targetDeployment?: string; servicePort?: number; targetPort?: string; serviceProtocol?: 'TCP' | 'UDP' | 'SCTP' };
 type KubernetesApplicationSource = KubernetesApplicationCreateRequest['source'];
 const creationSources: { id: KubernetesApplicationSource; label: string; hint: string }[] = [
   { id: 'FORM', label: '图形化创建', hint: '镜像、端口、副本与环境变量' },
@@ -247,11 +248,18 @@ export default function Applications({ notify }: { notify: (message: string) => 
           && changed.image.trim() !== node.image ? changed.image.trim() : null,
         targetDeployment: node.kind === 'Service' && changed.targetDeployment !== undefined
           && changed.targetDeployment !== node.targetDeployment ? changed.targetDeployment : null,
+        servicePort: node.kind === 'Service' && changed.servicePort !== undefined
+          && changed.servicePort !== node.servicePort ? changed.servicePort : null,
+        targetPort: node.kind === 'Service' && changed.targetPort !== undefined
+          && changed.targetPort !== node.targetPort ? changed.targetPort : null,
+        serviceProtocol: node.kind === 'Service' && changed.serviceProtocol !== undefined
+          && changed.serviceProtocol !== node.serviceProtocol ? changed.serviceProtocol : null,
       };
-      if (edit.replicas === null && edit.image === null && edit.targetDeployment === null) return [];
+      if (edit.replicas === null && edit.image === null && edit.targetDeployment === null
+          && edit.servicePort === null && edit.targetPort === null && edit.serviceProtocol === null) return [];
       return [edit];
     });
-    if (!edits.length) { setError('请先修改拓扑中的副本数、镜像或 Service 连接。'); return; }
+    if (!edits.length) { setError('请先修改拓扑中的副本、镜像、Service 连线或端口配置。'); return; }
     setBusy('draft');
     setError('');
     try {
@@ -348,7 +356,7 @@ export default function Applications({ notify }: { notify: (message: string) => 
                 />
               </div>
               {!!accounts.length && <div className="application-account-row"><span>ServiceAccount</span>{accounts.map(account => <span className="account-chip" key={account.id}>♙ {account.name}</span>)}</div>}
-              <div className="application-topology-footnote">拖动节点调整布局；拖动 Service 绿色端口到 Deployment 蓝色端口可重接服务。节点布局只影响当前视图，副本、镜像和连接修改会进入 YAML diff。</div>
+              <div className="application-topology-footnote">拖动节点调整布局；拖动 Service 绿色端口到 Deployment 蓝色端口可重接服务；右键卡片配置副本、镜像或 Service 端口。修改会生成 YAML diff，拓扑布局只保留在当前视图。</div>
             </section>
           </> : <section className="application-versions-card">
             <div className="application-section-heading"><div><span className="eyebrow">IMMUTABLE MANIFEST HISTORY</span><h3>版本历史</h3><p>草稿不会修改集群；只有状态为“待确认”的版本可提交部署。</p></div></div>
@@ -399,9 +407,7 @@ export default function Applications({ notify }: { notify: (message: string) => 
 type ApplicationFlowNodeData = {
   resource: KubernetesApplicationTopologyNode;
   changes: Editable;
-  targets: string[];
   controlsDisabled: boolean;
-  onUpdate: (node: KubernetesApplicationTopologyNode, value: Editable) => void;
 };
 type ApplicationFlowNode = Node<ApplicationFlowNodeData, 'application'>;
 
@@ -419,7 +425,7 @@ function deploymentTarget(resource: KubernetesApplicationTopologyNode) {
 }
 
 function ApplicationFlowNodeCard({ data, selected }: NodeProps<ApplicationFlowNode>) {
-  const { resource, changes, targets, controlsDisabled, onUpdate } = data;
+  const { resource, changes, controlsDisabled } = data;
   const deployment = resource.kind === 'Deployment';
   return <article className={`application-flow-node ${deployment ? 'deployment' : 'service'} ${selected ? 'selected' : ''}`}>
     {deployment
@@ -431,15 +437,13 @@ function ApplicationFlowNodeCard({ data, selected }: NodeProps<ApplicationFlowNo
     </div>
     <strong title={resource.name}>{resource.name}</strong>
     {deployment ? <>
-      <small>{resource.readyReplicas ?? 0}/{resource.replicas ?? 0} Ready</small>
-      <label className="application-node-control nodrag nowheel"><span>副本数</span><input aria-label={`${resource.name} 副本数`} type="number" min={0} max={20} disabled={controlsDisabled} value={changes.replicas ?? resource.replicas ?? 1} onChange={event => onUpdate(resource, { replicas: Number(event.target.value) })} /></label>
-      <label className="application-node-control nodrag nowheel"><span>容器镜像</span><input aria-label={`${resource.name} 容器镜像`} type="text" disabled={controlsDisabled} value={changes.image ?? resource.image ?? ''} onChange={event => onUpdate(resource, { image: event.target.value })} /></label>
+      <small>{resource.readyReplicas ?? 0}/{changes.replicas ?? resource.replicas ?? 0} Ready</small>
+      <small className="application-node-image">{changes.image ?? resource.image ?? '未声明镜像'}</small>
     </> : <>
-      <small>ClusterIP Service · {resource.targetDeployment ?? '未连接'}</small>
-      <label className="application-node-control nodrag nowheel"><span>选择后端</span><select aria-label={`${resource.name} 后端 Deployment`} disabled={controlsDisabled} value={changes.targetDeployment ?? resource.targetDeployment ?? ''} onChange={event => onUpdate(resource, { targetDeployment: event.target.value })}>
-        {targets.map(target => <option key={target} value={target}>{target}</option>)}
-      </select></label>
+      <small>ClusterIP · {changes.servicePort ?? resource.servicePort ?? '—'}/{changes.serviceProtocol ?? resource.serviceProtocol ?? 'TCP'} → {changes.targetPort ?? resource.targetPort ?? '—'}</small>
+      <small>后端：{changes.targetDeployment ?? resource.targetDeployment ?? '通过拓扑连线指定'}</small>
     </>}
+    <small className="application-node-edit-hint">右键配置</small>
   </article>;
 }
 
@@ -464,14 +468,10 @@ function ApplicationTopologyFlowCanvas({
   const [nodes, setNodes, onNodesChange] = useNodesState<ApplicationFlowNode>([]);
   const { fitView } = useReactFlow<ApplicationFlowNode, Edge>();
   const [connectionMessage, setConnectionMessage] = useState('');
+  const [editingNode, setEditingNode] = useState<KubernetesApplicationTopologyNode>();
   const visibleResources = useMemo(
     () => resources.filter(resource => resource.kind === 'Service' || resource.kind === 'Deployment'),
     [resources],
-  );
-  const targets = useMemo(
-    () => [...new Set(visibleResources.filter(resource => resource.kind === 'Deployment')
-      .map(deploymentTarget))],
-    [visibleResources],
   );
   const edges = useMemo<Edge[]>(() => {
     const deployments = visibleResources.filter(resource => resource.kind === 'Deployment');
@@ -487,7 +487,7 @@ function ApplicationTopologyFlowCanvas({
         target: edge.target,
         sourceHandle: 'service-output',
         targetHandle: 'deployment-input',
-        type: 'smoothstep' as const,
+        type: 'nanpanelBezier' as const,
         markerEnd: { type: MarkerType.ArrowClosed, color: '#91addc' },
         style: { stroke: '#91addc', strokeWidth: 2 },
         selectable: false,
@@ -503,7 +503,7 @@ function ApplicationTopologyFlowCanvas({
           target: deployment.id,
           sourceHandle: 'service-output',
           targetHandle: 'deployment-input',
-          type: 'smoothstep' as const,
+          type: 'nanpanelBezier' as const,
           markerEnd: { type: MarkerType.ArrowClosed, color: '#91addc' },
           style: { stroke: '#91addc', strokeWidth: 2 },
           selectable: false,
@@ -529,14 +529,12 @@ function ApplicationTopologyFlowCanvas({
         data: {
           resource,
           changes: changes[resource.id] ?? {},
-          targets,
           controlsDisabled: busy || hasDraft,
-          onUpdate,
         },
-        draggable: !busy,
+        draggable: !busy && !hasDraft,
       }));
     });
-  }, [visibleResources, changes, targets, busy, hasDraft, onUpdate, setNodes]);
+  }, [visibleResources, changes, busy, hasDraft, setNodes]);
 
   useEffect(() => {
     if (!nodes.length) return;
@@ -567,18 +565,22 @@ function ApplicationTopologyFlowCanvas({
   }
 
   return <>
-    <ReactFlow<ApplicationFlowNode, Edge>
+    <TopologyCanvas<ApplicationFlowNode, Edge>
       nodes={nodes}
       edges={edges}
       nodeTypes={applicationFlowNodeTypes}
       onNodesChange={onNodesChange}
       onConnect={connect}
+      onNodeContextMenu={(event, node) => {
+        event.preventDefault();
+        if (!busy && !hasDraft) setEditingNode(node.data.resource);
+      }}
       isValidConnection={validConnection}
       connectionMode={ConnectionMode.Strict}
       onConnectEnd={(_, state) => {
         if (state.toHandle && !state.isValid) setConnectionMessage('只允许从 Service 输出端连接到 Deployment 输入端。');
       }}
-      nodesDraggable={!busy}
+      nodesDraggable={!busy && !hasDraft}
       nodesConnectable={!busy && !hasDraft}
       elementsSelectable={false}
       deleteKeyCode={null}
@@ -586,12 +588,68 @@ function ApplicationTopologyFlowCanvas({
       maxZoom={1.8}
       noWheelClassName="nowheel"
       fitView
-    >
-      <Background color="#dbe3ee" gap={22} />
-      <Controls />
-    </ReactFlow>
+    />
     {connectionMessage && <div className="application-flow-message" role="status">{connectionMessage}</div>}
+    {editingNode && <ApplicationNodeSettingsDialog
+      key={editingNode.id}
+      node={editingNode}
+      changes={changes[editingNode.id] ?? {}}
+      disabled={busy || hasDraft}
+      onClose={() => setEditingNode(undefined)}
+      onSave={value => { onUpdate(editingNode, value); setEditingNode(undefined); }}
+    />}
   </>;
+}
+
+function ApplicationNodeSettingsDialog({
+  node, changes, disabled, onClose, onSave,
+}: {
+  node: KubernetesApplicationTopologyNode;
+  changes: Editable;
+  disabled: boolean;
+  onClose: () => void;
+  onSave: (value: Editable) => void;
+}) {
+  const [replicas, setReplicas] = useState(String(changes.replicas ?? node.replicas ?? 1));
+  const [image, setImage] = useState(changes.image ?? node.image ?? '');
+  const [servicePort, setServicePort] = useState(String(changes.servicePort ?? node.servicePort ?? ''));
+  const [targetPort, setTargetPort] = useState(changes.targetPort ?? node.targetPort ?? String(node.servicePort ?? ''));
+  const [serviceProtocol, setServiceProtocol] = useState<Editable['serviceProtocol']>(changes.serviceProtocol ?? node.serviceProtocol ?? 'TCP');
+  const [error, setError] = useState('');
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (node.kind === 'Deployment') {
+      const count = Number(replicas);
+      if (!Number.isInteger(count) || count < 0 || count > 20 || !image.trim()) {
+        setError('副本数必须为 0–20 的整数，镜像不能为空。'); return;
+      }
+      onSave({ replicas: count, image: image.trim() });
+      return;
+    }
+    const port = Number(servicePort);
+    if (!Number.isInteger(port) || port < 1 || port > 65535 || !targetPort.trim()) {
+      setError('Service 端口必须为 1–65535 的整数，目标端口不能为空。'); return;
+    }
+    onSave({ servicePort: port, targetPort: targetPort.trim(), serviceProtocol });
+  };
+  const deployment = node.kind === 'Deployment';
+  return <div className="modal-backdrop"><section className="modal application-node-settings" role="dialog" aria-modal="true" aria-labelledby="application-node-settings-title">
+    <div className="card-title"><div><span className="eyebrow">APPLICATION RESOURCE</span><h2 id="application-node-settings-title">{node.kind === 'Service' ? 'Service 配置' : '工作负载配置'}</h2></div><button className="icon-button" aria-label="关闭资源配置" onClick={onClose}>×</button></div>
+    <p className="application-node-settings-name"><strong>{node.name}</strong><AppState value={node.state} /></p>
+    <form onSubmit={submit}>
+      {deployment ? <>
+        <label className="field"><span>副本数（0–20）</span><input type="number" min={0} max={20} required value={replicas} onChange={event => setReplicas(event.target.value)} /></label>
+        <label className="field"><span>容器镜像</span><input required maxLength={512} value={image} onChange={event => setImage(event.target.value)} /></label>
+      </> : <>
+        <label className="field"><span>Service 端口（首个端口）</span><input type="number" min={1} max={65535} required value={servicePort} onChange={event => setServicePort(event.target.value)} /></label>
+        <label className="field"><span>Pod 目标端口（数字或命名端口）</span><input required maxLength={15} value={targetPort} onChange={event => setTargetPort(event.target.value)} /></label>
+        <label className="field"><span>网络协议</span><select value={serviceProtocol} onChange={event => setServiceProtocol(event.target.value as Editable['serviceProtocol'])}><option value="TCP">TCP</option><option value="UDP">UDP</option><option value="SCTP">SCTP</option></select></label>
+        <div className="alert">后端 Deployment 由拓扑连线决定；新连线会生成 Service selector 的 YAML diff。</div>
+      </>}
+      {error && <div className="alert error" role="alert">{error}</div>}
+      <div className="form-actions"><button type="button" className="secondary" onClick={onClose}>取消</button><button className="primary" disabled={disabled}>保存到拓扑草稿</button></div>
+    </form>
+  </section></div>;
 }
 
 function VersionCard({ version, busy, onDeploy }: { version: KubernetesApplicationVersion; busy: boolean; onDeploy: () => void }) {
