@@ -102,7 +102,7 @@ const protocolLayer: Record<TopologyPort['layer'], TopologyPort['protocols'][num
 export const nodePresets: Record<TopologyNodeKind, { name: string; inputs: number; outputs: number; description: string }> = {
   GATEWAY: { name: '公网 Gateway', inputs: 0, outputs: 1, description: '公网流量源' },
   HOST: { name: 'NAT Host', inputs: 1, outputs: 1, description: '受管主机' },
-  ROUTER: { name: '网络路由器', inputs: 1, outputs: 1, description: '按 IP 地址匹配 Agent 下一跳' },
+  ROUTER: { name: '网络路由器', inputs: 1, outputs: 1, description: '按接口 IPv4 地址与静态路由转发' },
   FIREWALL: { name: '虚拟防火墙', inputs: 1, outputs: 1, description: '在隔离 Linux bridge 上按端口、协议与目标端口过滤帧' },
   PACKET_TAP: { name: 'Packet Tap', inputs: 1, outputs: 2, description: '将入站数据包复制到多个观测出口' },
   SERVICE: { name: 'K3s Service', inputs: 1, outputs: 0, description: '服务终点' },
@@ -117,7 +117,7 @@ export const nodePresets: Record<TopologyNodeKind, { name: string; inputs: numbe
 };
 export function createTopologyNode(kind: TopologyNodeKind, position: { x: number; y: number }): TopologyNode {
   const preset = nodePresets[kind];
-  return { id: createUuid(), kind, name: preset.name, position, inputCount: preset.inputs, outputCount: preset.outputs, ports: portsFor(kind, preset.inputs, preset.outputs), parentId: null, assetId: null, clusterId: null, ipAddress: null, providerId: null, firewallPolicy: kind === 'FIREWALL' ? { defaultAction: 'DROP', rules: [] } : null };
+  return { id: createUuid(), kind, name: preset.name, position, inputCount: preset.inputs, outputCount: preset.outputs, ports: portsFor(kind, preset.inputs, preset.outputs), parentId: null, assetId: null, clusterId: null, ipAddress: null, providerId: null, firewallPolicy: kind === 'FIREWALL' ? { defaultAction: 'DROP', rules: [] } : null, routerConfiguration: null };
 }
 export function initialTopology(): TopologyDraftWrite {
   return { nodes: [createTopologyNode('GATEWAY', { x: 0, y: 100 }), createTopologyNode('HOST', { x: 350, y: 180 }), createTopologyNode('SERVICE', { x: 700, y: 100 })], links: [] };
@@ -210,7 +210,7 @@ export function draftError(value: unknown): string | null {
   const ids = new Set<string>();
   for (const n of value.nodes) {
     const requiredNodeKeys = ['id', 'kind', 'name', 'position', 'inputCount', 'outputCount', 'ports'];
-    const optionalNodeKeys = ['parentId', 'assetId', 'clusterId', 'ipAddress', 'description', 'providerId', 'firewallPolicy'];
+    const optionalNodeKeys = ['parentId', 'assetId', 'clusterId', 'ipAddress', 'description', 'providerId', 'firewallPolicy', 'routerConfiguration'];
     if (!record(n) || requiredNodeKeys.some(key => !Object.hasOwn(n, key)) || Object.keys(n).some(key => !requiredNodeKeys.includes(key) && !optionalNodeKeys.includes(key)) || typeof n.id !== 'string' || !uuid.test(n.id) || ids.has(n.id)) return '节点 ID 必须为唯一 UUID，且不能包含未定义字段';
     ids.add(n.id);
     if (typeof n.name !== 'string' || !n.name.trim() || [...n.name].length > 100 || !record(n.position) || !keysAre(n.position, ['x', 'y']) || ![n.position.x, n.position.y].every(v => typeof v === 'number' && Number.isFinite(v) && Math.abs(v) <= 10000)) return '节点名称或坐标无效';
@@ -243,6 +243,39 @@ export function draftError(value: unknown): string | null {
         matches.add(key);
       }
     }
+    if (n.routerConfiguration !== undefined && n.routerConfiguration !== null) {
+      const config = n.routerConfiguration;
+      if (n.kind !== 'ROUTER' || !record(config) || !keysAre(config, ['interfaces', 'routes'])
+        || !Array.isArray(config.interfaces) || config.interfaces.length > 16
+        || !Array.isArray(config.routes) || config.routes.length > 64) return 'Router 配置必须包含最多 16 个接口地址与 64 条静态路由';
+      const configuredPorts = new Set<string>();
+      const subnets = new Map<string, { network: number; prefix: number }>();
+      for (const iface of config.interfaces) {
+        if (!record(iface) || !keysAre(iface, ['port', 'address']) || typeof iface.port !== 'string'
+          || typeof iface.address !== 'string' || !n.ports.some(port => port.id === iface.port)
+          || !parseIpv4Cidr(iface.address) || configuredPorts.has(iface.port)) return 'Router 接口必须引用唯一端口并填写有效 IPv4 CIDR';
+        configuredPorts.add(iface.port);
+        const parsed = parseIpv4Cidr(iface.address);
+        if (parsed) subnets.set(iface.port, parsed);
+      }
+      const destinations = new Set<string>();
+      for (const route of config.routes) {
+        if (!record(route) || !keysAre(route, ['destination', 'gateway', 'outputPort'])
+          || typeof route.destination !== 'string' || !canonicalIpv4Network(route.destination)
+          || route.gateway !== null && (typeof route.gateway !== 'string' || !validIpv4(route.gateway))
+          || typeof route.outputPort !== 'string' || !configuredPorts.has(route.outputPort)
+          || !n.ports.some(port => port.id === route.outputPort && port.direction === 'OUTPUT')
+          || destinations.has(route.destination)) return 'Router 静态路由必须引用已配置接口并使用唯一 IPv4 网段';
+        destinations.add(route.destination);
+        const destination = parseIpv4Cidr(route.destination);
+        if (destination && [...subnets.values()].some(subnet => subnet.network === destination.network && subnet.prefix === destination.prefix)) return '静态路由不能覆盖 Router 接口的直连网段';
+        if (typeof route.gateway === 'string') {
+          const subnet = subnets.get(route.outputPort);
+          const gateway = ipv4Number(route.gateway);
+          if (!subnet || gateway === null || ((gateway & maskForPrefix(subnet.prefix)) >>> 0) !== subnet.network) return 'Router 下一跳必须位于所选接口的直连网段';
+        }
+      }
+    }
     if (parentId === n.id) return '文件夹不能包含自身';
   }
   const nodesById = new Map((value.nodes as TopologyNode[]).map(n => [n.id, n]));
@@ -272,7 +305,46 @@ export function draftError(value: unknown): string | null {
     if (error) return error;
     links.push(l as unknown as TopologyLink);
   }
+  for (const node of value.nodes as TopologyNode[]) {
+    if (node.kind !== 'ROUTER' || !node.routerConfiguration) continue;
+    const connectedPorts = new Set(links.flatMap(link => [
+      ...(link.targetNodeId === node.id ? [link.targetPort] : []),
+      ...(link.sourceNodeId === node.id ? [link.sourcePort] : []),
+    ]));
+    if (node.routerConfiguration.interfaces.some(iface => !connectedPorts.has(iface.port))) return 'Router 接口地址不能配置在未连接的端口上';
+    if (node.routerConfiguration.interfaces.length && [...connectedPorts].some(port => !node.routerConfiguration?.interfaces.some(iface => iface.port === port))) return 'Router 的每个已连接接口都必须配置 IPv4 地址';
+  }
   return null;
+}
+
+function ipv4Number(value: string): number | null {
+  if (!validIpv4(value)) return null;
+  return value.split('.').reduce((result, octet) => ((result << 8) | Number(octet)) >>> 0, 0);
+}
+
+function validIpv4(value: string): boolean {
+  const octets = value.split('.');
+  return octets.length === 4 && octets.every(part => /^(0|[1-9]\d{0,2})$/.test(part) && Number(part) <= 255);
+}
+
+function maskForPrefix(prefix: number): number {
+  return prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
+}
+
+function parseIpv4Cidr(value: string): { network: number; prefix: number } | null {
+  const match = /^(\d{1,3}(?:\.\d{1,3}){3})\/(\d|[12]\d|3[0-2])$/.exec(value);
+  if (!match || !validIpv4(match[1])) return null;
+  const address = ipv4Number(match[1]);
+  if (address === null) return null;
+  const prefix = Number(match[2]);
+  return { network: (address & maskForPrefix(prefix)) >>> 0, prefix };
+}
+
+function canonicalIpv4Network(value: string): boolean {
+  const parsed = parseIpv4Cidr(value);
+  const address = value.split('/')[0];
+  const number = ipv4Number(address);
+  return parsed !== null && number !== null && parsed.network === number;
 }
 
 function validIpAddress(value: string): boolean {

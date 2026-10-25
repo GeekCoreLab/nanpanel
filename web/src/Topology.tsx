@@ -22,7 +22,7 @@ import './service-network.css';
 import './topology-node-settings.css';
 import './topology-revisions.css';
 import './network-provider-capabilities.css';
-import type { FirewallPolicy, FirewallRule, Host, HostNetworkInventory, HostPage, KubernetesClusterList, KubernetesClusterSummary, KubernetesServiceInventorySnapshot, KubernetesServiceProbeSnapshot, KubernetesTopologyNamespaceDetail, KubernetesTopologyNamespaceSnapshot, NetworkProvider, TopologyDraft, TopologyDraftWrite, TopologyLayer, TopologyLink, TopologyNode, TopologyNodeKind, TopologyProtocol, TopologyRevisionList, TopologyRevisionSummary } from './lib/types';
+import type { FirewallPolicy, FirewallRule, Host, HostNetworkInventory, HostPage, KubernetesClusterList, KubernetesClusterSummary, KubernetesServiceInventorySnapshot, KubernetesServiceProbeSnapshot, KubernetesTopologyNamespaceDetail, KubernetesTopologyNamespaceSnapshot, NetworkProvider, RouterConfiguration, TopologyDraft, TopologyDraftWrite, TopologyLayer, TopologyLink, TopologyNode, TopologyNodeKind, TopologyProtocol, TopologyRevisionList, TopologyRevisionSummary } from './lib/types';
 
 type DeviceNode = Node<{
   model: TopologyNode;
@@ -137,7 +137,7 @@ function Device({ data, selected }: NodeProps<DeviceNode>) {
 }
 const nodeTypes = { device: Device };
 type Menu = { x: number; y: number; point: { x: number; y: number }; nodeId?: string; edgeId?: string };
-type NodeSettings = { nodeId: string; name: string; description: string; layer: TopologyLayer; protocols: TopologyProtocol[]; providerId: string; firewallPolicy: FirewallPolicy };
+type NodeSettings = { nodeId: string; name: string; description: string; layer: TopologyLayer; protocols: TopologyProtocol[]; providerId: string; firewallPolicy: FirewallPolicy; routerConfiguration: RouterConfiguration };
 const protocolOptions: Record<TopologyLayer, TopologyProtocol[]> = {
   L2: ['ETHERNET'], L3: ['IP'], L4: ['TCP', 'UDP', 'SCTP'], L7: ['HTTP', 'HTTPS'],
 };
@@ -395,9 +395,19 @@ function Editor() {
       ? { ...rule, ...patch } : rule);
     setNodeSettings({ ...nodeSettings, firewallPolicy: { ...nodeSettings.firewallPolicy, rules } });
   }
+  function updateRouterInterface(index: number, patch: Partial<RouterConfiguration['interfaces'][number]>) {
+    if (!nodeSettings) return;
+    const interfaces = nodeSettings.routerConfiguration.interfaces.map((iface, row) => row === index ? { ...iface, ...patch } : iface);
+    setNodeSettings({ ...nodeSettings, routerConfiguration: { ...nodeSettings.routerConfiguration, interfaces } });
+  }
+  function updateRouterRoute(index: number, patch: Partial<RouterConfiguration['routes'][number]>) {
+    if (!nodeSettings) return;
+    const routes = nodeSettings.routerConfiguration.routes.map((route, row) => row === index ? { ...route, ...patch } : route);
+    setNodeSettings({ ...nodeSettings, routerConfiguration: { ...nodeSettings.routerConfiguration, routes } });
+  }
   function openNodeSettings(node: TopologyNode) {
     const firstPort = node.ports[0];
-    setNodeSettings({ nodeId: node.id, name: node.name, description: node.description ?? '', layer: firstPort?.layer ?? 'L4', protocols: [...(firstPort?.protocols ?? ['TCP'])], providerId: node.providerId ?? '', firewallPolicy: { defaultAction: node.firewallPolicy?.defaultAction ?? 'DROP', rules: (node.firewallPolicy?.rules ?? []).map(rule => ({ ...rule })) } });
+    setNodeSettings({ nodeId: node.id, name: node.name, description: node.description ?? '', layer: firstPort?.layer ?? 'L4', protocols: [...(firstPort?.protocols ?? ['TCP'])], providerId: node.providerId ?? '', firewallPolicy: { defaultAction: node.firewallPolicy?.defaultAction ?? 'DROP', rules: (node.firewallPolicy?.rules ?? []).map(rule => ({ ...rule })) }, routerConfiguration: { interfaces: (node.routerConfiguration?.interfaces ?? []).map(iface => ({ ...iface })), routes: (node.routerConfiguration?.routes ?? []).map(route => ({ ...route })) } });
     setNodeSettingsError(''); setMenu(undefined);
   }
   function saveNodeSettings(event: FormEvent<HTMLFormElement>) {
@@ -414,6 +424,7 @@ function Editor() {
     const updated = { ...current, name: nodeSettings.name.trim(), description: nodeSettings.description.trim() || null,
       providerId: nodeSettings.providerId || null,
       firewallPolicy: current.kind === 'FIREWALL' ? nodeSettings.firewallPolicy : null,
+      routerConfiguration: current.kind === 'ROUTER' && (nodeSettings.routerConfiguration.interfaces.length || nodeSettings.routerConfiguration.routes.length) ? nodeSettings.routerConfiguration : null,
       ports: current.ports.map(port => ({ ...port, layer: nodeSettings.layer, protocols: [...nodeSettings.protocols] })) };
     const candidateNodes = nodes.map(node => node.id === current.id ? updated : node.data.model);
     const invalid = draftError({ nodes: candidateNodes, links: edges.map(asLink) });
@@ -861,6 +872,24 @@ function Editor() {
             <button type="button" className="secondary" aria-label={`删除规则 ${index + 1}`} onClick={() => setNodeSettings({ ...nodeSettings, firewallPolicy: { ...nodeSettings.firewallPolicy, rules: nodeSettings.firewallPolicy.rules.filter((_, ruleIndex) => ruleIndex !== index) } })}>删除</button>
           </div>)}</div>
           <button type="button" className="secondary" disabled={nodeSettings.firewallPolicy.rules.length >= 64} onClick={() => setNodeSettings({ ...nodeSettings, firewallPolicy: { ...nodeSettings.firewallPolicy, rules: [...nodeSettings.firewallPolicy.rules, { inputPort: settingsNode.ports.find(port => port.direction === 'INPUT')?.id ?? '', outputPort: settingsNode.ports.find(port => port.direction === 'OUTPUT')?.id ?? '', protocol: 'TCP', destinationPort: 443, action: 'ACCEPT' }] } })}>＋ 添加规则</button>
+        </section>}
+        {settingsNode?.kind === 'ROUTER' && <section className="topology-firewall-policy" aria-label="Router IPv4 地址与静态路由">
+          <h3>Router IPv4 配置</h3>
+          <p>地址与静态路由由 linux-netns Provider 应用在该拓扑专属 netns。将 Provider 接口设为 L2/ETHERNET 才能执行；只支持 IPv4，每个已连接接口需配置一个地址，下一跳必须属于所选接口的直连网段。</p>
+          <div className="topology-firewall-rules">{nodeSettings.routerConfiguration.interfaces.map((iface, index) => <div className="topology-firewall-rule" key={`router-interface-${index}`}>
+            <label className="field"><span>接口</span><select aria-label={`Router 接口 ${index + 1}`} value={iface.port} onChange={event => updateRouterInterface(index, { port: event.target.value })}>{settingsNode.ports.map(port => <option value={port.id} key={port.id}>{port.id} · {port.direction === 'INPUT' ? '入口' : '出口'}</option>)}</select></label>
+            <label className="field"><span>IPv4/CIDR</span><input aria-label={`Router 接口 ${index + 1} IPv4 CIDR`} required value={iface.address} onChange={event => updateRouterInterface(index, { address: event.target.value })} placeholder="198.18.1.1/24" /></label>
+            <button type="button" className="secondary" aria-label={`删除 Router 接口地址 ${index + 1}`} onClick={() => setNodeSettings({ ...nodeSettings, routerConfiguration: { ...nodeSettings.routerConfiguration, interfaces: nodeSettings.routerConfiguration.interfaces.filter((_, row) => row !== index) } })}>删除</button>
+          </div>)}</div>
+          <button type="button" className="secondary" disabled={nodeSettings.routerConfiguration.interfaces.length >= 16} onClick={() => { const used = new Set(nodeSettings.routerConfiguration.interfaces.map(iface => iface.port)); const port = settingsNode.ports.find(value => !used.has(value.id)); if (port) setNodeSettings({ ...nodeSettings, routerConfiguration: { ...nodeSettings.routerConfiguration, interfaces: [...nodeSettings.routerConfiguration.interfaces, { port: port.id, address: '' }] } }); }}>＋ 添加接口地址</button>
+          <h3>静态路由</h3>
+          <div className="topology-firewall-rules">{nodeSettings.routerConfiguration.routes.map((route, index) => <div className="topology-firewall-rule" key={`router-route-${index}`}>
+            <label className="field"><span>目标网段</span><input aria-label={`Router 静态路由 ${index + 1} 目标网段`} required value={route.destination} onChange={event => updateRouterRoute(index, { destination: event.target.value })} placeholder="198.18.2.0/24" /></label>
+            <label className="field"><span>下一跳（可空）</span><input aria-label={`Router 静态路由 ${index + 1} 下一跳`} value={route.gateway ?? ''} onChange={event => updateRouterRoute(index, { gateway: event.target.value.trim() || null })} placeholder="直连路由可留空" /></label>
+            <label className="field"><span>出口接口</span><select aria-label={`Router 静态路由 ${index + 1} 出口接口`} value={route.outputPort} onChange={event => updateRouterRoute(index, { outputPort: event.target.value })}>{settingsNode.ports.filter(port => port.direction === 'OUTPUT').map(port => <option value={port.id} key={port.id}>{port.id}</option>)}</select></label>
+            <button type="button" className="secondary" aria-label={`删除 Router 静态路由 ${index + 1}`} onClick={() => setNodeSettings({ ...nodeSettings, routerConfiguration: { ...nodeSettings.routerConfiguration, routes: nodeSettings.routerConfiguration.routes.filter((_, row) => row !== index) } })}>删除</button>
+          </div>)}</div>
+          <button type="button" className="secondary" disabled={nodeSettings.routerConfiguration.routes.length >= 64 || !nodeSettings.routerConfiguration.interfaces.length} onClick={() => { const port = settingsNode.ports.find(value => value.direction === 'OUTPUT' && nodeSettings.routerConfiguration.interfaces.some(iface => iface.port === value.id)); if (port) setNodeSettings({ ...nodeSettings, routerConfiguration: { ...nodeSettings.routerConfiguration, routes: [...nodeSettings.routerConfiguration.routes, { destination: '0.0.0.0/0', gateway: null, outputPort: port.id }] } }); }}>＋ 添加静态路由</button>
         </section>}
         {nodeSettingsError && <div className="alert error" role="alert">{nodeSettingsError}</div>}
         <div className="form-actions"><button type="button" className="secondary" onClick={() => setNodeSettings(undefined)}>取消</button><button className="primary">保存节点设置</button></div>

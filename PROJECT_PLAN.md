@@ -537,8 +537,10 @@ Agent Kubernetes runtime discovery 的代码测试和 `k3s-1` 部署证据见[�
 
 2026-10-26 第三切片为隔离 Provider 增加透明 bridge Firewall：Web 默认端口改为 L2/Ethernet；Core 从已保存 Revision 序列化有界策略；Agent daemon 与 Root Helper 双重校验连接端口、协议、动作、重复规则和规则上限；Helper 在该拓扑 netns 写入并 Verify bridge-family nftables forward chain。Core 全量 Maven、Rust 四项检查、Web 单测/构建/两个浏览器回归和隔离 Linux Firewall 实验通过。Commit `6829f61014a9547373daa010bffe4ad7a45168dd` 的 Actions run `40222461423` validate/publish 成功；不可变 GHCR 镜像部署到 `k3s-1`，Core/Web 各 1/1 Ready，PostgreSQL 与原 5 GiB PVC 保持 Ready/Bound，公开页 HTTP 200、数据库健康检查 UP、Helper/Agent active，运行时只读 Helper 能力包含 `network.topology.reconcile`。没有在目标生产拓扑执行 Provider Apply。详见[Firewall Provider 切片与部署验收](tests/p6/runs/2026-10-26-firewall-provider-slice.md)。
 
-- [x] root L2/Ethernet 图的隔离 Linux Bridge/Firewall/Packet Tap Provider；Router、OVS 及生产拓扑 Apply 不在本项验收边界内，详见[部署报告](tests/p6/runs/2026-10-26-firewall-provider-slice.md)。
-- [ ] Router 地址/路由执行、OVS Provider 与更完整的 L3 校验。
+2026-10-26 第四切片为隔离 Provider 增加单 Router IPv4 配置：保存的拓扑 Revision 可为每个 Router 接口设 CIDR，并配置最多 64 条绑定输出端口的静态路由；Core、Agent daemon 和 Root Helper 均校验连通端口、唯一 Router、CIDR、下一跳直连子网和不可覆盖的直连路由。Helper 只在该 Revision 的 netns 内开启 IPv4 forwarding、配置地址和静态路由；Verify 比对精确接口地址/路由/转发状态并拒绝未声明默认路由。Core 全量 Maven、Rust 四项规定检查、Web 18 项单测/构建/Playwright 与隔离 Linux 实路由/TCP 实验通过，宿主默认路由哈希不变。Router Provider 部署及只读运行时能力复核见[Router Provider 切片与部署验收](tests/p6/runs/2026-10-26-router-provider-slice.md)；未在目标生产拓扑执行 Provider Apply。
+
+- [x] root L2/Ethernet 图的隔离 Linux Bridge/Firewall/Packet Tap 与单 Router IPv4 静态路由 Provider；生产拓扑 Apply 不在本项验收边界内，详见[部署报告](tests/p6/runs/2026-10-26-router-provider-slice.md)。
+- [ ] OVS Provider、多 Router 独立路由表与更完整的 L3 地址/路由校验。
 - [x] 当前 L2/Ethernet Provider 的虚拟网线 RX/TX 指标、端口能力与 Firewall 策略匹配校验。
 - [x] 设备插入、Packet Tap 镜像、拓扑版本比较与回放：Canvas context menu 支持添加/调整设备；版本差异按节点与连接稳定 ID 展示，历史 Revision 仅回放为未保存草稿；Playwright 已覆盖这些路径，Packet Tap 内核镜像见[切片验收](tests/p6/runs/2026-10-26-packet-tap-slice.md)。
 

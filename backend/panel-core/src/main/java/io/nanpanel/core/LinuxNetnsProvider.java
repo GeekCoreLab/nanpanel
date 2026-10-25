@@ -16,6 +16,7 @@ import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -43,7 +44,12 @@ public class LinuxNetnsProvider implements NetworkProvider {
   private record HelperFirewallRule(String inputPort, String outputPort, String protocol,
                                     int destinationPort, String action) {}
   private record HelperFirewallPolicy(String defaultAction, List<HelperFirewallRule> rules) {}
-  private record HelperNode(String id, String kind, HelperFirewallPolicy firewallPolicy) {}
+  private record HelperRouterInterface(String port, String address) {}
+  private record HelperStaticRoute(String destination, String gateway, String outputPort) {}
+  private record HelperRouterConfiguration(List<HelperRouterInterface> interfaces,
+                                           List<HelperStaticRoute> routes) {}
+  private record HelperNode(String id, String kind, HelperFirewallPolicy firewallPolicy,
+                            HelperRouterConfiguration routerConfiguration) {}
   private record HelperLink(String id, String sourceNodeId, String sourcePort,
                             String targetNodeId, String targetPort, String layer,
                             String protocol) {}
@@ -64,19 +70,22 @@ public class LinuxNetnsProvider implements NetworkProvider {
 
   @Override
   public Set<String> capabilities() {
-    return Set.of("linux.bridge");
+    return Set.of("linux.bridge", "linux.router.ipv4");
   }
 
   @Override
   public ProviderDescriptor descriptor() {
-    return new ProviderDescriptor(ID, "Linux Bridge, Firewall and Packet Tap (isolated netns)", "0.3.0",
+    return new ProviderDescriptor(ID, "Linux Bridge, IPv4 Router, Firewall and Packet Tap (isolated netns)", "0.4.0",
         "panel.io/plugins/v1");
   }
 
   @Override
   public Set<Capability> capabilityDescriptors() {
-    return Set.of(new Capability("linux.bridge", OPERATIONS, Set.of("L2"),
-        Set.of("ETHERNET"), Set.of("SWITCH", "PACKET_TAP", "FIREWALL")));
+    return new LinkedHashSet<>(List.of(
+        new Capability("linux.bridge", OPERATIONS, Set.of("L2"),
+            Set.of("ETHERNET"), Set.of("SWITCH", "PACKET_TAP", "FIREWALL")),
+        new Capability("linux.router.ipv4", OPERATIONS, Set.of("L2"),
+            Set.of("ETHERNET"), Set.of("ROUTER"))));
   }
 
   @Override
@@ -239,11 +248,11 @@ public class LinuxNetnsProvider implements NetworkProvider {
       for (JsonNode node : nodes) {
         if (!ID.equals(node.path("providerId").asText())) continue;
         String kind = node.path("kind").asText();
-        if (!Set.of("SWITCH", "PACKET_TAP", "FIREWALL").contains(kind)
+        if (!Set.of("SWITCH", "PACKET_TAP", "FIREWALL", "ROUTER").contains(kind)
             || !node.path("id").isTextual()
             || node.hasNonNull("parentId")) {
           throw new IllegalArgumentException(
-              "Linux netns Provider accepts only root SWITCH, PACKET_TAP, and FIREWALL devices");
+              "Linux netns Provider accepts only root SWITCH, PACKET_TAP, FIREWALL, and ROUTER devices");
         }
         UUID id = UUID.fromString(node.path("id").asText());
         if (!selectedNodeIds.add(id.toString())) {
@@ -259,11 +268,24 @@ public class LinuxNetnsProvider implements NetworkProvider {
         } else if (policyNode != null && !policyNode.isNull()) {
           throw new IllegalArgumentException("Only FIREWALL can include a firewall policy");
         }
+        JsonNode routerNode = node.get("routerConfiguration");
+        HelperRouterConfiguration routerConfiguration = null;
+        if ("ROUTER".equals(kind)) {
+          if (routerNode == null || routerNode.isNull()) {
+            throw new IllegalArgumentException("ROUTER requires typed IPv4 interface and route configuration");
+          }
+          routerConfiguration = mapper.treeToValue(routerNode, HelperRouterConfiguration.class);
+        } else if (routerNode != null && !routerNode.isNull()) {
+          throw new IllegalArgumentException("Only ROUTER can include a router configuration");
+        }
         selectedNodeKinds.put(id.toString(), kind);
-        helperNodes.add(new HelperNode(id.toString(), kind, policy));
+        helperNodes.add(new HelperNode(id.toString(), kind, policy, routerConfiguration));
       }
       if (helperNodes.isEmpty() || helperNodes.size() > 16 || links.size() > 64) {
         throw new IllegalArgumentException("Linux netns plan needs 1 to 16 devices and at most 64 wires");
+      }
+      if (helperNodes.stream().filter(node -> "ROUTER".equals(node.kind())).count() > 1) {
+        throw new IllegalArgumentException("One isolated Linux netns topology supports at most one Router routing table");
       }
       List<HelperLink> helperLinks = new ArrayList<>();
       for (JsonNode link : links) {
@@ -277,8 +299,8 @@ public class LinuxNetnsProvider implements NetworkProvider {
         if (!sourceSelected) continue;
         String sourceKind = selectedNodeKinds.get(source);
         String targetKind = selectedNodeKinds.get(target);
-        if (!Set.of("SWITCH", "PACKET_TAP", "FIREWALL").contains(sourceKind)
-            || !Set.of("SWITCH", "PACKET_TAP", "FIREWALL").contains(targetKind)
+        if (!Set.of("SWITCH", "PACKET_TAP", "FIREWALL", "ROUTER").contains(sourceKind)
+            || !Set.of("SWITCH", "PACKET_TAP", "FIREWALL", "ROUTER").contains(targetKind)
             || !"L2".equals(link.path("layer").asText())
             || !"ETHERNET".equals(link.path("protocol").asText())) {
           throw new IllegalArgumentException("Linux netns wires must join supported L2 Ethernet devices");
@@ -291,6 +313,8 @@ public class LinuxNetnsProvider implements NetworkProvider {
       if (packetTapError != null) throw new IllegalArgumentException(packetTapError);
       String firewallError = firewallPolicyShapeError(helperNodes, helperLinks);
       if (firewallError != null) throw new IllegalArgumentException(firewallError);
+      String routerError = routerConfigurationError(helperNodes, helperLinks);
+      if (routerError != null) throw new IllegalArgumentException(routerError);
       return new Configuration(selectedHost, hostGeneration.longValue(), explanation, revision,
           generation, List.copyOf(helperNodes), List.copyOf(helperLinks));
     } catch (Exception failure) {
@@ -349,6 +373,87 @@ public class LinuxNetnsProvider implements NetworkProvider {
       }
     }
     return null;
+  }
+
+  private String routerConfigurationError(List<HelperNode> nodes, List<HelperLink> links) {
+    for (HelperNode node : nodes) {
+      if (!"ROUTER".equals(node.kind())) continue;
+      HelperRouterConfiguration configuration = node.routerConfiguration();
+      if (configuration == null || configuration.interfaces() == null
+          || configuration.routes() == null || configuration.interfaces().isEmpty()
+          || configuration.interfaces().size() > 16 || configuration.routes().size() > 64) {
+        return "ROUTER requires 1 to 16 IPv4 interface addresses and at most 64 static routes";
+      }
+      Set<String> connected = new HashSet<>();
+      Set<String> outputPorts = new HashSet<>();
+      for (HelperLink link : links) {
+        if (node.id().equals(link.sourceNodeId())) {
+          connected.add(link.sourcePort());
+          outputPorts.add(link.sourcePort());
+        }
+        if (node.id().equals(link.targetNodeId())) connected.add(link.targetPort());
+      }
+      Map<String, Ipv4Cidr> configured = new HashMap<>();
+      for (HelperRouterInterface iface : configuration.interfaces()) {
+        Ipv4Cidr address = iface == null ? null : parseIpv4Cidr(iface.address());
+        if (iface == null || iface.port() == null || address == null
+            || !connected.contains(iface.port()) || configured.putIfAbsent(iface.port(), address) != null) {
+          return "ROUTER interface addresses must reference unique connected ports and valid IPv4 CIDRs";
+        }
+      }
+      if (!configured.keySet().containsAll(connected)) {
+        return "ROUTER requires an IPv4 address on every connected interface";
+      }
+      Set<String> destinations = new HashSet<>();
+      for (HelperStaticRoute route : configuration.routes()) {
+        Ipv4Cidr destination = route == null ? null : parseIpv4Cidr(route.destination());
+        Ipv4Cidr output = route == null ? null : configured.get(route.outputPort());
+        if (route == null || destination == null || !destination.canonical()
+            || output == null || !outputPorts.contains(route.outputPort())
+            || !destinations.add(route.destination())) {
+          return "ROUTER static routes must use unique canonical IPv4 networks and configured output interfaces";
+        }
+        if (configured.values().stream().anyMatch(address -> address.network() == destination.network()
+            && address.prefix() == destination.prefix())) {
+          return "ROUTER static routes cannot replace directly connected networks";
+        }
+        if (route.gateway() != null) {
+          Long gateway = parseIpv4(route.gateway());
+          if (gateway == null || (gateway & ipv4Mask(output.prefix())) != output.network()) {
+            return "ROUTER next hops must belong to the selected output interface subnet";
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  private record Ipv4Cidr(long network, int prefix, boolean canonical) {}
+
+  private Ipv4Cidr parseIpv4Cidr(String value) {
+    if (value == null) return null;
+    String[] parts = value.split("/", -1);
+    if (parts.length != 2 || !parts[1].matches("0|[1-9]|[12][0-9]|3[0-2]")) return null;
+    Long address = parseIpv4(parts[0]);
+    if (address == null) return null;
+    int prefix = Integer.parseInt(parts[1]);
+    long network = address & ipv4Mask(prefix);
+    return new Ipv4Cidr(network, prefix, address == network);
+  }
+
+  private Long parseIpv4(String value) {
+    if (value == null || !value.matches("(?:0|[1-9][0-9]{0,2})(?:\\.(?:0|[1-9][0-9]{0,2})){3}")) return null;
+    long address = 0;
+    for (String octet : value.split("\\.")) {
+      int part = Integer.parseInt(octet);
+      if (part > 255) return null;
+      address = (address << 8) | part;
+    }
+    return address;
+  }
+
+  private long ipv4Mask(int prefix) {
+    return prefix == 0 ? 0 : (0xffff_ffffL << (32 - prefix)) & 0xffff_ffffL;
   }
 
   private String configurationError(Configuration configuration) {

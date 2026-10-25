@@ -64,7 +64,12 @@ class NetworkProviderApiTest {
         .body("[0].capabilityDetails[0].deviceKinds", hasItem("PACKET_TAP"))
         .body("[0].capabilityDetails[0].deviceKinds", hasItem("FIREWALL"))
         .body("[0].capabilityDetails[0].operations",
-            hasItems("PLAN", "VALIDATE", "APPLY", "VERIFY", "COMPENSATE"));
+            hasItems("PLAN", "VALIDATE", "APPLY", "VERIFY", "COMPENSATE"))
+        .body("[0].capabilities", hasItem("linux.router.ipv4"))
+        .body("[0].capabilityDetails[1].id", equalTo("linux.router.ipv4"))
+        .body("[0].capabilityDetails[1].deviceKinds", hasItem("ROUTER"))
+        .body("[0].capabilityDetails[1].layers", hasItem("L2"))
+        .body("[0].capabilityDetails[1].protocols", hasItem("ETHERNET"));
     var initialDraft = given().cookie("nanpanel_session", session.cookie())
         .get("/api/v1/topology/draft").then().statusCode(200).extract();
     Map<String, Object> switchNode = Map.of(
@@ -163,6 +168,59 @@ class NetworkProviderApiTest {
     given().cookie("nanpanel_session", session.cookie()).header("X-CSRF-Token", session.csrf())
         .post("/api/v1/network-providers/linux-netns/operations/" + firewallPlan.path("id") + "/validate")
         .then().statusCode(200).body("state", equalTo("DRIFTED"));
+
+    String routerEtag = given().cookie("nanpanel_session", session.cookie())
+        .get("/api/v1/topology/draft").then().statusCode(200).extract().header("ETag");
+    Map<String, Object> leftRouterSwitch = new java.util.LinkedHashMap<>(switchNode);
+    leftRouterSwitch.put("id", UUID.randomUUID().toString());
+    leftRouterSwitch.put("name", "Router ingress segment");
+    Map<String, Object> rightRouterSwitch = new java.util.LinkedHashMap<>(switchNode);
+    rightRouterSwitch.put("id", UUID.randomUUID().toString());
+    rightRouterSwitch.put("name", "Router egress segment");
+    Map<String, Object> linuxRouter = Map.of(
+        "id", UUID.randomUUID().toString(), "kind", "ROUTER", "name", "Isolated IPv4 Router",
+        "position", Map.of("x", 300, "y", 0), "inputCount", 1, "outputCount", 1,
+        "ports", List.of(
+            Map.of("id", "in-1", "direction", "INPUT", "layer", "L2", "protocols", List.of("ETHERNET")),
+            Map.of("id", "out-1", "direction", "OUTPUT", "layer", "L2", "protocols", List.of("ETHERNET"))),
+        "providerId", "linux-netns",
+        "routerConfiguration", Map.of(
+            "interfaces", List.of(Map.of("port", "in-1", "address", "198.18.1.1/24"),
+                Map.of("port", "out-1", "address", "198.18.2.1/24")),
+            "routes", List.of(Map.of("destination", "198.18.3.0/24", "gateway", "198.18.2.2",
+                "outputPort", "out-1"))));
+    List<Map<String, Object>> routerLinks = List.of(
+        Map.of("id", UUID.randomUUID().toString(), "sourceNodeId", leftRouterSwitch.get("id"),
+            "sourcePort", "out-1", "targetNodeId", linuxRouter.get("id"), "targetPort", "in-1",
+            "layer", "L2", "protocol", "ETHERNET", "status", "UNVERIFIED"),
+        Map.of("id", UUID.randomUUID().toString(), "sourceNodeId", linuxRouter.get("id"),
+            "sourcePort", "out-1", "targetNodeId", rightRouterSwitch.get("id"), "targetPort", "in-1",
+            "layer", "L2", "protocol", "ETHERNET", "status", "UNVERIFIED"));
+    var savedRouter = given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.csrf()).header("If-Match", routerEtag)
+        .contentType("application/json")
+        .body(Map.of("nodes", List.of(leftRouterSwitch, linuxRouter, rightRouterSwitch),
+            "links", routerLinks))
+        .put("/api/v1/topology/draft").then().statusCode(200).extract();
+    String routerPlanInput = mapper.writeValueAsString(Map.of(
+        "hostId", UUID.randomUUID().toString(), "hostGeneration", 1,
+        "reason", "Persist an isolated Linux IPv4 Router plan",
+        "revisionId", savedRouter.path("revisionId"), "generation", savedRouter.path("generation")));
+    var linuxRouterPlan = given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.csrf()).contentType("application/json")
+        .body(Map.of("desiredSnapshot", routerPlanInput))
+        .post("/api/v1/network-providers/linux-netns/plans")
+        .then().statusCode(201).body("state", equalTo("PLANNED")).extract();
+    String persistedRouterPlan = store.transaction(connection -> {
+      Object stored = AuthStore.query(connection,
+          "SELECT plan_configuration FROM network_provider_operation WHERE id=?",
+          UUID.fromString(linuxRouterPlan.path("id"))).getFirst().get("plan_configuration");
+      return stored instanceof java.sql.Clob clob
+          ? clob.getSubString(1, Math.toIntExact(clob.length())) : stored.toString();
+    });
+    assertEquals("198.18.3.0/24", mapper.readTree(persistedRouterPlan)
+        .path("nodes").get(1).path("routerConfiguration").path("routes").get(0)
+        .path("destination").asText());
 
     String topologyEtag = given().cookie("nanpanel_session", session.cookie())
         .get("/api/v1/topology/draft").then().statusCode(200).extract().header("ETag");

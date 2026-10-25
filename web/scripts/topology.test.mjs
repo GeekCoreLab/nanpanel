@@ -69,6 +69,30 @@ test('Firewall policy is bounded, port scoped, and rejects duplicate or invalid 
   assert.ok(draftError({ nodes: [{ ...node('ROUTER'), firewallPolicy: { defaultAction: 'DROP', rules: [] } }], links: [] }));
 });
 
+test('Router IPv4 interfaces and static routes are scoped to connected ports and their subnets', () => {
+  const source = node('SWITCH');
+  const router = node('ROUTER');
+  const target = node('SWITCH');
+  router.ports = router.ports.map(port => ({ ...port, layer: 'L2', protocols: ['ETHERNET'] }));
+  const links = [
+    link(source, router, 'out-1', 'in-1', 'L2', 'ETHERNET'),
+    link(router, target, 'out-1', 'in-1', 'L2', 'ETHERNET'),
+  ];
+  const routerConfig = {
+    interfaces: [
+      { port: 'in-1', address: '198.18.1.1/24' },
+      { port: 'out-1', address: '198.18.2.1/24' },
+    ],
+    routes: [{ destination: '198.18.3.0/24', gateway: '198.18.2.2', outputPort: 'out-1' }],
+  };
+  assert.equal(draftError({ nodes: [source, { ...router, routerConfiguration: routerConfig }, target], links }), null);
+  assert.match(draftError({ nodes: [source, { ...router, routerConfiguration: { ...routerConfig, routes: [{ ...routerConfig.routes[0], gateway: '198.18.4.2' }] } }, target], links }), /直连网段/);
+  assert.match(draftError({ nodes: [source, { ...router, routerConfiguration: { interfaces: [routerConfig.interfaces[0]], routes: [] } }, target], links }), /每个已连接接口/);
+  assert.match(draftError({ nodes: [source, { ...router, routerConfiguration: { ...routerConfig, routes: [{ ...routerConfig.routes[0], destination: '198.18.2.0/24' }] } }, target], links }), /直连网段/);
+  assert.ok(draftError({ nodes: [source, { ...router, routerConfiguration: { ...routerConfig, routes: [{ ...routerConfig.routes[0], destination: '198.18.3.1/24' }] } }, target], links }));
+  assert.ok(draftError({ nodes: [source, { ...router, routerConfiguration: routerConfig }], links }));
+});
+
 test('folder hierarchy, host asset binding and same-scope connections are validated', () => {
   const folder = node('FOLDER');
   const ingress = { ...node('GATEWAY'), parentId: folder.id };

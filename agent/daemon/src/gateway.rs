@@ -695,6 +695,29 @@ struct NetworkTopologyNode {
     id: String,
     kind: String,
     firewall_policy: Option<NetworkFirewallPolicy>,
+    router_configuration: Option<NetworkRouterConfiguration>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct NetworkRouterConfiguration {
+    interfaces: Vec<NetworkRouterInterface>,
+    routes: Vec<NetworkStaticRoute>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct NetworkRouterInterface {
+    port: String,
+    address: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct NetworkStaticRoute {
+    destination: String,
+    gateway: Option<String>,
+    output_port: String,
 }
 
 #[derive(Deserialize)]
@@ -975,10 +998,20 @@ fn valid_network_topology_payload(payload: NetworkTopologyPayload) -> bool {
         .map(|node| node.id.as_str())
         .collect::<std::collections::HashSet<_>>();
     if node_ids.len() != payload.nodes.len()
+        || payload
+            .nodes
+            .iter()
+            .filter(|node| node.kind == "ROUTER")
+            .count()
+            > 1
         || payload.nodes.iter().any(|node| {
             !valid_topology_uuid(&node.id)
-                || !matches!(node.kind.as_str(), "SWITCH" | "PACKET_TAP" | "FIREWALL")
+                || !matches!(
+                    node.kind.as_str(),
+                    "SWITCH" | "PACKET_TAP" | "FIREWALL" | "ROUTER"
+                )
                 || (node.kind == "FIREWALL") != node.firewall_policy.is_some()
+                || (node.kind == "ROUTER") != node.router_configuration.is_some()
         })
     {
         return false;
@@ -1069,8 +1102,106 @@ fn valid_network_topology_payload(payload: NetworkTopologyPayload) -> bool {
                     ))
             })
         }
+        "ROUTER" => valid_router_configuration(
+            node,
+            connected_inputs.get(node.id.as_str()),
+            connected_outputs.get(node.id.as_str()),
+        ),
         _ => false,
     })
+}
+
+fn valid_router_configuration(
+    node: &NetworkTopologyNode,
+    inputs: Option<&std::collections::HashSet<&str>>,
+    outputs: Option<&std::collections::HashSet<&str>>,
+) -> bool {
+    let Some(configuration) = &node.router_configuration else {
+        return false;
+    };
+    if configuration.interfaces.is_empty()
+        || configuration.interfaces.len() > 16
+        || configuration.routes.len() > 64
+    {
+        return false;
+    }
+    let connected = inputs
+        .into_iter()
+        .flat_map(|ports| ports.iter().copied())
+        .chain(outputs.into_iter().flat_map(|ports| ports.iter().copied()))
+        .collect::<std::collections::HashSet<_>>();
+    let mut interfaces = std::collections::HashMap::new();
+    for interface in &configuration.interfaces {
+        if !connected.contains(interface.port.as_str()) {
+            return false;
+        }
+        let Some((network, prefix)) = ipv4_cidr(&interface.address) else {
+            return false;
+        };
+        if interfaces
+            .insert(interface.port.as_str(), (network, prefix))
+            .is_some()
+        {
+            return false;
+        }
+    }
+    if !connected.is_subset(&interfaces.keys().copied().collect()) {
+        return false;
+    }
+    let output_ports = outputs
+        .into_iter()
+        .flat_map(|ports| ports.iter().copied())
+        .collect::<std::collections::HashSet<_>>();
+    let mut destinations = std::collections::HashSet::new();
+    configuration.routes.iter().all(|route| {
+        let Some((network, prefix)) = ipv4_cidr(&route.destination) else {
+            return false;
+        };
+        let canonical_destination =
+            route.destination == format!("{}/{}", ipv4_text(network), prefix);
+        let Some(output) = interfaces.get(route.output_port.as_str()) else {
+            return false;
+        };
+        if !canonical_destination
+            || !output_ports.contains(route.output_port.as_str())
+            || !destinations.insert(route.destination.as_str())
+            || interfaces
+                .values()
+                .any(|connected| *connected == (network, prefix))
+        {
+            return false;
+        }
+        route.gateway.as_deref().is_none_or(|gateway| {
+            let Some(gateway) = ipv4(gateway) else {
+                return false;
+            };
+            gateway & ipv4_mask(output.1) == output.0
+        })
+    })
+}
+
+fn ipv4_cidr(value: &str) -> Option<(u32, u8)> {
+    let (address, prefix) = value.split_once('/')?;
+    let address = ipv4(address)?;
+    let prefix = prefix.parse::<u8>().ok().filter(|prefix| *prefix <= 32)?;
+    Some((address & ipv4_mask(prefix), prefix))
+}
+
+fn ipv4(value: &str) -> Option<u32> {
+    let address = value.parse::<std::net::Ipv4Addr>().ok()?;
+    Some(u32::from_be_bytes(address.octets()))
+}
+
+fn ipv4_text(address: u32) -> std::net::Ipv4Addr {
+    std::net::Ipv4Addr::from(address)
+}
+
+fn ipv4_mask(prefix: u8) -> u32 {
+    if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    }
 }
 
 fn valid_topology_uuid(value: &str) -> bool {
@@ -1924,6 +2055,43 @@ mod tests {
                 "\"kind\":\"FIREWALL\",",
                 "\"kind\":\"FIREWALL\",\"command\":\"id\","
             )
+        ));
+    }
+
+    #[test]
+    fn topology_dispatch_validates_router_routes_and_limits_to_one_router() {
+        let topology = "11111111-1111-4111-8111-111111111111";
+        let payload = r#"{
+          "action":"APPLY","topologyId":"11111111-1111-4111-8111-111111111111",
+          "revisionId":"22222222-2222-4222-8222-222222222222","generation":4,
+          "nodes":[
+            {"id":"33333333-3333-4333-8333-333333333333","kind":"SWITCH"},
+            {"id":"44444444-4444-4444-8444-444444444444","kind":"ROUTER",
+             "routerConfiguration":{"interfaces":[
+               {"port":"in-1","address":"198.18.1.1/24"},
+               {"port":"out-1","address":"198.18.2.1/24"}],
+              "routes":[{"destination":"198.18.3.0/24","gateway":"198.18.2.2","outputPort":"out-1"}]}},
+            {"id":"66666666-6666-4666-8666-666666666666","kind":"SWITCH"}
+          ],
+          "links":[
+            {"id":"55555555-5555-4555-8555-555555555555",
+             "sourceNodeId":"33333333-3333-4333-8333-333333333333","sourcePort":"out-1",
+             "targetNodeId":"44444444-4444-4444-8444-444444444444","targetPort":"in-1",
+             "layer":"L2","protocol":"ETHERNET"},
+            {"id":"77777777-7777-4777-8777-777777777777",
+             "sourceNodeId":"44444444-4444-4444-8444-444444444444","sourcePort":"out-1",
+             "targetNodeId":"66666666-6666-4666-8666-666666666666","targetPort":"in-1",
+             "layer":"L2","protocol":"ETHERNET"}
+          ]
+        }"#;
+        assert!(valid_topology_dispatch(topology, payload));
+        assert!(!valid_topology_dispatch(
+            topology,
+            &payload.replace("198.18.2.2", "198.18.4.2")
+        ));
+        assert!(!valid_topology_dispatch(
+            topology,
+            &payload.replace("\"kind\":\"SWITCH\"", "\"kind\":\"ROUTER\"")
         ));
     }
 

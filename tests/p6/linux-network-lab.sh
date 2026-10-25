@@ -120,6 +120,11 @@ nsenter -t "$server_ns_pid" -n ip route add 198.18.1.0/24 via 198.18.2.1 dev p6s
 nsenter -t "$client_ns_pid" -n ip route get 198.18.2.2 | rg -q 'via 198\.18\.1\.1'
 nsenter -t "$server_ns_pid" -n ip route get 198.18.1.2 | rg -q 'via 198\.18\.2\.1'
 
+# A typed Router route is installed only in the isolated router namespace.
+nsenter -t "$router_ns_pid" -n ip route replace 198.18.3.0/24 via 198.18.2.2 dev p6r1b proto static
+nsenter -t "$router_ns_pid" -n ip route get 198.18.3.9 | rg -q 'via 198\.18\.2\.2 dev p6r1b'
+nsenter -t "$router_ns_pid" -n ip -j route show 198.18.3.0/24 | python3 -c 'import json,sys; routes=json.load(sys.stdin); assert len(routes)==1 and routes[0].get("dst")=="198.18.3.0/24" and routes[0].get("gateway")=="198.18.2.2" and routes[0].get("dev")=="p6r1b" and routes[0].get("protocol")=="static"'
+
 # Mirror router-to-switch frames to a dedicated observer veth with tc mirred.
 tc qdisc add dev p6sw1r clsact
 tc filter add dev p6sw1r egress matchall action mirred egress mirror dev p6sw2t
@@ -209,5 +214,5 @@ if [[ ! $firewall_packets =~ ^[0-9]+$ ]] || (( firewall_packets < 1 )); then
     exit 1
 fi
 
-printf 'Verified bridges=2, router=2 subnets, bridge Firewall dropped packets=%s, host Firewall dropped packets=%s, Packet Tap rx packets=%s, host default routes unchanged\n' \
+printf 'Verified bridges=2, router=2 subnets plus static route 198.18.3.0/24 via 198.18.2.2, bridge Firewall dropped packets=%s, host Firewall dropped packets=%s, Packet Tap rx packets=%s, host default routes unchanged\n' \
     "$bridge_firewall_packets" "$firewall_packets" "$tap_rx"

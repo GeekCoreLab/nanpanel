@@ -120,6 +120,63 @@ class TopologyResourceTest {
   }
 
   @Test
+  void savesTypedRouterIpv4InterfacesAndStaticRoutesAndRejectsOffLinkNextHops() {
+    getDraft();
+    UUID sourceId = UUID.randomUUID();
+    UUID routerId = UUID.randomUUID();
+    UUID targetId = UUID.randomUUID();
+    Map<String, Object> source = node(sourceId, "SWITCH", "Router ingress segment", 100, 100,
+        null, null, 2, 2, List.of(port("in-1", "INPUT", "L2", List.of("ETHERNET")),
+            port("in-2", "INPUT", "L2", List.of("ETHERNET")),
+            port("out-1", "OUTPUT", "L2", List.of("ETHERNET")),
+            port("out-2", "OUTPUT", "L2", List.of("ETHERNET"))));
+    Map<String, Object> router = node(routerId, "ROUTER", "Isolated IPv4 Router", 420, 100,
+        null, null, 1, 1, List.of(port("in-1", "INPUT", "L2", List.of("ETHERNET")),
+            port("out-1", "OUTPUT", "L2", List.of("ETHERNET"))));
+    Map<String, Object> target = node(targetId, "SWITCH", "Router egress segment", 740, 100,
+        null, null, 2, 2, List.of(port("in-1", "INPUT", "L2", List.of("ETHERNET")),
+            port("in-2", "INPUT", "L2", List.of("ETHERNET")),
+            port("out-1", "OUTPUT", "L2", List.of("ETHERNET")),
+            port("out-2", "OUTPUT", "L2", List.of("ETHERNET"))));
+    Map<String, Object> configuration = Map.of(
+        "interfaces", List.of(Map.of("port", "in-1", "address", "198.18.1.1/24"),
+            Map.of("port", "out-1", "address", "198.18.2.1/24")),
+        "routes", List.of(Map.of("destination", "198.18.3.0/24", "gateway", "198.18.2.2",
+            "outputPort", "out-1")));
+    router.put("routerConfiguration", configuration);
+    List<Map<String, Object>> links = List.of(
+        Map.of("id", UUID.randomUUID().toString(), "sourceNodeId", sourceId.toString(),
+            "sourcePort", "out-1", "targetNodeId", routerId.toString(), "targetPort", "in-1",
+            "layer", "L2", "protocol", "ETHERNET", "status", "UNVERIFIED"),
+        Map.of("id", UUID.randomUUID().toString(), "sourceNodeId", routerId.toString(),
+            "sourcePort", "out-1", "targetNodeId", targetId.toString(), "targetPort", "in-1",
+            "layer", "L2", "protocol", "ETHERNET", "status", "UNVERIFIED"));
+    var saved = given().cookie("nanpanel_session", sessionCookie)
+        .header("X-CSRF-Token", csrfToken).header("If-Match", lastEtag)
+        .contentType("application/json")
+        .body(Map.of("nodes", List.of(source, router, target), "links", links))
+        .put("/api/v1/topology/draft").then().statusCode(200).extract();
+    JsonNode savedRouter = saved.as(JsonNode.class).path("nodes").get(1);
+    assertEquals("198.18.1.1/24", savedRouter.path("routerConfiguration")
+        .path("interfaces").get(0).path("address").asText());
+    assertEquals("198.18.3.0/24", savedRouter.path("routerConfiguration")
+        .path("routes").get(0).path("destination").asText());
+
+    Map<String, Object> invalidRouter = new LinkedHashMap<>(router);
+    invalidRouter.put("routerConfiguration", Map.of(
+        "interfaces", configuration.get("interfaces"),
+        "routes", List.of(Map.of("destination", "198.18.3.0/24", "gateway", "198.18.4.2",
+            "outputPort", "out-1"))));
+    given().cookie("nanpanel_session", sessionCookie)
+        .header("X-CSRF-Token", csrfToken).header("If-Match", saved.header("ETag"))
+        .contentType("application/json")
+        .body(Map.of("nodes", List.of(source, invalidRouter, target), "links", links))
+        .put("/api/v1/topology/draft").then().statusCode(422)
+        .body("code", org.hamcrest.Matchers.equalTo("INVALID_TOPOLOGY"));
+    assertEquals(1, getDraft().path("generation").asInt());
+  }
+
+  @Test
   void savesAndReloadsHostGatewayAndObservedRouterWithRevisionGuards() {
     UUID gatewayNodeId = UUID.randomUUID();
     UUID hostNodeId = UUID.randomUUID();

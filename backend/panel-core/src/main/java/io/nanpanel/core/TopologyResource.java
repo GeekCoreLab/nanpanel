@@ -35,6 +35,7 @@ import jakarta.ws.rs.container.ContainerRequestContext;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -61,10 +62,15 @@ public class TopologyResource {
   public record FirewallRuleView(String inputPort, String outputPort, String protocol,
                                  int destinationPort, String action) {}
   public record FirewallPolicyView(String defaultAction, List<FirewallRuleView> rules) {}
+  public record RouterInterfaceAddressView(String port, String address) {}
+  public record RouterStaticRouteView(String destination, String gateway, String outputPort) {}
+  public record RouterConfigurationView(List<RouterInterfaceAddressView> interfaces,
+                                        List<RouterStaticRouteView> routes) {}
   public record NodeView(String id, String kind, String name, Position position,
                          int inputCount, int outputCount, List<PortView> ports,
                          String parentId, String assetId, String clusterId, String ipAddress,
-                         String description, String providerId, FirewallPolicyView firewallPolicy) {}
+                         String description, String providerId, FirewallPolicyView firewallPolicy,
+                         RouterConfigurationView routerConfiguration) {}
   public record LinkView(String id, String sourceNodeId, String sourcePort, String targetNodeId,
                          String targetPort, String layer, String protocol, String status,
                          String state) {}
@@ -240,7 +246,9 @@ public class TopologyResource {
           || node.has("providerId") && !node.get("providerId").isNull()
               && !node.get("providerId").isTextual()
           || node.has("firewallPolicy") && !node.get("firewallPolicy").isNull()
-              && !validFirewallPolicyShape(node.get("firewallPolicy"))) {
+              && !validFirewallPolicyShape(node.get("firewallPolicy"))
+          || node.has("routerConfiguration") && !node.get("routerConfiguration").isNull()
+              && !validRouterConfigurationShape(node.get("routerConfiguration"))) {
         throw fail(422, "INVALID_TOPOLOGY", "节点坐标或端口字段无效");
       }
       for (JsonNode port : node.path("ports")) {
@@ -298,7 +306,7 @@ public class TopologyResource {
               ? null : node.ipAddress().strip(), node.description() == null || node.description().isBlank()
                   ? null : node.description().strip(), node.providerId() == null
                       || node.providerId().isBlank() ? null : node.providerId().strip(),
-          node.firewallPolicy());
+          node.firewallPolicy(), node.routerConfiguration());
     }).toList();
     List<LinkInput> links = input.links().stream().map(link -> {
       if (link == null) {
@@ -355,6 +363,8 @@ public class TopologyResource {
       }
       String firewallError = firewallPolicyError(node);
       if (firewallError != null) return firewallError;
+      String routerError = routerConfigurationError(node, value.links());
+      if (routerError != null) return routerError;
     }
     for (NodeView node : value.nodes()) {
       String parentId = node.parentId();
@@ -498,7 +508,7 @@ public class TopologyResource {
   private boolean objectWithNodeKeys(JsonNode value) {
     Set<String> allowed = Set.of("id", "kind", "name", "position", "inputCount",
         "outputCount", "ports", "parentId", "assetId", "clusterId", "ipAddress",
-        "description", "providerId", "firewallPolicy");
+        "description", "providerId", "firewallPolicy", "routerConfiguration");
     Set<String> required = Set.of("id", "kind", "name", "position", "inputCount",
         "outputCount", "ports");
     if (value == null || !value.isObject() || value.size() < required.size()
@@ -556,6 +566,99 @@ public class TopologyResource {
       if (!matches.add(key)) return "防火墙规则匹配条件不能重复";
     }
     return null;
+  }
+
+  private boolean validRouterConfigurationShape(JsonNode configuration) {
+    if (!objectWithKeys(configuration, Set.of("interfaces", "routes"))
+        || !configuration.path("interfaces").isArray()
+        || configuration.path("interfaces").size() > 16
+        || !configuration.path("routes").isArray()
+        || configuration.path("routes").size() > 64) return false;
+    for (JsonNode iface : configuration.path("interfaces")) {
+      if (!objectWithKeys(iface, Set.of("port", "address"))
+          || !iface.path("port").isTextual() || !iface.path("address").isTextual()) return false;
+    }
+    for (JsonNode route : configuration.path("routes")) {
+      if (!objectWithKeys(route, Set.of("destination", "gateway", "outputPort"))
+          || !route.path("destination").isTextual()
+          || !route.has("gateway") || !route.get("gateway").isNull() && !route.get("gateway").isTextual()
+          || !route.path("outputPort").isTextual()) return false;
+    }
+    return true;
+  }
+
+  private String routerConfigurationError(NodeView node, List<LinkInput> links) {
+    RouterConfigurationView configuration = node.routerConfiguration();
+    if (configuration == null) return null;
+    if (!"ROUTER".equals(node.kind()) || configuration.interfaces() == null
+        || configuration.routes() == null || configuration.interfaces().size() > 16
+        || configuration.routes().size() > 64) return "Router 配置字段或节点种类无效";
+    Set<String> connectedPorts = new HashSet<>();
+    for (LinkInput link : links) {
+      if (node.id().equals(link.sourceNodeId())) connectedPorts.add(link.sourcePort());
+      if (node.id().equals(link.targetNodeId())) connectedPorts.add(link.targetPort());
+    }
+    Map<String, Ipv4Cidr> configured = new HashMap<>();
+    for (RouterInterfaceAddressView iface : configuration.interfaces()) {
+      if (iface == null || iface.port() == null || iface.address() == null
+          || node.ports().stream().noneMatch(port -> iface.port().equals(port.id()))
+          || !connectedPorts.contains(iface.port()) || configured.containsKey(iface.port())) {
+        return "Router 接口地址必须引用唯一且已连接的端口";
+      }
+      Ipv4Cidr address = parseIpv4Cidr(iface.address());
+      if (address == null) return "Router 接口地址必须是有效 IPv4 CIDR";
+      configured.put(iface.port(), address);
+    }
+    if (!configuration.interfaces().isEmpty() && !configured.keySet().containsAll(connectedPorts)) {
+      return "Router 的每个已连接接口都必须配置 IPv4 地址";
+    }
+    Set<String> destinations = new HashSet<>();
+    for (RouterStaticRouteView route : configuration.routes()) {
+      if (route == null || route.destination() == null || route.outputPort() == null
+          || node.ports().stream().noneMatch(port -> route.outputPort().equals(port.id())
+              && "OUTPUT".equals(port.direction()))
+          || !configured.containsKey(route.outputPort())) return "Router 静态路由必须引用已配置的出口接口";
+      Ipv4Cidr destination = parseIpv4Cidr(route.destination());
+      if (destination == null || !destination.canonicalAddress()
+          || !destinations.add(route.destination())) return "Router 静态路由目标必须是唯一的规范 IPv4 网段";
+      if (configured.values().stream().anyMatch(address -> address.network() == destination.network()
+          && address.prefix() == destination.prefix())) return "静态路由不能覆盖 Router 接口的直连网段";
+      if (route.gateway() != null) {
+        Long gateway = parseIpv4(route.gateway());
+        Ipv4Cidr output = configured.get(route.outputPort());
+        if (gateway == null || (gateway & maskForPrefix(output.prefix())) != output.network()) {
+          return "Router 下一跳必须位于所选接口的直连网段";
+        }
+      }
+    }
+    return null;
+  }
+
+  private record Ipv4Cidr(long address, long network, int prefix, boolean canonicalAddress) {}
+
+  private Ipv4Cidr parseIpv4Cidr(String value) {
+    String[] parts = value.split("/", -1);
+    if (parts.length != 2) return null;
+    Long address = parseIpv4(parts[0]);
+    if (address == null || !parts[1].matches("0|[1-9]|[12][0-9]|3[0-2]")) return null;
+    int prefix = Integer.parseInt(parts[1]);
+    long mask = maskForPrefix(prefix);
+    return new Ipv4Cidr(address, address & mask, prefix, address == (address & mask));
+  }
+
+  private Long parseIpv4(String value) {
+    if (value == null || !value.matches("(?:0|[1-9][0-9]{0,2})(?:\\.(?:0|[1-9][0-9]{0,2})){3}")) return null;
+    long address = 0;
+    for (String octet : value.split("\\.")) {
+      int part = Integer.parseInt(octet);
+      if (part > 255) return null;
+      address = (address << 8) | part;
+    }
+    return address;
+  }
+
+  private long maskForPrefix(int prefix) {
+    return prefix == 0 ? 0 : (0xffff_ffffL << (32 - prefix)) & 0xffff_ffffL;
   }
 
   private boolean validIpAddress(String value) {

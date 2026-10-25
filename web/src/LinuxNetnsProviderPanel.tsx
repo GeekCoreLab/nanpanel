@@ -108,7 +108,7 @@ export default function LinuxNetnsProviderPanel({ ready, expectedEtag }: { ready
   } catch { wireMetrics = []; }
 
   return <section className="netbird-provider linux-netns-provider card" aria-labelledby="linux-netns-provider-title">
-    <div className="card-title"><div><h2 id="linux-netns-provider-title">Linux Bridge · Firewall · 每拓扑隔离 netns</h2><p>当前实现执行 SWITCH、FIREWALL 与 PACKET_TAP。Firewall 使用 bridge-family nftables 按输入/输出端口、传输协议和目标端口匹配；Packet Tap 使用 tc mirred 镜像两侧业务帧。</p></div>
+    <div className="card-title"><div><h2 id="linux-netns-provider-title">Linux Bridge · Router · Firewall · 每拓扑隔离 netns</h2><p>当前实现执行 SWITCH、ROUTER、FIREWALL 与 PACKET_TAP。Router 支持单个 IPv4 路由表、接口 CIDR、静态路由与隔离 netns 内转发；Firewall 使用 bridge-family nftables；Packet Tap 使用 tc mirred 镜像两侧业务帧。</p></div>
       <span className={`badge ${providerLoaded ? 'available' : 'pending'}`}>{providerLoaded ? 'Provider 已装载' : 'Provider 不可用'}</span>
       {isMock && <span className="badge pending">Mock 模式 · 不执行</span>}
     </div>
@@ -127,8 +127,8 @@ export default function LinuxNetnsProviderPanel({ ready, expectedEtag }: { ready
       <p className="netbird-provider-detail">{operation.detail}</p>
       <div className="form-actions">
         {operation.state === 'PLANNED' && <button type="button" className="secondary" disabled={busy} onClick={() => void step('validate')}>校验 Revision、主机与 Helper 能力</button>}
-        {operation.state === 'VALIDATED' && <button type="button" className="primary" disabled={busy} onClick={() => void step('apply')}>应用隔离 Linux Bridge</button>}
-        {canVerify && <button type="button" className="secondary" disabled={busy} onClick={() => void step('verify')}>验证桥接与零默认路由</button>}
+        {operation.state === 'VALIDATED' && <button type="button" className="primary" disabled={busy} onClick={() => void step('apply')}>应用隔离 Linux 拓扑</button>}
+        {canVerify && <button type="button" className="secondary" disabled={busy} onClick={() => void step('verify')}>验证桥接、Router 与静态路由</button>}
         {canCompensate && <button type="button" className="danger" disabled={busy} onClick={() => void step('compensate')}>补偿并删除该 Revision 命名空间</button>}
         {operation.state === 'VERIFIED' && <button type="button" className="secondary" disabled={busy} onClick={() => void readWireMetrics()}>读取虚拟网线计数器</button>}
         <button type="button" className="secondary" disabled={busy} onClick={() => void refreshOperation()}>刷新操作状态</button>
@@ -140,6 +140,6 @@ export default function LinuxNetnsProviderPanel({ ready, expectedEtag }: { ready
       <span className="sr-only">{operationStates.includes(operation.state) ? operation.state : 'UNKNOWN'}</span>
     </div>}
     {error && <div className="alert error" role="alert">{error}</div>}
-    <p className="netbird-provider-note">操作只在该拓扑专属 netns 中创建 bridge/veth 与 Firewall 规则；该执行入口不配置宿主网卡或路由。Router、OVS 与管理路径探测仍未实现。</p>
+    <p className="netbird-provider-note">接口、地址、静态路由、bridge 与 Firewall 规则都限制在该拓扑专属 netns；不会配置宿主网卡或宿主路由。当前每个拓扑最多一个 Router，OVS 与管理路径探测仍未实现。</p>
   </section>;
 }
