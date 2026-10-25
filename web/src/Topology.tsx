@@ -723,17 +723,13 @@ function Editor() {
     </nav>}
     {(workspace === 'topology' || !!folderId || isP0Lab) && <>
     <div className="topology-tools"><div className="port-legend"><span><i className="input-dot" />蓝色：入口</span><span><i className="output-dot" />绿色：出口</span>{Object.entries(linkStateLabels).map(([state, label]) => <span key={state}><i className={`state-dot ${state.toLowerCase()}`} />{label}</span>)}</div><div className="topology-actions"><button className="secondary" disabled={!loaded || busy} onClick={e => { const rect = e.currentTarget.getBoundingClientRect(); const canvas = canvasRef.current?.getBoundingClientRect(); openMenu({ preventDefault() {}, clientX: rect.left, clientY: rect.bottom + 8 }, undefined, undefined, canvas ? { x: canvas.left + canvas.width / 2, y: canvas.top + canvas.height / 2 } : undefined); }}>＋ 添加节点</button><button className="secondary" disabled={busy || !activeEdges.length} onClick={() => { setEdges(current => current.filter(edge => !activeEdges.some(active => active.id === edge.id))); setDirty(true); setRouteEvidence(undefined); }}>清空本层连接</button></div></div>
-    <section className="topology card" aria-label="拓扑编辑器" ref={canvasRef} onContextMenu={event => {
-      const target = event.target;
-      if (target instanceof Element && target.closest('.react-flow__node, .react-flow__edge, .react-flow__controls, .react-flow__minimap')) return;
-      openMenu(event);
-    }}>
+    <section className="topology card" aria-label="拓扑编辑器" ref={canvasRef}>
       <TopologyCanvas<DeviceNode, Edge> nodes={activeDisplayNodes} edges={folderId ? activeEdges : [...activeEdges, ...observedRouteEdges]} nodeTypes={nodeTypes}
         onNodesChange={changes => { onNodesChange(changes); if (changes.some(c => c.type === 'position' && c.position || c.type === 'remove')) { setDirty(true); setRouteEvidence(undefined); } }}
         onEdgesChange={changes => { onEdgesChange(changes); if (changes.some(c => c.type === 'remove')) { setDirty(true); setRouteEvidence(undefined); } }}
         onConnect={connect} reviewConnection={connection => connectionReviewMessage(draft().nodes, candidate(connection))} isValidConnection={validConnection} connectionMode={ConnectionMode.Strict}
         onConnectEnd={(_, state) => { if (state.toHandle && !state.isValid) setError('连接无效：仅允许未占用的绿色出口 → 蓝色入口，且不能形成自连接或环路'); }}
-        onPaneContextMenu={e => openMenu(e)} onNodeContextMenu={(e, node) => { if (!node.data.observedOnly) openMenu(e, node.id); }} onNodeDoubleClick={(_, node) => { if (!node.data.observedOnly && node.data.model.kind === 'FOLDER') enterFolder(node.id); }} onEdgeContextMenu={(e, edge) => { if (!edge.data?.observedRoute) openMenu(e, undefined, edge.id); }}
+        onCanvasContextMenu={openMenu} onNodeContextMenu={(e, node) => { if (!node.data.observedOnly) openMenu(e, node.id); }} onNodeDoubleClick={(_, node) => { if (!node.data.observedOnly && node.data.model.kind === 'FOLDER') enterFolder(node.id); }} onEdgeContextMenu={(e, edge) => { if (!edge.data?.observedRoute) openMenu(e, undefined, edge.id); }}
         onPaneClick={() => setMenu(undefined)} onMoveStart={event => { if (event) { setMenu(undefined); setGatewayAssetOpen({}); } }}
         onNodesDelete={deleted => { deleted.forEach(node => removeNode(node.id)); }}
         nodesDraggable={!busy} nodesConnectable={loaded && !busy} elementsSelectable={!busy} deleteKeyCode={busy ? null : ['Backspace', 'Delete']}

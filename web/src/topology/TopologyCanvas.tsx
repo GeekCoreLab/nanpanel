@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useState, type MouseEventHandler, type ReactNode } from 'react';
 import {
   Background, Controls, BaseEdge, ReactFlow,
   getBezierPath,
@@ -37,6 +37,7 @@ export type TopologyCanvasProps<N extends Node, E extends Edge> = Omit<
   edgeTypes?: EdgeTypes;
   onConnect?: (connection: Connection) => void;
   reviewConnection?: (connection: Connection) => string | null;
+  onCanvasContextMenu?: MouseEventHandler<HTMLDivElement>;
   children?: ReactNode;
 };
 
@@ -46,6 +47,7 @@ export function TopologyCanvas<N extends Node, E extends Edge>({
   defaultEdgeOptions,
   onConnect,
   reviewConnection,
+  onCanvasContextMenu,
   children,
   ...flowProps
 }: TopologyCanvasProps<N, E>) {
@@ -64,7 +66,14 @@ export function TopologyCanvas<N extends Node, E extends Edge>({
     setPendingReview(undefined);
   };
 
-  return <div className="topology-canvas-shell">
+  return <div className="topology-canvas-shell" onContextMenu={event => {
+    const target = event.target;
+    if (!onCanvasContextMenu || target instanceof Element
+        && target.closest('.react-flow__node, .react-flow__edge, .react-flow__controls, .react-flow__minimap')) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onCanvasContextMenu(event);
+  }}>
     <ReactFlow<N, E>
       {...flowProps}
       edgeTypes={{ ...edgeTypes, nanpanelBezier: TopologyBezierEdge }}

@@ -50,8 +50,8 @@
 .application-state i{display:inline-block;width:6px;height:6px;border-radius:50%;background:#b4bfcd}
 .application-state.deployed,.application-state.ready,.application-state.active,.application-state.configured{color:#399477}
 .application-state.deployed i,.application-state.ready i,.application-state.active i,.application-state.configured i{background:#39aa83}
-.application-state.applying,.application-state.progressing,.application-state.draft{color:#b48337}
-.application-state.applying i,.application-state.progressing i,.application-state.draft i{background:#dda842;box-shadow:0 0 0 3px #dda84220}
+.application-state.applying,.application-state.progressing,.application-state.draft,.application-state.pending{color:#b48337}
+.application-state.applying i,.application-state.progressing i,.application-state.draft i,.application-state.pending i{background:#dda842;box-shadow:0 0 0 3px #dda84220}
 .application-state.failed,.application-state.partial,.application-state.missing,.application-state.unavailable{color:#c07864}
 .application-state.failed i,.application-state.partial i,.application-state.missing i,.application-state.unavailable i{background:#d47e68}
 .application-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;margin-bottom:16px}
