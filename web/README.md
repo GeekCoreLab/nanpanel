@@ -77,7 +77,7 @@ npm run test:browser
 
 覆盖登录、主机详情、重启任务、管理员创建/编辑/重置密码/禁用、设置、审计、拓扑与手机布局，截图保存到 `web/artifacts/`。可通过 `NANPANEL_TEST_URL` 指向其他开发地址。
 
-拓扑专项浏览器验收：`npm run test:topology`（需先启动开发服务器）。覆盖实际拖线、非法方向拒绝、右键新增交换机/防火墙/Packet Tap 与转发节点、端口扩展、草稿保存与重新读取，以及历史版本比较和未保存回放。防火墙与 Packet Tap 目前是带端口能力校验的期望节点；保存它们不会安装规则或复制实时流量，部署状态须由对应 Provider 的后续验收证明。
+拓扑专项浏览器验收：`npm run test:topology`（需先启动开发服务器）。覆盖实际拖线、非法方向拒绝、右键新增交换机/防火墙/Packet Tap 与转发节点、端口扩展、Provider 能力清单、草稿保存与重新读取，以及历史版本比较和未保存回放。防火墙与 Packet Tap 目前是带端口能力校验的期望节点；清单未声明的能力不能推断为可执行，保存节点也不会安装规则或复制实时流量。
 
 `node web/scripts/k3s-route-live-browser.mjs` 是目标 `k3s-1` 的只读 UI 验收：需要忽略文件 `.env` 中的 P2 Web HTTPS 地址和限域只读 Kubernetes inventory API Key，并需要 `ssh k3s-1` 访问 Host 路由。脚本从目标数据库读取 Host 路由，经目标 Web nginx `/api` 代理读取真实 Service inventory/探测数据，检查 Istio UI，并拦截拓扑写入。它不替代管理员登录后的生产拓扑保存/重新读取验收。
 

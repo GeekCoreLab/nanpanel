@@ -1,0 +1,14 @@
+.network-provider-capabilities{display:grid;gap:14px}
+.network-provider-capabilities>.card-title{align-items:center}
+.network-provider-capabilities .card-title p{margin:5px 0 0;color:#7a8ba1;font-size:11px}
+.network-provider-capabilities-empty{margin:0;color:#788ba3;font-size:12px}
+.network-provider-capabilities-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px}
+.network-provider-capability-provider{display:grid;gap:8px;padding:13px;border:1px solid #e4eaf2;border-radius:8px;background:#fbfcfe}
+.network-provider-capability-heading{display:flex;justify-content:space-between;gap:10px;color:#304a68;font-size:12px}
+.network-provider-capability-heading span,.network-provider-capability-provider>small{color:#8292a7;font-size:10px}
+.network-provider-capability-provider>small code{color:#597493}
+.network-provider-capability-provider ul{display:grid;gap:8px;margin:0;padding:0;list-style:none}
+.network-provider-capability-provider li{display:grid;gap:4px;padding-top:8px;border-top:1px solid #e7edf4;color:#687f98;font-size:10px}
+.network-provider-capability-provider li strong{color:#496684;font-size:11px}
+.network-provider-capability-provider p{margin:0;color:#8292a7;font-size:10px}
+@media(max-width:620px){.network-provider-capabilities>.card-title{align-items:flex-start}.network-provider-capabilities-list{grid-template-columns:minmax(0,1fr)}}

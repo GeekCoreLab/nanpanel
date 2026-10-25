@@ -19,6 +19,11 @@ try {
   await expect(page.locator('.service-network-item')).toHaveCount(0);
   await expect(page.locator('.service-network-flow')).toHaveCount(0);
   await page.getByRole('button', { name: /拓扑编辑/ }).click();
+  await page.getByRole('button', { name: /网络接入/ }).click();
+  await expect(page.getByRole('heading', { name: '已加载 Provider 能力' })).toBeVisible();
+  await expect(page.getByText('Mock 示例能力；不会应用到真实设备。')).toBeVisible();
+  await expect(page.getByText('overlay.group-membership.reconcile')).toBeVisible();
+  await page.getByRole('button', { name: /拓扑编辑/ }).click();
   await page.getByLabel('拓扑编辑器').scrollIntoViewIfNeeded();
   await expect(gateway.locator('[data-handleid="out-1"]')).toHaveCSS('background-color', 'rgb(46, 175, 131)');
   await expect(host.locator('[data-handleid="in-1"]')).toHaveCSS('background-color', 'rgb(74, 134, 237)');

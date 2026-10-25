@@ -149,6 +149,18 @@ test('Mock mode refuses to fabricate service inventory and Istio traffic', async
   await mockRequest('/auth/logout', { method: 'POST', headers: { 'X-CSRF-Token': login.csrfToken } });
 });
 
+test('Mock Provider inventory reports explicit capability details', async () => {
+  const csrfToken = (await (await mockRequest('/auth/csrf', { method: 'GET' })).json()).csrfToken;
+  const login = await (await mockRequest('/auth/login', { method: 'POST', headers: { 'X-CSRF-Token': csrfToken }, body: JSON.stringify({ username: 'admin', password: DEMO_PASSWORD }) })).json();
+  const response = await mockRequest('/network-providers', { method: 'GET' });
+  const [provider] = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(provider.capabilityDetails[0].id, 'overlay.group-membership.reconcile');
+  assert.ok(provider.capabilityDetails[0].operations.includes('COMPENSATE'));
+  assert.deepEqual(provider.capabilityDetails[0].layers, []);
+  await mockRequest('/auth/logout', { method: 'POST', headers: { 'X-CSRF-Token': login.csrfToken } });
+});
+
 test('Mock topology API requires auth, CSRF, matching ETag; save is atomic and remains unverified', async () => {
   let csrf = '';
   async function call(method, body, etag, token = csrf) {
