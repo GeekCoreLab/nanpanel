@@ -61,6 +61,7 @@ class NetworkProviderApiTest {
         .then().statusCode(200)
         .body("[0].id", equalTo("linux-netns"))
         .body("[0].capabilityDetails[0].deviceKinds", hasItem("SWITCH"))
+        .body("[0].capabilityDetails[0].deviceKinds", hasItem("PACKET_TAP"))
         .body("[0].capabilityDetails[0].operations",
             hasItems("PLAN", "VALIDATE", "APPLY", "VERIFY", "COMPENSATE"));
     var initialDraft = given().cookie("nanpanel_session", session.cookie())
@@ -74,15 +75,40 @@ class NetworkProviderApiTest {
             Map.of("id", "out-1", "direction", "OUTPUT", "layer", "L2", "protocols", List.of("ETHERNET")),
             Map.of("id", "out-2", "direction", "OUTPUT", "layer", "L2", "protocols", List.of("ETHERNET"))),
         "providerId", "linux-netns");
+    Map<String, Object> businessSwitch = new java.util.LinkedHashMap<>(switchNode);
+    businessSwitch.put("id", UUID.randomUUID().toString());
+    businessSwitch.put("name", "Business network");
+    Map<String, Object> monitorSwitch = new java.util.LinkedHashMap<>(switchNode);
+    monitorSwitch.put("id", UUID.randomUUID().toString());
+    monitorSwitch.put("name", "Monitor network");
+    Map<String, Object> packetTap = Map.of(
+        "id", UUID.randomUUID().toString(), "kind", "PACKET_TAP", "name", "Traffic mirror",
+        "position", Map.of("x", 0, "y", 0), "inputCount", 1, "outputCount", 2,
+        "ports", List.of(
+            Map.of("id", "in-1", "direction", "INPUT", "layer", "L2", "protocols", List.of("ETHERNET")),
+            Map.of("id", "out-1", "direction", "OUTPUT", "layer", "L2", "protocols", List.of("ETHERNET")),
+            Map.of("id", "out-2", "direction", "OUTPUT", "layer", "L2", "protocols", List.of("ETHERNET"))),
+        "providerId", "linux-netns");
+    List<Map<String, Object>> packetTapLinks = List.of(
+        Map.of("id", UUID.randomUUID().toString(), "sourceNodeId", switchNode.get("id"),
+            "sourcePort", "out-1", "targetNodeId", packetTap.get("id"), "targetPort", "in-1",
+            "layer", "L2", "protocol", "ETHERNET", "status", "UNVERIFIED"),
+        Map.of("id", UUID.randomUUID().toString(), "sourceNodeId", packetTap.get("id"),
+            "sourcePort", "out-1", "targetNodeId", businessSwitch.get("id"), "targetPort", "in-1",
+            "layer", "L2", "protocol", "ETHERNET", "status", "UNVERIFIED"),
+        Map.of("id", UUID.randomUUID().toString(), "sourceNodeId", packetTap.get("id"),
+            "sourcePort", "out-2", "targetNodeId", monitorSwitch.get("id"), "targetPort", "in-1",
+            "layer", "L2", "protocol", "ETHERNET", "status", "UNVERIFIED"));
     var savedSwitch = given().cookie("nanpanel_session", session.cookie())
         .header("X-CSRF-Token", session.csrf())
         .header("If-Match", initialDraft.header("ETag"))
         .contentType("application/json")
-        .body(Map.of("nodes", List.of(switchNode), "links", List.of()))
+        .body(Map.of("nodes", List.of(switchNode, packetTap, businessSwitch, monitorSwitch),
+            "links", packetTapLinks))
         .put("/api/v1/topology/draft").then().statusCode(200).extract();
     String linuxPlanInput = mapper.writeValueAsString(Map.of(
         "hostId", UUID.randomUUID().toString(), "hostGeneration", 1,
-        "reason", "Persist an isolated Linux bridge topology plan",
+        "reason", "Persist an isolated Linux packet tap topology plan",
         "revisionId", savedSwitch.path("revisionId"), "generation", savedSwitch.path("generation")));
     var linuxPlan = given().cookie("nanpanel_session", session.cookie())
         .header("X-CSRF-Token", session.csrf()).contentType("application/json")

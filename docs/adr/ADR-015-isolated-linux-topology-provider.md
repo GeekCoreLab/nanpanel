@@ -20,27 +20,31 @@ read-only route inventory; it is not enough to configure a real router.
 1. Run the first executable Provider through the existing Core Provider
    lifecycle and the typed Agent-to-Helper operation path.
 2. Give every applied topology revision its own Linux network namespace. The
-   Helper may create only bridge and veth resources inside that namespace; it
-   must not move host interfaces or configure host routes.
-3. Initially support only root-level `SWITCH` devices and L2/Ethernet wires.
-   Reject mixed-provider wires and unsupported device kinds.
+   Helper may create only bridge, veth, and traffic-control resources inside
+   that namespace; it must not move host interfaces or configure host routes.
+3. Support root-level `SWITCH` and `PACKET_TAP` devices with L2/Ethernet wires.
+   A Packet Tap requires one input (`in-1`), one business output (`out-1`), and
+   one monitor output (`out-2`). Keep the monitor veth outside the bridge and
+   use `tc mirred` on both business bridge ports. Verify the installed filters
+   before reporting success. Reject mixed-provider wires and unsupported kinds.
 4. Derive namespace and interface names from validated topology, revision,
    generation, and stable IDs. Verify ownership markers and zero default routes
    before reporting success. Compensation removes only a namespace with the
    matching ownership marker.
-5. Add Router, Firewall, Packet Tap, and OVS support only after each device has
-   an explicit configuration model, typed Helper schema, and real kernel
-   acceptance evidence.
+5. Add Router, Firewall, and OVS support only after each device has an explicit
+   configuration model, typed Helper schema, and real kernel acceptance
+   evidence.
 
 ## Consequences
 
-- The first Provider can execute and verify bridge graphs without modifying
-  host interfaces or routes.
+- The first Provider can execute and verify bridge and Packet Tap graphs without
+  modifying host interfaces or routes. The Packet Tap captures both directions
+  on the two business wires and sends copies over its dedicated monitor wire.
 - A saved graph remains desired state until an operator creates and advances a
   persisted Provider operation.
-- Router, Firewall, Packet Tap, OVS, and management-path probes are not covered
-  by this first implementation. RX/TX counters are passive kernel snapshots;
-  this Provider does not generate test traffic or claim end-to-end connectivity.
+- Router, Firewall, OVS, and management-path probes are not covered by this
+  implementation. RX/TX counters are passive kernel snapshots; this Provider
+  does not generate test traffic or claim end-to-end connectivity.
 - The network namespace registry under `/run/netns` is host-visible metadata;
   all data-plane devices and routes remain inside each topology namespace.
 
@@ -48,7 +52,9 @@ read-only route inventory; it is not enough to configure a real router.
 
 The Rust Helper validates the typed request again at the privilege boundary.
 Provider verification checks namespace ownership, bridge/veth device kinds,
-port-to-bridge membership, and the absence of a default route. The isolated P6
-Linux lab separately exercises real bridge, routed TCP, nftables, and `tc`
-behavior while hashing the host default routes before and after. Core-to-Helper
-Provider deployment still requires the P6 host acceptance run.
+port-to-bridge membership, Packet Tap `mirred` egress filters, and the absence
+of a default route. The isolated P6 Linux lab separately exercises real bridge,
+routed TCP, nftables, and `tc` behavior while hashing the host default routes
+before and after. The first Provider is deployed to `k3s-1` and its runtime
+Helper capability is verified read-only; production-topology Apply remains a
+separate acceptance gate.

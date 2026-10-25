@@ -108,7 +108,7 @@ export default function LinuxNetnsProviderPanel({ ready, expectedEtag }: { ready
   } catch { wireMetrics = []; }
 
   return <section className="netbird-provider linux-netns-provider card" aria-labelledby="linux-netns-provider-title">
-    <div className="card-title"><div><h2 id="linux-netns-provider-title">Linux Bridge · 每拓扑隔离 netns</h2><p>当前实现执行 SWITCH 与 L2 Ethernet 网线；每个 Revision 在所选主机创建独立命名空间。</p></div>
+    <div className="card-title"><div><h2 id="linux-netns-provider-title">Linux Bridge · 每拓扑隔离 netns</h2><p>当前实现执行 SWITCH 与 PACKET_TAP。Packet Tap 固定使用一个输入、一个业务输出和一个监控输出；Helper 在隔离命名空间用 tc mirred 复制业务帧。</p></div>
       <span className={`badge ${providerLoaded ? 'available' : 'pending'}`}>{providerLoaded ? 'Provider 已装载' : 'Provider 不可用'}</span>
       {isMock && <span className="badge pending">Mock 模式 · 不执行</span>}
     </div>

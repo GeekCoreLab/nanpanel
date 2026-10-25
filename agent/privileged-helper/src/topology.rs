@@ -58,12 +58,23 @@ struct CompiledTopology {
     namespace: String,
     bridges: HashMap<Uuid, String>,
     interfaces: HashMap<Uuid, (String, String)>,
+    packet_taps: Vec<PacketTap>,
+}
+
+#[derive(Debug)]
+struct PacketTap {
+    node_id: Uuid,
+    business_interfaces: [String; 2],
+    monitor_interface: String,
 }
 
 pub(crate) fn available() -> bool {
     ["/usr/sbin/ip", "/usr/bin/ip"]
         .iter()
         .any(|candidate| trusted_binary(Path::new(candidate)))
+        && ["/usr/sbin/tc", "/usr/bin/tc"]
+            .iter()
+            .any(|candidate| trusted_binary(Path::new(candidate)))
 }
 
 pub(crate) fn validate_target_payload(target: &str, payload: Option<&str>) -> Result<(), String> {
@@ -101,9 +112,9 @@ fn compile(target: &str, request: TopologyRequest) -> Result<CompiledTopology, S
 
     let mut node_ids = HashSet::new();
     for node in &request.nodes {
-        if !node_ids.insert(node.id) || node.kind != "SWITCH" {
+        if !node_ids.insert(node.id) || !matches!(node.kind.as_str(), "SWITCH" | "PACKET_TAP") {
             return Err(
-                "DENIED: Linux bridge Provider currently accepts unique SWITCH nodes only"
+                "DENIED: Linux bridge Provider accepts unique SWITCH and PACKET_TAP nodes only"
                     .to_owned(),
             );
         }
@@ -148,6 +159,47 @@ fn compile(target: &str, request: TopologyRequest) -> Result<CompiledTopology, S
             )
         })
         .collect::<HashMap<_, _>>();
+    let mut packet_taps = Vec::new();
+    for node in request
+        .nodes
+        .iter()
+        .filter(|node| node.kind == "PACKET_TAP")
+    {
+        let input = request
+            .links
+            .iter()
+            .find(|link| link.target_node_id == node.id && link.target_port == "in-1");
+        let business = request
+            .links
+            .iter()
+            .find(|link| link.source_node_id == node.id && link.source_port == "out-1");
+        let monitor = request
+            .links
+            .iter()
+            .find(|link| link.source_node_id == node.id && link.source_port == "out-2");
+        let tap_link_count = request
+            .links
+            .iter()
+            .filter(|link| link.source_node_id == node.id || link.target_node_id == node.id)
+            .count();
+        let (Some(input), Some(business), Some(monitor)) = (input, business, monitor) else {
+            return Err(
+                "DENIED: PACKET_TAP requires one input, one business output, and one monitor output"
+                    .to_owned(),
+            );
+        };
+        if tap_link_count != 3 {
+            return Err("DENIED: PACKET_TAP supports exactly three connected ports".to_owned());
+        }
+        packet_taps.push(PacketTap {
+            node_id: node.id,
+            business_interfaces: [
+                interface_for_node(input, &interfaces, node.id)?,
+                interface_for_node(business, &interfaces, node.id)?,
+            ],
+            monitor_interface: interface_for_node(monitor, &interfaces, node.id)?,
+        });
+    }
     let namespace = format!(
         "nanpanel-{}-{}-{}",
         request.topology_id,
@@ -160,7 +212,33 @@ fn compile(target: &str, request: TopologyRequest) -> Result<CompiledTopology, S
         namespace,
         bridges,
         interfaces,
+        packet_taps,
     })
+}
+
+fn interface_for_node(
+    link: &TopologyLink,
+    interfaces: &HashMap<Uuid, (String, String)>,
+    node_id: Uuid,
+) -> Result<String, String> {
+    let (source, target) = interfaces
+        .get(&link.id)
+        .ok_or_else(|| "DENIED: topology wire has no allocated interface".to_owned())?;
+    if link.source_node_id == node_id {
+        Ok(source.clone())
+    } else if link.target_node_id == node_id {
+        Ok(target.clone())
+    } else {
+        Err("DENIED: topology wire does not connect to the requested device".to_owned())
+    }
+}
+
+impl CompiledTopology {
+    fn is_monitor_interface(&self, interface: &str) -> bool {
+        self.packet_taps
+            .iter()
+            .any(|tap| tap.monitor_interface == interface)
+    }
 }
 
 fn valid_port(value: &str, prefix: &str) -> bool {
@@ -178,6 +256,10 @@ fn trusted_binary(path: &Path) -> bool {
 
 fn ip_binary() -> Result<std::path::PathBuf, String> {
     trusted_executable(&["/usr/sbin/ip", "/usr/bin/ip"])
+}
+
+fn tc_binary() -> Result<std::path::PathBuf, String> {
+    trusted_executable(&["/usr/sbin/tc", "/usr/bin/tc"])
 }
 
 async fn namespace_exists(ip: &Path, namespace: &str) -> Result<bool, String> {
@@ -310,9 +392,19 @@ async fn apply_created(topology: &CompiledTopology, ip: &Path) -> Result<String,
             ],
         )
         .await?;
-        for (interface, node_id, side) in [
-            (source, link.source_node_id, "source"),
-            (target, link.target_node_id, "target"),
+        for (interface, node_id, port, side) in [
+            (
+                source,
+                link.source_node_id,
+                link.source_port.as_str(),
+                "source",
+            ),
+            (
+                target,
+                link.target_node_id,
+                link.target_port.as_str(),
+                "target",
+            ),
         ] {
             in_namespace(
                 ip,
@@ -335,19 +427,25 @@ async fn apply_created(topology: &CompiledTopology, ip: &Path) -> Result<String,
                 ],
             )
             .await?;
-            in_namespace(
-                ip,
-                &topology.namespace,
-                &[
-                    "link".to_owned(),
-                    "set".to_owned(),
-                    "dev".to_owned(),
-                    interface.clone(),
-                    "master".to_owned(),
-                    topology.bridges[&node_id].clone(),
-                ],
-            )
-            .await?;
+            let mirror_output = topology
+                .packet_taps
+                .iter()
+                .any(|tap| tap.node_id == node_id && port == "out-2");
+            if !mirror_output {
+                in_namespace(
+                    ip,
+                    &topology.namespace,
+                    &[
+                        "link".to_owned(),
+                        "set".to_owned(),
+                        "dev".to_owned(),
+                        interface.clone(),
+                        "master".to_owned(),
+                        topology.bridges[&node_id].clone(),
+                    ],
+                )
+                .await?;
+            }
             in_namespace(
                 ip,
                 &topology.namespace,
@@ -360,6 +458,47 @@ async fn apply_created(topology: &CompiledTopology, ip: &Path) -> Result<String,
                 ],
             )
             .await?;
+        }
+    }
+
+    if !topology.packet_taps.is_empty() {
+        let tc = tc_binary()?;
+        for tap in &topology.packet_taps {
+            for interface in &tap.business_interfaces {
+                in_namespace(
+                    &tc,
+                    &topology.namespace,
+                    &[
+                        "qdisc".to_owned(),
+                        "add".to_owned(),
+                        "dev".to_owned(),
+                        interface.clone(),
+                        "clsact".to_owned(),
+                    ],
+                )
+                .await?;
+                in_namespace(
+                    &tc,
+                    &topology.namespace,
+                    &[
+                        "filter".to_owned(),
+                        "add".to_owned(),
+                        "dev".to_owned(),
+                        interface.clone(),
+                        "egress".to_owned(),
+                        "protocol".to_owned(),
+                        "all".to_owned(),
+                        "matchall".to_owned(),
+                        "action".to_owned(),
+                        "mirred".to_owned(),
+                        "egress".to_owned(),
+                        "mirror".to_owned(),
+                        "dev".to_owned(),
+                        tap.monitor_interface.clone(),
+                    ],
+                )
+                .await?;
+            }
         }
     }
 
@@ -422,7 +561,7 @@ async fn verify(topology: &CompiledTopology) -> Result<String, String> {
         });
         if bridge.is_none() {
             return Err(format!(
-                "FAILED: switch {} bridge is missing or has drifted",
+                "FAILED: switch or packet tap {} bridge is missing or has drifted",
                 node.id
             ));
         }
@@ -442,6 +581,11 @@ async fn verify(topology: &CompiledTopology) -> Result<String, String> {
                 node_id,
                 side
             );
+            let expected_master = if topology.is_monitor_interface(interface) {
+                None
+            } else {
+                topology.bridges.get(&node_id).map(String::as_str)
+            };
             let attached = links.iter().any(|actual| {
                 actual.get("ifname").and_then(Value::as_str) == Some(interface)
                     && actual
@@ -450,14 +594,39 @@ async fn verify(topology: &CompiledTopology) -> Result<String, String> {
                         .and_then(Value::as_str)
                         == Some("veth")
                     && actual.get("alias").and_then(Value::as_str) == Some(expected_alias.as_str())
-                    && actual.get("master").and_then(Value::as_str)
-                        == topology.bridges.get(&node_id).map(String::as_str)
+                    && actual.get("master").and_then(Value::as_str) == expected_master
             });
             if !attached {
                 return Err(format!(
                     "FAILED: virtual wire {} is missing or has drifted",
                     link.id
                 ));
+            }
+        }
+    }
+    if !topology.packet_taps.is_empty() {
+        let tc = tc_binary()?;
+        for tap in &topology.packet_taps {
+            for interface in &tap.business_interfaces {
+                let output = in_namespace(
+                    &tc,
+                    &topology.namespace,
+                    &[
+                        "-j".to_owned(),
+                        "filter".to_owned(),
+                        "show".to_owned(),
+                        "dev".to_owned(),
+                        interface.clone(),
+                        "egress".to_owned(),
+                    ],
+                )
+                .await?;
+                if !has_packet_mirror(&output, &tap.monitor_interface) {
+                    return Err(format!(
+                        "FAILED: packet tap {} mirror filter is missing or has drifted",
+                        tap.node_id
+                    ));
+                }
             }
         }
     }
@@ -493,12 +662,34 @@ async fn verify(topology: &CompiledTopology) -> Result<String, String> {
         "revisionId": topology.request.revision_id,
         "generation": topology.request.generation,
         "namespace": topology.namespace,
-        "switches": topology.request.nodes.len(),
+        "switches": topology.request.nodes.iter().filter(|node| node.kind == "SWITCH").count(),
+        "packetTaps": topology.packet_taps.len(),
         "wires": topology.request.links.len(),
         "linkMetrics": link_metrics,
         "defaultRoutes": 0,
     })
     .to_string())
+}
+
+fn has_packet_mirror(output: &str, monitor_interface: &str) -> bool {
+    let Ok(filters) = serde_json::from_str::<Vec<Value>>(output) else {
+        return false;
+    };
+    filters.iter().any(|filter| {
+        filter.get("kind").and_then(Value::as_str) == Some("matchall")
+            && filter
+                .pointer("/options/actions")
+                .and_then(Value::as_array)
+                .is_some_and(|actions| {
+                    actions.iter().any(|action| {
+                        action.get("kind").and_then(Value::as_str) == Some("mirred")
+                            && action.get("mirred_action").and_then(Value::as_str) == Some("mirror")
+                            && action.get("direction").and_then(Value::as_str) == Some("egress")
+                            && action.get("to_dev").and_then(Value::as_str)
+                                == Some(monitor_interface)
+                    })
+                })
+    })
 }
 
 fn interface_statistics(links: &[Value], interface: &str) -> Option<Value> {
@@ -585,7 +776,9 @@ async fn namespace_owned(topology: &CompiledTopology, ip: &Path) -> Result<bool,
 
 #[cfg(test)]
 mod tests {
-    use super::{compile, decode, interface_statistics, validate_target_payload};
+    use super::{
+        compile, decode, has_packet_mirror, interface_statistics, validate_target_payload,
+    };
     use serde_json::json;
     use uuid::Uuid;
 
@@ -678,5 +871,74 @@ mod tests {
         );
         assert_eq!(interface_statistics(&links, "npl00b"), None);
         assert_eq!(interface_statistics(&links, "missing"), None);
+    }
+
+    #[test]
+    fn accepts_packet_tap_only_with_real_mirror_paths() -> anyhow::Result<()> {
+        let topology = Uuid::new_v4();
+        let upstream = Uuid::new_v4();
+        let tap = Uuid::new_v4();
+        let business = Uuid::new_v4();
+        let monitor = Uuid::new_v4();
+        let mut payload = json!({
+            "action": "APPLY",
+            "topologyId": topology,
+            "revisionId": Uuid::new_v4(),
+            "generation": 4,
+            "nodes": [
+                {"id": upstream, "kind": "SWITCH"},
+                {"id": tap, "kind": "PACKET_TAP"},
+                {"id": business, "kind": "SWITCH"},
+                {"id": monitor, "kind": "SWITCH"}
+            ],
+            "links": [
+                {"id": Uuid::new_v4(), "sourceNodeId": upstream, "sourcePort": "out-1",
+                 "targetNodeId": tap, "targetPort": "in-1", "layer": "L2", "protocol": "ETHERNET"},
+                {"id": Uuid::new_v4(), "sourceNodeId": tap, "sourcePort": "out-1",
+                 "targetNodeId": business, "targetPort": "in-1", "layer": "L2", "protocol": "ETHERNET"},
+                {"id": Uuid::new_v4(), "sourceNodeId": tap, "sourcePort": "out-2",
+                 "targetNodeId": monitor, "targetPort": "in-1", "layer": "L2", "protocol": "ETHERNET"}
+            ]
+        });
+        let compiled = compile(
+            &topology.to_string(),
+            decode(&payload.to_string()).map_err(anyhow::Error::msg)?,
+        )
+        .map_err(anyhow::Error::msg)?;
+        assert_eq!(compiled.packet_taps.len(), 1);
+        let compiled_tap = compiled
+            .packet_taps
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("compiled packet tap is missing"))?;
+        assert_eq!(compiled_tap.business_interfaces.len(), 2);
+        assert_ne!(
+            compiled_tap.business_interfaces[0],
+            compiled_tap.monitor_interface
+        );
+
+        let links = payload["links"]
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("packet tap links are missing"))?;
+        let first = links
+            .first()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("packet tap input link is missing"))?;
+        let second = links
+            .get(1)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("packet tap business link is missing"))?;
+        payload["links"] = json!([first, second]);
+        assert!(
+            validate_target_payload(&topology.to_string(), Some(&payload.to_string())).is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn verifies_the_egress_mirror_action_and_monitor_device() {
+        let filter = r#"[{"kind":"matchall","options":{"actions":[{"kind":"mirred","mirred_action":"mirror","direction":"egress","to_dev":"npl01a"}]}}]"#;
+        assert!(has_packet_mirror(filter, "npl01a"));
+        assert!(!has_packet_mirror(filter, "npl02a"));
+        assert!(!has_packet_mirror("not-json", "npl01a"));
     }
 }

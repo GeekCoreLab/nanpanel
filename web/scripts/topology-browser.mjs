@@ -24,6 +24,7 @@ try {
   await expect(page.getByText('Mock 示例能力；不会应用到真实设备。')).toBeVisible();
   await expect(page.getByText('overlay.group-membership.reconcile')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Linux Bridge · 每拓扑隔离 netns' })).toBeVisible();
+  await expect(page.getByText(/PACKET_TAP.*tc mirred/)).toBeVisible();
   await expect(page.getByText('Mock 模式 · 不执行')).toBeVisible();
   await page.getByRole('button', { name: /拓扑编辑/ }).click();
   await page.getByLabel('拓扑编辑器').scrollIntoViewIfNeeded();

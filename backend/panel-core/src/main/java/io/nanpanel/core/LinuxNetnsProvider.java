@@ -23,7 +23,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 
-/** Linux bridge Provider whose entire resource graph is placed in a dedicated netns. */
+/** Linux bridge and Packet Tap Provider isolated in a dedicated netns. */
 @RequestScoped
 public class LinuxNetnsProvider implements NetworkProvider {
   public static final String ID = "linux-netns";
@@ -65,14 +65,14 @@ public class LinuxNetnsProvider implements NetworkProvider {
 
   @Override
   public ProviderDescriptor descriptor() {
-    return new ProviderDescriptor(ID, "Linux Bridge (isolated netns)", "0.1.0",
+    return new ProviderDescriptor(ID, "Linux Bridge and Packet Tap (isolated netns)", "0.2.0",
         "panel.io/plugins/v1");
   }
 
   @Override
   public Set<Capability> capabilityDescriptors() {
     return Set.of(new Capability("linux.bridge", OPERATIONS, Set.of("L2"),
-        Set.of("ETHERNET"), Set.of("SWITCH")));
+        Set.of("ETHERNET"), Set.of("SWITCH", "PACKET_TAP")));
   }
 
   @Override
@@ -147,7 +147,7 @@ public class LinuxNetnsProvider implements NetworkProvider {
           && configuration.revisionId().toString().equals(report.path("revisionId").asText())
           && report.path("generation").asLong() == configuration.topologyGeneration();
       return CompletableFuture.completedFuture(new ValidationResult(verified,
-          verified ? "Linux bridge and veth resources exist in the isolated netns; default route count is zero"
+          verified ? "Linux bridges, Packet Tap mirror filters, and veth resources match in the isolated netns; default route count is zero"
               : "Helper reported that the isolated topology differs from the saved revision"));
     } catch (Exception failure) {
       return CompletableFuture.completedFuture(
@@ -233,19 +233,21 @@ public class LinuxNetnsProvider implements NetworkProvider {
       List<HelperNode> helperNodes = new ArrayList<>();
       for (JsonNode node : nodes) {
         if (!ID.equals(node.path("providerId").asText())) continue;
-        if (!"SWITCH".equals(node.path("kind").asText())
+        String kind = node.path("kind").asText();
+        if (!Set.of("SWITCH", "PACKET_TAP").contains(kind)
             || !node.path("id").isTextual()
             || node.hasNonNull("parentId")) {
-          throw new IllegalArgumentException("Linux Bridge Provider accepts only root SWITCH devices");
+          throw new IllegalArgumentException(
+              "Linux netns Provider accepts only root SWITCH and PACKET_TAP devices");
         }
         UUID id = UUID.fromString(node.path("id").asText());
         if (!selectedNodeIds.add(id.toString())) {
-          throw new IllegalArgumentException("Provider switch IDs must be unique");
+          throw new IllegalArgumentException("Provider device IDs must be unique");
         }
-        helperNodes.add(new HelperNode(id.toString(), "SWITCH"));
+        helperNodes.add(new HelperNode(id.toString(), kind));
       }
       if (helperNodes.isEmpty() || helperNodes.size() > 16 || links.size() > 64) {
-        throw new IllegalArgumentException("Linux Bridge plan needs 1 to 16 switches and at most 64 wires");
+        throw new IllegalArgumentException("Linux netns plan needs 1 to 16 devices and at most 64 wires");
       }
       List<HelperLink> helperLinks = new ArrayList<>();
       for (JsonNode link : links) {
@@ -254,23 +256,43 @@ public class LinuxNetnsProvider implements NetworkProvider {
         boolean sourceSelected = selectedNodeIds.contains(source);
         boolean targetSelected = selectedNodeIds.contains(target);
         if (sourceSelected != targetSelected) {
-          throw new IllegalArgumentException("A Provider switch wire cannot end at an unmanaged device");
+          throw new IllegalArgumentException("A Provider wire cannot end at an unmanaged device");
         }
         if (!sourceSelected) continue;
         if (!"L2".equals(link.path("layer").asText())
             || !"ETHERNET".equals(link.path("protocol").asText())) {
-          throw new IllegalArgumentException("Linux Bridge wires must use L2 Ethernet ports");
+          throw new IllegalArgumentException("Linux netns wires must use L2 Ethernet ports");
         }
         helperLinks.add(new HelperLink(UUID.fromString(link.path("id").asText()).toString(),
             UUID.fromString(source).toString(), link.path("sourcePort").asText(),
             UUID.fromString(target).toString(), link.path("targetPort").asText(), "L2", "ETHERNET"));
       }
+      String packetTapError = packetTapShapeError(helperNodes, helperLinks);
+      if (packetTapError != null) throw new IllegalArgumentException(packetTapError);
       return new Configuration(selectedHost, hostGeneration.longValue(), explanation, revision,
           generation, List.copyOf(helperNodes), List.copyOf(helperLinks));
     } catch (Exception failure) {
       if (failure instanceof IllegalArgumentException invalid) throw invalid;
       throw new IllegalArgumentException("Provider plan snapshot is invalid", failure);
     }
+  }
+
+  private String packetTapShapeError(List<HelperNode> nodes, List<HelperLink> links) {
+    for (HelperNode node : nodes) {
+      if (!"PACKET_TAP".equals(node.kind())) continue;
+      long connected = links.stream().filter(link -> node.id().equals(link.sourceNodeId())
+          || node.id().equals(link.targetNodeId())).count();
+      boolean input = links.stream().anyMatch(link -> node.id().equals(link.targetNodeId())
+          && "in-1".equals(link.targetPort()));
+      boolean business = links.stream().anyMatch(link -> node.id().equals(link.sourceNodeId())
+          && "out-1".equals(link.sourcePort()));
+      boolean monitor = links.stream().anyMatch(link -> node.id().equals(link.sourceNodeId())
+          && "out-2".equals(link.sourcePort()));
+      if (connected != 3 || !input || !business || !monitor) {
+        return "PACKET_TAP requires one connected input, one business output, and one monitor output";
+      }
+    }
+    return null;
   }
 
   private String configurationError(Configuration configuration) {
