@@ -26,7 +26,7 @@ public final class P3FixtureNetworkProvider implements NetworkProvider {
   public Set<Capability> capabilityDescriptors() {
     return Set.of(new Capability("p3.fixture.tcp",
         Set.of("OBSERVE", "PLAN", "VALIDATE", "APPLY", "VERIFY", "COMPENSATE"),
-        Set.of("L4"), Set.of("TCP")));
+        Set.of("L4"), Set.of("TCP"), Set.of("ROUTER")));
   }
 
   @Override

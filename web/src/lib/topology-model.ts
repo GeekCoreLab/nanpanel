@@ -1,5 +1,5 @@
 import { createUuid } from './uuid.ts';
-import type { TopologyDraftWrite, TopologyLink, TopologyNode, TopologyNodeKind, TopologyPort } from './types';
+import type { NetworkProvider, TopologyDraftWrite, TopologyLayer, TopologyLink, TopologyNode, TopologyNodeKind, TopologyPort, TopologyProtocol } from './types';
 
 export type RouteNextHopHost = { id: string; hostname: string; kind?: 'HOST' | 'ROUTER' };
 export type RouteNextHopResolution =
@@ -117,7 +117,7 @@ export const nodePresets: Record<TopologyNodeKind, { name: string; inputs: numbe
 };
 export function createTopologyNode(kind: TopologyNodeKind, position: { x: number; y: number }): TopologyNode {
   const preset = nodePresets[kind];
-  return { id: createUuid(), kind, name: preset.name, position, inputCount: preset.inputs, outputCount: preset.outputs, ports: portsFor(kind, preset.inputs, preset.outputs), parentId: null, assetId: null, clusterId: null, ipAddress: null };
+  return { id: createUuid(), kind, name: preset.name, position, inputCount: preset.inputs, outputCount: preset.outputs, ports: portsFor(kind, preset.inputs, preset.outputs), parentId: null, assetId: null, clusterId: null, ipAddress: null, providerId: null };
 }
 export function initialTopology(): TopologyDraftWrite {
   return { nodes: [createTopologyNode('GATEWAY', { x: 0, y: 100 }), createTopologyNode('HOST', { x: 350, y: 180 }), createTopologyNode('SERVICE', { x: 700, y: 100 })], links: [] };
@@ -150,6 +150,21 @@ export function validNodeShape(node: TopologyNode): boolean {
     case 'FOLDER': return i >= 1 && o >= 1;
     default: return false;
   }
+}
+
+/** A provider is selectable only when it declares the device, port, and full safe lifecycle. */
+export function providerSupportsDevice(
+  provider: NetworkProvider,
+  kind: TopologyNodeKind,
+  layer: TopologyLayer,
+  protocols: readonly TopologyProtocol[],
+): boolean {
+  const requiredOperations = ['PLAN', 'VALIDATE', 'APPLY', 'VERIFY', 'COMPENSATE'];
+  return provider.capabilityDetails?.some(capability =>
+    capability.deviceKinds.includes(kind)
+      && capability.layers.includes(layer)
+      && protocols.every(protocol => capability.protocols.includes(protocol))
+      && requiredOperations.every(operation => capability.operations.includes(operation))) ?? false;
 }
 export function connectionError(nodes: TopologyNode[], links: TopologyLink[], candidate: TopologyLink): string | null {
   const source = nodes.find(n => n.id === candidate.sourceNodeId), target = nodes.find(n => n.id === candidate.targetNodeId);
@@ -195,7 +210,7 @@ export function draftError(value: unknown): string | null {
   const ids = new Set<string>();
   for (const n of value.nodes) {
     const requiredNodeKeys = ['id', 'kind', 'name', 'position', 'inputCount', 'outputCount', 'ports'];
-    const optionalNodeKeys = ['parentId', 'assetId', 'clusterId', 'ipAddress', 'description'];
+    const optionalNodeKeys = ['parentId', 'assetId', 'clusterId', 'ipAddress', 'description', 'providerId'];
     if (!record(n) || requiredNodeKeys.some(key => !Object.hasOwn(n, key)) || Object.keys(n).some(key => !requiredNodeKeys.includes(key) && !optionalNodeKeys.includes(key)) || typeof n.id !== 'string' || !uuid.test(n.id) || ids.has(n.id)) return '节点 ID 必须为唯一 UUID，且不能包含未定义字段';
     ids.add(n.id);
     if (typeof n.name !== 'string' || !n.name.trim() || [...n.name].length > 100 || !record(n.position) || !keysAre(n.position, ['x', 'y']) || ![n.position.x, n.position.y].every(v => typeof v === 'number' && Number.isFinite(v) && Math.abs(v) <= 10000)) return '节点名称或坐标无效';
@@ -209,6 +224,7 @@ export function draftError(value: unknown): string | null {
     if (n.clusterId != null && n.kind !== 'FOLDER') return '只有文件夹节点可以关联 Kubernetes 集群';
     if (n.ipAddress !== undefined && n.ipAddress !== null && (typeof n.ipAddress !== 'string' || n.kind !== 'ROUTER' || !validIpAddress(n.ipAddress))) return '下一跳 IP 只能设置在 Router 节点上，且必须是有效 IPv4/IPv6 地址';
     if (n.description !== undefined && n.description !== null && (typeof n.description !== 'string' || [...n.description].length > 500)) return '节点用途说明最多 500 个 Unicode 字符';
+    if (n.providerId !== undefined && n.providerId !== null && (typeof n.providerId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(n.providerId))) return '网络 Provider ID 格式无效';
     if (parentId === n.id) return '文件夹不能包含自身';
   }
   const nodesById = new Map((value.nodes as TopologyNode[]).map(n => [n.id, n]));

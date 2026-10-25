@@ -10,7 +10,7 @@ import { api, isMock, isP0Lab } from './lib/api';
 import { createUuid } from './lib/uuid.ts';
 import NetbirdProviderPanel from './NetbirdProviderPanel';
 import NetworkProviderCapabilities from './NetworkProviderCapabilities';
-import { compareTopologyDrafts, connectionError, connectionReviewMessage, createTopologyNode, draftError, nodePresets, resolveRouteNextHop, unmatchedRouteGateways, validNodeShape } from './lib/topology-model';
+import { compareTopologyDrafts, connectionError, connectionReviewMessage, createTopologyNode, draftError, nodePresets, providerSupportsDevice, resolveRouteNextHop, unmatchedRouteGateways, validNodeShape } from './lib/topology-model';
 import { TopologyCanvas } from './topology/TopologyCanvas';
 import { TopologyContextMenu, TopologyContextMenuGroup, TopologyContextMenuHeading, TopologyContextMenuItem } from './topology/TopologyContextMenu';
 import './topology-status.css';
@@ -21,7 +21,7 @@ import './service-network.css';
 import './topology-node-settings.css';
 import './topology-revisions.css';
 import './network-provider-capabilities.css';
-import type { Host, HostNetworkInventory, HostPage, KubernetesClusterList, KubernetesClusterSummary, KubernetesServiceInventorySnapshot, KubernetesServiceProbeSnapshot, KubernetesTopologyNamespaceDetail, KubernetesTopologyNamespaceSnapshot, TopologyDraft, TopologyDraftWrite, TopologyLayer, TopologyLink, TopologyNode, TopologyNodeKind, TopologyProtocol, TopologyRevisionList, TopologyRevisionSummary } from './lib/types';
+import type { Host, HostNetworkInventory, HostPage, KubernetesClusterList, KubernetesClusterSummary, KubernetesServiceInventorySnapshot, KubernetesServiceProbeSnapshot, KubernetesTopologyNamespaceDetail, KubernetesTopologyNamespaceSnapshot, NetworkProvider, TopologyDraft, TopologyDraftWrite, TopologyLayer, TopologyLink, TopologyNode, TopologyNodeKind, TopologyProtocol, TopologyRevisionList, TopologyRevisionSummary } from './lib/types';
 
 type DeviceNode = Node<{
   model: TopologyNode;
@@ -131,12 +131,12 @@ function Device({ data, selected }: NodeProps<DeviceNode>) {
     <div className="device-ports" style={{ height }}>
       {Array.from({ length: node.inputCount }, (_, i) => { const port = node.ports.find(value => value.id === `in-${i + 1}`); return <div className="device-port port-in" key={`in-${i + 1}`} style={{ top: 12 + i * 26 }}><Handle id={`in-${i + 1}`} type="target" position={Position.Left} aria-label={`${node.name} 入口 ${i + 1}`} /><span>{node.kind === 'FOLDER' && i === 0 ? 'Ingress 接入' : `入口 ${i + 1}`} · {port?.layer ?? 'L4'}/{port?.protocols.join(',') ?? 'TCP'}</span></div>; })}
       {Array.from({ length: node.outputCount }, (_, i) => { const port = node.ports.find(value => value.id === `out-${i + 1}`); return <div className="device-port port-out" key={`out-${i + 1}`} style={{ top: 12 + i * 26 }}><span>{node.kind === 'FOLDER' && i === 0 ? '集群服务' : `出口 ${i + 1}`} · {port?.layer ?? 'L4'}/{port?.protocols.join(',') ?? 'TCP'}</span><Handle id={`out-${i + 1}`} type="source" position={Position.Right} aria-label={`${node.name} 出口 ${i + 1}`} /></div>; })}
-    </div>{node.description && <p className="device-description">{node.description}</p>}<div className="device-status">{node.kind === 'FOLDER' ? '双击打开层级视图' : node.assetId ? `资产 ${data.asset?.hostname ?? node.assetId}` : '期望节点 · 未部署'}</div>
+    </div>{node.description && <p className="device-description">{node.description}</p>}<div className="device-status">{node.kind === 'FOLDER' ? '双击打开层级视图' : node.providerId ? `Provider ${node.providerId} · 尚未部署` : node.assetId ? `资产 ${data.asset?.hostname ?? node.assetId}` : '期望节点 · 未部署'}</div>
   </div>;
 }
 const nodeTypes = { device: Device };
 type Menu = { x: number; y: number; point: { x: number; y: number }; nodeId?: string; edgeId?: string };
-type NodeSettings = { nodeId: string; name: string; description: string; layer: TopologyLayer; protocols: TopologyProtocol[] };
+type NodeSettings = { nodeId: string; name: string; description: string; layer: TopologyLayer; protocols: TopologyProtocol[]; providerId: string };
 const protocolOptions: Record<TopologyLayer, TopologyProtocol[]> = {
   L2: ['ETHERNET'], L3: ['IP'], L4: ['TCP', 'UDP', 'SCTP'], L7: ['HTTP', 'HTTPS'],
 };
@@ -172,10 +172,16 @@ function Editor() {
   const [revisionError, setRevisionError] = useState('');
   const [menu, setMenu] = useState<Menu>(); const canvasRef = useRef<HTMLElement>(null);
   const [nodeSettings, setNodeSettings] = useState<NodeSettings>(); const [nodeSettingsError, setNodeSettingsError] = useState('');
+  const [networkProviders, setNetworkProviders] = useState<NetworkProvider[]>([]);
+  const [networkProvidersError, setNetworkProvidersError] = useState('');
   const observedRouterSignatureRef = useRef('');
   const { screenToFlowPosition, fitView } = useReactFlow<DeviceNode>();
   const updateNodeInternals = useUpdateNodeInternals();
   const activeFolderClusterId = nodes.find(node => node.id === folderId)?.data.model.clusterId ?? null;
+  const settingsNode = nodes.find(node => node.id === nodeSettings?.nodeId)?.data.model;
+  const compatibleProviders = settingsNode ? networkProviders.filter(provider =>
+    providerSupportsDevice(provider, settingsNode.kind, nodeSettings?.layer ?? 'L4',
+      nodeSettings?.protocols ?? [])) : [];
   const topologyNamespacesPath = (clusterId = activeFolderClusterId) => clusterId
     ? `/kubernetes/clusters/${encodeURIComponent(clusterId)}/topology/namespaces`
     : '/kubernetes/topology/namespaces';
@@ -312,6 +318,13 @@ function Editor() {
   }
   useEffect(() => { void load(); }, []);
   useEffect(() => {
+    let cancelled = false;
+    void api<NetworkProvider[]>('/network-providers', 'GET', undefined, {}, true)
+      .then(result => { if (!cancelled) { setNetworkProviders(result.data); setNetworkProvidersError(''); } })
+      .catch(reason => { if (!cancelled) setNetworkProvidersError((reason as Error).message); });
+    return () => { cancelled = true; };
+  }, []);
+  useEffect(() => {
     if (isMock) return;
     void loadServiceInventory();
     const timer = window.setInterval(() => {
@@ -377,7 +390,7 @@ function Editor() {
   }
   function openNodeSettings(node: TopologyNode) {
     const firstPort = node.ports[0];
-    setNodeSettings({ nodeId: node.id, name: node.name, description: node.description ?? '', layer: firstPort?.layer ?? 'L4', protocols: [...(firstPort?.protocols ?? ['TCP'])] });
+    setNodeSettings({ nodeId: node.id, name: node.name, description: node.description ?? '', layer: firstPort?.layer ?? 'L4', protocols: [...(firstPort?.protocols ?? ['TCP'])], providerId: node.providerId ?? '' });
     setNodeSettingsError(''); setMenu(undefined);
   }
   function saveNodeSettings(event: FormEvent<HTMLFormElement>) {
@@ -388,13 +401,17 @@ function Editor() {
     }
     const current = nodes.find(node => node.id === nodeSettings.nodeId)?.data.model;
     if (!current) { setNodeSettings(undefined); return; }
+    if (nodeSettings.providerId && !compatibleProviders.some(provider => provider.id === nodeSettings.providerId)) {
+      setNodeSettingsError('所选 Provider 未声明此设备、网络层、协议及完整变更生命周期能力。'); return;
+    }
     const updated = { ...current, name: nodeSettings.name.trim(), description: nodeSettings.description.trim() || null,
+      providerId: nodeSettings.providerId || null,
       ports: current.ports.map(port => ({ ...port, layer: nodeSettings.layer, protocols: [...nodeSettings.protocols] })) };
     const candidateNodes = nodes.map(node => node.id === current.id ? updated : node.data.model);
     const invalid = draftError({ nodes: candidateNodes, links: edges.map(asLink) });
     if (invalid) { setNodeSettingsError(`这些接口设置会使当前拓扑无效：${invalid}`); return; }
     setNodes(existing => existing.map(node => node.id === current.id ? { ...node, data: { ...node.data, model: updated } } : node));
-    setNodeSettings(undefined); setNodeSettingsError(''); setDirty(true); setRouteEvidence(undefined); setMessage(`已更新 ${updated.name} 的节点与接口信息`);
+    setNodeSettings(undefined); setNodeSettingsError(''); setDirty(true); setRouteEvidence(undefined); setMessage(`已更新 ${updated.name} 的节点与接口信息${updated.providerId ? `，绑定 Provider ${updated.providerId}` : ''}`);
   }
   function addNode(kind: TopologyNodeKind) {
     if (nodes.filter(node => !node.data.observedOnly).length >= 100) { setError('最多添加 100 个节点'); return; }
@@ -815,6 +832,14 @@ function Editor() {
         <label className="field"><span>用途说明</span><textarea maxLength={500} rows={3} value={nodeSettings.description} onChange={event => setNodeSettings({ ...nodeSettings, description: event.target.value })} placeholder="填写流量策略、镜像目标或设备能力备注" /></label>
         <label className="field"><span>统一接口网络层</span><select value={nodeSettings.layer} onChange={event => { const layer = event.target.value as TopologyLayer; setNodeSettings({ ...nodeSettings, layer, protocols: [protocolOptions[layer][0]] }); }}>{(['L2', 'L3', 'L4', 'L7'] as TopologyLayer[]).map(layer => <option key={layer} value={layer}>{layer}</option>)}</select></label>
         <fieldset className="topology-protocol-options"><legend>接口协议</legend>{protocolOptions[nodeSettings.layer].map(protocol => <label key={protocol}><input type="checkbox" checked={nodeSettings.protocols.includes(protocol)} onChange={event => setNodeSettings({ ...nodeSettings, protocols: event.target.checked ? [...nodeSettings.protocols, protocol] : nodeSettings.protocols.filter(value => value !== protocol) })} />{protocol}</label>)}</fieldset>
+        {settingsNode && ['ROUTER', 'FIREWALL', 'SWITCH', 'PACKET_TAP'].includes(settingsNode.kind) && <>
+          <label className="field"><span>设备 Provider</span><select value={nodeSettings.providerId} disabled={!compatibleProviders.length && !nodeSettings.providerId} onChange={event => setNodeSettings({ ...nodeSettings, providerId: event.target.value })}>
+            <option value="">仅保存期望节点</option>
+            {nodeSettings.providerId && !compatibleProviders.some(provider => provider.id === nodeSettings.providerId) && <option value={nodeSettings.providerId} disabled>{nodeSettings.providerId}（未加载或能力不匹配）</option>}
+            {compatibleProviders.map(provider => <option key={provider.id} value={provider.id}>{provider.name ?? provider.id} ({provider.id})</option>)}
+          </select></label>
+          <small>{networkProvidersError ? `无法读取 Core Provider 能力：${networkProvidersError}` : compatibleProviders.length ? 'Provider 必须声明此设备、接口层/协议及完整变更和补偿阶段。绑定只记录执行目标，不代表网络规则已经应用。' : '当前没有已加载 Provider 声明支持此设备及接口能力；节点仍只作为期望配置保存。'}</small>
+        </>}
         {nodeSettingsError && <div className="alert error" role="alert">{nodeSettingsError}</div>}
         <div className="form-actions"><button type="button" className="secondary" onClick={() => setNodeSettings(undefined)}>取消</button><button className="primary">保存节点设置</button></div>
       </form>

@@ -102,6 +102,7 @@ class TopologyResourceTest {
     Map<String, Object> router = node(routerNodeId, "ROUTER", "Observed Router 10.0.0.1",
         740, 100, null, "10.0.0.1", 1, 1,
         List.of(port("in-1", "INPUT"), port("out-1", "OUTPUT")));
+    router.put("providerId", "p6-linux-network");
     Map<String, Object> link = Map.of("id", linkId.toString(),
         "sourceNodeId", gatewayNodeId.toString(), "sourcePort", "out-1",
         "targetNodeId", hostNodeId.toString(), "targetPort", "in-1",
@@ -127,6 +128,7 @@ class TopologyResourceTest {
     assertEquals(applicationHostId.toString(), findNode(reloaded, hostNodeId)
         .path("assetId").asText());
     assertEquals("10.0.0.1", findNode(reloaded, routerNodeId).path("ipAddress").asText());
+    assertEquals("p6-linux-network", findNode(reloaded, routerNodeId).path("providerId").asText());
     assertEquals("PENDING", reloaded.path("links").get(0).path("state").asText());
     assertEquals(linkId.toString(), reloaded.path("links").get(0).path("id").asText());
     JsonNode revisions = given().cookie("nanpanel_session", sessionCookie)

@@ -55,6 +55,12 @@ try {
   }
   await expect(device('虚拟防火墙').locator('.device-ports')).toContainText('L3/IP');
   await expect(device('Packet Tap').locator('.device-ports')).toContainText('L2/ETHERNET');
+  await device('虚拟防火墙').click({ button: 'right' });
+  await page.getByRole('menuitem', { name: '编辑节点信息', exact: true }).click();
+  const nodeSettings = page.getByRole('dialog', { name: '节点与接口信息' });
+  await expect(nodeSettings.getByLabel('设备 Provider')).toBeDisabled();
+  await expect(nodeSettings.getByText('当前没有已加载 Provider 声明支持此设备及接口能力；节点仍只作为期望配置保存。')).toBeVisible();
+  await nodeSettings.getByRole('button', { name: '取消' }).click();
   // Fit nodes before targeting a node inserted off-screen.
   await page.getByRole('button', { name: 'fit view' }).click();
   const switchNode = device('虚拟交换机');
@@ -218,5 +224,5 @@ try {
   await expect(device('K3s Service')).toBeVisible();
   await expect(page.locator('.react-flow__edge')).toHaveCount(1);
   if (errors.length) throw new Error(errors.join('\n'));
-  console.log('PASS: base topology editing, immutable revision compare and unsaved replay, searchable Gateway host asset binding, automatic route next-hop matching, Host/Gateway asset save and reload with Router reconstruction, nested folder editing and persistence, Namespace/Ingress/Service/Pod/container drill-down, mobile menu; no page errors');
+  console.log('PASS: base topology editing, immutable revision compare and unsaved replay, Provider capability-gated node settings, searchable Gateway host asset binding, automatic route next-hop matching, Host/Gateway asset save and reload with Router reconstruction, nested folder editing and persistence, Namespace/Ingress/Service/Pod/container drill-down, mobile menu; no page errors');
 } finally { await browser.close(); }

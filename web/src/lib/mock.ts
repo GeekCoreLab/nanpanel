@@ -89,7 +89,7 @@ export async function mockRequest(path: string, options: RequestInit, authentica
  if (!current || current.status !== 'ACTIVE' || (!authenticatedBusiness && !sessions.some(s => s.current))) return fail(401, 'UNAUTHENTICATED', '请登录以继续');
  if (current.mustChangePassword && !p.startsWith('/auth/')) return fail(403, 'PASSWORD_CHANGE_REQUIRED', '请先修改初始密码');
  if (method !== 'GET' && p.startsWith('/admin/') && Date.now() - new Date(sessions[0]?.authenticatedAt ?? now()).getTime() > 300000) return fail(403, 'REAUTHENTICATION_REQUIRED', '需要重新验证密码；验证后请重新检查并提交');
- if (p === '/network-providers' && method === 'GET') return ok([{ id: 'netbird-groups', name: 'NetBird 受管 peer 组', version: '0.1.0', apiVersion: 'panel.io/plugins/v1', capabilities: ['overlay.group-membership.reconcile'], capabilityDetails: [{ id: 'overlay.group-membership.reconcile', operations: ['OBSERVE', 'PLAN', 'VALIDATE', 'APPLY', 'VERIFY', 'COMPENSATE'], layers: [], protocols: [] }] }]);
+ if (p === '/network-providers' && method === 'GET') return ok([{ id: 'netbird-groups', name: 'NetBird 受管 peer 组', version: '0.1.0', apiVersion: 'panel.io/plugins/v1', capabilities: ['overlay.group-membership.reconcile'], capabilityDetails: [{ id: 'overlay.group-membership.reconcile', operations: ['OBSERVE', 'PLAN', 'VALIDATE', 'APPLY', 'VERIFY', 'COMPENSATE'], layers: [], protocols: [], deviceKinds: [] }] }]);
  if (p === '/network-providers/netbird-groups/observations' && method === 'POST') {
   if (!String(b.resourceKey ?? '').startsWith('nanpanel-managed-')) return fail(400, 'VALIDATION_FAILED', '组名不在 Mock 受管前缀内');
   const group = netbirdGroup?.groupName === b.resourceKey ? netbirdGroup : undefined;

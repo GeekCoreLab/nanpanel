@@ -53,6 +53,36 @@ class NetworkProviderApiTest {
         .body("[0].capabilities", hasItem("p3.fixture.tcp"))
         .body("[0].capabilityDetails[0].operations", hasItems("PLAN", "VALIDATE", "APPLY"));
     given().cookie("nanpanel_session", session.cookie())
+        .get("/api/v1/network-providers")
+        .then().statusCode(200).body("[0].capabilityDetails[0].deviceKinds", hasItem("ROUTER"));
+
+    String topologyEtag = given().cookie("nanpanel_session", session.cookie())
+        .get("/api/v1/topology/draft").then().statusCode(200).extract().header("ETag");
+    Map<String, Object> router = Map.of("id", UUID.randomUUID().toString(), "kind", "ROUTER",
+        "name", "Provider-bound router", "position", Map.of("x", 0, "y", 0),
+        "inputCount", 1, "outputCount", 1,
+        "ports", List.of(Map.of("id", "in-1", "direction", "INPUT", "layer", "L4",
+                "protocols", List.of("TCP")),
+            Map.of("id", "out-1", "direction", "OUTPUT", "layer", "L4",
+                "protocols", List.of("TCP"))),
+        "providerId", "p3-fixture-provider");
+    var boundTopology = given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.csrf()).header("If-Match", topologyEtag)
+        .contentType("application/json").body(Map.of("nodes", List.of(router), "links", List.of()))
+        .put("/api/v1/topology/draft").then().statusCode(200).extract();
+    assertEquals("p3-fixture-provider", boundTopology.path("nodes[0].providerId"));
+    String boundEtag = boundTopology.header("ETag");
+    Map<String, Object> unsupportedRouter = new java.util.LinkedHashMap<>(router);
+    unsupportedRouter.put("ports", List.of(
+        Map.of("id", "in-1", "direction", "INPUT", "layer", "L4", "protocols", List.of("UDP")),
+        Map.of("id", "out-1", "direction", "OUTPUT", "layer", "L4", "protocols", List.of("UDP"))));
+    given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.csrf()).header("If-Match", boundEtag)
+        .contentType("application/json")
+        .body(Map.of("nodes", List.of(unsupportedRouter), "links", List.of()))
+        .put("/api/v1/topology/draft").then().statusCode(422)
+        .body("code", equalTo("INVALID_TOPOLOGY"));
+    given().cookie("nanpanel_session", session.cookie())
         .get("/api/v1/plugins")
         .then().statusCode(200).body("[0].id", equalTo("p3-api-fixture"))
         .body("[0].state", equalTo("STARTED"))

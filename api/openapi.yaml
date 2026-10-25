@@ -5257,6 +5257,11 @@ components:
           type: [string, 'null']
           maxLength: 500
           description: Operator supplied node note; it does not declare provider capabilities.
+        providerId:
+          type: [string, 'null']
+          maxLength: 80
+          pattern: ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$
+          description: Optional selected NetworkProvider ID; assignment records intent and does not deploy the node.
     TopologyLink:
       type: object
       additionalProperties: false
@@ -5509,7 +5514,7 @@ components:
     NetworkProviderCapability:
       type: object
       additionalProperties: false
-      required: [id, operations, layers, protocols]
+      required: [id, operations, layers, protocols, deviceKinds]
       properties:
         id:
           type: string
@@ -5527,6 +5532,11 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/TopologyProtocol'
+        deviceKinds:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/TopologyNodeKind'
     ConfigTranslatorDescriptor:
       type: object
       additionalProperties: false

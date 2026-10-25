@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compareTopologyDrafts, connectionError, createTopologyNode, draftError, initialTopology, resolveRouteNextHop, unmatchedRouteGateways, validNodeShape } from '../src/lib/topology-model.ts';
+import { compareTopologyDrafts, connectionError, createTopologyNode, draftError, initialTopology, providerSupportsDevice, resolveRouteNextHop, unmatchedRouteGateways, validNodeShape } from '../src/lib/topology-model.ts';
 import { mockRequest, DEMO_PASSWORD } from '../src/lib/mock.ts';
 const node = kind => createTopologyNode(kind, { x: 0, y: 0 });
 const link = (source, target, out = 'out-1', input = 'in-1', layer = 'L4', protocol = 'TCP') => ({ id: crypto.randomUUID(), sourceNodeId: source.id, sourcePort: out, targetNodeId: target.id, targetPort: input, layer, protocol, status: 'UNVERIFIED' });
@@ -38,11 +38,24 @@ test('direction, explicit fan-in/fan-out, port occupancy, references and cycles'
   assert.equal(validNodeShape({ ...mismatchedTap, ports: mismatchedPorts }), false);
   assert.equal(validNodeShape({ ...node('FORWARDER'), inputCount: 17 }), false);
   assert.ok(draftError({ nodes: [gateway, gateway], links: [] }));
+  assert.equal(draftError({ nodes: [{ ...node('ROUTER'), providerId: 'linux.bridge' }], links: [] }), null);
+  assert.ok(draftError({ nodes: [{ ...node('ROUTER'), providerId: '../host' }], links: [] }));
   assert.ok(draftError({ nodes: [{ ...gateway, position: { x: Infinity, y: 0 } }], links: [] }));
   assert.ok(draftError({ nodes, links: [{ ...link(gateway, merge), status: 'HEALTHY' }] }));
   assert.ok(draftError({ nodes, links: [link(gateway, merge, 'out-1', 'in-1', 'L4', 'HTTP')] }));
   assert.ok(draftError({ nodes, links: [link(gateway, node('HOST'))] }));
   assert.ok(draftError({ ...initialTopology(), deployed: true }));
+});
+
+test('Provider device binding requires declared device, port, and lifecycle capabilities', () => {
+  const provider = { id: 'linux-network', capabilities: [], capabilityDetails: [{
+    id: 'linux.router', deviceKinds: ['ROUTER'], layers: ['L4'], protocols: ['TCP'],
+    operations: ['PLAN', 'VALIDATE', 'APPLY', 'VERIFY', 'COMPENSATE'],
+  }] };
+  assert.equal(providerSupportsDevice(provider, 'ROUTER', 'L4', ['TCP']), true);
+  assert.equal(providerSupportsDevice(provider, 'ROUTER', 'L4', ['TCP', 'UDP']), false);
+  assert.equal(providerSupportsDevice(provider, 'SWITCH', 'L4', ['TCP']), false);
+  assert.equal(providerSupportsDevice({ ...provider, capabilityDetails: [{ ...provider.capabilityDetails[0], operations: ['PLAN', 'VALIDATE'] }] }, 'ROUTER', 'L4', ['TCP']), false);
 });
 
 test('folder hierarchy, host asset binding and same-scope connections are validated', () => {
@@ -157,6 +170,7 @@ test('Mock Provider inventory reports explicit capability details', async () => 
   assert.equal(response.status, 200);
   assert.equal(provider.capabilityDetails[0].id, 'overlay.group-membership.reconcile');
   assert.ok(provider.capabilityDetails[0].operations.includes('COMPENSATE'));
+  assert.deepEqual(provider.capabilityDetails[0].deviceKinds, []);
   assert.deepEqual(provider.capabilityDetails[0].layers, []);
   await mockRequest('/auth/logout', { method: 'POST', headers: { 'X-CSRF-Token': login.csrfToken } });
 });

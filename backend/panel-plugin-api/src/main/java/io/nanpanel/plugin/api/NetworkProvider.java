@@ -31,11 +31,17 @@ public interface NetworkProvider extends ExtensionPoint {
     record ChangePlan(UUID id, long generation, String idempotencyKey, String configuration) {}
     record ValidationResult(boolean successful, String detail) {}
     record ProviderDescriptor(String id, String name, String version, String apiVersion) {}
-    record Capability(String id, Set<String> operations, Set<String> layers, Set<String> protocols) {
+    record Capability(String id, Set<String> operations, Set<String> layers, Set<String> protocols,
+                      Set<String> deviceKinds) {
+        public Capability(String id, Set<String> operations, Set<String> layers, Set<String> protocols) {
+            this(id, operations, layers, protocols, Set.of());
+        }
+
         public Capability {
             operations = Set.copyOf(operations);
             layers = Set.copyOf(layers);
             protocols = Set.copyOf(protocols);
+            deviceKinds = Set.copyOf(deviceKinds);
         }
     }
 }

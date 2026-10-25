@@ -24,7 +24,7 @@ export default function NetworkProviderCapabilities() {
 
   return <section className="network-provider-capabilities card" aria-labelledby="network-provider-capabilities-title">
     <div className="card-title">
-      <div><h2 id="network-provider-capabilities-title">已加载 Provider 能力</h2><p>端口类型只有与此处声明的能力匹配后，才可作为 Provider 支持的依据</p></div>
+      <div><h2 id="network-provider-capabilities-title">已加载 Provider 能力</h2><p>设备类型、网络层、协议与完整变更生命周期都必须匹配，才能绑定到拓扑节点</p></div>
       <button type="button" className="secondary" disabled={busy} onClick={() => void load()}>{busy ? '读取中…' : '重新读取能力'}</button>
     </div>
     {isMock && <div className="alert">Mock 示例能力；不会应用到真实设备。</div>}
@@ -38,6 +38,7 @@ export default function NetworkProviderCapabilities() {
           {provider.capabilityDetails.map(capability => <li key={capability.id}>
             <strong>{capability.id}</strong>
             <span>操作：{capability.operations.length ? capability.operations.join(' · ') : '未声明'}</span>
+            <span>设备：{capability.deviceKinds.length ? capability.deviceKinds.join(' · ') : '未声明'}</span>
             <span>网络层：{capability.layers.length ? capability.layers.join(' / ') : '未声明'}</span>
             <span>协议：{capability.protocols.length ? capability.protocols.join(' / ') : '未声明'}</span>
           </li>)}

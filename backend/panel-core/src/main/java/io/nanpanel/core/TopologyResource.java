@@ -17,6 +17,7 @@ import io.nanpanel.domain.NetworkGraph.Node;
 import io.nanpanel.domain.NetworkGraph.Port;
 import io.nanpanel.domain.NetworkGraph.Protocol;
 import io.nanpanel.network.NetworkGraphValidator;
+import io.nanpanel.plugin.api.NetworkProvider;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DefaultValue;
@@ -52,6 +53,7 @@ public class TopologyResource {
 
   @Inject AuthStore store;
   @Inject ObjectMapper mapper;
+  @Inject NetworkProviderRegistry providers;
   @Context ContainerRequestContext request;
 
   public record Position(double x, double y) {}
@@ -59,7 +61,7 @@ public class TopologyResource {
   public record NodeView(String id, String kind, String name, Position position,
                          int inputCount, int outputCount, List<PortView> ports,
                          String parentId, String assetId, String clusterId, String ipAddress,
-                         String description) {}
+                         String description, String providerId) {}
   public record LinkView(String id, String sourceNodeId, String sourcePort, String targetNodeId,
                          String targetPort, String layer, String protocol, String status,
                          String state) {}
@@ -107,6 +109,10 @@ public class TopologyResource {
     String invalid = NetworkGraphValidator.error(graph);
     if (invalid != null) {
       throw fail(422, "INVALID_TOPOLOGY", invalid);
+    }
+    String providerInvalid = providerError(payload);
+    if (providerInvalid != null) {
+      throw fail(422, "INVALID_TOPOLOGY", providerInvalid);
     }
     String snapshot = encode(payload);
     UUID revisionId = UUID.randomUUID();
@@ -227,7 +233,9 @@ public class TopologyResource {
           || !node.path("inputCount").isIntegralNumber()
           || !node.path("outputCount").isIntegralNumber()
           || node.has("ipAddress") && !node.get("ipAddress").isNull()
-              && !node.get("ipAddress").isTextual()) {
+              && !node.get("ipAddress").isTextual()
+          || node.has("providerId") && !node.get("providerId").isNull()
+              && !node.get("providerId").isTextual()) {
         throw fail(422, "INVALID_TOPOLOGY", "节点坐标或端口字段无效");
       }
       for (JsonNode port : node.path("ports")) {
@@ -283,7 +291,8 @@ public class TopologyResource {
           node.position(), node.inputCount(), node.outputCount(), ports, node.parentId(),
           node.assetId(), node.clusterId(), node.ipAddress() == null || node.ipAddress().isBlank()
               ? null : node.ipAddress().strip(), node.description() == null || node.description().isBlank()
-                  ? null : node.description().strip());
+                  ? null : node.description().strip(), node.providerId() == null
+                      || node.providerId().isBlank() ? null : node.providerId().strip());
     }).toList();
     List<LinkInput> links = input.links().stream().map(link -> {
       if (link == null) {
@@ -310,6 +319,9 @@ public class TopologyResource {
         } catch (RuntimeException failure) {
           return "父文件夹 ID 无效";
         }
+      }
+      if (node.providerId() != null && !node.providerId().matches("[A-Za-z0-9][A-Za-z0-9._-]{0,79}")) {
+        return "网络 Provider ID 格式无效";
       }
       if (node.assetId() != null) {
         try {
@@ -393,7 +405,7 @@ public class TopologyResource {
           throw fail(422, "INVALID_TOPOLOGY", "端口数组与入口、出口数量不一致");
         }
         nodes.add(new Node(id, node.kind(), node.name(),
-            new NetworkGraph.Position(node.position().x(), node.position().y()), null, ports));
+            new NetworkGraph.Position(node.position().x(), node.position().y()), node.providerId(), ports));
       }
       List<Link> links = value.links().stream().map(link -> new Link(uuid(link.id()),
           uuid(link.sourceNodeId()), link.sourcePort(), uuid(link.targetNodeId()), link.targetPort(),
@@ -410,6 +422,26 @@ public class TopologyResource {
     } catch (JsonProcessingException failure) {
       throw new IllegalStateException("Validated topology could not be serialized", failure);
     }
+  }
+
+  private String providerError(DraftWrite value) {
+    for (NodeView node : value.nodes()) {
+      if (node.providerId() == null) continue;
+      NetworkProvider provider = providers.provider(node.providerId()).orElse(null);
+      if (provider == null) continue;
+      boolean supported = provider.capabilityDescriptors().stream().anyMatch(capability ->
+          capability.deviceKinds().contains(node.kind())
+              && capability.layers().containsAll(node.ports().stream().map(PortView::layer).toList())
+              && capability.protocols().containsAll(node.ports().stream()
+                  .flatMap(port -> port.protocols().stream()).toList())
+              && capability.operations().containsAll(Set.of(
+                  "PLAN", "VALIDATE", "APPLY", "VERIFY", "COMPENSATE")));
+      if (!supported) {
+        return "Provider " + node.providerId()
+            + " 未声明此设备、全部接口层/协议及完整变更生命周期能力";
+      }
+    }
+    return null;
   }
 
   private DraftView view(Map<String, Object> row) {
@@ -457,7 +489,8 @@ public class TopologyResource {
 
   private boolean objectWithNodeKeys(JsonNode value) {
     Set<String> allowed = Set.of("id", "kind", "name", "position", "inputCount",
-        "outputCount", "ports", "parentId", "assetId", "clusterId", "ipAddress");
+        "outputCount", "ports", "parentId", "assetId", "clusterId", "ipAddress",
+        "description", "providerId");
     Set<String> required = Set.of("id", "kind", "name", "position", "inputCount",
         "outputCount", "ports");
     if (value == null || !value.isObject() || value.size() < required.size()
