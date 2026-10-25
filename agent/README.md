@@ -2,7 +2,7 @@
 
 `Cargo.toml` 建立了独立 workspace，包含 `daemon`、`relay`、`runtime-drivers`、`privileged-helper`。Agent 使用 Rust gRPC 双向流、mTLS 客户端证书、周期主机清单和 systemd 观测；Core 通过一次性接入码签发客户端证书，Gateway 校验证书并将心跳转发至 Core。Linux x86_64 静态 Agent 和 Helper 随 Core 镜像发布，安装器在证书指纹校验后部署普通用户 Agent 与 root Helper。两个 systemd unit 直接使用宿主机环境，不配置 systemd 文件系统、临时目录、内核或 syscall 沙箱；Agent 仍是普通用户，只有 Helper 以 root 运行。
 
-Helper 使用 `SO_PEERCRED` 校验 Agent UID，只接收固定类型操作，不接受任意 Shell。支持 systemd unit 重启和有界 journal、软件包安装、受保护文件原子写入、主机文件浏览/读写/删除、容器管理、临时防火墙规则、隔离拓扑 Bridge/Packet Tap Provider 和 Agent 更新。操作目标使用结构化参数与固定命令；主机文件路径拒绝 `.`、`..` 和符号链接，限制文件类型、读写大小和目录项数量；容器使用只读根文件系统、资源上限、loopback 端口与 `no-new-privileges`；防火墙规则按接口、协议、端口校验，先启动 systemd 定时回滚，再由只获得 `CAP_NET_ADMIN` 的瞬时 worker 执行和验证。缺少可信 nft 或 systemd-run 时不报告该能力。若缺少 root-owned 且不可组/其他用户写入的 `ip` 或 `tc` 命令，则不报告 `network.topology.reconcile`。该能力只在 per-topology netns 中创建 Linux bridge、veth 与 `tc mirred` 镜像，不应用宿主路由。`container-runtime` 可选择固定的 Docker 或 Podman CLI。安装器和维护命令会删除旧版逐项操作名单及模式文件。
+Helper 使用 `SO_PEERCRED` 校验 Agent UID，只接收固定类型操作，不接受任意 Shell。支持 systemd unit 重启和有界 journal、软件包安装、受保护文件原子写入、主机文件浏览/读写/删除、容器管理、临时防火墙规则、隔离拓扑 Bridge/Firewall/Packet Tap Provider 和 Agent 更新。操作目标使用结构化参数与固定命令；主机文件路径拒绝 `.`、`..` 和符号链接，限制文件类型、读写大小和目录项数量；容器使用只读根文件系统、资源上限、loopback 端口与 `no-new-privileges`；防火墙规则按接口、协议、端口校验，先启动 systemd 定时回滚，再由只获得 `CAP_NET_ADMIN` 的瞬时 worker 执行和验证。缺少可信 nft 或 systemd-run 时不报告该能力。若缺少 root-owned 且不可组/其他用户写入的 `ip`、`tc` 或 `nft` 命令，则不报告 `network.topology.reconcile`。该能力只在 per-topology netns 中创建 Linux bridge/veth、将受限 Firewall 策略编译到 bridge-family nftables、并配置 `tc mirred` 镜像；不应用宿主路由。`container-runtime` 可选择固定的 Docker 或 Podman CLI。安装器和维护命令会删除旧版逐项操作名单及模式文件。
 
 ### 普通主机蓝绿发布（P5）
 

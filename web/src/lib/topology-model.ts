@@ -88,8 +88,8 @@ export function unmatchedRouteGateways(
 
 const defaultPort = (id: string, direction: TopologyPort['direction'], layer: TopologyPort['layer'] = 'L4', protocols: TopologyPort['protocols'] = ['TCP', 'UDP']): TopologyPort => ({ id, direction, layer, protocols });
 const portsFor = (kind: TopologyNodeKind, inputs: number, outputs: number): TopologyPort[] => {
-  const layer = kind === 'SWITCH' || kind === 'PACKET_TAP' ? 'L2' : kind === 'FIREWALL' ? 'L3' : 'L4';
-  const protocols: TopologyPort['protocols'] = kind === 'SWITCH' || kind === 'PACKET_TAP' ? ['ETHERNET'] : kind === 'FIREWALL' ? ['IP'] : ['TCP', 'UDP'];
+  const layer = kind === 'SWITCH' || kind === 'PACKET_TAP' || kind === 'FIREWALL' ? 'L2' : 'L4';
+  const protocols: TopologyPort['protocols'] = kind === 'SWITCH' || kind === 'PACKET_TAP' || kind === 'FIREWALL' ? ['ETHERNET'] : ['TCP', 'UDP'];
   return [
     ...Array.from({ length: inputs }, (_, index) => defaultPort(`in-${index + 1}`, 'INPUT', layer, protocols)),
     ...Array.from({ length: outputs }, (_, index) => defaultPort(`out-${index + 1}`, 'OUTPUT', layer, protocols)),
@@ -103,7 +103,7 @@ export const nodePresets: Record<TopologyNodeKind, { name: string; inputs: numbe
   GATEWAY: { name: '公网 Gateway', inputs: 0, outputs: 1, description: '公网流量源' },
   HOST: { name: 'NAT Host', inputs: 1, outputs: 1, description: '受管主机' },
   ROUTER: { name: '网络路由器', inputs: 1, outputs: 1, description: '按 IP 地址匹配 Agent 下一跳' },
-  FIREWALL: { name: '虚拟防火墙', inputs: 1, outputs: 1, description: 'Provider 配置生效前需验证规则与管理通道保护' },
+  FIREWALL: { name: '虚拟防火墙', inputs: 1, outputs: 1, description: '在隔离 Linux bridge 上按端口、协议与目标端口过滤帧' },
   PACKET_TAP: { name: 'Packet Tap', inputs: 1, outputs: 2, description: '将入站数据包复制到多个观测出口' },
   SERVICE: { name: 'K3s Service', inputs: 1, outputs: 0, description: '服务终点' },
   SWITCH: { name: '虚拟交换机', inputs: 4, outputs: 4, description: '多端口逻辑互联' },

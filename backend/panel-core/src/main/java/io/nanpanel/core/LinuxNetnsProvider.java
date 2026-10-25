@@ -14,6 +14,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -23,7 +24,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 
-/** Linux bridge and Packet Tap Provider isolated in a dedicated netns. */
+/** Linux bridge, Firewall, and Packet Tap Provider isolated in a dedicated netns. */
 @RequestScoped
 public class LinuxNetnsProvider implements NetworkProvider {
   public static final String ID = "linux-netns";
@@ -39,7 +40,10 @@ public class LinuxNetnsProvider implements NetworkProvider {
   @Context ContainerRequestContext request;
   @Context io.vertx.core.http.HttpServerRequest http;
 
-  private record HelperNode(String id, String kind) {}
+  private record HelperFirewallRule(String inputPort, String outputPort, String protocol,
+                                    int destinationPort, String action) {}
+  private record HelperFirewallPolicy(String defaultAction, List<HelperFirewallRule> rules) {}
+  private record HelperNode(String id, String kind, HelperFirewallPolicy firewallPolicy) {}
   private record HelperLink(String id, String sourceNodeId, String sourcePort,
                             String targetNodeId, String targetPort, String layer,
                             String protocol) {}
@@ -65,14 +69,14 @@ public class LinuxNetnsProvider implements NetworkProvider {
 
   @Override
   public ProviderDescriptor descriptor() {
-    return new ProviderDescriptor(ID, "Linux Bridge and Packet Tap (isolated netns)", "0.2.0",
+    return new ProviderDescriptor(ID, "Linux Bridge, Firewall and Packet Tap (isolated netns)", "0.3.0",
         "panel.io/plugins/v1");
   }
 
   @Override
   public Set<Capability> capabilityDescriptors() {
     return Set.of(new Capability("linux.bridge", OPERATIONS, Set.of("L2"),
-        Set.of("ETHERNET"), Set.of("SWITCH", "PACKET_TAP")));
+        Set.of("ETHERNET"), Set.of("SWITCH", "PACKET_TAP", "FIREWALL")));
   }
 
   @Override
@@ -230,21 +234,33 @@ public class LinuxNetnsProvider implements NetworkProvider {
         throw new IllegalArgumentException("Saved topology revision is invalid");
       }
       Set<String> selectedNodeIds = new HashSet<>();
+      Map<String, String> selectedNodeKinds = new HashMap<>();
       List<HelperNode> helperNodes = new ArrayList<>();
       for (JsonNode node : nodes) {
         if (!ID.equals(node.path("providerId").asText())) continue;
         String kind = node.path("kind").asText();
-        if (!Set.of("SWITCH", "PACKET_TAP").contains(kind)
+        if (!Set.of("SWITCH", "PACKET_TAP", "FIREWALL").contains(kind)
             || !node.path("id").isTextual()
             || node.hasNonNull("parentId")) {
           throw new IllegalArgumentException(
-              "Linux netns Provider accepts only root SWITCH and PACKET_TAP devices");
+              "Linux netns Provider accepts only root SWITCH, PACKET_TAP, and FIREWALL devices");
         }
         UUID id = UUID.fromString(node.path("id").asText());
         if (!selectedNodeIds.add(id.toString())) {
           throw new IllegalArgumentException("Provider device IDs must be unique");
         }
-        helperNodes.add(new HelperNode(id.toString(), kind));
+        JsonNode policyNode = node.get("firewallPolicy");
+        HelperFirewallPolicy policy = null;
+        if ("FIREWALL".equals(kind)) {
+          if (policyNode == null || policyNode.isNull()) {
+            throw new IllegalArgumentException("FIREWALL requires a typed policy");
+          }
+          policy = mapper.treeToValue(policyNode, HelperFirewallPolicy.class);
+        } else if (policyNode != null && !policyNode.isNull()) {
+          throw new IllegalArgumentException("Only FIREWALL can include a firewall policy");
+        }
+        selectedNodeKinds.put(id.toString(), kind);
+        helperNodes.add(new HelperNode(id.toString(), kind, policy));
       }
       if (helperNodes.isEmpty() || helperNodes.size() > 16 || links.size() > 64) {
         throw new IllegalArgumentException("Linux netns plan needs 1 to 16 devices and at most 64 wires");
@@ -259,9 +275,13 @@ public class LinuxNetnsProvider implements NetworkProvider {
           throw new IllegalArgumentException("A Provider wire cannot end at an unmanaged device");
         }
         if (!sourceSelected) continue;
-        if (!"L2".equals(link.path("layer").asText())
+        String sourceKind = selectedNodeKinds.get(source);
+        String targetKind = selectedNodeKinds.get(target);
+        if (!Set.of("SWITCH", "PACKET_TAP", "FIREWALL").contains(sourceKind)
+            || !Set.of("SWITCH", "PACKET_TAP", "FIREWALL").contains(targetKind)
+            || !"L2".equals(link.path("layer").asText())
             || !"ETHERNET".equals(link.path("protocol").asText())) {
-          throw new IllegalArgumentException("Linux netns wires must use L2 Ethernet ports");
+          throw new IllegalArgumentException("Linux netns wires must join supported L2 Ethernet devices");
         }
         helperLinks.add(new HelperLink(UUID.fromString(link.path("id").asText()).toString(),
             UUID.fromString(source).toString(), link.path("sourcePort").asText(),
@@ -269,12 +289,48 @@ public class LinuxNetnsProvider implements NetworkProvider {
       }
       String packetTapError = packetTapShapeError(helperNodes, helperLinks);
       if (packetTapError != null) throw new IllegalArgumentException(packetTapError);
+      String firewallError = firewallPolicyShapeError(helperNodes, helperLinks);
+      if (firewallError != null) throw new IllegalArgumentException(firewallError);
       return new Configuration(selectedHost, hostGeneration.longValue(), explanation, revision,
           generation, List.copyOf(helperNodes), List.copyOf(helperLinks));
     } catch (Exception failure) {
       if (failure instanceof IllegalArgumentException invalid) throw invalid;
       throw new IllegalArgumentException("Provider plan snapshot is invalid", failure);
     }
+  }
+
+  private String firewallPolicyShapeError(List<HelperNode> nodes, List<HelperLink> links) {
+    for (HelperNode node : nodes) {
+      if (!"FIREWALL".equals(node.kind())) continue;
+      HelperFirewallPolicy policy = node.firewallPolicy();
+      if (policy == null || policy.rules() == null || policy.rules().size() > 64
+          || !("ACCEPT".equals(policy.defaultAction())
+              || "DROP".equals(policy.defaultAction()))) {
+        return "FIREWALL policy must define an ACCEPT/DROP default and up to 64 rules";
+      }
+      Set<String> inputs = new HashSet<>();
+      Set<String> outputs = new HashSet<>();
+      for (HelperLink link : links) {
+        if (node.id().equals(link.targetNodeId())) inputs.add(link.targetPort());
+        if (node.id().equals(link.sourceNodeId())) outputs.add(link.sourcePort());
+      }
+      if (inputs.isEmpty() || outputs.isEmpty()) {
+        return "FIREWALL requires at least one connected input and output";
+      }
+      Set<String> matches = new HashSet<>();
+      for (HelperFirewallRule rule : policy.rules()) {
+        if (rule == null || !inputs.contains(rule.inputPort()) || !outputs.contains(rule.outputPort())
+            || !Set.of("TCP", "UDP", "SCTP").contains(rule.protocol())
+            || rule.destinationPort() < 1 || rule.destinationPort() > 65535
+            || !Set.of("ACCEPT", "DROP").contains(rule.action())) {
+          return "FIREWALL rules must reference connected ports and valid transport matches";
+        }
+        String key = rule.inputPort() + ":" + rule.outputPort() + ":" + rule.protocol()
+            + ":" + rule.destinationPort();
+        if (!matches.add(key)) return "FIREWALL match conditions cannot be duplicated";
+      }
+    }
+    return null;
   }
 
   private String packetTapShapeError(List<HelperNode> nodes, List<HelperLink> links) {

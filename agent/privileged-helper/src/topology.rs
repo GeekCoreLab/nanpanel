@@ -38,6 +38,62 @@ struct TopologyRequest {
 struct TopologyNode {
     id: Uuid,
     kind: String,
+    firewall_policy: Option<FirewallPolicy>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct FirewallPolicy {
+    default_action: FirewallAction,
+    rules: Vec<FirewallRule>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct FirewallRule {
+    input_port: String,
+    output_port: String,
+    protocol: FirewallProtocol,
+    destination_port: u16,
+    action: FirewallAction,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum FirewallAction {
+    Accept,
+    Drop,
+}
+
+impl FirewallAction {
+    fn nft_verdict(self) -> &'static str {
+        match self {
+            Self::Accept => "accept",
+            Self::Drop => "drop",
+        }
+    }
+
+    fn nft_policy(self) -> &'static str {
+        self.nft_verdict()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum FirewallProtocol {
+    Tcp,
+    Udp,
+    Sctp,
+}
+
+impl FirewallProtocol {
+    fn nft_name(self) -> &'static str {
+        match self {
+            Self::Tcp => "tcp",
+            Self::Udp => "udp",
+            Self::Sctp => "sctp",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -59,6 +115,7 @@ struct CompiledTopology {
     bridges: HashMap<Uuid, String>,
     interfaces: HashMap<Uuid, (String, String)>,
     packet_taps: Vec<PacketTap>,
+    firewalls: Vec<Firewall>,
 }
 
 #[derive(Debug)]
@@ -68,11 +125,23 @@ struct PacketTap {
     monitor_interface: String,
 }
 
+#[derive(Debug)]
+struct Firewall {
+    node_id: Uuid,
+    table: String,
+    policy: FirewallPolicy,
+    input_interfaces: HashMap<String, String>,
+    output_interfaces: HashMap<String, String>,
+}
+
 pub(crate) fn available() -> bool {
     ["/usr/sbin/ip", "/usr/bin/ip"]
         .iter()
         .any(|candidate| trusted_binary(Path::new(candidate)))
         && ["/usr/sbin/tc", "/usr/bin/tc"]
+            .iter()
+            .any(|candidate| trusted_binary(Path::new(candidate)))
+        && ["/usr/sbin/nft", "/usr/bin/nft"]
             .iter()
             .any(|candidate| trusted_binary(Path::new(candidate)))
 }
@@ -111,13 +180,17 @@ fn compile(target: &str, request: TopologyRequest) -> Result<CompiledTopology, S
     }
 
     let mut node_ids = HashSet::new();
+    let mut node_kinds = HashMap::new();
     for node in &request.nodes {
-        if !node_ids.insert(node.id) || !matches!(node.kind.as_str(), "SWITCH" | "PACKET_TAP") {
-            return Err(
-                "DENIED: Linux bridge Provider accepts unique SWITCH and PACKET_TAP nodes only"
-                    .to_owned(),
-            );
+        if !node_ids.insert(node.id)
+            || !matches!(node.kind.as_str(), "SWITCH" | "PACKET_TAP" | "FIREWALL")
+        {
+            return Err("DENIED: Linux netns Provider accepts unique SWITCH, PACKET_TAP, and FIREWALL nodes only".to_owned());
         }
+        if (node.kind == "FIREWALL") != node.firewall_policy.is_some() {
+            return Err("DENIED: FIREWALL requires a typed policy, and other device kinds cannot include one".to_owned());
+        }
+        node_kinds.insert(node.id, node.kind.as_str());
     }
 
     let mut link_ids = HashSet::new();
@@ -129,13 +202,13 @@ fn compile(target: &str, request: TopologyRequest) -> Result<CompiledTopology, S
             || !node_ids.contains(&link.target_node_id)
             || !valid_port(&link.source_port, "out-")
             || !valid_port(&link.target_port, "in-")
-            || link.layer != "L2"
-            || link.protocol != "ETHERNET"
+            || !supported_link(link, &node_kinds)
             || !used_ports.insert((link.source_node_id, link.source_port.as_str()))
             || !used_ports.insert((link.target_node_id, link.target_port.as_str()))
         {
             return Err(
-                "DENIED: Linux bridge links must be unique L2 Ethernet switch ports".to_owned(),
+                "DENIED: Linux netns wires must be unique supported L2 Ethernet device ports"
+                    .to_owned(),
             );
         }
     }
@@ -200,6 +273,7 @@ fn compile(target: &str, request: TopologyRequest) -> Result<CompiledTopology, S
             monitor_interface: interface_for_node(monitor, &interfaces, node.id)?,
         });
     }
+    let firewalls = compile_firewalls(&request, &interfaces)?;
     let namespace = format!(
         "nanpanel-{}-{}-{}",
         request.topology_id,
@@ -213,7 +287,93 @@ fn compile(target: &str, request: TopologyRequest) -> Result<CompiledTopology, S
         bridges,
         interfaces,
         packet_taps,
+        firewalls,
     })
+}
+
+fn supported_link(link: &TopologyLink, node_kinds: &HashMap<Uuid, &str>) -> bool {
+    let Some(source_kind) = node_kinds.get(&link.source_node_id) else {
+        return false;
+    };
+    let Some(target_kind) = node_kinds.get(&link.target_node_id) else {
+        return false;
+    };
+    matches!(*source_kind, "SWITCH" | "PACKET_TAP" | "FIREWALL")
+        && matches!(*target_kind, "SWITCH" | "PACKET_TAP" | "FIREWALL")
+        && link.layer == "L2"
+        && link.protocol == "ETHERNET"
+}
+
+fn compile_firewalls(
+    request: &TopologyRequest,
+    interfaces: &HashMap<Uuid, (String, String)>,
+) -> Result<Vec<Firewall>, String> {
+    let mut nodes = request
+        .nodes
+        .iter()
+        .filter(|node| node.kind == "FIREWALL")
+        .collect::<Vec<_>>();
+    nodes.sort_by_key(|node| node.id);
+    nodes
+        .into_iter()
+        .enumerate()
+        .map(|(index, node)| {
+            let policy = node
+                .firewall_policy
+                .as_ref()
+                .ok_or_else(|| "DENIED: FIREWALL requires a policy".to_owned())?;
+            if policy.rules.len() > 64 {
+                return Err("DENIED: FIREWALL policy has too many rules".to_owned());
+            }
+            let mut input_interfaces = HashMap::new();
+            let mut output_interfaces = HashMap::new();
+            for link in request.links.iter().filter(|link| {
+                link.source_node_id == node.id || link.target_node_id == node.id
+            }) {
+                if link.target_node_id == node.id {
+                    input_interfaces.insert(
+                        link.target_port.clone(),
+                        interface_for_node(link, interfaces, node.id)?,
+                    );
+                }
+                if link.source_node_id == node.id {
+                    output_interfaces.insert(
+                        link.source_port.clone(),
+                        interface_for_node(link, interfaces, node.id)?,
+                    );
+                }
+            }
+            if input_interfaces.is_empty() || output_interfaces.is_empty() {
+                return Err("DENIED: FIREWALL requires at least one connected input and output".to_owned());
+            }
+            let mut matches = HashSet::new();
+            for rule in &policy.rules {
+                if rule.destination_port == 0
+                    || !input_interfaces.contains_key(&rule.input_port)
+                    || !output_interfaces.contains_key(&rule.output_port)
+                {
+                    return Err("DENIED: FIREWALL rule must reference connected ports and a valid destination port".to_owned());
+                }
+                let key = format!(
+                    "{}:{}:{}:{}",
+                    rule.input_port,
+                    rule.output_port,
+                    rule.protocol.nft_name(),
+                    rule.destination_port
+                );
+                if !matches.insert(key) {
+                    return Err("DENIED: FIREWALL policy contains duplicate match conditions".to_owned());
+                }
+            }
+            Ok(Firewall {
+                node_id: node.id,
+                table: format!("npf{index:02x}"),
+                policy: policy.clone(),
+                input_interfaces,
+                output_interfaces,
+            })
+        })
+        .collect()
 }
 
 fn interface_for_node(
@@ -260,6 +420,10 @@ fn ip_binary() -> Result<std::path::PathBuf, String> {
 
 fn tc_binary() -> Result<std::path::PathBuf, String> {
     trusted_executable(&["/usr/sbin/tc", "/usr/bin/tc"])
+}
+
+fn nft_binary() -> Result<std::path::PathBuf, String> {
+    trusted_executable(&["/usr/sbin/nft", "/usr/bin/nft"])
 }
 
 async fn namespace_exists(ip: &Path, namespace: &str) -> Result<bool, String> {
@@ -501,6 +665,72 @@ async fn apply_created(topology: &CompiledTopology, ip: &Path) -> Result<String,
             }
         }
     }
+    if !topology.firewalls.is_empty() {
+        let nft = nft_binary()?;
+        for firewall in &topology.firewalls {
+            in_namespace(
+                &nft,
+                &topology.namespace,
+                &[
+                    "add".to_owned(),
+                    "table".to_owned(),
+                    "bridge".to_owned(),
+                    firewall.table.clone(),
+                ],
+            )
+            .await?;
+            let chain = format!(
+                "{{ type filter hook forward priority 0; policy {}; }}",
+                firewall.policy.default_action.nft_policy()
+            );
+            in_namespace(
+                &nft,
+                &topology.namespace,
+                &[
+                    "add".to_owned(),
+                    "chain".to_owned(),
+                    "bridge".to_owned(),
+                    firewall.table.clone(),
+                    "forward".to_owned(),
+                    chain,
+                ],
+            )
+            .await?;
+            for (index, rule) in firewall.policy.rules.iter().enumerate() {
+                let input = firewall
+                    .input_interfaces
+                    .get(&rule.input_port)
+                    .ok_or_else(|| "DENIED: firewall input interface is missing".to_owned())?;
+                let output = firewall
+                    .output_interfaces
+                    .get(&rule.output_port)
+                    .ok_or_else(|| "DENIED: firewall output interface is missing".to_owned())?;
+                let comment = firewall_rule_comment(topology, firewall, index);
+                in_namespace(
+                    &nft,
+                    &topology.namespace,
+                    &[
+                        "add".to_owned(),
+                        "rule".to_owned(),
+                        "bridge".to_owned(),
+                        firewall.table.clone(),
+                        "forward".to_owned(),
+                        "iifname".to_owned(),
+                        input.clone(),
+                        "oifname".to_owned(),
+                        output.clone(),
+                        rule.protocol.nft_name().to_owned(),
+                        "dport".to_owned(),
+                        rule.destination_port.to_string(),
+                        rule.action.nft_verdict().to_owned(),
+                        "comment".to_owned(),
+                        comment,
+                    ],
+                )
+                .await?;
+            }
+        }
+    }
 
     verify(topology).await
 }
@@ -630,6 +860,30 @@ async fn verify(topology: &CompiledTopology) -> Result<String, String> {
             }
         }
     }
+    if !topology.firewalls.is_empty() {
+        let nft = nft_binary()?;
+        for firewall in &topology.firewalls {
+            let output = in_namespace(
+                &nft,
+                &topology.namespace,
+                &[
+                    "-j".to_owned(),
+                    "list".to_owned(),
+                    "chain".to_owned(),
+                    "bridge".to_owned(),
+                    firewall.table.clone(),
+                    "forward".to_owned(),
+                ],
+            )
+            .await?;
+            if !firewall_rules_match(&output, topology, firewall) {
+                return Err(format!(
+                    "FAILED: firewall {} rules or default action are missing or have drifted",
+                    firewall.node_id
+                ));
+            }
+        }
+    }
     let mut link_metrics = Vec::with_capacity(topology.request.links.len());
     for link in &topology.request.links {
         let (source, target) = &topology.interfaces[&link.id];
@@ -664,11 +918,150 @@ async fn verify(topology: &CompiledTopology) -> Result<String, String> {
         "namespace": topology.namespace,
         "switches": topology.request.nodes.iter().filter(|node| node.kind == "SWITCH").count(),
         "packetTaps": topology.packet_taps.len(),
+        "firewalls": topology.firewalls.len(),
         "wires": topology.request.links.len(),
         "linkMetrics": link_metrics,
         "defaultRoutes": 0,
     })
     .to_string())
+}
+
+fn firewall_rule_comment(
+    topology: &CompiledTopology,
+    firewall: &Firewall,
+    rule_index: usize,
+) -> String {
+    format!(
+        "nanpanel:{}:{}:{}:{}:rule:{}",
+        topology.request.topology_id,
+        topology.request.revision_id,
+        topology.request.generation,
+        firewall.node_id,
+        rule_index
+    )
+}
+
+fn firewall_rules_match(output: &str, topology: &CompiledTopology, firewall: &Firewall) -> bool {
+    let Ok(document) = serde_json::from_str::<Value>(output) else {
+        return false;
+    };
+    let Some(entries) = document.pointer("/nftables").and_then(Value::as_array) else {
+        return false;
+    };
+    let chain_exists = entries.iter().any(|entry| {
+        entry.get("chain").is_some_and(|chain| {
+            chain.get("family").and_then(Value::as_str) == Some("bridge")
+                && chain.get("table").and_then(Value::as_str) == Some(firewall.table.as_str())
+                && chain.get("name").and_then(Value::as_str) == Some("forward")
+                && chain.get("hook").and_then(Value::as_str) == Some("forward")
+                && chain.get("policy").and_then(Value::as_str)
+                    == Some(firewall.policy.default_action.nft_policy())
+        })
+    });
+    if !chain_exists {
+        return false;
+    }
+    let rules = entries
+        .iter()
+        .filter_map(|entry| entry.get("rule"))
+        .filter(|rule| {
+            rule.get("family").and_then(Value::as_str) == Some("bridge")
+                && rule.get("table").and_then(Value::as_str) == Some(firewall.table.as_str())
+                && rule.get("chain").and_then(Value::as_str) == Some("forward")
+        })
+        .collect::<Vec<_>>();
+    if rules.len() != firewall.policy.rules.len() {
+        return false;
+    }
+    firewall
+        .policy
+        .rules
+        .iter()
+        .enumerate()
+        .all(|(index, expected)| {
+            let Some(input) = firewall.input_interfaces.get(&expected.input_port) else {
+                return false;
+            };
+            let Some(output) = firewall.output_interfaces.get(&expected.output_port) else {
+                return false;
+            };
+            let comment = firewall_rule_comment(topology, firewall, index);
+            rules.get(index).is_some_and(|rule| {
+                rule.get("comment").and_then(Value::as_str) == Some(comment.as_str())
+                    && firewall_rule_expression_matches(
+                        rule,
+                        input,
+                        output,
+                        expected.protocol,
+                        expected.destination_port,
+                        expected.action,
+                    )
+            })
+        })
+}
+
+fn firewall_rule_expression_matches(
+    rule: &Value,
+    input: &str,
+    output: &str,
+    protocol: FirewallProtocol,
+    destination_port: u16,
+    action: FirewallAction,
+) -> bool {
+    let Some(expressions) = rule.pointer("/expr").and_then(Value::as_array) else {
+        return false;
+    };
+    if expressions.len() != 4 {
+        return false;
+    }
+    let matches = expressions
+        .iter()
+        .filter_map(|expression| expression.get("match"));
+    let mut found_input = false;
+    let mut found_output = false;
+    let mut found_port = false;
+    for matcher in matches {
+        let left = matcher.get("left");
+        let right = matcher.get("right");
+        if left
+            .and_then(|value| value.pointer("/meta/key"))
+            .and_then(Value::as_str)
+            == Some("iifname")
+            && right.and_then(Value::as_str) == Some(input)
+        {
+            found_input = true;
+        }
+        if left
+            .and_then(|value| value.pointer("/meta/key"))
+            .and_then(Value::as_str)
+            == Some("oifname")
+            && right.and_then(Value::as_str) == Some(output)
+        {
+            found_output = true;
+        }
+        if left
+            .and_then(|value| value.pointer("/payload/protocol"))
+            .and_then(Value::as_str)
+            == Some(protocol.nft_name())
+            && left
+                .and_then(|value| value.pointer("/payload/field"))
+                .and_then(Value::as_str)
+                == Some("dport")
+            && right.and_then(Value::as_u64) == Some(u64::from(destination_port))
+        {
+            found_port = true;
+        }
+    }
+    let verdict = match action {
+        FirewallAction::Accept => "accept",
+        FirewallAction::Drop => "drop",
+    };
+    found_input
+        && found_output
+        && found_port
+        && expressions
+            .iter()
+            .any(|expression| expression.get(verdict).is_some_and(Value::is_null))
 }
 
 fn has_packet_mirror(output: &str, monitor_interface: &str) -> bool {
@@ -777,7 +1170,8 @@ async fn namespace_owned(topology: &CompiledTopology, ip: &Path) -> Result<bool,
 #[cfg(test)]
 mod tests {
     use super::{
-        compile, decode, has_packet_mirror, interface_statistics, validate_target_payload,
+        compile, decode, firewall_rules_match, has_packet_mirror, interface_statistics,
+        validate_target_payload,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -940,5 +1334,87 @@ mod tests {
         assert!(has_packet_mirror(filter, "npl01a"));
         assert!(!has_packet_mirror(filter, "npl02a"));
         assert!(!has_packet_mirror("not-json", "npl01a"));
+    }
+
+    #[test]
+    fn compiles_and_verifies_a_bounded_bridge_firewall_policy() -> anyhow::Result<()> {
+        let topology_id = Uuid::new_v4();
+        let source = Uuid::new_v4();
+        let firewall = Uuid::new_v4();
+        let target = Uuid::new_v4();
+        let revision = Uuid::new_v4();
+        let mut payload = json!({
+            "action": "APPLY",
+            "topologyId": topology_id,
+            "revisionId": revision,
+            "generation": 5,
+            "nodes": [
+                {"id": source, "kind": "SWITCH"},
+                {"id": firewall, "kind": "FIREWALL", "firewallPolicy": {
+                    "defaultAction": "DROP",
+                    "rules": [{"inputPort": "in-1", "outputPort": "out-1",
+                        "protocol": "TCP", "destinationPort": 8080, "action": "ACCEPT"}]
+                }},
+                {"id": target, "kind": "SWITCH"}
+            ],
+            "links": [
+                {"id": Uuid::new_v4(), "sourceNodeId": source, "sourcePort": "out-1",
+                 "targetNodeId": firewall, "targetPort": "in-1", "layer": "L2", "protocol": "ETHERNET"},
+                {"id": Uuid::new_v4(), "sourceNodeId": firewall, "sourcePort": "out-1",
+                 "targetNodeId": target, "targetPort": "in-1", "layer": "L2", "protocol": "ETHERNET"}
+            ]
+        });
+        let compiled = compile(
+            &topology_id.to_string(),
+            decode(&payload.to_string()).map_err(anyhow::Error::msg)?,
+        )
+        .map_err(anyhow::Error::msg)?;
+        assert_eq!(compiled.firewalls.len(), 1);
+        let compiled_firewall = compiled
+            .firewalls
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("compiled firewall is missing"))?;
+        assert_eq!(compiled_firewall.table, "npf00");
+        let input_interface = compiled_firewall
+            .input_interfaces
+            .get("in-1")
+            .ok_or_else(|| anyhow::anyhow!("firewall input interface is missing"))?;
+        let output_interface = compiled_firewall
+            .output_interfaces
+            .get("out-1")
+            .ok_or_else(|| anyhow::anyhow!("firewall output interface is missing"))?;
+        let rule = format!(
+            "nanpanel:{}:{}:5:{}:rule:0",
+            topology_id, revision, firewall
+        );
+        let document = json!({"nftables": [
+            {"chain": {"family": "bridge", "table": "npf00", "name": "forward",
+                "hook": "forward", "policy": "drop"}},
+            {"rule": {"family": "bridge", "table": "npf00", "chain": "forward",
+                "comment": rule,
+                "expr": [
+                    {"match": {"left": {"meta": {"key": "iifname"}}, "right": input_interface}},
+                    {"match": {"left": {"meta": {"key": "oifname"}}, "right": output_interface}},
+                    {"match": {"left": {"payload": {"protocol": "tcp", "field": "dport"}}, "right": 8080}},
+                    {"accept": null}
+                ]}}
+        ]});
+        assert!(firewall_rules_match(
+            &document.to_string(),
+            &compiled,
+            compiled_firewall
+        ));
+        let mut drifted = document.clone();
+        drifted["nftables"][0]["chain"]["policy"] = json!("accept");
+        assert!(!firewall_rules_match(
+            &drifted.to_string(),
+            &compiled,
+            compiled_firewall
+        ));
+        payload["nodes"][1]["firewallPolicy"]["rules"][0]["inputPort"] = json!("in-2");
+        assert!(
+            validate_target_payload(&topology_id.to_string(), Some(&payload.to_string())).is_err()
+        );
+        Ok(())
     }
 }

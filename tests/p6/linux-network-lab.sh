@@ -36,6 +36,7 @@ namespace_pids=()
 server_pid=
 
 cleanup() {
+    nft delete table bridge nanpanel_p6 2>/dev/null || true
     if [[ -n $server_pid ]]; then
         kill "$server_pid" 2>/dev/null || true
         wait "$server_pid" 2>/dev/null || true
@@ -159,6 +160,32 @@ if [[ ! $tap_rx =~ ^[0-9]+$ ]] || (( tap_rx < 1 )); then
     exit 1
 fi
 
+# Exercise the bridge-family nftables forward hook used by the Provider's
+# transparent Firewall. Keep this table in the isolated lab namespace.
+nft -f - <<'NFT'
+add table bridge nanpanel_p6
+add chain bridge nanpanel_p6 forward { type filter hook forward priority 0; policy accept; }
+add rule bridge nanpanel_p6 forward iifname "p6sw2r" oifname "p6sw2s" tcp dport 18080 counter drop comment "nanpanel-p6-bridge-firewall-test"
+NFT
+
+nsenter -t "$client_ns_pid" -n python3 - <<'PY'
+import socket
+
+try:
+    socket.create_connection(("198.18.2.2", 18080), timeout=1)
+except (TimeoutError, OSError):
+    pass
+else:
+    raise SystemExit("Bridge-family Firewall rule did not block the routed TCP flow")
+PY
+
+bridge_firewall_packets=$(nft -a list chain bridge nanpanel_p6 forward | awk '/nanpanel-p6-bridge-firewall-test/{for (i=1;i<=NF;i++) if ($i=="packets") {print $(i+1); exit}}')
+if [[ ! $bridge_firewall_packets =~ ^[0-9]+$ ]] || (( bridge_firewall_packets < 1 )); then
+    printf 'Bridge Firewall rule counter did not increase (packets=%s).\n' "$bridge_firewall_packets" >&2
+    exit 1
+fi
+nft delete table bridge nanpanel_p6
+
 nsenter -t "$server_ns_pid" -n nft -f - <<'NFT'
 add table inet nanpanel_p6
 add chain inet nanpanel_p6 input { type filter hook input priority 0; policy accept; }
@@ -182,5 +209,5 @@ if [[ ! $firewall_packets =~ ^[0-9]+$ ]] || (( firewall_packets < 1 )); then
     exit 1
 fi
 
-printf 'Verified bridges=2, router=2 subnets, firewall dropped packets=%s, Packet Tap rx packets=%s, host default routes unchanged\n' \
-    "$firewall_packets" "$tap_rx"
+printf 'Verified bridges=2, router=2 subnets, bridge Firewall dropped packets=%s, host Firewall dropped packets=%s, Packet Tap rx packets=%s, host default routes unchanged\n' \
+    "$bridge_firewall_packets" "$firewall_packets" "$tap_rx"

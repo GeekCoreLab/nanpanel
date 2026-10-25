@@ -108,7 +108,7 @@ export default function LinuxNetnsProviderPanel({ ready, expectedEtag }: { ready
   } catch { wireMetrics = []; }
 
   return <section className="netbird-provider linux-netns-provider card" aria-labelledby="linux-netns-provider-title">
-    <div className="card-title"><div><h2 id="linux-netns-provider-title">Linux Bridge · 每拓扑隔离 netns</h2><p>当前实现执行 SWITCH 与 PACKET_TAP。Packet Tap 固定使用一个输入、一个业务输出和一个监控输出；Helper 在隔离命名空间用 tc mirred 复制业务帧。</p></div>
+    <div className="card-title"><div><h2 id="linux-netns-provider-title">Linux Bridge · Firewall · 每拓扑隔离 netns</h2><p>当前实现执行 SWITCH、FIREWALL 与 PACKET_TAP。Firewall 使用 bridge-family nftables 按输入/输出端口、传输协议和目标端口匹配；Packet Tap 使用 tc mirred 镜像两侧业务帧。</p></div>
       <span className={`badge ${providerLoaded ? 'available' : 'pending'}`}>{providerLoaded ? 'Provider 已装载' : 'Provider 不可用'}</span>
       {isMock && <span className="badge pending">Mock 模式 · 不执行</span>}
     </div>
@@ -140,6 +140,6 @@ export default function LinuxNetnsProviderPanel({ ready, expectedEtag }: { ready
       <span className="sr-only">{operationStates.includes(operation.state) ? operation.state : 'UNKNOWN'}</span>
     </div>}
     {error && <div className="alert error" role="alert">{error}</div>}
-    <p className="netbird-provider-note">操作只在该拓扑专属 netns 中创建 bridge/veth；该执行入口不配置宿主网卡或路由。Router、Firewall、Packet Tap 与 OVS 尚未由此 Provider 执行。</p>
+    <p className="netbird-provider-note">操作只在该拓扑专属 netns 中创建 bridge/veth 与 Firewall 规则；该执行入口不配置宿主网卡或路由。Router、OVS 与管理路径探测仍未实现。</p>
   </section>;
 }

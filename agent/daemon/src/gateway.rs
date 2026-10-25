@@ -694,6 +694,24 @@ struct NetworkTopologyPayload {
 struct NetworkTopologyNode {
     id: String,
     kind: String,
+    firewall_policy: Option<NetworkFirewallPolicy>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct NetworkFirewallPolicy {
+    default_action: String,
+    rules: Vec<NetworkFirewallRule>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct NetworkFirewallRule {
+    input_port: String,
+    output_port: String,
+    protocol: String,
+    destination_port: u16,
+    action: String,
 }
 
 #[derive(Deserialize)]
@@ -957,17 +975,30 @@ fn valid_network_topology_payload(payload: NetworkTopologyPayload) -> bool {
         .map(|node| node.id.as_str())
         .collect::<std::collections::HashSet<_>>();
     if node_ids.len() != payload.nodes.len()
-        || payload
-            .nodes
-            .iter()
-            .any(|node| node.kind != "SWITCH" || !valid_topology_uuid(&node.id))
+        || payload.nodes.iter().any(|node| {
+            !valid_topology_uuid(&node.id)
+                || !matches!(node.kind.as_str(), "SWITCH" | "PACKET_TAP" | "FIREWALL")
+                || (node.kind == "FIREWALL") != node.firewall_policy.is_some()
+        })
     {
+        return false;
+    }
+    if payload.nodes.iter().any(|node| {
+        node.firewall_policy.as_ref().is_some_and(|policy| {
+            !matches!(policy.default_action.as_str(), "ACCEPT" | "DROP") || policy.rules.len() > 64
+        })
+    }) {
         return false;
     }
     let mut link_ids = std::collections::HashSet::new();
     let mut ports = std::collections::HashSet::new();
-    payload.links.iter().all(|link| {
-        valid_topology_uuid(&link.id)
+    let mut connected_inputs =
+        std::collections::HashMap::<&str, std::collections::HashSet<&str>>::new();
+    let mut connected_outputs =
+        std::collections::HashMap::<&str, std::collections::HashSet<&str>>::new();
+    let mut connected_count = std::collections::HashMap::<&str, usize>::new();
+    let links_valid = payload.links.iter().all(|link| {
+        let valid = valid_topology_uuid(&link.id)
             && link_ids.insert(link.id.as_str())
             && link.source_node_id != link.target_node_id
             && node_ids.contains(link.source_node_id.as_str())
@@ -977,7 +1008,68 @@ fn valid_network_topology_payload(payload: NetworkTopologyPayload) -> bool {
             && link.layer == "L2"
             && link.protocol == "ETHERNET"
             && ports.insert((link.source_node_id.as_str(), link.source_port.as_str()))
-            && ports.insert((link.target_node_id.as_str(), link.target_port.as_str()))
+            && ports.insert((link.target_node_id.as_str(), link.target_port.as_str()));
+        if valid {
+            connected_outputs
+                .entry(link.source_node_id.as_str())
+                .or_default()
+                .insert(link.source_port.as_str());
+            connected_inputs
+                .entry(link.target_node_id.as_str())
+                .or_default()
+                .insert(link.target_port.as_str());
+            *connected_count
+                .entry(link.source_node_id.as_str())
+                .or_default() += 1;
+            *connected_count
+                .entry(link.target_node_id.as_str())
+                .or_default() += 1;
+        }
+        valid
+    });
+    if !links_valid {
+        return false;
+    }
+    payload.nodes.iter().all(|node| match node.kind.as_str() {
+        "SWITCH" => true,
+        "PACKET_TAP" => {
+            connected_count.get(node.id.as_str()) == Some(&3)
+                && connected_inputs
+                    .get(node.id.as_str())
+                    .is_some_and(|ports| ports.contains("in-1"))
+                && connected_outputs
+                    .get(node.id.as_str())
+                    .is_some_and(|ports| ports.contains("out-1") && ports.contains("out-2"))
+        }
+        "FIREWALL" => {
+            let Some(policy) = &node.firewall_policy else {
+                return false;
+            };
+            let Some(inputs) = connected_inputs.get(node.id.as_str()) else {
+                return false;
+            };
+            let Some(outputs) = connected_outputs.get(node.id.as_str()) else {
+                return false;
+            };
+            if inputs.is_empty() || outputs.is_empty() {
+                return false;
+            }
+            let mut matches = std::collections::HashSet::new();
+            policy.rules.iter().all(|rule| {
+                inputs.contains(rule.input_port.as_str())
+                    && outputs.contains(rule.output_port.as_str())
+                    && matches!(rule.protocol.as_str(), "TCP" | "UDP" | "SCTP")
+                    && rule.destination_port > 0
+                    && matches!(rule.action.as_str(), "ACCEPT" | "DROP")
+                    && matches.insert((
+                        rule.input_port.as_str(),
+                        rule.output_port.as_str(),
+                        rule.protocol.as_str(),
+                        rule.destination_port,
+                    ))
+            })
+        }
+        _ => false,
     })
 }
 
@@ -1783,6 +1875,55 @@ mod tests {
         assert!(!valid_topology_dispatch(
             topology,
             &payload.replace("\"generation\":3", "\"generation\":3,\"command\":\"id\"")
+        ));
+    }
+
+    #[test]
+    fn topology_dispatch_accepts_only_connected_firewall_rules() {
+        let topology = "11111111-1111-4111-8111-111111111111";
+        let payload = r#"{
+          "action":"APPLY",
+          "topologyId":"11111111-1111-4111-8111-111111111111",
+          "revisionId":"22222222-2222-4222-8222-222222222222",
+          "generation":3,
+          "nodes":[
+            {"id":"33333333-3333-4333-8333-333333333333","kind":"SWITCH"},
+            {"id":"44444444-4444-4444-8444-444444444444","kind":"FIREWALL",
+             "firewallPolicy":{"defaultAction":"DROP","rules":[
+               {"inputPort":"in-1","outputPort":"out-1","protocol":"TCP",
+                "destinationPort":8080,"action":"ACCEPT"}]}},
+            {"id":"66666666-6666-4666-8666-666666666666","kind":"SWITCH"}
+          ],
+          "links":[
+            {"id":"55555555-5555-4555-8555-555555555555",
+             "sourceNodeId":"33333333-3333-4333-8333-333333333333","sourcePort":"out-1",
+             "targetNodeId":"44444444-4444-4444-8444-444444444444","targetPort":"in-1",
+             "layer":"L2","protocol":"ETHERNET"},
+            {"id":"77777777-7777-4777-8777-777777777777",
+             "sourceNodeId":"44444444-4444-4444-8444-444444444444","sourcePort":"out-1",
+             "targetNodeId":"66666666-6666-4666-8666-666666666666","targetPort":"in-1",
+             "layer":"L2","protocol":"ETHERNET"}
+          ]
+        }"#;
+        assert!(valid_topology_dispatch(topology, payload));
+        assert!(!valid_topology_dispatch(
+            topology,
+            &payload.replace("\"inputPort\":\"in-1\"", "\"inputPort\":\"in-2\"")
+        ));
+        assert!(!valid_topology_dispatch(
+            topology,
+            &payload.replace("\"action\":\"ACCEPT\"", "\"action\":\"EXEC\"")
+        ));
+        assert!(!valid_topology_dispatch(
+            topology,
+            &payload.replace("\"defaultAction\":\"DROP\"", "\"defaultAction\":\"LOG\"")
+        ));
+        assert!(!valid_topology_dispatch(
+            topology,
+            &payload.replace(
+                "\"kind\":\"FIREWALL\",",
+                "\"kind\":\"FIREWALL\",\"command\":\"id\","
+            )
         ));
     }
 

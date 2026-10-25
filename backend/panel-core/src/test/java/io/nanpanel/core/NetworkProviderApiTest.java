@@ -62,6 +62,7 @@ class NetworkProviderApiTest {
         .body("[0].id", equalTo("linux-netns"))
         .body("[0].capabilityDetails[0].deviceKinds", hasItem("SWITCH"))
         .body("[0].capabilityDetails[0].deviceKinds", hasItem("PACKET_TAP"))
+        .body("[0].capabilityDetails[0].deviceKinds", hasItem("FIREWALL"))
         .body("[0].capabilityDetails[0].operations",
             hasItems("PLAN", "VALIDATE", "APPLY", "VERIFY", "COMPENSATE"));
     var initialDraft = given().cookie("nanpanel_session", session.cookie())
@@ -117,6 +118,50 @@ class NetworkProviderApiTest {
         .then().statusCode(201).body("state", equalTo("PLANNED")).extract();
     given().cookie("nanpanel_session", session.cookie()).header("X-CSRF-Token", session.csrf())
         .post("/api/v1/network-providers/linux-netns/operations/" + linuxPlan.path("id") + "/validate")
+        .then().statusCode(200).body("state", equalTo("DRIFTED"));
+
+    String firewallEtag = given().cookie("nanpanel_session", session.cookie())
+        .get("/api/v1/topology/draft").then().statusCode(200).extract().header("ETag");
+    Map<String, Object> leftFirewallSwitch = new java.util.LinkedHashMap<>(switchNode);
+    leftFirewallSwitch.put("id", UUID.randomUUID().toString());
+    leftFirewallSwitch.put("name", "Firewall ingress bridge");
+    Map<String, Object> rightFirewallSwitch = new java.util.LinkedHashMap<>(switchNode);
+    rightFirewallSwitch.put("id", UUID.randomUUID().toString());
+    rightFirewallSwitch.put("name", "Firewall egress bridge");
+    Map<String, Object> firewallNode = Map.of(
+        "id", UUID.randomUUID().toString(), "kind", "FIREWALL", "name", "Filtered bridge",
+        "position", Map.of("x", 300, "y", 0), "inputCount", 1, "outputCount", 1,
+        "ports", List.of(
+            Map.of("id", "in-1", "direction", "INPUT", "layer", "L2", "protocols", List.of("ETHERNET")),
+            Map.of("id", "out-1", "direction", "OUTPUT", "layer", "L2", "protocols", List.of("ETHERNET"))),
+        "providerId", "linux-netns",
+        "firewallPolicy", Map.of("defaultAction", "DROP", "rules", List.of(Map.of(
+            "inputPort", "in-1", "outputPort", "out-1", "protocol", "TCP",
+            "destinationPort", 8080, "action", "ACCEPT"))));
+    List<Map<String, Object>> firewallLinks = List.of(
+        Map.of("id", UUID.randomUUID().toString(), "sourceNodeId", leftFirewallSwitch.get("id"),
+            "sourcePort", "out-1", "targetNodeId", firewallNode.get("id"), "targetPort", "in-1",
+            "layer", "L2", "protocol", "ETHERNET", "status", "UNVERIFIED"),
+        Map.of("id", UUID.randomUUID().toString(), "sourceNodeId", firewallNode.get("id"),
+            "sourcePort", "out-1", "targetNodeId", rightFirewallSwitch.get("id"), "targetPort", "in-1",
+            "layer", "L2", "protocol", "ETHERNET", "status", "UNVERIFIED"));
+    var savedFirewall = given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.csrf()).header("If-Match", firewallEtag)
+        .contentType("application/json")
+        .body(Map.of("nodes", List.of(leftFirewallSwitch, firewallNode, rightFirewallSwitch),
+            "links", firewallLinks))
+        .put("/api/v1/topology/draft").then().statusCode(200).extract();
+    String firewallPlanInput = mapper.writeValueAsString(Map.of(
+        "hostId", UUID.randomUUID().toString(), "hostGeneration", 1,
+        "reason", "Persist a bounded bridge firewall policy plan",
+        "revisionId", savedFirewall.path("revisionId"), "generation", savedFirewall.path("generation")));
+    var firewallPlan = given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.csrf()).contentType("application/json")
+        .body(Map.of("desiredSnapshot", firewallPlanInput))
+        .post("/api/v1/network-providers/linux-netns/plans")
+        .then().statusCode(201).body("state", equalTo("PLANNED")).extract();
+    given().cookie("nanpanel_session", session.cookie()).header("X-CSRF-Token", session.csrf())
+        .post("/api/v1/network-providers/linux-netns/operations/" + firewallPlan.path("id") + "/validate")
         .then().statusCode(200).body("state", equalTo("DRIFTED"));
 
     String topologyEtag = given().cookie("nanpanel_session", session.cookie())
