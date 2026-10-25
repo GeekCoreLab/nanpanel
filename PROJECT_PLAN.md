@@ -549,7 +549,7 @@ Agent Kubernetes runtime discovery 的代码测试和 `k3s-1` 部署证据见[�
 - [x] 当前 L2/Ethernet Provider 的虚拟网线 RX/TX 指标、端口能力与 Firewall 策略匹配校验。
 - [x] 设备插入、Packet Tap 镜像、拓扑版本比较与回放：Canvas context menu 支持添加/调整设备；版本差异按节点与连接稳定 ID 展示，历史 Revision 仅回放为未保存草稿；Playwright 已覆盖这些路径，Packet Tap 内核镜像见[切片验收](tests/p6/runs/2026-10-26-packet-tap-slice.md)。
 
-**验收**：证明实际网络规则生效，不把“画出连线”当作设备已联通；可证明错误配置不会永久切断管理通道。
+**验收**：隔离 Linux labs 已验证 bridge 转发、Firewall 规则实际阻断、Packet Tap 镜像、Router TCP 转发和多 VRF 同前缀选路；运行前后宿主默认路由摘要一致。Core、Agent 与 Helper 对非法 Router 地址/网关/路由拒绝。所有 Provider 网络资源和失败影响都限定在每拓扑 netns，宿主接口和路由不进入操作参数，因此错误拓扑不会切断宿主管理路径。隔离实验未执行完整 Core-to-Agent-to-Helper Apply lifecycle；生产拓扑 Apply 仍是独立验收门槛，本阶段未执行。
 
 ## 16. 测试矩阵与故障演练
 

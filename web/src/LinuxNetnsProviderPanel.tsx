@@ -108,7 +108,7 @@ export default function LinuxNetnsProviderPanel({ ready, expectedEtag }: { ready
   } catch { wireMetrics = []; }
 
   return <section className="netbird-provider linux-netns-provider card" aria-labelledby="linux-netns-provider-title">
-    <div className="card-title"><div><h2 id="linux-netns-provider-title">Linux Bridge · Open vSwitch · Router · Firewall · 每拓扑隔离 netns</h2><p>当前实现执行 SWITCH、ROUTER、FIREWALL 与 PACKET_TAP。Open vSwitch 使用每拓扑私有 OVSDB 和 netdev 用户态 datapath；需要执行主机报告 network.topology.ovs，且暂不支持同一 Provider 计划混用 Firewall 或 Packet Tap。Router 支持单个 IPv4 路由表、接口 CIDR、静态路由与隔离 netns 内转发；Firewall 使用 bridge-family nftables；Packet Tap 使用 tc mirred 镜像两侧业务帧。</p></div>
+    <div className="card-title"><div><h2 id="linux-netns-provider-title">Linux Bridge · Open vSwitch · Router · Firewall · 每拓扑隔离 netns</h2><p>当前实现执行 SWITCH、ROUTER、FIREWALL 与 PACKET_TAP。Open vSwitch 使用每拓扑私有 OVSDB 和 netdev 用户态 datapath；需要执行主机报告 network.topology.ovs，且暂不支持同一 Provider 计划混用 Firewall 或 Packet Tap。Router 支持多个互相独立的 IPv4 VRF 路由表、接口 CIDR 和静态路由（每拓扑最多 64 条），并在隔离 netns 内转发；含 Router 的计划要求执行主机报告 network.topology.vrf。Firewall 使用 bridge-family nftables；Packet Tap 使用 tc mirred 镜像两侧业务帧。</p></div>
       <span className={`badge ${providerLoaded ? 'available' : 'pending'}`}>{providerLoaded ? 'Provider 已装载' : 'Provider 不可用'}</span>
       {isMock && <span className="badge pending">Mock 模式 · 不执行</span>}
     </div>

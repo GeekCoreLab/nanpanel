@@ -1,6 +1,6 @@
 # ADR-015: Isolated Linux topology Provider
 
-- Status: Accepted; additional P6 devices and production-topology acceptance remain open.
+- Status: Accepted; the isolated P6 implementation and lab acceptance are complete. Production-topology Apply remains a separate gate and was not run.
 - Date: 2026-10-26
 
 ## Context
@@ -11,9 +11,10 @@ and compensation. There was no built-in Provider that executed those plans.
 Directly creating bridges, routes, firewall rules, or traffic-control rules in
 the host network namespace could affect the Agent management path.
 
-The current graph schema does not define per-interface addresses or routes for
-a virtual Router. Its `Router.ipAddress` field is an annotation used by
-read-only route inventory; it is not enough to configure a real router.
+The `ROUTER.ipAddress` field remains an annotation used by read-only route
+inventory. Executable Router interfaces and static routes are represented
+separately by `routerConfiguration`, so observing a next hop does not configure
+the virtual Router.
 
 ## Decision
 
@@ -87,9 +88,14 @@ master membership, addresses, per-table routes, and forwarding state,
 exact Firewall chain policy and rules, Packet Tap `mirred` egress filters, and
 absence of undeclared default routes. For OVS, it also checks private daemon
 control sockets, `netdev` bridge type, exact bridge/port ownership, and bridge
-membership. The isolated P6 Linux and OVS labs separately
-exercises real bridge-family Firewall drops, routed TCP, a static IPv4 route,
-host nftables, `tc` behavior, and raw Ethernet forwarding through OVS while
-hashing host default routes before and after. The Provider is deployed to
-`k3s-1` and its runtime Helper capability is verified read-only;
-production-topology Apply remains a separate acceptance gate.
+membership. The isolated P6 Linux and OVS labs exercise real bridge-family
+Firewall drops, routed TCP, a static IPv4 route, host nftables, `tc` behavior,
+and raw Ethernet forwarding through OVS while hashing host default routes
+before and after. Multi-Router tests additionally verify independent VRF route
+selection for the same prefix. Core, Agent, and Helper reject invalid Router
+address and route shapes before execution. Together with the per-topology
+namespace boundary, these checks show that Provider resources and failures
+cannot change the host management routes; no separate host-path probe is part
+of this selected execution boundary. The Provider is deployed to `k3s-1` and
+its runtime Helper capabilities are verified read-only. Production-topology
+Apply remains a separate acceptance gate.
