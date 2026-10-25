@@ -1,21 +1,23 @@
-import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from 'react';
 import type { WheelEvent as ReactWheelEvent } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  ReactFlow, ReactFlowProvider, Background, Controls, Handle, Position, ConnectionMode,
-  BaseEdge, getBezierPath, MarkerType, useNodesState, useEdgesState, useReactFlow, useUpdateNodeInternals,
-  type Node, type NodeProps, type Edge, type EdgeProps, type Connection, type IsValidConnection,
+  ReactFlowProvider, Handle, Position, ConnectionMode,
+  MarkerType, useNodesState, useEdgesState, useReactFlow, useUpdateNodeInternals,
+  type Node, type NodeProps, type Edge, type Connection, type IsValidConnection,
 } from '@xyflow/react';
 import { api, isMock, isP0Lab } from './lib/api';
 import { createUuid } from './lib/uuid.ts';
 import NetbirdProviderPanel from './NetbirdProviderPanel';
-import { connectionError, createTopologyNode, draftError, nodePresets, resolveRouteNextHop, unmatchedRouteGateways, validNodeShape } from './lib/topology-model';
+import { connectionError, connectionReviewMessage, createTopologyNode, draftError, nodePresets, resolveRouteNextHop, unmatchedRouteGateways, validNodeShape } from './lib/topology-model';
+import { TopologyCanvas } from './topology/TopologyCanvas';
 import './topology-status.css';
 import './topology-hierarchy.css';
 import './topology-workspaces.css';
 import './gateway-asset-picker.css';
 import './service-network.css';
-import type { Host, HostNetworkInventory, HostPage, KubernetesClusterList, KubernetesClusterSummary, KubernetesServiceInventorySnapshot, KubernetesServiceProbeSnapshot, KubernetesTopologyNamespaceDetail, KubernetesTopologyNamespaceSnapshot, TopologyDraft, TopologyDraftWrite, TopologyLink, TopologyNode, TopologyNodeKind } from './lib/types';
+import './topology-node-settings.css';
+import type { Host, HostNetworkInventory, HostPage, KubernetesClusterList, KubernetesClusterSummary, KubernetesServiceInventorySnapshot, KubernetesServiceProbeSnapshot, KubernetesTopologyNamespaceDetail, KubernetesTopologyNamespaceSnapshot, TopologyDraft, TopologyDraftWrite, TopologyLayer, TopologyLink, TopologyNode, TopologyNodeKind, TopologyProtocol } from './lib/types';
 
 type DeviceNode = Node<{
   model: TopologyNode;
@@ -39,9 +41,9 @@ type DeviceNode = Node<{
   onFolderClusterSelect?: (nodeId: string, clusterId: string | null) => void;
 }, 'device'>;
 type P0RouteEvidence = { status: 'VERIFIED'; route: string; httpStatus: number; responseBody: string; configSha256: string; diff: string; verifiedAt: string };
-const virtualKinds: TopologyNodeKind[] = ['SWITCH', 'MERGE', 'SPLIT', 'FORWARDER'];
+const virtualKinds: TopologyNodeKind[] = ['SWITCH', 'MERGE', 'SPLIT', 'FORWARDER', 'LOAD_BALANCER', 'MIRROR', 'CUSTOM'];
 const asNode = (model: TopologyNode, asset?: Host): DeviceNode => ({ id: model.id, type: 'device', position: model.position, data: { model: { ...model, parentId: model.parentId ?? null, assetId: model.assetId ?? null, clusterId: model.clusterId ?? null, ipAddress: model.ipAddress ?? null }, asset } });
-const asEdge = (link: TopologyLink): Edge => ({ id: link.id, source: link.sourceNodeId, sourceHandle: link.sourcePort, target: link.targetNodeId, targetHandle: link.targetPort, type: 'directed', markerEnd: { type: MarkerType.ArrowClosed, color: '#4a86ed' }, data: { status: 'UNVERIFIED', state: link.state ?? 'PENDING', layer: link.layer, protocol: link.protocol }, ariaLabel: `期望连接，${link.state ?? 'PENDING'} · ${link.layer}/${link.protocol}` });
+const asEdge = (link: TopologyLink): Edge => ({ id: link.id, source: link.sourceNodeId, sourceHandle: link.sourcePort, target: link.targetNodeId, targetHandle: link.targetPort, type: 'nanpanelBezier', markerEnd: { type: MarkerType.ArrowClosed, color: '#4a86ed' }, data: { status: 'UNVERIFIED', state: link.state ?? 'PENDING', layer: link.layer, protocol: link.protocol }, ariaLabel: `期望连接，${link.state ?? 'PENDING'} · ${link.layer}/${link.protocol}` });
 const asLink = (edge: Edge): TopologyLink => ({ id: edge.id, sourceNodeId: edge.source, sourcePort: edge.sourceHandle ?? '', targetNodeId: edge.target, targetPort: edge.targetHandle ?? '', layer: (edge.data?.layer as TopologyLink['layer']) ?? 'L4', protocol: (edge.data?.protocol as TopologyLink['protocol']) ?? 'TCP', status: 'UNVERIFIED' });
 const linkStateLabels = { PENDING: '待部署', VERIFIED: '已验证', ERROR: '异常', UNSUPPORTED: '不可支持', OBSERVED: 'Agent 路由观测' } as const;
 const estimatedNodeHeight = (node: Pick<TopologyNode, 'kind' | 'inputCount' | 'outputCount'>) => {
@@ -123,20 +125,17 @@ function Device({ data, selected }: NodeProps<DeviceNode>) {
       </div>, document.body)}
     </div>}
     <div className="device-ports" style={{ height }}>
-      {Array.from({ length: node.inputCount }, (_, i) => <div className="device-port port-in" key={`in-${i + 1}`} style={{ top: 12 + i * 26 }}><Handle id={`in-${i + 1}`} type="target" position={Position.Left} aria-label={`${node.name} 入口 ${i + 1}`} /><span>{node.kind === 'FOLDER' && i === 0 ? 'Ingress 接入' : `入口 ${i + 1}`} · L4</span></div>)}
-      {Array.from({ length: node.outputCount }, (_, i) => <div className="device-port port-out" key={`out-${i + 1}`} style={{ top: 12 + i * 26 }}><span>{node.kind === 'FOLDER' && i === 0 ? '集群服务' : `出口 ${i + 1}`} · L4</span><Handle id={`out-${i + 1}`} type="source" position={Position.Right} aria-label={`${node.name} 出口 ${i + 1}`} /></div>)}
-    </div><div className="device-status">{node.kind === 'FOLDER' ? '双击打开层级视图' : node.assetId ? `资产 ${data.asset?.hostname ?? node.assetId}` : '期望节点 · 未部署'}</div>
+      {Array.from({ length: node.inputCount }, (_, i) => { const port = node.ports.find(value => value.id === `in-${i + 1}`); return <div className="device-port port-in" key={`in-${i + 1}`} style={{ top: 12 + i * 26 }}><Handle id={`in-${i + 1}`} type="target" position={Position.Left} aria-label={`${node.name} 入口 ${i + 1}`} /><span>{node.kind === 'FOLDER' && i === 0 ? 'Ingress 接入' : `入口 ${i + 1}`} · {port?.layer ?? 'L4'}/{port?.protocols.join(',') ?? 'TCP'}</span></div>; })}
+      {Array.from({ length: node.outputCount }, (_, i) => { const port = node.ports.find(value => value.id === `out-${i + 1}`); return <div className="device-port port-out" key={`out-${i + 1}`} style={{ top: 12 + i * 26 }}><span>{node.kind === 'FOLDER' && i === 0 ? '集群服务' : `出口 ${i + 1}`} · {port?.layer ?? 'L4'}/{port?.protocols.join(',') ?? 'TCP'}</span><Handle id={`out-${i + 1}`} type="source" position={Position.Right} aria-label={`${node.name} 出口 ${i + 1}`} /></div>; })}
+    </div>{node.description && <p className="device-description">{node.description}</p>}<div className="device-status">{node.kind === 'FOLDER' ? '双击打开层级视图' : node.assetId ? `资产 ${data.asset?.hostname ?? node.assetId}` : '期望节点 · 未部署'}</div>
   </div>;
 }
-function DirectedEdge(props: EdgeProps) {
-  const [path] = getBezierPath(props); const gradient = `link-${props.id}`;
-  const state = (props.data?.state ?? 'PENDING') as keyof typeof linkStateLabels;
-  const colors = { PENDING: '#8897ab', VERIFIED: '#2eaf83', ERROR: '#d46c68', UNSUPPORTED: '#aa8ec2', OBSERVED: '#527eaf' };
-  return <g className={`link-state-${state.toLowerCase()}`} aria-label={props.data?.observedRoute ? `Agent 路由观测 · L3/IP · ${props.data.routeCount} 条路由` : linkStateLabels[state]}><BaseEdge id={props.id} path={path} markerEnd={props.markerEnd} style={{ stroke: colors[state], strokeWidth: props.selected ? 3 : 2, strokeDasharray: state === 'VERIFIED' || state === 'ERROR' ? undefined : '6 4' }} /></g>;
-}
 const nodeTypes = { device: Device };
-const edgeTypes = { directed: DirectedEdge };
 type Menu = { x: number; y: number; point: { x: number; y: number }; nodeId?: string; edgeId?: string };
+type NodeSettings = { nodeId: string; name: string; description: string; layer: TopologyLayer; protocols: TopologyProtocol[] };
+const protocolOptions: Record<TopologyLayer, TopologyProtocol[]> = {
+  L2: ['ETHERNET'], L3: ['IP'], L4: ['TCP', 'UDP', 'SCTP'], L7: ['HTTP', 'HTTPS'],
+};
 
 function Editor() {
   const [nodes, setNodes, onNodesChange] = useNodesState<DeviceNode>([]);
@@ -163,6 +162,7 @@ function Editor() {
   const [expandedNamespace, setExpandedNamespace] = useState<string>(); const [expandedPod, setExpandedPod] = useState<string>(); const [kubernetesError, setKubernetesError] = useState(''); const [kubernetesBusy, setKubernetesBusy] = useState(false);
   const [routeEvidence, setRouteEvidence] = useState<P0RouteEvidence>();
   const [menu, setMenu] = useState<Menu>(); const menuRef = useRef<HTMLDivElement>(null); const canvasRef = useRef<HTMLElement>(null);
+  const [nodeSettings, setNodeSettings] = useState<NodeSettings>(); const [nodeSettingsError, setNodeSettingsError] = useState('');
   const observedRouterSignatureRef = useRef('');
   const { screenToFlowPosition, fitView } = useReactFlow<DeviceNode>();
   const updateNodeInternals = useUpdateNodeInternals();
@@ -343,6 +343,27 @@ function Editor() {
   function openMenu(event: { preventDefault(): void; clientX: number; clientY: number }, nodeId?: string, edgeId?: string, insertionPoint?: { x: number; y: number }) {
     event.preventDefault(); if (!loaded || busy) return;
     setMenu({ x: Math.max(8, Math.min(event.clientX, window.innerWidth - 278)), y: Math.max(8, Math.min(event.clientY, window.innerHeight - 450)), point: screenToFlowPosition(insertionPoint ?? { x: event.clientX, y: event.clientY }), nodeId, edgeId });
+  }
+  function openNodeSettings(node: TopologyNode) {
+    const firstPort = node.ports[0];
+    setNodeSettings({ nodeId: node.id, name: node.name, description: node.description ?? '', layer: firstPort?.layer ?? 'L4', protocols: [...(firstPort?.protocols ?? ['TCP'])] });
+    setNodeSettingsError(''); setMenu(undefined);
+  }
+  function saveNodeSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!nodeSettings) return;
+    if (!nodeSettings.protocols.length || nodeSettings.protocols.some(protocol => !protocolOptions[nodeSettings.layer].includes(protocol))) {
+      setNodeSettingsError('至少选择一个与接口网络层相符的协议。'); return;
+    }
+    const current = nodes.find(node => node.id === nodeSettings.nodeId)?.data.model;
+    if (!current) { setNodeSettings(undefined); return; }
+    const updated = { ...current, name: nodeSettings.name.trim(), description: nodeSettings.description.trim() || null,
+      ports: current.ports.map(port => ({ ...port, layer: nodeSettings.layer, protocols: [...nodeSettings.protocols] })) };
+    const candidateNodes = nodes.map(node => node.id === current.id ? updated : node.data.model);
+    const invalid = draftError({ nodes: candidateNodes, links: edges.map(asLink) });
+    if (invalid) { setNodeSettingsError(`这些接口设置会使当前拓扑无效：${invalid}`); return; }
+    setNodes(existing => existing.map(node => node.id === current.id ? { ...node, data: { ...node.data, model: updated } } : node));
+    setNodeSettings(undefined); setNodeSettingsError(''); setDirty(true); setRouteEvidence(undefined); setMessage(`已更新 ${updated.name} 的节点与接口信息`);
   }
   function addNode(kind: TopologyNodeKind) {
     if (nodes.filter(node => !node.data.observedOnly).length >= 100) { setError('最多添加 100 个节点'); return; }
@@ -549,11 +570,25 @@ function Editor() {
   }
   const observedRouteEdges: Edge[] = [...observedRouteCounts.entries()].map(([key, observed]) => ({
     id: `observed-${key}`, source: observed.source.id, sourceHandle: 'out-1',
-    target: observed.target.id, targetHandle: 'in-1', type: 'directed', selectable: false,
+    target: observed.target.id, targetHandle: 'in-1', type: 'nanpanelBezier', selectable: false,
     deletable: false, focusable: false, markerEnd: { type: MarkerType.ArrowClosed, color: '#527eaf' },
     data: { state: 'OBSERVED', observedRoute: true, routeCount: observed.count, layer: 'L3', protocol: 'IP' },
   }));
-  const candidate = (connection: Connection | Edge): TopologyLink => ({ id: createUuid(), sourceNodeId: connection.source, sourcePort: connection.sourceHandle ?? '', targetNodeId: connection.target, targetPort: connection.targetHandle ?? '', layer: 'L4', protocol: 'TCP', status: 'UNVERIFIED' });
+  const candidate = (connection: Connection | Edge): TopologyLink => {
+    const source = nodes.find(node => node.id === connection.source)?.data.model;
+    const target = nodes.find(node => node.id === connection.target)?.data.model;
+    const sourcePort = source?.ports.find(port => port.id === connection.sourceHandle);
+    const targetPort = target?.ports.find(port => port.id === connection.targetHandle);
+    const sharedProtocols = sourcePort && targetPort && sourcePort.layer === targetPort.layer
+      ? sourcePort.protocols.filter(protocol => targetPort.protocols.includes(protocol)) : [];
+    const protocol = (['ETHERNET', 'IP', 'TCP', 'UDP', 'SCTP', 'HTTP', 'HTTPS'] as const)
+      .find(value => sharedProtocols.includes(value));
+    return {
+      id: createUuid(), sourceNodeId: connection.source, sourcePort: connection.sourceHandle ?? '',
+      targetNodeId: connection.target, targetPort: connection.targetHandle ?? '',
+      layer: sourcePort?.layer ?? targetPort?.layer ?? 'L4', protocol: protocol ?? 'TCP', status: 'UNVERIFIED',
+    };
+  };
   const validConnection: IsValidConnection = connection => loaded && !busy && edges.length < 800 && !connectionError(draft().nodes, edges.map(asLink), candidate(connection));
   function connect(connection: Connection) {
     if (edges.length >= 800) { setError('最多添加 800 条连接'); return; }
@@ -576,7 +611,8 @@ function Editor() {
     if (delta < 0 && edges.some(e => input ? e.target === node.id && e.targetHandle === portId : e.source === node.id && e.sourceHandle === portId)) return null;
     const nextCount = node[direction] + delta;
     if (nextCount < 0 || nextCount > 16) return null;
-    const addedPort = { id: `${input ? 'in' : 'out'}-${nextCount}`, direction: input ? 'INPUT' as const : 'OUTPUT' as const, layer: 'L4' as const, protocols: ['TCP', 'UDP'] as ('TCP' | 'UDP')[] };
+    const reference = node.ports.find(port => port.direction === (input ? 'INPUT' : 'OUTPUT'));
+    const addedPort = { id: `${input ? 'in' : 'out'}-${nextCount}`, direction: input ? 'INPUT' as const : 'OUTPUT' as const, layer: reference?.layer ?? 'L4' as const, protocols: reference?.protocols ?? ['TCP', 'UDP'] as ('TCP' | 'UDP')[] };
     const ports = delta > 0
       ? input
         ? [...node.ports.filter(port => port.direction === 'INPUT'), addedPort, ...node.ports.filter(port => port.direction === 'OUTPUT')]
@@ -628,18 +664,17 @@ function Editor() {
     {(workspace === 'topology' || !!folderId || isP0Lab) && <>
     <div className="topology-tools"><div className="port-legend"><span><i className="input-dot" />蓝色：入口</span><span><i className="output-dot" />绿色：出口</span>{Object.entries(linkStateLabels).map(([state, label]) => <span key={state}><i className={`state-dot ${state.toLowerCase()}`} />{label}</span>)}</div><div className="topology-actions"><button className="secondary" disabled={!loaded || busy} onClick={e => { const rect = e.currentTarget.getBoundingClientRect(); const canvas = canvasRef.current?.getBoundingClientRect(); openMenu({ preventDefault() {}, clientX: rect.left, clientY: rect.bottom + 8 }, undefined, undefined, canvas ? { x: canvas.left + canvas.width / 2, y: canvas.top + canvas.height / 2 } : undefined); }}>＋ 添加节点</button><button className="secondary" disabled={busy || !activeEdges.length} onClick={() => { setEdges(current => current.filter(edge => !activeEdges.some(active => active.id === edge.id))); setDirty(true); setRouteEvidence(undefined); }}>清空本层连接</button></div></div>
     <section className="topology card" aria-label="拓扑编辑器" ref={canvasRef}>
-      <ReactFlow<DeviceNode> nodes={activeDisplayNodes} edges={folderId ? activeEdges : [...activeEdges, ...observedRouteEdges]} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
+      <TopologyCanvas<DeviceNode, Edge> nodes={activeDisplayNodes} edges={folderId ? activeEdges : [...activeEdges, ...observedRouteEdges]} nodeTypes={nodeTypes}
         onNodesChange={changes => { onNodesChange(changes); if (changes.some(c => c.type === 'position' && c.position || c.type === 'remove')) { setDirty(true); setRouteEvidence(undefined); } }}
         onEdgesChange={changes => { onEdgesChange(changes); if (changes.some(c => c.type === 'remove')) { setDirty(true); setRouteEvidence(undefined); } }}
-        onConnect={connect} isValidConnection={validConnection} connectionMode={ConnectionMode.Strict}
+        onConnect={connect} reviewConnection={connection => connectionReviewMessage(draft().nodes, candidate(connection))} isValidConnection={validConnection} connectionMode={ConnectionMode.Strict}
         onConnectEnd={(_, state) => { if (state.toHandle && !state.isValid) setError('连接无效：仅允许未占用的绿色出口 → 蓝色入口，且不能形成自连接或环路'); }}
         onPaneContextMenu={e => openMenu(e)} onNodeContextMenu={(e, node) => { if (!node.data.observedOnly) openMenu(e, node.id); }} onNodeDoubleClick={(_, node) => { if (!node.data.observedOnly && node.data.model.kind === 'FOLDER') enterFolder(node.id); }} onEdgeContextMenu={(e, edge) => { if (!edge.data?.observedRoute) openMenu(e, undefined, edge.id); }}
         onPaneClick={() => setMenu(undefined)} onMoveStart={event => { if (event) { setMenu(undefined); setGatewayAssetOpen({}); } }}
         onNodesDelete={deleted => { deleted.forEach(node => removeNode(node.id)); }}
         nodesDraggable={!busy} nodesConnectable={loaded && !busy} elementsSelectable={!busy} deleteKeyCode={busy ? null : ['Backspace', 'Delete']}
         fitView minZoom={.2} maxZoom={1.7} noWheelClassName="nowheel" translateExtent={[[-11000, -11000], [11000, 11000]]} nodeExtent={[[-10000, -10000], [10000, 10000]]}>
-        <Background color="#dbe3ee" gap={24} /><Controls />
-      </ReactFlow>
+      </TopologyCanvas>
     </section>
     {!folderId && workspace === 'topology' && <section className="service-network card" aria-labelledby="host-routes-title">
       <div className="card-title"><div><h2 id="host-routes-title">主机路由观测与自动下一跳匹配</h2><p>读取已绑定主机的 Agent 路由快照；未建模的唯一下一跳会自动显示为只读 Router</p></div></div>
@@ -724,9 +759,20 @@ function Editor() {
     {!folderId && workspace === 'providers' && <NetbirdProviderPanel />}
     {(workspace === 'topology' || !!folderId || isP0Lab) && <div className="topology-caption"><span>全拓扑 {nodes.filter(node => !node.data.observedOnly).length} 个配置节点 · Agent 自动发现 {autoRouterNodes.length} 个 Router；期望连接 {edges.length} 条 · 当前层 {activeNodes.filter(node => !node.data.observedOnly).length} 个节点 · {activeEdges.length} 条期望连接 · {dirty ? '有未保存的修改' : '草稿未修改'}</span><span role="status">{message || (busy ? '正在读取草稿…' : '')}</span></div>}
     {menu && <div className="topology-menu" role="menu" aria-label="拓扑右键菜单" ref={menuRef} style={{ left: menu.x, top: menu.y } as CSSProperties}>
-      {contextNode ? <><strong>{contextNode.name} · {contextNode.inputCount} 入 / {contextNode.outputCount} 出</strong>{contextNode.kind === 'FOLDER' && <button role="menuitem" onClick={() => enterFolder(contextNode.id)}>打开层级视图</button>}{(['inputCount', 'outputCount'] as const).map(direction => <div key={direction} className="menu-port-actions">{[1, -1].map(delta => <button role="menuitem" key={delta} disabled={!portChangeCandidate(contextNode, direction, delta)} onClick={() => changePorts(contextNode, direction, delta)}>{delta > 0 ? '增加' : '减少'}{direction === 'inputCount' ? '入口' : '出口'}</button>)}</div>)}<button role="menuitem" className="danger" onClick={() => removeNode(contextNode.id)}>删除节点及关联连接</button></> : menu.edgeId ? <><strong>期望连接 · {linkStateLabels[(contextEdge?.data?.state ?? 'PENDING') as keyof typeof linkStateLabels]} · L4/{(contextEdge?.data?.protocol ?? 'TCP') as string}</strong><button role="menuitem" className="danger" onClick={() => { setEdges(current => current.filter(e => e.id !== menu.edgeId)); setDirty(true); setRouteEvidence(undefined); setMenu(undefined); }}>删除连接</button></> : <><strong>添加节点</strong>{(Object.keys(nodePresets) as TopologyNodeKind[]).map(kind => <button role="menuitem" key={kind} onClick={() => addNode(kind)}><span>{nodePresets[kind].name}</span><small>{nodePresets[kind].inputs} 入 / {nodePresets[kind].outputs} 出</small></button>)}</>}
+      {contextNode ? <><strong>{contextNode.name} · {contextNode.inputCount} 入 / {contextNode.outputCount} 出</strong>{contextNode.kind === 'FOLDER' && <button role="menuitem" onClick={() => enterFolder(contextNode.id)}>打开层级视图</button>}<button role="menuitem" onClick={() => openNodeSettings(contextNode)}>编辑节点信息</button>{(['inputCount', 'outputCount'] as const).map(direction => <div key={direction} className="menu-port-actions">{[1, -1].map(delta => <button role="menuitem" key={delta} disabled={!portChangeCandidate(contextNode, direction, delta)} onClick={() => changePorts(contextNode, direction, delta)}>{delta > 0 ? '增加' : '减少'}{direction === 'inputCount' ? '入口' : '出口'}</button>)}</div>)}<button role="menuitem" className="danger" onClick={() => removeNode(contextNode.id)}>删除节点及关联连接</button></> : menu.edgeId ? <><strong>期望连接 · {linkStateLabels[(contextEdge?.data?.state ?? 'PENDING') as keyof typeof linkStateLabels]} · {contextEdge?.data?.layer as string}/{(contextEdge?.data?.protocol ?? 'TCP') as string}</strong><button role="menuitem" className="danger" onClick={() => { setEdges(current => current.filter(e => e.id !== menu.edgeId)); setDirty(true); setRouteEvidence(undefined); setMenu(undefined); }}>删除连接</button></> : <><strong>添加节点</strong>{(Object.keys(nodePresets) as TopologyNodeKind[]).map(kind => <button role="menuitem" key={kind} onClick={() => addNode(kind)}><span>{nodePresets[kind].name}</span><small>{nodePresets[kind].inputs} 入 / {nodePresets[kind].outputs} 出</small></button>)}</>}
       <button role="menuitem" className="menu-cancel" onClick={() => setMenu(undefined)}>关闭菜单 · Esc</button>
     </div>}
+    {nodeSettings && <div className="modal-backdrop"><section className="modal topology-node-settings" role="dialog" aria-modal="true" aria-labelledby="topology-node-settings-title">
+      <div className="card-title"><div><span className="eyebrow">TOPOLOGY NODE</span><h2 id="topology-node-settings-title">节点与接口信息</h2></div><button className="icon-button" aria-label="关闭节点设置" onClick={() => setNodeSettings(undefined)}>×</button></div>
+      <form onSubmit={saveNodeSettings}>
+        <label className="field"><span>节点名称</span><input required maxLength={100} value={nodeSettings.name} onChange={event => setNodeSettings({ ...nodeSettings, name: event.target.value })} /></label>
+        <label className="field"><span>用途说明</span><textarea maxLength={500} rows={3} value={nodeSettings.description} onChange={event => setNodeSettings({ ...nodeSettings, description: event.target.value })} placeholder="填写流量策略、镜像目标或设备能力备注" /></label>
+        <label className="field"><span>统一接口网络层</span><select value={nodeSettings.layer} onChange={event => { const layer = event.target.value as TopologyLayer; setNodeSettings({ ...nodeSettings, layer, protocols: [protocolOptions[layer][0]] }); }}>{(['L2', 'L3', 'L4', 'L7'] as TopologyLayer[]).map(layer => <option key={layer} value={layer}>{layer}</option>)}</select></label>
+        <fieldset className="topology-protocol-options"><legend>接口协议</legend>{protocolOptions[nodeSettings.layer].map(protocol => <label key={protocol}><input type="checkbox" checked={nodeSettings.protocols.includes(protocol)} onChange={event => setNodeSettings({ ...nodeSettings, protocols: event.target.checked ? [...nodeSettings.protocols, protocol] : nodeSettings.protocols.filter(value => value !== protocol) })} />{protocol}</label>)}</fieldset>
+        {nodeSettingsError && <div className="alert error" role="alert">{nodeSettingsError}</div>}
+        <div className="form-actions"><button type="button" className="secondary" onClick={() => setNodeSettings(undefined)}>取消</button><button className="primary">保存节点设置</button></div>
+      </form>
+    </section></div>}
     {assetPickerOpen && <div className="modal-backdrop"><section className="modal topology-asset-picker" role="dialog" aria-modal="true" aria-labelledby="topology-asset-picker-title"><div className="card-title"><div><span className="eyebrow">REGISTERED HOSTS</span><h2 id="topology-asset-picker-title">添加主机资产到主拓扑</h2></div><button className="icon-button" aria-label="关闭添加主机资产" onClick={() => setAssetPickerOpen(false)}>×</button></div><p>选择已登记主机后，拓扑会绑定该资产并自动读取 Agent 上报的路由表。</p><div className="topology-asset-list">{assetChoices.map(host => { const bound = nodes.some(node => node.data.model.assetId === host.id); return <button className="topology-asset-option" key={host.id} disabled={bound} onClick={() => addHostAsset(host)}><span><strong>{host.hostname}</strong><small>{host.os ?? 'OS 未知'} · {host.arch ?? '架构未知'} · {host.agentId ? 'Agent 已绑定' : '等待 Agent'}</small></span><span className={`badge ${host.status === 'ONLINE' ? 'online' : host.status === 'OFFLINE' ? 'offline' : 'unknown'}`}>{bound ? '已添加' : host.status}</span></button>; })}</div>{assetNextCursor && <button className="secondary" disabled={assetPickerBusy} onClick={() => void loadMoreHostAssets()}>{assetPickerBusy ? '读取中…' : '加载更多主机'}</button>}{!assetChoices.length && <div className="empty">还没有已登记主机。</div>}</section></div>}
   </>;
 }

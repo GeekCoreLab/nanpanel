@@ -58,7 +58,8 @@ public class TopologyResource {
   public record PortView(String id, String direction, String layer, List<String> protocols) {}
   public record NodeView(String id, String kind, String name, Position position,
                          int inputCount, int outputCount, List<PortView> ports,
-                         String parentId, String assetId, String clusterId, String ipAddress) {}
+                         String parentId, String assetId, String clusterId, String ipAddress,
+                         String description) {}
   public record LinkView(String id, String sourceNodeId, String sourcePort, String targetNodeId,
                          String targetPort, String layer, String protocol, String status,
                          String state) {}
@@ -269,6 +270,9 @@ public class TopologyResource {
       if (node == null || node.ports() == null || node.position() == null) {
         throw fail(422, "INVALID_TOPOLOGY", "节点字段不能为空");
       }
+      if (node.description() != null && node.description().codePointCount(0, node.description().length()) > 500) {
+        throw fail(422, "INVALID_TOPOLOGY", "节点用途说明最多 500 个 Unicode 字符");
+      }
       List<PortView> ports = node.ports().stream().map(port -> {
         if (port == null || port.protocols() == null || port.protocols().isEmpty()) {
           throw fail(422, "INVALID_TOPOLOGY", "端口字段不能为空");
@@ -278,7 +282,8 @@ public class TopologyResource {
       return new NodeView(node.id(), node.kind(), node.name() == null ? null : node.name().strip(),
           node.position(), node.inputCount(), node.outputCount(), ports, node.parentId(),
           node.assetId(), node.clusterId(), node.ipAddress() == null || node.ipAddress().isBlank()
-              ? null : node.ipAddress().strip());
+              ? null : node.ipAddress().strip(), node.description() == null || node.description().isBlank()
+                  ? null : node.description().strip());
     }).toList();
     List<LinkInput> links = input.links().stream().map(link -> {
       if (link == null) {

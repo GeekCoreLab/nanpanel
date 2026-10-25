@@ -5161,6 +5161,9 @@ components:
       - MERGE
       - SPLIT
       - FORWARDER
+      - LOAD_BALANCER
+      - MIRROR
+      - CUSTOM
       - FOLDER
     TopologyPosition:
       type: object
@@ -5254,6 +5257,10 @@ components:
           type: [string, 'null']
           maxLength: 45
           description: Static IPv4/IPv6 address used by a ROUTER node for next-hop matching.
+        description:
+          type: [string, 'null']
+          maxLength: 500
+          description: Operator supplied node note; it does not declare provider capabilities.
     TopologyLink:
       type: object
       additionalProperties: false

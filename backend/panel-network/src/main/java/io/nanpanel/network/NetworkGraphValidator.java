@@ -108,6 +108,10 @@ public final class NetworkGraphValidator {
                     || !protocolMatches(link.layer(), link.protocol())) {
                 return "连接的网络层与协议必须同时受两端口支持";
             }
+            if (("LOAD_BALANCER".equals(source.kind()) || "LOAD_BALANCER".equals(target.kind()))
+                    && link.layer() != Layer.L4 && link.layer() != Layer.L7) {
+                return "流量分配器只支持 L4/L7 流量接口";
+            }
             if (!occupied.add(source.id() + ":" + sourcePort.id())
                     || !occupied.add(target.id() + ":" + targetPort.id())) {
                 return "每个端口只能连接一条链路";
@@ -134,6 +138,9 @@ public final class NetworkGraphValidator {
             case "ROUTER" -> inputs >= 1 && inputs <= 16 && outputs >= 1 && outputs <= 16;
             case "MERGE" -> inputs >= 2 && inputs <= 16 && outputs == 1;
             case "SPLIT" -> inputs == 1 && outputs >= 2 && outputs <= 16;
+            case "LOAD_BALANCER" -> inputs >= 1 && inputs <= 16 && outputs >= 2 && outputs <= 16;
+            case "MIRROR" -> inputs == 1 && outputs >= 2 && outputs <= 16;
+            case "CUSTOM" -> inputs >= 1 && inputs <= 16 && outputs >= 1 && outputs <= 16;
             case "SWITCH", "FORWARDER" -> inputs >= 2 && inputs <= 16 && outputs >= 2 && outputs <= 16;
             default -> false;
         };

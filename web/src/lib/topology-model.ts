@@ -44,11 +44,15 @@ export function unmatchedRouteGateways(
   return [...unmatched].sort((left, right) => left.localeCompare(right));
 }
 
-const defaultPort = (id: string, direction: TopologyPort['direction']): TopologyPort => ({ id, direction, layer: 'L4', protocols: ['TCP', 'UDP'] });
-const portsFor = (inputs: number, outputs: number): TopologyPort[] => [
-  ...Array.from({ length: inputs }, (_, index) => defaultPort(`in-${index + 1}`, 'INPUT')),
-  ...Array.from({ length: outputs }, (_, index) => defaultPort(`out-${index + 1}`, 'OUTPUT')),
-];
+const defaultPort = (id: string, direction: TopologyPort['direction'], layer: TopologyPort['layer'] = 'L4', protocols: TopologyPort['protocols'] = ['TCP', 'UDP']): TopologyPort => ({ id, direction, layer, protocols });
+const portsFor = (kind: TopologyNodeKind, inputs: number, outputs: number): TopologyPort[] => {
+  const layer = kind === 'SWITCH' ? 'L2' : 'L4';
+  const protocols: TopologyPort['protocols'] = kind === 'SWITCH' ? ['ETHERNET'] : ['TCP', 'UDP'];
+  return [
+    ...Array.from({ length: inputs }, (_, index) => defaultPort(`in-${index + 1}`, 'INPUT', layer, protocols)),
+    ...Array.from({ length: outputs }, (_, index) => defaultPort(`out-${index + 1}`, 'OUTPUT', layer, protocols)),
+  ];
+};
 const protocolLayer: Record<TopologyPort['layer'], TopologyPort['protocols'][number][]> = {
   L2: ['ETHERNET'], L3: ['IP'], L4: ['TCP', 'UDP', 'SCTP'], L7: ['HTTP', 'HTTPS'],
 };
@@ -62,11 +66,14 @@ export const nodePresets: Record<TopologyNodeKind, { name: string; inputs: numbe
   MERGE: { name: '多合一转发器', inputs: 3, outputs: 1, description: '多个入口汇聚至一个出口' },
   SPLIT: { name: '一分多转发器', inputs: 1, outputs: 3, description: '一个入口分发至多个出口' },
   FORWARDER: { name: '多进多出转发器', inputs: 3, outputs: 3, description: '所有入口的流量都会被发送给所有出口' },
+  LOAD_BALANCER: { name: '流量分配器', inputs: 1, outputs: 3, description: '按流量策略分配至多个出口' },
+  MIRROR: { name: '流量镜像器', inputs: 1, outputs: 2, description: '将入口流量复制到业务与观测出口' },
+  CUSTOM: { name: '自定义网络设备', inputs: 1, outputs: 1, description: '接口声明之外的设备能力需人工确认' },
   FOLDER: { name: 'K3s 集群文件夹', inputs: 1, outputs: 1, description: '双击进入集群拓扑与资源视图' },
 };
 export function createTopologyNode(kind: TopologyNodeKind, position: { x: number; y: number }): TopologyNode {
   const preset = nodePresets[kind];
-  return { id: createUuid(), kind, name: preset.name, position, inputCount: preset.inputs, outputCount: preset.outputs, ports: portsFor(preset.inputs, preset.outputs), parentId: null, assetId: null, clusterId: null, ipAddress: null };
+  return { id: createUuid(), kind, name: preset.name, position, inputCount: preset.inputs, outputCount: preset.outputs, ports: portsFor(kind, preset.inputs, preset.outputs), parentId: null, assetId: null, clusterId: null, ipAddress: null };
 }
 export function initialTopology(): TopologyDraftWrite {
   return { nodes: [createTopologyNode('GATEWAY', { x: 0, y: 100 }), createTopologyNode('HOST', { x: 350, y: 180 }), createTopologyNode('SERVICE', { x: 700, y: 100 })], links: [] };
@@ -75,7 +82,7 @@ export function validNodeShape(node: TopologyNode): boolean {
   const i = node.inputCount, o = node.outputCount;
   if (![i, o].every(n => Number.isInteger(n) && n >= 0 && n <= 16)) return false;
   if (!Array.isArray(node.ports) || node.ports.length !== i + o) return false;
-  const expected = portsFor(i, o);
+  const expected = portsFor(node.kind, i, o);
   if (node.ports.some((port, index) => !port || port.id !== expected[index].id || port.direction !== expected[index].direction
     || !['L2', 'L3', 'L4', 'L7'].includes(port.layer) || !Array.isArray(port.protocols) || !port.protocols.length
     || port.protocols.some(protocol => !protocolLayer[port.layer]?.includes(protocol)))) return false;
@@ -86,6 +93,9 @@ export function validNodeShape(node: TopologyNode): boolean {
     case 'ROUTER': return i >= 1 && o >= 1;
     case 'MERGE': return i >= 2 && o === 1;
     case 'SPLIT': return i === 1 && o >= 2;
+    case 'LOAD_BALANCER': return i >= 1 && o >= 2;
+    case 'MIRROR': return i === 1 && o >= 2;
+    case 'CUSTOM': return i >= 1 && o >= 1;
     case 'SWITCH': case 'FORWARDER': return i >= 2 && o >= 2;
     case 'FOLDER': return i >= 1 && o >= 1;
     default: return false;
@@ -101,10 +111,29 @@ export function connectionError(nodes: TopologyNode[], links: TopologyLink[], ca
   const sourcePort = source.ports.find(port => port.id === candidate.sourcePort), targetPort = target.ports.find(port => port.id === candidate.targetPort);
   if (!['L2', 'L3', 'L4', 'L7'].includes(candidate.layer) || !protocolLayer[candidate.layer]?.includes(candidate.protocol) || sourcePort?.layer !== candidate.layer || targetPort?.layer !== candidate.layer
     || !sourcePort.protocols.includes(candidate.protocol) || !targetPort.protocols.includes(candidate.protocol)) return '连接的网络层与协议必须同时受两端口支持';
+  if ([source, target].some(node => node.kind === 'LOAD_BALANCER') && !['L4', 'L7'].includes(candidate.layer)) return '流量分配器只支持 L4/L7 流量接口，不能连接 L2/L3 端口';
   if (links.some(l => (l.sourceNodeId === source.id && l.sourcePort === candidate.sourcePort) || (l.targetNodeId === target.id && l.targetPort === candidate.targetPort))) return '端口已被占用，请增加端口或添加转发节点';
   const visited = new Set<string>();
   const reaches = (id: string): boolean => { if (id === source.id) return true; if (visited.has(id)) return false; visited.add(id); return links.filter(l => l.sourceNodeId === id).some(l => reaches(l.targetNodeId)); };
   return reaches(target.id) ? '该连接将形成转发环路' : null;
+}
+
+/**
+ * The port declaration proves a protocol match, while traffic-device execution
+ * semantics remain provider-specific. Ask an operator before connecting through
+ * devices whose runtime capabilities are not declared by the selected provider.
+ */
+export function connectionReviewMessage(nodes: readonly TopologyNode[], candidate: TopologyLink): string | null {
+  const source = nodes.find(node => node.id === candidate.sourceNodeId);
+  const target = nodes.find(node => node.id === candidate.targetNodeId);
+  if (!source || !target) return null;
+  const needsReview = new Set<TopologyNodeKind>([
+    'SWITCH', 'MERGE', 'SPLIT', 'FORWARDER', 'LOAD_BALANCER', 'MIRROR', 'CUSTOM',
+  ]);
+  const devices = [source, target].filter(node => needsReview.has(node.kind));
+  if (!devices.length) return null;
+  const names = devices.map(node => `“${node.name}”`).join('、');
+  return `${names} 的端口层与协议声明匹配，但当前拓扑没有该设备的 Provider 能力清单；请人工确认流量方向、分配/复制方式及目标接口支持此连接。`;
 }
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
@@ -116,7 +145,7 @@ export function draftError(value: unknown): string | null {
   const ids = new Set<string>();
   for (const n of value.nodes) {
     const requiredNodeKeys = ['id', 'kind', 'name', 'position', 'inputCount', 'outputCount', 'ports'];
-    const optionalNodeKeys = ['parentId', 'assetId', 'clusterId', 'ipAddress'];
+    const optionalNodeKeys = ['parentId', 'assetId', 'clusterId', 'ipAddress', 'description'];
     if (!record(n) || requiredNodeKeys.some(key => !Object.hasOwn(n, key)) || Object.keys(n).some(key => !requiredNodeKeys.includes(key) && !optionalNodeKeys.includes(key)) || typeof n.id !== 'string' || !uuid.test(n.id) || ids.has(n.id)) return '节点 ID 必须为唯一 UUID，且不能包含未定义字段';
     ids.add(n.id);
     if (typeof n.name !== 'string' || !n.name.trim() || [...n.name].length > 100 || !record(n.position) || !keysAre(n.position, ['x', 'y']) || ![n.position.x, n.position.y].every(v => typeof v === 'number' && Number.isFinite(v) && Math.abs(v) <= 10000)) return '节点名称或坐标无效';
@@ -129,6 +158,7 @@ export function draftError(value: unknown): string | null {
     if (n.clusterId !== undefined && n.clusterId !== null && (typeof n.clusterId !== 'string' || !uuid.test(n.clusterId))) return 'Kubernetes 集群 ID 无效';
     if (n.clusterId != null && n.kind !== 'FOLDER') return '只有文件夹节点可以关联 Kubernetes 集群';
     if (n.ipAddress !== undefined && n.ipAddress !== null && (typeof n.ipAddress !== 'string' || n.kind !== 'ROUTER' || !validIpAddress(n.ipAddress))) return '下一跳 IP 只能设置在 Router 节点上，且必须是有效 IPv4/IPv6 地址';
+    if (n.description !== undefined && n.description !== null && (typeof n.description !== 'string' || [...n.description].length > 500)) return '节点用途说明最多 500 个 Unicode 字符';
     if (parentId === n.id) return '文件夹不能包含自身';
   }
   const nodesById = new Map((value.nodes as TopologyNode[]).map(n => [n.id, n]));

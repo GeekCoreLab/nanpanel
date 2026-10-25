@@ -1,12 +1,12 @@
 // Generated from api/openapi.yaml. Regenerate with scripts/generate-types.py.
 export type ClusterProviderCredentialMetadata = { id: string; purpose: "CLOUDCORE_BOOTSTRAP_TOKEN" | "EDGECORE_BOOTSTRAP_TOKEN" | "EDGECORE_CERTIFICATE" | "EDGECORE_PRIVATE_KEY"; expiresAt: string | null; revokedAt: string | null; createdAt: string };
 export type ClusterProviderOperation = { id: string; providerId: string; clusterId: string; generation: number; operation: string; state: "PLANNED" | "VALIDATED" | "DRIFTED" | "EXECUTING" | "AWAITING_NODE_REGISTRATION" | "SUCCEEDED" | "FAILED" | "UNKNOWN"; detail: string; hostOperationId: string | null; createdAt: string; updatedAt: string };
-export type TopologyNodeKind = "GATEWAY" | "HOST" | "ROUTER" | "SERVICE" | "SWITCH" | "MERGE" | "SPLIT" | "FORWARDER" | "FOLDER";
+export type TopologyNodeKind = "GATEWAY" | "HOST" | "ROUTER" | "SERVICE" | "SWITCH" | "MERGE" | "SPLIT" | "FORWARDER" | "LOAD_BALANCER" | "MIRROR" | "CUSTOM" | "FOLDER";
 export type TopologyPosition = { x: number; y: number };
 export type TopologyLayer = "L2" | "L3" | "L4" | "L7";
 export type TopologyProtocol = "ETHERNET" | "IP" | "TCP" | "UDP" | "SCTP" | "HTTP" | "HTTPS";
 export type TopologyPort = { id: string; direction: "INPUT" | "OUTPUT"; layer: TopologyLayer; protocols: (TopologyProtocol)[] };
-export type TopologyNode = { id: string; kind: TopologyNodeKind; name: string; position: TopologyPosition; inputCount: number; outputCount: number; ports: (TopologyPort)[]; parentId?: string | null; assetId?: string | null; clusterId?: string | null; ipAddress?: string | null };
+export type TopologyNode = { id: string; kind: TopologyNodeKind; name: string; position: TopologyPosition; inputCount: number; outputCount: number; ports: (TopologyPort)[]; parentId?: string | null; assetId?: string | null; clusterId?: string | null; ipAddress?: string | null; description?: string | null };
 export type TopologyLink = { id: string; sourceNodeId: string; sourcePort: string; targetNodeId: string; targetPort: string; layer: TopologyLayer; protocol: TopologyProtocol; status: "UNVERIFIED"; state?: "PENDING" | "VERIFIED" | "ERROR" | "UNSUPPORTED" };
 export type TopologyDraftWrite = { nodes: (TopologyNode)[]; links: (TopologyLink)[] };
 export type TopologyDraft = { revisionId: string; generation: number; nodes: (TopologyNode)[]; links: (TopologyLink)[]; updatedAt: string; updatedBy: string | null };
