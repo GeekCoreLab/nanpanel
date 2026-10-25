@@ -8,6 +8,8 @@
 
 新增 Web 登录、会话、管理员账号、内置角色、仪表盘、平台设置和审计 API，端点表与语义见 [Web 平台 API](web-platform.md)。下表为原有主机运维功能链。
 
+Kubernetes 工作负载应用、YAML 派生拓扑、版本草稿、资源级 diff 与显式部署见 [Kubernetes 应用 API](kubernetes-applications.md)。
+
 ## 主机运维功能链
 
 | 方法 | 路径 | 用途 |

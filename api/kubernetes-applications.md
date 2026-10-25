@@ -1,0 +1,32 @@
+# Kubernetes 应用管理
+
+NaNPanel 把受管 Kubernetes 工作负载记录为应用。每个应用版本持久化一份标准化 YAML 清单，拓扑节点和 Service → Deployment 连线由这份清单的资源与 selector 生成。拓扑修改先创建 `DRAFT` 版本并返回资源级 YAML diff；只有单独确认部署才会向集群写入。
+
+## Bookinfo 引导
+
+`POST /api/v1/kubernetes/applications/bookinfo` 创建 Istio Bookinfo 示例：4 个 ServiceAccount、4 个 Service 和 5 个 Deployment（`reviews` 的 v1/v2/v3 都保留）。选择已登记集群和其中现有 Namespace；同名资源已存在时拒绝创建，不接管已有资源。创建失败时控制面会清理本次创建的资源，清理结果记录为 `FAILED` 或 `PARTIAL`。
+
+模板遵循 [Istio Bookinfo 示例](https://istio.io/latest/docs/examples/bookinfo/) 的基础 Kubernetes 工作负载结构。该向导不安装 Istio、不创建 Ingress、不读取 Secret，也不代表应用内部调用链已由 YAML 验证。
+
+## 拓扑编辑和版本部署
+
+`GET /api/v1/kubernetes/applications/{applicationId}` 返回当前应用、由当前版本清单生成的拓扑和清单。`GET .../versions` 返回不可变版本历史。
+
+拓扑版本草稿请求必须包含当前 `baseVersion` 和修改项；每个应用同时只允许一个待确认草稿。首期编辑范围限于 Deployment 副本数（0–20）、该 Deployment 的容器镜像，以及 Service 的 `app` selector 目标。后端从存储的清单解析资源并生成新 YAML，不接受任意更新 YAML，不增删资源，不写入 Secret、Namespace、集群级资源或自定义资源。部署一个草稿后，其他基于旧版本的草稿会标记为 `FAILED` 并提示已过期。
+
+创建草稿只持久化候选版本，不操作集群。返回版本历史中的 `manifestDiff` 按 Kubernetes kind/name 展示变更资源。部署接口仅接受状态为 `DRAFT` 且 `baseVersion` 仍等于当前版本的草稿；部署前逐资源检查 `nanpanel.io/application-id` 所有权标记和 Kubernetes ResourceVersion。多资源更新不是集群原子事务，失败时会尝试恢复前一份清单，并将最终状态记录为 `FAILED` 或 `PARTIAL`。
+
+应用所需的集群权限限制在被选 Namespace：读取对应资源、创建 Bookinfo 首版资源，以及读取和更新该应用已登记的 Deployment、Service、ServiceAccount。不需要集群级写权限。应用资源同时登记 Kubernetes UID；同名资源被删除并重建后，旧应用不会自动接管新 UID。
+
+## 路由
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| GET | `/api/v1/kubernetes/applications` | 列出已登记应用 |
+| POST | `/api/v1/kubernetes/applications/bookinfo` | 创建并部署 Bookinfo 初始版本 |
+| GET | `/api/v1/kubernetes/applications/{applicationId}` | 获取应用拓扑和当前版本 YAML |
+| GET | `/api/v1/kubernetes/applications/{applicationId}/versions` | 获取版本历史和差异 |
+| POST | `/api/v1/kubernetes/applications/{applicationId}/versions` | 生成待确认版本草稿，不写入集群 |
+| POST | `/api/v1/kubernetes/applications/{applicationId}/versions/{version}/deploy` | 显式确认部署指定草稿 |
+
+所有路由使用活动管理员 Cookie 会话；写请求需要 CSRF。受限 API Key 不包含这些管理权限。

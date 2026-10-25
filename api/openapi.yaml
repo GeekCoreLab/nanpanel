@@ -42,6 +42,8 @@ tags:
   description: Kubernetes Service 与 EndpointSlice 只读清单
 - name: KubernetesClusters
   description: 独立 Kubernetes 集群登记、健康观测和节点资产映射
+- name: KubernetesApplications
+  description: YAML 驱动的 Kubernetes 应用拓扑、版本差异与显式部署
 - name: NetworkProviders
   description: 管理端网络 Provider 计划、变更、验证与补偿
 paths:
@@ -939,6 +941,202 @@ paths:
               schema: { $ref: '#/components/schemas/Problem' }
         '503':
           description: 集群已创建资源，但控制面未能持久化其所有权记录。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /api/v1/kubernetes/applications:
+    get:
+      tags: [KubernetesApplications]
+      operationId: listKubernetesApplications
+      summary: 列出 Kubernetes 应用
+      description: 返回 NaNPanel 创建和记录的应用，不会接管未登记的集群资源。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 应用摘要列表。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationList' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/kubernetes/applications/bookinfo:
+    post:
+      tags: [KubernetesApplications]
+      operationId: createBookinfoApplication
+      summary: 在现有 Namespace 中创建 Bookinfo 测试应用
+      description: 创建 4 个 ServiceAccount、4 个 Service 与 5 个 Deployment。只支持命名空间级资源；不安装 Istio、不创建 Ingress，也不读取 Secret。所选资源名称必须未被占用。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/KubernetesBookinfoCreateRequest' }
+      responses:
+        '201':
+          description: Bookinfo 初始版本已创建并部署。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationDetail' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 集群凭据缺少 Namespace 读取或资源创建权限。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Bookinfo 记录已存在或某个同名 Kubernetes 资源已被占用。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: 集群、Namespace 或应用显示名称无效。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '502':
+          description: 集群 API 不可用；若创建失败，控制面会尝试清理本次创建的资源。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          description: 初始清理未能全部完成，应用状态会记录为 PARTIAL。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /api/v1/kubernetes/applications/{applicationId}:
+    parameters:
+    - name: applicationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    get:
+      tags: [KubernetesApplications]
+      operationId: getKubernetesApplication
+      summary: 查询应用拓扑与当前 YAML 清单
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 根据当前不可变版本 YAML 生成的拓扑。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationDetail' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/kubernetes/applications/{applicationId}/versions:
+    parameters:
+    - name: applicationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    get:
+      tags: [KubernetesApplications]
+      operationId: listKubernetesApplicationVersions
+      summary: 查询应用版本历史
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 已部署版本与待确认的 YAML 差异草稿。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationVersionList' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      tags: [KubernetesApplications]
+      operationId: createKubernetesApplicationVersionDraft
+      summary: 根据拓扑修改创建未部署版本草稿
+      description: 后端从当前存储清单生成受限的 Deployment 副本数/镜像及 Service selector 修改，并返回资源级 YAML diff。此操作不写入 Kubernetes。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/KubernetesApplicationVersionDraftRequest' }
+      responses:
+        '201':
+          description: 已保存 DRAFT 版本，等待管理员检查差异并确认部署。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationDetail' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 基础版本已变化、应用已有待确认草稿或当前状态不允许创建草稿。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: 拓扑修改无效或未产生 YAML 差异。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /api/v1/kubernetes/applications/{applicationId}/versions/{version}/deploy:
+    parameters:
+    - name: applicationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    - name: version
+      in: path
+      required: true
+      schema: { type: integer, minimum: 1 }
+    post:
+      tags: [KubernetesApplications]
+      operationId: deployKubernetesApplicationVersion
+      summary: 显式确认部署指定应用版本
+      description: 仅对仍基于当前版本的 DRAFT 应用版本执行 Namespace 内资源更新；检查每个资源的应用所有权和 ResourceVersion。多资源更新失败时尝试恢复前一版本，并持久化 FAILED 或 PARTIAL 状态。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      responses:
+        '200':
+          description: 版本部署完成并返回新拓扑。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationDetail' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 集群凭据没有资源更新权限。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 版本草稿已过期、资源所有权冲突或资源版本冲突。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '502':
+          description: 更新失败且已恢复前一版本，或 Kubernetes API 不可用。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          description: 多资源更新或恢复部分失败；应用状态为 PARTIAL。
           content:
             application/problem+json:
               schema: { $ref: '#/components/schemas/Problem' }
@@ -5567,6 +5765,212 @@ components:
           type: string
           format: date-time
         finishedAt:
+          type: [string, 'null']
+          format: date-time
+    KubernetesBookinfoCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [clusterId, namespace, displayName]
+      properties:
+        clusterId:
+          type: string
+          format: uuid
+        namespace:
+          type: string
+          minLength: 1
+          maxLength: 63
+          pattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 80
+    KubernetesApplicationList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items:
+            $ref: '#/components/schemas/KubernetesApplication'
+    KubernetesApplication:
+      type: object
+      additionalProperties: false
+      required: [id, clusterId, clusterName, namespace, name, displayName, templateId, currentVersion, state, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        clusterId:
+          type: string
+          format: uuid
+        clusterName:
+          type: string
+        namespace:
+          type: string
+          maxLength: 63
+        name:
+          type: string
+          maxLength: 63
+        displayName:
+          type: string
+          maxLength: 80
+        templateId:
+          type: string
+          enum: [bookinfo]
+        currentVersion:
+          type: integer
+          minimum: 0
+        state:
+          type: string
+          enum: [APPLYING, DEPLOYED, FAILED, PARTIAL]
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    KubernetesApplicationDetail:
+      type: object
+      additionalProperties: false
+      required: [application, topology, manifestYaml]
+      properties:
+        application:
+          $ref: '#/components/schemas/KubernetesApplication'
+        topology:
+          $ref: '#/components/schemas/KubernetesApplicationTopology'
+        manifestYaml:
+          type: string
+          description: 当前或新建草稿的标准化 Namespace 资源清单。
+    KubernetesApplicationTopology:
+      type: object
+      additionalProperties: false
+      required: [nodes, edges]
+      properties:
+        nodes:
+          type: array
+          maxItems: 64
+          items:
+            $ref: '#/components/schemas/KubernetesApplicationTopologyNode'
+        edges:
+          type: array
+          maxItems: 256
+          items:
+            $ref: '#/components/schemas/KubernetesApplicationTopologyEdge'
+    KubernetesApplicationTopologyNode:
+      type: object
+      additionalProperties: false
+      required: [id, kind, name, replicas, readyReplicas, image, targetDeployment, state]
+      properties:
+        id:
+          type: string
+          maxLength: 256
+        kind:
+          type: string
+          enum: [Service, Deployment, ServiceAccount]
+        name:
+          type: string
+          maxLength: 253
+        replicas:
+          type: [integer, 'null']
+          minimum: 0
+          maximum: 20
+        readyReplicas:
+          type: [integer, 'null']
+          minimum: 0
+        image:
+          type: [string, 'null']
+          maxLength: 512
+        targetDeployment:
+          type: [string, 'null']
+          maxLength: 63
+        state:
+          type: string
+          enum: [READY, PROGRESSING, MISSING, UNAVAILABLE, ACTIVE, CONFIGURED, UNKNOWN]
+    KubernetesApplicationTopologyEdge:
+      type: object
+      additionalProperties: false
+      required: [id, source, target]
+      properties:
+        id:
+          type: string
+          maxLength: 512
+        source:
+          type: string
+          maxLength: 256
+        target:
+          type: string
+          maxLength: 256
+    KubernetesApplicationVersionDraftRequest:
+      type: object
+      additionalProperties: false
+      required: [baseVersion, edits]
+      properties:
+        baseVersion:
+          type: integer
+          minimum: 1
+        edits:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            $ref: '#/components/schemas/KubernetesApplicationTopologyEdit'
+    KubernetesApplicationTopologyEdit:
+      type: object
+      additionalProperties: false
+      required: [resourceId, replicas, image, targetDeployment]
+      properties:
+        resourceId:
+          type: string
+          minLength: 1
+          maxLength: 256
+        replicas:
+          type: [integer, 'null']
+          minimum: 0
+          maximum: 20
+        image:
+          type: [string, 'null']
+          maxLength: 512
+        targetDeployment:
+          type: [string, 'null']
+          maxLength: 63
+    KubernetesApplicationVersionList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 256
+          items:
+            $ref: '#/components/schemas/KubernetesApplicationVersion'
+    KubernetesApplicationVersion:
+      type: object
+      additionalProperties: false
+      required: [version, baseVersion, state, manifestSha256, manifestDiff, errorMessage, createdAt, deployedAt]
+      properties:
+        version:
+          type: integer
+          minimum: 1
+        baseVersion:
+          type: integer
+          minimum: 0
+        state:
+          type: string
+          enum: [DRAFT, APPLYING, DEPLOYED, FAILED, PARTIAL]
+        manifestSha256:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+        manifestDiff:
+          type: string
+        errorMessage:
+          type: [string, 'null']
+          maxLength: 1000
+        createdAt:
+          type: string
+          format: date-time
+        deployedAt:
           type: [string, 'null']
           format: date-time
     KubernetesClusterList:

@@ -166,6 +166,7 @@ public class SessionFilter
     if (csrf)
       limit("csrf:" + http.remoteAddress().host());
     if ((path.startsWith("api/v1/admin/") || path.startsWith("api/v1/kubernetes/clusters")
+        || path.startsWith("api/v1/kubernetes/applications")
         || path.startsWith("api/v1/network-providers/")
         || path.startsWith("api/v1/plugins/") || path.startsWith("api/v1/config-translators/")) && write &&
         r.getCookies().get(COOKIE) != null)
