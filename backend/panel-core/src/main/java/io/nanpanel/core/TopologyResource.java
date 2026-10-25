@@ -58,10 +58,13 @@ public class TopologyResource {
 
   public record Position(double x, double y) {}
   public record PortView(String id, String direction, String layer, List<String> protocols) {}
+  public record FirewallRuleView(String inputPort, String outputPort, String protocol,
+                                 int destinationPort, String action) {}
+  public record FirewallPolicyView(String defaultAction, List<FirewallRuleView> rules) {}
   public record NodeView(String id, String kind, String name, Position position,
                          int inputCount, int outputCount, List<PortView> ports,
                          String parentId, String assetId, String clusterId, String ipAddress,
-                         String description, String providerId) {}
+                         String description, String providerId, FirewallPolicyView firewallPolicy) {}
   public record LinkView(String id, String sourceNodeId, String sourcePort, String targetNodeId,
                          String targetPort, String layer, String protocol, String status,
                          String state) {}
@@ -235,7 +238,9 @@ public class TopologyResource {
           || node.has("ipAddress") && !node.get("ipAddress").isNull()
               && !node.get("ipAddress").isTextual()
           || node.has("providerId") && !node.get("providerId").isNull()
-              && !node.get("providerId").isTextual()) {
+              && !node.get("providerId").isTextual()
+          || node.has("firewallPolicy") && !node.get("firewallPolicy").isNull()
+              && !validFirewallPolicyShape(node.get("firewallPolicy"))) {
         throw fail(422, "INVALID_TOPOLOGY", "节点坐标或端口字段无效");
       }
       for (JsonNode port : node.path("ports")) {
@@ -292,7 +297,8 @@ public class TopologyResource {
           node.assetId(), node.clusterId(), node.ipAddress() == null || node.ipAddress().isBlank()
               ? null : node.ipAddress().strip(), node.description() == null || node.description().isBlank()
                   ? null : node.description().strip(), node.providerId() == null
-                      || node.providerId().isBlank() ? null : node.providerId().strip());
+                      || node.providerId().isBlank() ? null : node.providerId().strip(),
+          node.firewallPolicy());
     }).toList();
     List<LinkInput> links = input.links().stream().map(link -> {
       if (link == null) {
@@ -347,6 +353,8 @@ public class TopologyResource {
           || !validIpAddress(node.ipAddress()))) {
         return "下一跳 IP 只能设置在 Router 节点上，且必须是有效 IPv4/IPv6 地址";
       }
+      String firewallError = firewallPolicyError(node);
+      if (firewallError != null) return firewallError;
     }
     for (NodeView node : value.nodes()) {
       String parentId = node.parentId();
@@ -490,7 +498,7 @@ public class TopologyResource {
   private boolean objectWithNodeKeys(JsonNode value) {
     Set<String> allowed = Set.of("id", "kind", "name", "position", "inputCount",
         "outputCount", "ports", "parentId", "assetId", "clusterId", "ipAddress",
-        "description", "providerId");
+        "description", "providerId", "firewallPolicy");
     Set<String> required = Set.of("id", "kind", "name", "position", "inputCount",
         "outputCount", "ports");
     if (value == null || !value.isObject() || value.size() < required.size()
@@ -507,6 +515,47 @@ public class TopologyResource {
       found.add(name);
     }
     return found.containsAll(required);
+  }
+
+  private boolean validFirewallPolicyShape(JsonNode policy) {
+    if (!objectWithKeys(policy, Set.of("defaultAction", "rules"))
+        || !policy.path("defaultAction").isTextual() || !policy.path("rules").isArray()
+        || policy.path("rules").size() > 64) return false;
+    for (JsonNode rule : policy.path("rules")) {
+      if (!objectWithKeys(rule, Set.of("inputPort", "outputPort", "protocol", "destinationPort", "action"))
+          || !rule.path("inputPort").isTextual() || !rule.path("outputPort").isTextual()
+          || !rule.path("protocol").isTextual() || !rule.path("destinationPort").isIntegralNumber()
+          || !rule.path("action").isTextual()) return false;
+    }
+    return true;
+  }
+
+  private String firewallPolicyError(NodeView node) {
+    FirewallPolicyView policy = node.firewallPolicy();
+    if (policy == null) return null;
+    if (!"FIREWALL".equals(node.kind())) return "只有 Firewall 节点可以设置防火墙策略";
+    if (policy.rules() == null || policy.rules().size() > 64
+        || !("ACCEPT".equals(policy.defaultAction()) || "DROP".equals(policy.defaultAction()))) {
+      return "防火墙默认动作无效或规则数量超过 64 条";
+    }
+    Set<String> inputs = node.ports().stream().filter(port -> "INPUT".equals(port.direction()))
+        .map(PortView::id).collect(java.util.stream.Collectors.toSet());
+    Set<String> outputs = node.ports().stream().filter(port -> "OUTPUT".equals(port.direction()))
+        .map(PortView::id).collect(java.util.stream.Collectors.toSet());
+    Set<String> matches = new HashSet<>();
+    for (FirewallRuleView rule : policy.rules()) {
+      if (rule == null || !inputs.contains(rule.inputPort()) || !outputs.contains(rule.outputPort())
+          || !("TCP".equals(rule.protocol()) || "UDP".equals(rule.protocol())
+              || "SCTP".equals(rule.protocol()))
+          || rule.destinationPort() < 1 || rule.destinationPort() > 65535
+          || !("ACCEPT".equals(rule.action()) || "DROP".equals(rule.action()))) {
+        return "防火墙规则必须引用有效的入/出端口、TCP/UDP/SCTP 端口及动作";
+      }
+      String key = rule.inputPort() + ":" + rule.outputPort() + ":" + rule.protocol()
+          + ":" + rule.destinationPort();
+      if (!matches.add(key)) return "防火墙规则匹配条件不能重复";
+    }
+    return null;
   }
 
   private boolean validIpAddress(String value) {

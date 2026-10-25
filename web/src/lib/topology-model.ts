@@ -117,7 +117,7 @@ export const nodePresets: Record<TopologyNodeKind, { name: string; inputs: numbe
 };
 export function createTopologyNode(kind: TopologyNodeKind, position: { x: number; y: number }): TopologyNode {
   const preset = nodePresets[kind];
-  return { id: createUuid(), kind, name: preset.name, position, inputCount: preset.inputs, outputCount: preset.outputs, ports: portsFor(kind, preset.inputs, preset.outputs), parentId: null, assetId: null, clusterId: null, ipAddress: null, providerId: null };
+  return { id: createUuid(), kind, name: preset.name, position, inputCount: preset.inputs, outputCount: preset.outputs, ports: portsFor(kind, preset.inputs, preset.outputs), parentId: null, assetId: null, clusterId: null, ipAddress: null, providerId: null, firewallPolicy: kind === 'FIREWALL' ? { defaultAction: 'DROP', rules: [] } : null };
 }
 export function initialTopology(): TopologyDraftWrite {
   return { nodes: [createTopologyNode('GATEWAY', { x: 0, y: 100 }), createTopologyNode('HOST', { x: 350, y: 180 }), createTopologyNode('SERVICE', { x: 700, y: 100 })], links: [] };
@@ -210,7 +210,7 @@ export function draftError(value: unknown): string | null {
   const ids = new Set<string>();
   for (const n of value.nodes) {
     const requiredNodeKeys = ['id', 'kind', 'name', 'position', 'inputCount', 'outputCount', 'ports'];
-    const optionalNodeKeys = ['parentId', 'assetId', 'clusterId', 'ipAddress', 'description', 'providerId'];
+    const optionalNodeKeys = ['parentId', 'assetId', 'clusterId', 'ipAddress', 'description', 'providerId', 'firewallPolicy'];
     if (!record(n) || requiredNodeKeys.some(key => !Object.hasOwn(n, key)) || Object.keys(n).some(key => !requiredNodeKeys.includes(key) && !optionalNodeKeys.includes(key)) || typeof n.id !== 'string' || !uuid.test(n.id) || ids.has(n.id)) return '节点 ID 必须为唯一 UUID，且不能包含未定义字段';
     ids.add(n.id);
     if (typeof n.name !== 'string' || !n.name.trim() || [...n.name].length > 100 || !record(n.position) || !keysAre(n.position, ['x', 'y']) || ![n.position.x, n.position.y].every(v => typeof v === 'number' && Number.isFinite(v) && Math.abs(v) <= 10000)) return '节点名称或坐标无效';
@@ -225,6 +225,24 @@ export function draftError(value: unknown): string | null {
     if (n.ipAddress !== undefined && n.ipAddress !== null && (typeof n.ipAddress !== 'string' || n.kind !== 'ROUTER' || !validIpAddress(n.ipAddress))) return '下一跳 IP 只能设置在 Router 节点上，且必须是有效 IPv4/IPv6 地址';
     if (n.description !== undefined && n.description !== null && (typeof n.description !== 'string' || [...n.description].length > 500)) return '节点用途说明最多 500 个 Unicode 字符';
     if (n.providerId !== undefined && n.providerId !== null && (typeof n.providerId !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(n.providerId))) return '网络 Provider ID 格式无效';
+    if (n.firewallPolicy !== undefined && n.firewallPolicy !== null) {
+      if (n.kind !== 'FIREWALL' || !record(n.firewallPolicy) || !keysAre(n.firewallPolicy, ['defaultAction', 'rules'])
+        || !['ACCEPT', 'DROP'].includes(String(n.firewallPolicy.defaultAction)) || !Array.isArray(n.firewallPolicy.rules) || n.firewallPolicy.rules.length > 64) return '防火墙策略结构或节点种类无效';
+      const matches = new Set<string>();
+      for (const rule of n.firewallPolicy.rules) {
+        if (!record(rule) || !keysAre(rule, ['inputPort', 'outputPort', 'protocol', 'destinationPort', 'action'])
+          || typeof rule.inputPort !== 'string' || !/^in-([1-9]|1[0-6])$/.test(rule.inputPort)
+          || typeof rule.outputPort !== 'string' || !/^out-([1-9]|1[0-6])$/.test(rule.outputPort)
+          || !['TCP', 'UDP', 'SCTP'].includes(String(rule.protocol))
+          || !Number.isInteger(rule.destinationPort) || Number(rule.destinationPort) < 1 || Number(rule.destinationPort) > 65535
+          || !['ACCEPT', 'DROP'].includes(String(rule.action))) return '防火墙规则字段无效';
+        if (!n.ports.some(port => port.id === rule.inputPort && port.direction === 'INPUT')
+          || !n.ports.some(port => port.id === rule.outputPort && port.direction === 'OUTPUT')) return '防火墙规则引用了不存在的入口或出口';
+        const key = `${rule.inputPort}:${rule.outputPort}:${rule.protocol}:${rule.destinationPort}`;
+        if (matches.has(key)) return '防火墙规则匹配条件不能重复';
+        matches.add(key);
+      }
+    }
     if (parentId === n.id) return '文件夹不能包含自身';
   }
   const nodesById = new Map((value.nodes as TopologyNode[]).map(n => [n.id, n]));

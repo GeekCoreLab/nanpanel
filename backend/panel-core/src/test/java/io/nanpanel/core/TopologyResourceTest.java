@@ -86,6 +86,40 @@ class TopologyResourceTest {
   }
 
   @Test
+  void savesFirewallPolicyAndRejectsDuplicateMatchConditions() {
+    UUID firewallId = UUID.randomUUID();
+    getDraft();
+    String initialEtag = lastEtag;
+    Map<String, Object> firewall = node(firewallId, "FIREWALL", "Isolated Firewall", 100, 100,
+        null, null, 1, 1, List.of(port("in-1", "INPUT", "L3", List.of("IP")),
+            port("out-1", "OUTPUT", "L3", List.of("IP"))));
+    Map<String, Object> rule = Map.of("inputPort", "in-1", "outputPort", "out-1",
+        "protocol", "TCP", "destinationPort", 443, "action", "ACCEPT");
+    firewall.put("firewallPolicy", Map.of("defaultAction", "DROP", "rules", List.of(rule)));
+    var saved = given().cookie("nanpanel_session", sessionCookie)
+        .header("X-CSRF-Token", csrfToken).header("If-Match", initialEtag)
+        .contentType("application/json")
+        .body(Map.of("nodes", List.of(firewall), "links", List.of()))
+        .put("/api/v1/topology/draft").then().statusCode(200).extract();
+    JsonNode savedBody = saved.as(JsonNode.class);
+    assertEquals("DROP", savedBody.path("nodes").get(0).path("firewallPolicy")
+        .path("defaultAction").asText());
+    assertEquals(443, savedBody.path("nodes").get(0).path("firewallPolicy")
+        .path("rules").get(0).path("destinationPort").asInt());
+
+    Map<String, Object> duplicate = node(UUID.randomUUID(), "FIREWALL", "Duplicate rules", 100, 100,
+        null, null, 1, 1, List.of(port("in-1", "INPUT", "L3", List.of("IP")),
+            port("out-1", "OUTPUT", "L3", List.of("IP"))));
+    duplicate.put("firewallPolicy", Map.of("defaultAction", "DROP", "rules", List.of(rule, rule)));
+    given().cookie("nanpanel_session", sessionCookie)
+        .header("X-CSRF-Token", csrfToken).header("If-Match", saved.header("ETag"))
+        .contentType("application/json")
+        .body(Map.of("nodes", List.of(duplicate), "links", List.of()))
+        .put("/api/v1/topology/draft").then().statusCode(422)
+        .body("code", org.hamcrest.Matchers.equalTo("INVALID_TOPOLOGY"));
+  }
+
+  @Test
   void savesAndReloadsHostGatewayAndObservedRouterWithRevisionGuards() {
     UUID gatewayNodeId = UUID.randomUUID();
     UUID hostNodeId = UUID.randomUUID();

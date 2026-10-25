@@ -58,6 +58,17 @@ test('Provider device binding requires declared device, port, and lifecycle capa
   assert.equal(providerSupportsDevice({ ...provider, capabilityDetails: [{ ...provider.capabilityDetails[0], operations: ['PLAN', 'VALIDATE'] }] }, 'ROUTER', 'L4', ['TCP']), false);
 });
 
+test('Firewall policy is bounded, port scoped, and rejects duplicate or invalid matches', () => {
+  const firewall = node('FIREWALL');
+  assert.deepEqual(firewall.firewallPolicy, { defaultAction: 'DROP', rules: [] });
+  const rule = { inputPort: 'in-1', outputPort: 'out-1', protocol: 'TCP', destinationPort: 443, action: 'ACCEPT' };
+  assert.equal(draftError({ nodes: [{ ...firewall, firewallPolicy: { defaultAction: 'DROP', rules: [rule] } }], links: [] }), null);
+  assert.match(draftError({ nodes: [{ ...firewall, firewallPolicy: { defaultAction: 'DROP', rules: [{ ...rule, inputPort: 'in-2' }] } }], links: [] }), /不存在的入口或出口/);
+  assert.match(draftError({ nodes: [{ ...firewall, firewallPolicy: { defaultAction: 'DROP', rules: [rule, rule] } }], links: [] }), /匹配条件不能重复/);
+  assert.ok(draftError({ nodes: [{ ...firewall, firewallPolicy: { defaultAction: 'DROP', rules: [{ ...rule, destinationPort: 65536 }] } }], links: [] }));
+  assert.ok(draftError({ nodes: [{ ...node('ROUTER'), firewallPolicy: { defaultAction: 'DROP', rules: [] } }], links: [] }));
+});
+
 test('folder hierarchy, host asset binding and same-scope connections are validated', () => {
   const folder = node('FOLDER');
   const ingress = { ...node('GATEWAY'), parentId: folder.id };

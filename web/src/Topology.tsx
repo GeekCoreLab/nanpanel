@@ -21,7 +21,7 @@ import './service-network.css';
 import './topology-node-settings.css';
 import './topology-revisions.css';
 import './network-provider-capabilities.css';
-import type { Host, HostNetworkInventory, HostPage, KubernetesClusterList, KubernetesClusterSummary, KubernetesServiceInventorySnapshot, KubernetesServiceProbeSnapshot, KubernetesTopologyNamespaceDetail, KubernetesTopologyNamespaceSnapshot, NetworkProvider, TopologyDraft, TopologyDraftWrite, TopologyLayer, TopologyLink, TopologyNode, TopologyNodeKind, TopologyProtocol, TopologyRevisionList, TopologyRevisionSummary } from './lib/types';
+import type { FirewallPolicy, FirewallRule, Host, HostNetworkInventory, HostPage, KubernetesClusterList, KubernetesClusterSummary, KubernetesServiceInventorySnapshot, KubernetesServiceProbeSnapshot, KubernetesTopologyNamespaceDetail, KubernetesTopologyNamespaceSnapshot, NetworkProvider, TopologyDraft, TopologyDraftWrite, TopologyLayer, TopologyLink, TopologyNode, TopologyNodeKind, TopologyProtocol, TopologyRevisionList, TopologyRevisionSummary } from './lib/types';
 
 type DeviceNode = Node<{
   model: TopologyNode;
@@ -136,7 +136,7 @@ function Device({ data, selected }: NodeProps<DeviceNode>) {
 }
 const nodeTypes = { device: Device };
 type Menu = { x: number; y: number; point: { x: number; y: number }; nodeId?: string; edgeId?: string };
-type NodeSettings = { nodeId: string; name: string; description: string; layer: TopologyLayer; protocols: TopologyProtocol[]; providerId: string };
+type NodeSettings = { nodeId: string; name: string; description: string; layer: TopologyLayer; protocols: TopologyProtocol[]; providerId: string; firewallPolicy: FirewallPolicy };
 const protocolOptions: Record<TopologyLayer, TopologyProtocol[]> = {
   L2: ['ETHERNET'], L3: ['IP'], L4: ['TCP', 'UDP', 'SCTP'], L7: ['HTTP', 'HTTPS'],
 };
@@ -388,9 +388,15 @@ function Editor() {
     event.preventDefault(); if (!loaded || busy) return;
     setMenu({ x: event.clientX, y: event.clientY, point: screenToFlowPosition(insertionPoint ?? { x: event.clientX, y: event.clientY }), nodeId, edgeId });
   }
+  function updateFirewallRule(index: number, patch: Partial<FirewallRule>) {
+    if (!nodeSettings) return;
+    const rules = nodeSettings.firewallPolicy.rules.map((rule, ruleIndex) => ruleIndex === index
+      ? { ...rule, ...patch } : rule);
+    setNodeSettings({ ...nodeSettings, firewallPolicy: { ...nodeSettings.firewallPolicy, rules } });
+  }
   function openNodeSettings(node: TopologyNode) {
     const firstPort = node.ports[0];
-    setNodeSettings({ nodeId: node.id, name: node.name, description: node.description ?? '', layer: firstPort?.layer ?? 'L4', protocols: [...(firstPort?.protocols ?? ['TCP'])], providerId: node.providerId ?? '' });
+    setNodeSettings({ nodeId: node.id, name: node.name, description: node.description ?? '', layer: firstPort?.layer ?? 'L4', protocols: [...(firstPort?.protocols ?? ['TCP'])], providerId: node.providerId ?? '', firewallPolicy: { defaultAction: node.firewallPolicy?.defaultAction ?? 'DROP', rules: (node.firewallPolicy?.rules ?? []).map(rule => ({ ...rule })) } });
     setNodeSettingsError(''); setMenu(undefined);
   }
   function saveNodeSettings(event: FormEvent<HTMLFormElement>) {
@@ -406,6 +412,7 @@ function Editor() {
     }
     const updated = { ...current, name: nodeSettings.name.trim(), description: nodeSettings.description.trim() || null,
       providerId: nodeSettings.providerId || null,
+      firewallPolicy: current.kind === 'FIREWALL' ? nodeSettings.firewallPolicy : null,
       ports: current.ports.map(port => ({ ...port, layer: nodeSettings.layer, protocols: [...nodeSettings.protocols] })) };
     const candidateNodes = nodes.map(node => node.id === current.id ? updated : node.data.model);
     const invalid = draftError({ nodes: candidateNodes, links: edges.map(asLink) });
@@ -840,6 +847,20 @@ function Editor() {
           </select></label>
           <small>{networkProvidersError ? `无法读取 Core Provider 能力：${networkProvidersError}` : compatibleProviders.length ? 'Provider 必须声明此设备、接口层/协议及完整变更和补偿阶段。绑定只记录执行目标，不代表网络规则已经应用。' : '当前没有已加载 Provider 声明支持此设备及接口能力；节点仍只作为期望配置保存。'}</small>
         </>}
+        {settingsNode?.kind === 'FIREWALL' && <section className="topology-firewall-policy" aria-label="期望防火墙策略">
+          <h3>防火墙期望策略</h3>
+          <p>仅保存规则意图；需要单独执行 Provider 操作后才会应用。最多 64 条，未匹配流量执行默认动作。</p>
+          <label className="field"><span>默认动作</span><select value={nodeSettings.firewallPolicy.defaultAction} onChange={event => setNodeSettings({ ...nodeSettings, firewallPolicy: { ...nodeSettings.firewallPolicy, defaultAction: event.target.value as FirewallPolicy['defaultAction'] } })}><option value="DROP">DROP</option><option value="ACCEPT">ACCEPT</option></select></label>
+          <div className="topology-firewall-rules">{nodeSettings.firewallPolicy.rules.map((rule, index) => <div className="topology-firewall-rule" key={`${rule.inputPort}-${rule.outputPort}-${index}`}>
+            <label><span>入口</span><select aria-label={`规则 ${index + 1} 入口`} value={rule.inputPort} onChange={event => updateFirewallRule(index, { inputPort: event.target.value })}>{(settingsNode.ports.filter(port => port.direction === 'INPUT')).map(port => <option key={port.id} value={port.id}>{port.id}</option>)}</select></label>
+            <label><span>出口</span><select aria-label={`规则 ${index + 1} 出口`} value={rule.outputPort} onChange={event => updateFirewallRule(index, { outputPort: event.target.value })}>{(settingsNode.ports.filter(port => port.direction === 'OUTPUT')).map(port => <option key={port.id} value={port.id}>{port.id}</option>)}</select></label>
+            <label><span>协议</span><select aria-label={`规则 ${index + 1} 协议`} value={rule.protocol} onChange={event => updateFirewallRule(index, { protocol: event.target.value as FirewallRule['protocol'] })}><option>TCP</option><option>UDP</option><option>SCTP</option></select></label>
+            <label><span>目标端口</span><input aria-label={`规则 ${index + 1} 目标端口`} type="number" min={1} max={65535} value={rule.destinationPort || ''} onChange={event => updateFirewallRule(index, { destinationPort: event.target.value === '' ? 0 : Number(event.target.value) })} /></label>
+            <label><span>动作</span><select aria-label={`规则 ${index + 1} 动作`} value={rule.action} onChange={event => updateFirewallRule(index, { action: event.target.value as FirewallRule['action'] })}><option value="ACCEPT">ACCEPT</option><option value="DROP">DROP</option></select></label>
+            <button type="button" className="secondary" aria-label={`删除规则 ${index + 1}`} onClick={() => setNodeSettings({ ...nodeSettings, firewallPolicy: { ...nodeSettings.firewallPolicy, rules: nodeSettings.firewallPolicy.rules.filter((_, ruleIndex) => ruleIndex !== index) } })}>删除</button>
+          </div>)}</div>
+          <button type="button" className="secondary" disabled={nodeSettings.firewallPolicy.rules.length >= 64} onClick={() => setNodeSettings({ ...nodeSettings, firewallPolicy: { ...nodeSettings.firewallPolicy, rules: [...nodeSettings.firewallPolicy.rules, { inputPort: settingsNode.ports.find(port => port.direction === 'INPUT')?.id ?? '', outputPort: settingsNode.ports.find(port => port.direction === 'OUTPUT')?.id ?? '', protocol: 'TCP', destinationPort: 443, action: 'ACCEPT' }] } })}>＋ 添加规则</button>
+        </section>}
         {nodeSettingsError && <div className="alert error" role="alert">{nodeSettingsError}</div>}
         <div className="form-actions"><button type="button" className="secondary" onClick={() => setNodeSettings(undefined)}>取消</button><button className="primary">保存节点设置</button></div>
       </form>

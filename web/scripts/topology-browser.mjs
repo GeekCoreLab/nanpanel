@@ -60,7 +60,13 @@ try {
   const nodeSettings = page.getByRole('dialog', { name: '节点与接口信息' });
   await expect(nodeSettings.getByLabel('设备 Provider')).toBeDisabled();
   await expect(nodeSettings.getByText('当前没有已加载 Provider 声明支持此设备及接口能力；节点仍只作为期望配置保存。')).toBeVisible();
-  await nodeSettings.getByRole('button', { name: '取消' }).click();
+  await expect(nodeSettings.getByLabel('默认动作')).toHaveValue('DROP');
+  await nodeSettings.getByRole('button', { name: '＋ 添加规则' }).click();
+  await nodeSettings.getByRole('button', { name: '＋ 添加规则' }).click();
+  await nodeSettings.getByRole('button', { name: '保存节点设置' }).click();
+  await expect(nodeSettings.getByRole('alert')).toContainText('匹配条件不能重复');
+  await nodeSettings.getByRole('button', { name: '删除规则 2' }).click();
+  await nodeSettings.getByRole('button', { name: '保存节点设置' }).click();
   // Fit nodes before targeting a node inserted off-screen.
   await page.getByRole('button', { name: 'fit view' }).click();
   const switchNode = device('虚拟交换机');
