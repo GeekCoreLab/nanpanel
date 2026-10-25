@@ -1,7 +1,7 @@
 // Generated from api/openapi.yaml. Regenerate with scripts/generate-types.py.
 export type ClusterProviderCredentialMetadata = { id: string; purpose: "CLOUDCORE_BOOTSTRAP_TOKEN" | "EDGECORE_BOOTSTRAP_TOKEN" | "EDGECORE_CERTIFICATE" | "EDGECORE_PRIVATE_KEY"; expiresAt: string | null; revokedAt: string | null; createdAt: string };
 export type ClusterProviderOperation = { id: string; providerId: string; clusterId: string; generation: number; operation: string; state: "PLANNED" | "VALIDATED" | "DRIFTED" | "EXECUTING" | "AWAITING_NODE_REGISTRATION" | "SUCCEEDED" | "FAILED" | "UNKNOWN"; detail: string; hostOperationId: string | null; createdAt: string; updatedAt: string };
-export type TopologyNodeKind = "GATEWAY" | "HOST" | "ROUTER" | "SERVICE" | "SWITCH" | "MERGE" | "SPLIT" | "FORWARDER" | "LOAD_BALANCER" | "MIRROR" | "CUSTOM" | "FOLDER";
+export type TopologyNodeKind = "GATEWAY" | "HOST" | "ROUTER" | "FIREWALL" | "SERVICE" | "SWITCH" | "MERGE" | "SPLIT" | "FORWARDER" | "LOAD_BALANCER" | "MIRROR" | "PACKET_TAP" | "CUSTOM" | "FOLDER";
 export type TopologyPosition = { x: number; y: number };
 export type TopologyLayer = "L2" | "L3" | "L4" | "L7";
 export type TopologyProtocol = "ETHERNET" | "IP" | "TCP" | "UDP" | "SCTP" | "HTTP" | "HTTPS";

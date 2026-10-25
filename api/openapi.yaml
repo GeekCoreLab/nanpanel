@@ -5150,6 +5150,7 @@ components:
       - GATEWAY
       - HOST
       - ROUTER
+      - FIREWALL
       - SERVICE
       - SWITCH
       - MERGE
@@ -5157,6 +5158,7 @@ components:
       - FORWARDER
       - LOAD_BALANCER
       - MIRROR
+      - PACKET_TAP
       - CUSTOM
       - FOLDER
     TopologyPosition:

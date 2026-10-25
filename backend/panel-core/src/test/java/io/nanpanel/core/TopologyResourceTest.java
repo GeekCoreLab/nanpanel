@@ -72,6 +72,17 @@ class TopologyResourceTest {
 
     gatewayHostId = insertHost("topology-gateway-asset");
     applicationHostId = insertHost("topology-application-asset");
+    store.transaction(connection -> {
+      AuthStore.update(connection, "DELETE FROM topology_revision WHERE generation > 0");
+      AuthStore.update(connection,
+          "UPDATE topology_revision SET snapshot='{\"nodes\":[],\"links\":[]}',"
+              + "updated_by=NULL,updated_at=0 WHERE generation=0");
+      AuthStore.update(connection,
+          "UPDATE topology_head SET revision_id='00000000-0000-0000-0000-000000000001',"
+              + "generation=0,snapshot='{\"nodes\":[],\"links\":[]}',"
+              + "updated_by=NULL,updated_at=0 WHERE id=1");
+      return null;
+    });
   }
 
   @Test
@@ -80,7 +91,7 @@ class TopologyResourceTest {
     UUID hostNodeId = UUID.randomUUID();
     UUID routerNodeId = UUID.randomUUID();
     UUID linkId = UUID.randomUUID();
-    JsonNode initial = getDraft();
+    getDraft();
     String initialEtag = lastEtag;
 
     Map<String, Object> gateway = node(gatewayNodeId, "GATEWAY", "Public Gateway",
@@ -146,6 +157,43 @@ class TopologyResourceTest {
     assertTrue(afterRejectedWrite.path("nodes").has(0));
   }
 
+  @Test
+  void acceptsFirewallAndPacketTapOnlyWhenTheirPortCapabilitiesAreConsistent() {
+    getDraft();
+    UUID firewallId = UUID.randomUUID();
+    UUID packetTapId = UUID.randomUUID();
+    Map<String, Object> firewall = node(firewallId, "FIREWALL", "L3 Firewall",
+        100, 100, null, null, 1, 1, List.of(
+            port("in-1", "INPUT", "L3", List.of("IP")),
+            port("out-1", "OUTPUT", "L3", List.of("IP"))));
+    List<Map<String, Object>> packetTapPorts = List.of(
+        port("in-1", "INPUT", "L2", List.of("ETHERNET")),
+        port("out-1", "OUTPUT", "L2", List.of("ETHERNET")),
+        port("out-2", "OUTPUT", "L2", List.of("ETHERNET")));
+    Map<String, Object> packetTap = node(packetTapId, "PACKET_TAP", "Packet Tap",
+        420, 100, null, null, 1, 2, packetTapPorts);
+    var save = given().cookie("nanpanel_session", sessionCookie)
+        .header("X-CSRF-Token", csrfToken).header("If-Match", lastEtag)
+        .contentType("application/json")
+        .body(Map.of("nodes", List.of(firewall, packetTap), "links", List.of()))
+        .put("/api/v1/topology/draft").then().statusCode(200).extract();
+    String savedEtag = save.header("ETag");
+    assertNotEquals(lastEtag, savedEtag);
+
+    Map<String, Object> invalidTap = new LinkedHashMap<>(packetTap);
+    List<Map<String, Object>> invalidPorts = new java.util.ArrayList<>(packetTapPorts);
+    invalidPorts.set(2, port("out-2", "OUTPUT", "L3", List.of("IP")));
+    invalidTap.put("ports", invalidPorts);
+    given().cookie("nanpanel_session", sessionCookie)
+        .header("X-CSRF-Token", csrfToken).header("If-Match", savedEtag)
+        .contentType("application/json")
+        .body(Map.of("nodes", List.of(invalidTap), "links", List.of()))
+        .put("/api/v1/topology/draft").then().statusCode(422)
+        .body("code", org.hamcrest.Matchers.equalTo("INVALID_TOPOLOGY"));
+    assertEquals(1, getDraft().path("generation").asInt());
+    assertEquals(savedEtag, lastEtag);
+  }
+
   private String lastEtag;
 
   private JsonNode getDraft() {
@@ -188,6 +236,12 @@ class TopologyResourceTest {
   private static Map<String, Object> port(String id, String direction) {
     return Map.of("id", id, "direction", direction, "layer", "L4",
         "protocols", List.of("TCP", "UDP"));
+  }
+
+  private static Map<String, Object> port(String id, String direction, String layer,
+                                           List<String> protocols) {
+    return Map.of("id", id, "direction", direction, "layer", layer,
+        "protocols", protocols);
   }
 
   private static JsonNode findNode(JsonNode draft, UUID id) {

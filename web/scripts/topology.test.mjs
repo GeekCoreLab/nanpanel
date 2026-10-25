@@ -28,6 +28,14 @@ test('direction, explicit fan-in/fan-out, port occupancy, references and cycles'
   assert.equal(validNodeShape({ ...merge, outputCount: 2 }), false);
   assert.equal(validNodeShape({ ...split, inputCount: 2 }), false);
   assert.equal(validNodeShape({ ...node('SWITCH'), inputCount: 16, outputCount: 16, ports: ports(16, 16) }), true);
+  assert.equal(validNodeShape(node('FIREWALL')), true);
+  assert.equal(validNodeShape(node('PACKET_TAP')), true);
+  assert.equal(validNodeShape({ ...node('SERVICE'), inputCount: 0, ports: [] }), false);
+  const mismatchedTap = node('PACKET_TAP');
+  const mismatchedPorts = mismatchedTap.ports.map((port, index) => ({
+    ...port, layer: index ? 'L3' : 'L2', protocols: [index ? 'IP' : 'ETHERNET'],
+  }));
+  assert.equal(validNodeShape({ ...mismatchedTap, ports: mismatchedPorts }), false);
   assert.equal(validNodeShape({ ...node('FORWARDER'), inputCount: 17 }), false);
   assert.ok(draftError({ nodes: [gateway, gateway], links: [] }));
   assert.ok(draftError({ nodes: [{ ...gateway, position: { x: Infinity, y: 0 } }], links: [] }));
@@ -154,7 +162,7 @@ test('Mock topology API requires auth, CSRF, matching ETag; save is atomic and r
   const initial = await call('GET');
   assert.equal(initial.response.status, 200);
   const tag = initial.response.headers.get('ETag');
-  const write = { nodes: [...initial.data.nodes, node('SWITCH'), node('MERGE'), node('SPLIT'), node('FORWARDER')], links: [] };
+  const write = { nodes: [...initial.data.nodes, node('SWITCH'), node('FIREWALL'), node('PACKET_TAP'), node('MERGE'), node('SPLIT'), node('FORWARDER')], links: [] };
   write.links.push(link(write.nodes[0], write.nodes[1]));
   assert.equal((await call('PUT', write)).response.status, 428);
   assert.equal((await call('PUT', write, tag, 'invalid')).response.status, 403);

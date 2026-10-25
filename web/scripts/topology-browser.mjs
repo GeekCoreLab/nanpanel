@@ -43,11 +43,13 @@ try {
   await pane.click({ button: 'right', position: { x: 100, y: 70 } });
   await page.getByRole('menuitem', { name: '虚拟交换机 4 入 / 4 出' }).click();
   await expect(device('虚拟交换机').locator('[data-handleid^="in-"]')).toHaveCount(4);
-  for (const [name, count] of [['多合一转发器', '3 入 / 1 出'], ['一分多转发器', '1 入 / 3 出'], ['多进多出转发器', '3 入 / 3 出']]) {
+  for (const [name, count] of [['虚拟防火墙', '1 入 / 1 出'], ['Packet Tap', '1 入 / 2 出'], ['多合一转发器', '3 入 / 1 出'], ['一分多转发器', '1 入 / 3 出'], ['多进多出转发器', '3 入 / 3 出']]) {
     await page.getByRole('button', { name: '＋ 添加节点' }).click();
     await page.getByRole('menuitem', { name: `${name} ${count}` }).click();
     await device(name).waitFor();
   }
+  await expect(device('虚拟防火墙').locator('.device-ports')).toContainText('L3/IP');
+  await expect(device('Packet Tap').locator('.device-ports')).toContainText('L2/ETHERNET');
   // Fit nodes before targeting a node inserted off-screen.
   await page.getByRole('button', { name: 'fit view' }).click();
   const switchNode = device('虚拟交换机');
@@ -66,17 +68,17 @@ try {
   const revisions = page.getByRole('dialog', { name: '版本比较与回放' });
   await expect(revisions).toBeVisible();
   await revisions.getByRole('button', { name: /Revision 0/ }).click();
-  await expect(revisions.locator('.topology-revision-diff h3').first()).toContainText('节点 · +4 / −0');
+  await expect(revisions.locator('.topology-revision-diff h3').first()).toContainText('节点 · +6 / −0');
   await revisions.getByRole('button', { name: '回放为未保存草稿' }).click();
   await expect(revisions).toHaveCount(0);
   await expect(page.locator('.react-flow__node-device')).toHaveCount(3);
   await expect(page.getByRole('status')).toContainText('Revision 0 已回放为未保存草稿');
   await page.getByRole('button', { name: '重新读取（丢弃未保存）' }).click();
-  await expect(page.locator('.react-flow__node-device')).toHaveCount(7);
+  await expect(page.locator('.react-flow__node-device')).toHaveCount(9);
   await expect(page.locator('.react-flow__edge')).toHaveCount(2);
   await page.locator('nav a[href="#overview"]').click();
   await page.locator('nav a[href="#topology"]').click();
-  await expect(page.locator('.react-flow__node-device')).toHaveCount(7);
+  await expect(page.locator('.react-flow__node-device')).toHaveCount(9);
   await expect(page.locator('.react-flow__edge')).toHaveCount(2);
   await page.getByLabel('拓扑编辑器').scrollIntoViewIfNeeded();
   await page.screenshot({ path: new URL('../artifacts/topology.png', import.meta.url).pathname, fullPage: true });
@@ -88,10 +90,10 @@ try {
   await device('NAT Host').click({ button: 'right' });
   await page.getByRole('menuitem', { name: '删除节点及关联连接' }).click();
   await expect(page.locator('.react-flow__edge')).toHaveCount(0);
-  await expect(page.locator('.react-flow__node-device')).toHaveCount(6);
+  await expect(page.locator('.react-flow__node-device')).toHaveCount(8);
   // Reload explicitly discards local edits and restores the saved graph.
   await page.getByRole('button', { name: '重新读取（丢弃未保存）' }).click();
-  await expect(page.locator('.react-flow__node-device')).toHaveCount(7);
+  await expect(page.locator('.react-flow__node-device')).toHaveCount(9);
   await expect(page.locator('.react-flow__edge')).toHaveCount(2);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole('button', { name: '＋ 添加节点' }).click();

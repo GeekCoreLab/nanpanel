@@ -76,6 +76,14 @@ public final class NetworkGraphValidator {
                     return "出口端口必须从 out-1 起连续编号";
                 }
             }
+            if ("FIREWALL".equals(node.kind()) || "PACKET_TAP".equals(node.kind())) {
+                Port first = node.ports().getFirst();
+                boolean consistent = node.ports().stream().allMatch(port ->
+                        port.layer() == first.layer() && port.protocols().equals(first.protocols()));
+                if (!consistent) {
+                    return "防火墙与 Packet Tap 的所有端口必须声明相同的网络层和协议集合";
+                }
+            }
             portsByNode.put(node.id(), ports);
         }
 
@@ -135,11 +143,11 @@ public final class NetworkGraphValidator {
             case "FOLDER" -> inputs >= 1 && inputs <= 16 && outputs >= 1 && outputs <= 16;
             case "SERVICE" -> inputs >= 1 && inputs <= 16 && outputs == 0;
             case "HOST" -> inputs >= 1 && inputs <= 16 && outputs >= 1 && outputs <= 16;
-            case "ROUTER" -> inputs >= 1 && inputs <= 16 && outputs >= 1 && outputs <= 16;
+            case "ROUTER", "FIREWALL" -> inputs >= 1 && inputs <= 16 && outputs >= 1 && outputs <= 16;
             case "MERGE" -> inputs >= 2 && inputs <= 16 && outputs == 1;
             case "SPLIT" -> inputs == 1 && outputs >= 2 && outputs <= 16;
             case "LOAD_BALANCER" -> inputs >= 1 && inputs <= 16 && outputs >= 2 && outputs <= 16;
-            case "MIRROR" -> inputs == 1 && outputs >= 2 && outputs <= 16;
+            case "MIRROR", "PACKET_TAP" -> inputs == 1 && outputs >= 2 && outputs <= 16;
             case "CUSTOM" -> inputs >= 1 && inputs <= 16 && outputs >= 1 && outputs <= 16;
             case "SWITCH", "FORWARDER" -> inputs >= 2 && inputs <= 16 && outputs >= 2 && outputs <= 16;
             default -> false;

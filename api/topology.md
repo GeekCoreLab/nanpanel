@@ -6,7 +6,7 @@ The Core persists one shared workspace graph as immutable Revisions. Saving a de
 
 Nodes keep editor coordinates and explicit typed ports. A port has an ID, direction (`INPUT` or `OUTPUT`), layer (`L2`, `L3`, `L4`, `L7`) and supported protocols. Supported protocol values are `ETHERNET`, `IP`, `TCP`, `UDP`, `SCTP`, `HTTP` and `HTTPS`; they must match the declared layer. A link declares its layer and protocol, and both endpoint ports must support them.
 
-The editor creates typed default ports for each node kind: switches start at `L2/ETHERNET`, and other traffic devices start at `L4/TCP,UDP`. Links use the first common protocol in `ETHERNET`, `IP`, `TCP`, `UDP`, `SCTP`, `HTTP`, `HTTPS` order. A link always points from an output port to an input port. Each port can be used once. Missing references, self-links, duplicate IDs, invalid node shapes, incompatible port types, excess ports, cycles and unknown fields are rejected. Empty graphs are allowed; the limits are 100 nodes and 800 links.
+The editor creates typed default ports for each node kind: switches and Packet Taps start at `L2/ETHERNET`, firewalls start at `L3/IP`, and other traffic devices start at `L4/TCP,UDP`. A Firewall or Packet Tap must declare the same layer and protocol set on every port. Links use the first common protocol in `ETHERNET`, `IP`, `TCP`, `UDP`, `SCTP`, `HTTP`, `HTTPS` order. A link always points from an output port to an input port. Each port can be used once. Missing references, self-links, duplicate IDs, invalid node shapes, incompatible port types, excess ports, cycles and unknown fields are rejected. Empty graphs are allowed; the limits are 100 nodes and 800 links.
 
 `FOLDER` nodes create nested editing scopes. Nodes may set `parentId` to a folder UUID; omitted or null means the outermost topology. Folders can nest at most eight levels, and a link may only connect nodes in the same scope. The complete hierarchy is saved in the same revision and shares its ETag. Deleting a folder removes all descendants. A `HOST` node may set `assetId` to a registered host UUID; the Core verifies that the host exists and that the same host is not bound more than once in a draft.
 
@@ -15,6 +15,7 @@ The editor creates typed default ports for each node kind: switches start at `L2
 | `GATEWAY` | 0 / 1 | 0 / 1–16 |
 | `HOST` | 1 / 1 | 1–16 / 1–16 |
 | `ROUTER` | 1 / 1 | 1–16 / 1–16 |
+| `FIREWALL` | 1 / 1 | 1–16 / 1–16 |
 | `SERVICE` | 1 / 0 | 1–16 / 0 |
 | `SWITCH` | 4 / 4 | 2–16 / 2–16 |
 | `MERGE` | 3 / 1 | 2–16 / 1 |
@@ -22,10 +23,11 @@ The editor creates typed default ports for each node kind: switches start at `L2
 | `FORWARDER` | 3 / 3 | 2–16 / 2–16 |
 | `LOAD_BALANCER` | 1 / 3 | 1–16 / 2–16 |
 | `MIRROR` | 1 / 2 | 1 / 2–16 |
+| `PACKET_TAP` | 1 / 2 | 1 / 2–16 |
 | `CUSTOM` | 1 / 1 | 1–16 / 1–16 |
 | `FOLDER` | 1 / 1 | 1–16 / 1–16 |
 
-These are desired logical nodes, not deployed devices. Their names do not imply MAC learning, traffic replication, load balancing, port mapping or route selection. Providers must declare the capabilities and execution semantics they support. `LOAD_BALANCER` models L4/L7 distribution intent, `MIRROR` models an input copied to business and observation outputs, and `CUSTOM` represents a device whose capabilities have not been declared. The editor rejects a `LOAD_BALANCER` connection declared as L2/L3. For connections that include traffic appliances without provider capability metadata, it asks the operator to review the connection before saving it; confirmation does not claim the provider deployed or verified that behavior.
+These are desired logical nodes, not deployed devices. Their names do not imply MAC learning, firewall enforcement, traffic replication, load balancing, port mapping or route selection. Providers must declare the capabilities and execution semantics they support. `FIREWALL` models a same-layer policy boundary, `LOAD_BALANCER` models L4/L7 distribution intent, `MIRROR` and `PACKET_TAP` model an input copied to business and observation outputs, and `CUSTOM` represents a device whose capabilities have not been declared. The editor rejects a `LOAD_BALANCER` connection declared as L2/L3. For connections that include traffic appliances without provider capability metadata, it asks the operator to review the connection before saving it; confirmation does not claim the provider deployed or verified that behavior.
 
 The outer topology can include registered Host assets and Router nodes. A Router may declare an IPv4 or IPv6 `ipAddress`; read-only Agent network snapshots match route gateways against selected Host interface addresses and top-level Router addresses to display known next hops. A unique address owner creates an observed route connection; duplicate owners remain ambiguous. Router addresses are static topology annotations and do not create or change operating-system routes. Saving the topology does not change a route table; general host route deployment still needs a capable Provider and an explicit operation.
 
