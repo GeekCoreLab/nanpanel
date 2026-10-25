@@ -535,11 +535,11 @@ Agent Kubernetes runtime discovery 的代码测试和 `k3s-1` 部署证据见[�
 
 2026-10-26 第二切片为同一 Provider 增加严格三端口 `PACKET_TAP`：Helper 在 per-topology netns 内用 `tc mirred` 镜像两侧业务出口到隔离监控网线，并在 Verify 中检查过滤器与接口归属。Core 76 项测试、Rust 四项规定检查、Web 17 项测试/构建/Playwright 和隔离 Linux Packet Tap 数据面实验通过。Commit `f3a1b18978e0a0cb361ef73697a6f56bdc998634` 的 Actions run `40219654056` 成功；不可变 GHCR Core/Web 镜像已部署到 `k3s-1`，Core/Web 各 1/1 Ready，PostgreSQL 及原 5 GiB PVC 保持 Ready/Bound，公开页面 HTTP 200、数据库健康检查 UP、Helper/Agent active，部署后的 Helper 只读能力包含 `network.topology.reconcile`。没有在目标生产拓扑执行 Provider Apply。详见[Packet Tap 切片与部署验收](tests/p6/runs/2026-10-26-packet-tap-slice.md)。
 
-2026-10-26 第三切片为隔离 Provider 增加透明 bridge Firewall：Web 默认端口改为 L2/Ethernet；Core 从已保存 Revision 序列化有界策略；Agent daemon 与 Root Helper 双重校验连接端口、协议、动作、重复规则和规则上限；Helper 在该拓扑 netns 写入并 Verify bridge-family nftables forward chain。完整证据见[Firewall Provider 切片](tests/p6/runs/2026-10-26-firewall-provider-slice.md)，镜像发布和 `k3s-1` 部署状态会在该报告中追加。
+2026-10-26 第三切片为隔离 Provider 增加透明 bridge Firewall：Web 默认端口改为 L2/Ethernet；Core 从已保存 Revision 序列化有界策略；Agent daemon 与 Root Helper 双重校验连接端口、协议、动作、重复规则和规则上限；Helper 在该拓扑 netns 写入并 Verify bridge-family nftables forward chain。Core 全量 Maven、Rust 四项检查、Web 单测/构建/两个浏览器回归和隔离 Linux Firewall 实验通过。Commit `6829f61014a9547373daa010bffe4ad7a45168dd` 的 Actions run `40222461423` validate/publish 成功；不可变 GHCR 镜像部署到 `k3s-1`，Core/Web 各 1/1 Ready，PostgreSQL 与原 5 GiB PVC 保持 Ready/Bound，公开页 HTTP 200、数据库健康检查 UP、Helper/Agent active，运行时只读 Helper 能力包含 `network.topology.reconcile`。没有在目标生产拓扑执行 Provider Apply。详见[Firewall Provider 切片与部署验收](tests/p6/runs/2026-10-26-firewall-provider-slice.md)。
 
-- [ ] root L2/Ethernet 图的隔离 Linux Bridge/Firewall/Packet Tap Provider；Firewall 的本地实现与验证已完成，等待本切片发布/部署证据补录。
-- [ ] Router 地址/路由执行与 OVS Provider。
-- [ ] 虚拟网线链路指标、端口能力与 L2/L3 校验。
+- [x] root L2/Ethernet 图的隔离 Linux Bridge/Firewall/Packet Tap Provider；Router、OVS 及生产拓扑 Apply 不在本项验收边界内，详见[部署报告](tests/p6/runs/2026-10-26-firewall-provider-slice.md)。
+- [ ] Router 地址/路由执行、OVS Provider 与更完整的 L3 校验。
+- [x] 当前 L2/Ethernet Provider 的虚拟网线 RX/TX 指标、端口能力与 Firewall 策略匹配校验。
 - [x] 设备插入、Packet Tap 镜像、拓扑版本比较与回放：Canvas context menu 支持添加/调整设备；版本差异按节点与连接稳定 ID 展示，历史 Revision 仅回放为未保存草稿；Playwright 已覆盖这些路径，Packet Tap 内核镜像见[切片验收](tests/p6/runs/2026-10-26-packet-tap-slice.md)。
 
 **验收**：证明实际网络规则生效，不把“画出连线”当作设备已联通；可证明错误配置不会永久切断管理通道。

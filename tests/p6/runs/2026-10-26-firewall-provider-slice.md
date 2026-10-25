@@ -35,11 +35,41 @@
   Host default-route digest was
   unchanged: `0ef98fc565c2ead8fcd958b1592e256030a823bf2623c9ad404432c2cdc06a32`.
 
-## Release and acceptance boundary
+## Release and deployment evidence
 
-The functional change is locally validated. Append the exact commit, successful
-Actions run, immutable GHCR tags, and `k3s-1` rollout/readiness evidence here
-after registry publication and deployment. Deployment acceptance verifies the
-Provider capability and public application response only; it does not create a
-production topology or apply Firewall rules there. Router execution, OVS,
-management-path probes and broader L3 acceptance remain open P6 work.
+- Commit: `6829f61014a9547373daa010bffe4ad7a45168dd`
+  (`Add isolated bridge firewall support`).
+- [Actions run 40222461423](https://github.com/GeekCoreLab/nanpanel/actions/runs/40222461423):
+  `validate` and `publish` both succeeded.
+- Immutable images:
+  `ghcr.io/geekcorelab/nanpanel-core:sha-6829f61014a9547373daa010bffe4ad7a45168dd`
+  and
+  `ghcr.io/geekcorelab/nanpanel-web:sha-6829f61014a9547373daa010bffe4ad7a45168dd`.
+  `deploy/k3s/deploy.sh` verified both GHCR manifests and deployed those tags;
+  no local image upload was used.
+- Before rollout, Core and Web were `1/1` Ready on the Packet Tap image. After
+  rollout, both are `1/1` Ready on this commit's images. PostgreSQL remained
+  `1/1` Running without a new restart, and the existing 5 GiB PVC stayed Bound
+  to `pvc-3428a4ec-567f-4678-b44c-fd548a57e5b2`.
+- `https://10.100.0.1:30443/` returned HTTP 200. The deployed JavaScript bundle
+  contains `FIREWALL`, `bridge-family`, and `nftables`. `/q/health/ready` returned
+  HTTP 200 with database connections `UP`.
+- `nanpanel-helper.service` and `nanpanel-agent.service` are active. The updated
+  Helper SHA-256 is
+  `6ad3f495fc06f5dd55ac1dfd613bbc32143104a90a611bc67a9c5f6a3ca21d87`; the
+  Agent SHA-256 is
+  `ec5672ca5675587ed7730900073667f4a3f75d132bf1e790fa18941a4989beaf`.
+  Previous binaries remain backed up under `/var/lib/nanpanel-helper` and
+  `/var/lib/nanpanel-agent`.
+- A read-only `helper.capabilities` request over `/run/nanpanel/helper.sock` as
+  `nanpanel-agent` returned 14 capabilities including
+  `network.topology.reconcile`.
+
+## Acceptance boundary
+
+Deployment confirms immutable image publication, Core/Web readiness, public
+asset delivery, database health and runtime Helper capability. No authenticated
+browser operation was run in this deployment check. No Provider Apply was run
+against a production topology, and no host network interface or route was
+changed. Router execution, OVS, management-path probes and broader L3
+acceptance remain open P6 work.
