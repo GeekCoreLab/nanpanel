@@ -8,6 +8,7 @@ import {
 } from '@xyflow/react';
 import { api, isMock, isP0Lab } from './lib/api';
 import { createUuid } from './lib/uuid.ts';
+import LinuxNetnsProviderPanel from './LinuxNetnsProviderPanel';
 import NetbirdProviderPanel from './NetbirdProviderPanel';
 import NetworkProviderCapabilities from './NetworkProviderCapabilities';
 import { compareTopologyDrafts, connectionError, connectionReviewMessage, createTopologyNode, draftError, nodePresets, providerSupportsDevice, resolveRouteNextHop, unmatchedRouteGateways, validNodeShape } from './lib/topology-model';
@@ -819,7 +820,7 @@ function Editor() {
         {!serviceInventory && !serviceInventoryError && <div className="empty">正在读取真实 Kubernetes 与 Istio 快照…</div>}
       </>}
     </section>}
-    {!folderId && workspace === 'providers' && <><NetworkProviderCapabilities /><NetbirdProviderPanel /></>}
+    {!folderId && workspace === 'providers' && <><NetworkProviderCapabilities /><LinuxNetnsProviderPanel ready={loaded && !dirty} expectedEtag={etag} /><NetbirdProviderPanel /></>}
     {(workspace === 'topology' || !!folderId || isP0Lab) && <div className="topology-caption"><span>全拓扑 {nodes.filter(node => !node.data.observedOnly).length} 个配置节点 · Agent 自动发现 {autoRouterNodes.length} 个 Router；期望连接 {edges.length} 条 · 当前层 {activeNodes.filter(node => !node.data.observedOnly).length} 个节点 · {activeEdges.length} 条期望连接 · {dirty ? '有未保存的修改' : '草稿未修改'}</span><span role="status">{message || (busy ? '正在读取草稿…' : '')}</span></div>}
     {menu && <TopologyContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}>
       {contextNode ? <>

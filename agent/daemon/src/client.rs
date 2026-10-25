@@ -21,6 +21,7 @@ use tonic::Streaming;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 use tracing::{info, warn};
 
+use crate::gateway::valid_topology_dispatch;
 use crate::v1::{
     AgentMessage, ControlMessage, Heartbeat, KubernetesRuntimeDiscovery, NetbirdOverlaySummary,
     NetbirdPeerPath as NetbirdPeerPathMessage, NetworkAddress, NetworkInterface, NetworkRoute,
@@ -660,6 +661,7 @@ async fn connect_once(
                                 | "container.stop"
                                 | "container.deploy"
                                 | "network.firewall.expose"
+                                | "network.topology.reconcile"
                                 | "k3s.preflight"
                                 | "k3s.install"
                                 | "k3s.upgrade"
@@ -1635,6 +1637,7 @@ fn valid_control(capability: &str, target: &str, payload_json: &str) -> bool {
                     },
                 )
         }
+        "network.topology.reconcile" => valid_topology_dispatch(target, payload_json),
         "k3s.preflight" => {
             target.is_empty()
                 && has_payload

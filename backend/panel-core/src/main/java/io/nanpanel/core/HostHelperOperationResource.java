@@ -43,6 +43,7 @@ public class HostHelperOperationResource {
   private static final Set<String> CAPABILITIES = Set.of(
       "package.install", "file.write.protected", "container.list", "container.logs",
       "container.start", "container.stop", "container.deploy", "network.firewall.expose",
+      "network.topology.reconcile",
       "file.list", "file.read", "file.write", "file.delete", "k3s.preflight", "k3s.install",
       "k3s.upgrade", "kubeedge.edgecore.join", "nginx.route.set");
   private static final java.util.regex.Pattern PACKAGE_NAME =
@@ -59,6 +60,8 @@ public class HostHelperOperationResource {
       java.util.regex.Pattern.compile("[A-Za-z0-9][A-Za-z0-9_.-]{0,62}");
   private static final java.util.regex.Pattern NGINX_ROUTE_NAME =
       java.util.regex.Pattern.compile("nanpanel-[a-z][a-z0-9-]{0,52}");
+  private static final java.util.regex.Pattern UUID_TEXT = java.util.regex.Pattern.compile(
+      "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
 
   @Inject AuthStore store;
   @Inject ObjectMapper mapper;
@@ -105,6 +108,10 @@ public class HostHelperOperationResource {
       @PathParam("hostId") String hostValue,
       @HeaderParam("Idempotency-Key") String idempotencyKey,
       HelperOperationRequest input) {
+    if (input != null && "network.topology.reconcile".equals(input.capability())) {
+      throw fail(403, "NETWORK_PROVIDER_PLAN_REQUIRED",
+          "隔离拓扑操作必须经过持久化的 Provider 计划生命周期提交");
+    }
     if (input != null && "kubeedge.edgecore.join".equals(input.capability())) {
       throw fail(403, "CLUSTER_PROVIDER_PLAN_REQUIRED",
           "EdgeCore 加入必须通过已验证的 KubeEdge 生命周期计划提交");
@@ -447,6 +454,7 @@ public class HostHelperOperationResource {
       case "container.logs", "container.start", "container.stop", "container.deploy" ->
           CONTAINER_NAME.matcher(target).matches();
       case "network.firewall.expose" -> NETWORK_RULE_NAME.matcher(target).matches();
+      case "network.topology.reconcile" -> UUID_TEXT.matcher(target).matches();
       case "nginx.route.set" -> NGINX_ROUTE_NAME.matcher(target).matches();
       default -> false;
     };
@@ -565,12 +573,76 @@ public class HostHelperOperationResource {
         throw fail(422, "VALIDATION_FAILED", "网络接口、协议、端口或回滚时间无效");
       return;
     }
+    if (capability.equals("network.topology.reconcile")) {
+      validateNetworkTopology(target, payload);
+      return;
+    }
     if (capability.equals("nginx.route.set")) {
       validateNginxRoute(payload);
       return;
     }
     if (payload != null && !payload.isNull())
       throw fail(422, "VALIDATION_FAILED", "该 Helper 操作不接受附加参数");
+  }
+
+  private void validateNetworkTopology(String target, JsonNode payload) {
+    JsonNode topologyId = payload == null ? null : payload.get("topologyId");
+    JsonNode revisionId = payload == null ? null : payload.get("revisionId");
+    JsonNode generation = payload == null ? null : payload.get("generation");
+    JsonNode action = payload == null ? null : payload.get("action");
+    JsonNode nodes = payload == null ? null : payload.get("nodes");
+    JsonNode links = payload == null ? null : payload.get("links");
+    if (payload == null || !payload.isObject() || payload.size() != 6
+        || topologyId == null || !topologyId.isTextual() || !target.equals(topologyId.asText())
+        || revisionId == null || !revisionId.isTextual() || !UUID_TEXT.matcher(revisionId.asText()).matches()
+        || generation == null || !generation.isIntegralNumber() || !generation.canConvertToLong()
+        || generation.longValue() < 1 || action == null || !action.isTextual()
+        || !Set.of("APPLY", "VERIFY", "COMPENSATE").contains(action.asText())
+        || nodes == null || !nodes.isArray() || nodes.isEmpty() || nodes.size() > 16
+        || links == null || !links.isArray() || links.size() > 64
+        || compactJson(payload).getBytes(StandardCharsets.UTF_8).length > 48 * 1024) {
+      throw fail(422, "VALIDATION_FAILED", "隔离拓扑网络操作参数无效");
+    }
+    var nodeIds = new java.util.HashSet<String>();
+    for (JsonNode node : nodes) {
+      JsonNode id = node == null ? null : node.get("id");
+      JsonNode kind = node == null ? null : node.get("kind");
+      if (!objectWithKeys(node, Set.of("id", "kind")) || id == null || !id.isTextual()
+          || !UUID_TEXT.matcher(id.asText()).matches() || kind == null || !kind.isTextual()
+          || !"SWITCH".equals(kind.asText()) || !nodeIds.add(id.asText())) {
+        throw fail(422, "VALIDATION_FAILED", "首个 Linux Bridge Provider 仅接受唯一 SWITCH 节点");
+      }
+    }
+    var linkIds = new java.util.HashSet<String>();
+    var occupiedPorts = new java.util.HashSet<String>();
+    for (JsonNode link : links) {
+      if (!objectWithKeys(link, Set.of("id", "sourceNodeId", "sourcePort", "targetNodeId",
+          "targetPort", "layer", "protocol"))) {
+        throw fail(422, "VALIDATION_FAILED", "隔离拓扑链路字段无效");
+      }
+      String id = link.path("id").asText();
+      String sourceNode = link.path("sourceNodeId").asText();
+      String sourcePort = link.path("sourcePort").asText();
+      String targetNode = link.path("targetNodeId").asText();
+      String targetPort = link.path("targetPort").asText();
+      if (!UUID_TEXT.matcher(id).matches() || !linkIds.add(id)
+          || !nodeIds.contains(sourceNode) || !nodeIds.contains(targetNode) || sourceNode.equals(targetNode)
+          || !sourcePort.matches("out-([1-9]|1[0-6])")
+          || !targetPort.matches("in-([1-9]|1[0-6])")
+          || !"L2".equals(link.path("layer").asText())
+          || !"ETHERNET".equals(link.path("protocol").asText())
+          || !occupiedPorts.add(sourceNode + ":" + sourcePort)
+          || !occupiedPorts.add(targetNode + ":" + targetPort)) {
+        throw fail(422, "VALIDATION_FAILED", "Linux Bridge 链路必须连接唯一 L2 Ethernet switch 端口");
+      }
+    }
+  }
+
+  private boolean objectWithKeys(JsonNode value, Set<String> expectedKeys) {
+    if (value == null || !value.isObject() || value.size() != expectedKeys.size()) return false;
+    var actualKeys = new java.util.HashSet<String>();
+    value.fieldNames().forEachRemaining(actualKeys::add);
+    return actualKeys.equals(expectedKeys);
   }
 
   private void validateNginxRoute(JsonNode payload) {

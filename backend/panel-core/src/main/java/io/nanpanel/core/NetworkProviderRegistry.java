@@ -9,8 +9,11 @@ import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 
 @ApplicationScoped
@@ -22,6 +25,7 @@ public class NetworkProviderRegistry {
   String directory;
 
   private ProviderRuntime runtime;
+  @jakarta.inject.Inject LinuxNetnsProvider linuxNetnsProvider;
 
   @PostConstruct
   void start() {
@@ -37,7 +41,14 @@ public class NetworkProviderRegistry {
   }
 
   public List<NetworkProvider> providers() {
-    return runtime == null ? List.of() : runtime.providers();
+    var values = new ArrayList<NetworkProvider>();
+    values.add(linuxNetnsProvider);
+    if (runtime != null) {
+      Set<String> ids = new HashSet<>();
+      values.forEach(provider -> ids.add(provider.id()));
+      runtime.providers().stream().filter(provider -> ids.add(provider.id())).forEach(values::add);
+    }
+    return List.copyOf(values);
   }
 
   public List<ClusterProvider> clusterProviders() {

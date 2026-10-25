@@ -207,6 +207,56 @@ if [[ "$tls_rotated" == true ]]; then
 fi
 ssh "$ssh_target" kubectl -n nanpanel rollout status deployment/nanpanel-core --timeout=240s
 ssh "$ssh_target" kubectl -n nanpanel rollout status deployment/nanpanel-web --timeout=180s
+if ssh "$ssh_target" systemctl is-enabled nanpanel-helper.service >/dev/null 2>&1; then
+    ssh "$ssh_target" bash -s <<'REMOTE'
+set -Eeuo pipefail
+helper=/usr/local/bin/nanpanel-helper
+pod=deployment/nanpanel-core
+container=core
+image_sha=$(kubectl -n nanpanel exec "$pod" -c "$container" -- sha256sum /work/nanpanel-helper | awk '{print $1}')
+current_sha=$(sudo -n sha256sum "$helper" | awk '{print $1}')
+if [[ ! "$image_sha" =~ ^[0-9a-f]{64}$ || ! "$current_sha" =~ ^[0-9a-f]{64}$ ]]; then
+    printf 'Unable to verify Helper binary hashes.\n' >&2
+    exit 1
+fi
+if [[ "$image_sha" != "$current_sha" ]]; then
+    sudo -n install -d -o root -g root -m 0700 /var/lib/nanpanel-helper
+    backup="/var/lib/nanpanel-helper/nanpanel-helper.pre-${current_sha}"
+    if ! sudo -n test -e "$backup"; then
+        sudo -n cp --preserve=mode,ownership "$helper" "$backup"
+    fi
+    temporary=$(sudo -n mktemp /usr/local/bin/.nanpanel-helper.XXXXXX)
+    trap 'sudo -n rm -f -- "$temporary"' EXIT
+    kubectl -n nanpanel exec "$pod" -c "$container" -- cat /work/nanpanel-helper |
+        sudo -n install -o root -g root -m 0755 /dev/stdin "$temporary"
+    downloaded_sha=$(sudo -n sha256sum "$temporary" | awk '{print $1}')
+    if [[ "$downloaded_sha" != "$image_sha" ]] ||
+        ! sudo -n python3 - "$temporary" <<'PY'
+import pathlib
+import sys
+
+if pathlib.Path(sys.argv[1]).read_bytes()[:4] != b"\x7fELF":
+    raise SystemExit("Helper image artifact is not a Linux executable")
+PY
+    then
+        printf 'Downloaded Helper binary failed verification.\n' >&2
+        exit 1
+    fi
+    sudo -n mv -f -- "$temporary" "$helper"
+    trap - EXIT
+    if ! sudo -n systemctl restart nanpanel-helper.service ||
+        ! sudo -n systemctl is-active --quiet nanpanel-helper.service; then
+        sudo -n cp --preserve=mode,ownership "$backup" "$temporary"
+        sudo -n mv -f -- "$temporary" "$helper"
+        sudo -n systemctl restart nanpanel-helper.service || true
+        exit 1
+    fi
+    printf 'Updated nanpanel-helper: image sha256=%s, previous binary backed up at %s\n' "$image_sha" "$backup"
+else
+    printf 'nanpanel-helper already matches the Core image artifact (sha256=%s)\n' "$image_sha"
+fi
+REMOTE
+fi
 if ssh "$ssh_target" systemctl is-enabled nanpanel-agent.service >/dev/null 2>&1; then
     ssh "$ssh_target" bash -s <<'REMOTE'
 set -Eeuo pipefail

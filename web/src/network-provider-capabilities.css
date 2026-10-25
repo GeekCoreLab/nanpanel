@@ -11,4 +11,18 @@
 .network-provider-capability-provider li{display:grid;gap:4px;padding-top:8px;border-top:1px solid #e7edf4;color:#687f98;font-size:10px}
 .network-provider-capability-provider li strong{color:#496684;font-size:11px}
 .network-provider-capability-provider p{margin:0;color:#8292a7;font-size:10px}
+.linux-netns-provider>.card-title{align-items:flex-start}
+.linux-netns-provider>.card-title>div:last-child{display:flex;gap:8px;flex-wrap:wrap}
+.linux-netns-provider>.card-title p{max-width:620px}
+.linux-netns-provider .netbird-provider-form{grid-template-columns:minmax(240px,1fr) minmax(240px,1.4fr)}
+.linux-netns-provider .netbird-provider-form .form-actions{grid-column:1/-1}
+.linux-netns-metrics{display:grid;gap:8px;min-width:0;padding:12px;border:1px solid #dfe8f2;border-radius:9px;background:#f8fbff}
+.linux-netns-metrics>p{margin:0;color:#70849d;font-size:11px}
+.linux-netns-metrics-table-wrap{overflow-x:auto}
+.linux-netns-metrics table{width:100%;min-width:680px;border-collapse:collapse;color:#536b87;font-size:10px;text-align:left}
+.linux-netns-metrics th,.linux-netns-metrics td{padding:8px;border-bottom:1px solid #e5edf5;white-space:nowrap}
+.linux-netns-metrics th{color:#71859e;font-weight:650}
+.linux-netns-metrics td code{color:#577594}
+.linux-netns-provider-note{margin:0;padding:0 24px 16px;color:#8592a5;font-size:10px;line-height:1.8}
 @media(max-width:620px){.network-provider-capabilities>.card-title{align-items:flex-start}.network-provider-capabilities-list{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:620px){.linux-netns-provider>.card-title{padding:17px 15px}.linux-netns-provider .netbird-provider-form{grid-template-columns:1fr;padding:0 15px 15px}.linux-netns-provider .netbird-provider-form .form-actions{grid-column:auto}.linux-netns-provider-note{padding:0 15px 15px}}

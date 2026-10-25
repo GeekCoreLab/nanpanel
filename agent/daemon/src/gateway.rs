@@ -680,6 +680,36 @@ struct NetworkFirewallPayload {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct NetworkTopologyPayload {
+    action: String,
+    topology_id: String,
+    revision_id: String,
+    generation: u64,
+    nodes: Vec<NetworkTopologyNode>,
+    links: Vec<NetworkTopologyLink>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct NetworkTopologyNode {
+    id: String,
+    kind: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct NetworkTopologyLink {
+    id: String,
+    source_node_id: String,
+    source_port: String,
+    target_node_id: String,
+    target_port: String,
+    layer: String,
+    protocol: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct NginxRoutePayload {
     listen_address: String,
     listen_port: u16,
@@ -758,7 +788,11 @@ async fn dispatch_control(
             .as_ref()
             .is_some_and(|payload| payload.len() > 48 * 1024)
         || !valid_dispatch_target(&request.capability, &request.target)
-        || !valid_dispatch_payload(&request.capability, request.payload_json.as_deref())
+        || !valid_dispatch_request_payload(
+            &request.capability,
+            &request.target,
+            request.payload_json.as_deref(),
+        )
     {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -831,6 +865,7 @@ fn valid_dispatch_target(capability: &str, target: &str) -> bool {
             valid_container_target(target)
         }
         "network.firewall.expose" => valid_container_target(target),
+        "network.topology.reconcile" => valid_topology_uuid(target),
         _ => false,
     }
 }
@@ -864,6 +899,10 @@ fn valid_dispatch_payload(capability: &str, payload: Option<&str>) -> bool {
                     && (30..=300).contains(&payload.rollback_seconds)
             })
         }
+        ("network.topology.reconcile", Some(json)) => {
+            serde_json::from_str::<NetworkTopologyPayload>(json)
+                .is_ok_and(valid_network_topology_payload)
+        }
         ("container.deploy", Some(json)) => serde_json::from_str::<ContainerDeployPayload>(json)
             .is_ok_and(|payload| {
                 valid_container_image(&payload.image)
@@ -886,6 +925,72 @@ fn valid_dispatch_payload(capability: &str, payload: Option<&str>) -> bool {
         ) => true,
         _ => false,
     }
+}
+
+fn valid_dispatch_request_payload(capability: &str, target: &str, payload: Option<&str>) -> bool {
+    valid_dispatch_payload(capability, payload)
+        && (capability != "network.topology.reconcile"
+            || payload.is_some_and(|json| valid_topology_dispatch(target, json)))
+}
+
+pub(crate) fn valid_topology_dispatch(target: &str, json: &str) -> bool {
+    valid_topology_uuid(target)
+        && serde_json::from_str::<NetworkTopologyPayload>(json).is_ok_and(|payload| {
+            payload.topology_id == target && valid_network_topology_payload(payload)
+        })
+}
+
+fn valid_network_topology_payload(payload: NetworkTopologyPayload) -> bool {
+    if !matches!(payload.action.as_str(), "APPLY" | "VERIFY" | "COMPENSATE")
+        || !valid_topology_uuid(&payload.topology_id)
+        || !valid_topology_uuid(&payload.revision_id)
+        || payload.generation == 0
+        || payload.nodes.is_empty()
+        || payload.nodes.len() > 16
+        || payload.links.len() > 64
+    {
+        return false;
+    }
+    let node_ids = payload
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    if node_ids.len() != payload.nodes.len()
+        || payload
+            .nodes
+            .iter()
+            .any(|node| node.kind != "SWITCH" || !valid_topology_uuid(&node.id))
+    {
+        return false;
+    }
+    let mut link_ids = std::collections::HashSet::new();
+    let mut ports = std::collections::HashSet::new();
+    payload.links.iter().all(|link| {
+        valid_topology_uuid(&link.id)
+            && link_ids.insert(link.id.as_str())
+            && link.source_node_id != link.target_node_id
+            && node_ids.contains(link.source_node_id.as_str())
+            && node_ids.contains(link.target_node_id.as_str())
+            && valid_topology_port(&link.source_port, "out-")
+            && valid_topology_port(&link.target_port, "in-")
+            && link.layer == "L2"
+            && link.protocol == "ETHERNET"
+            && ports.insert((link.source_node_id.as_str(), link.source_port.as_str()))
+            && ports.insert((link.target_node_id.as_str(), link.target_port.as_str()))
+    })
+}
+
+fn valid_topology_uuid(value: &str) -> bool {
+    uuid::Uuid::parse_str(value).is_ok_and(|id| id.hyphenated().to_string() == value)
+}
+
+fn valid_topology_port(value: &str, prefix: &str) -> bool {
+    value.strip_prefix(prefix).is_some_and(|number| {
+        number
+            .parse::<u8>()
+            .is_ok_and(|parsed| (1..=16).contains(&parsed) && parsed.to_string() == number)
+    })
 }
 
 fn valid_k3s_install_payload(payload: &K3sInstallPayload) -> bool {
@@ -1633,6 +1738,51 @@ mod tests {
             Some(
                 r#"{"listenAddress":"0.0.0.0","listenPort":18080,"serverName":"app.example.test","healthPath":"/health","backends":[{"name":"stable","port":20080,"weight":100}]}"#
             ),
+        ));
+    }
+
+    #[test]
+    fn topology_dispatch_accepts_only_bounded_bridge_graphs_for_the_named_topology() {
+        let topology = "11111111-1111-4111-8111-111111111111";
+        let payload = r#"{
+          "action":"APPLY",
+          "topologyId":"11111111-1111-4111-8111-111111111111",
+          "revisionId":"22222222-2222-4222-8222-222222222222",
+          "generation":3,
+          "nodes":[
+            {"id":"33333333-3333-4333-8333-333333333333","kind":"SWITCH"},
+            {"id":"44444444-4444-4444-8444-444444444444","kind":"SWITCH"}
+          ],
+          "links":[{
+            "id":"55555555-5555-4555-8555-555555555555",
+            "sourceNodeId":"33333333-3333-4333-8333-333333333333",
+            "sourcePort":"out-1",
+            "targetNodeId":"44444444-4444-4444-8444-444444444444",
+            "targetPort":"in-1",
+            "layer":"L2",
+            "protocol":"ETHERNET"
+          }]
+        }"#;
+        assert!(valid_topology_dispatch(topology, payload));
+        assert!(!valid_topology_dispatch(
+            "66666666-6666-4666-8666-666666666666",
+            payload
+        ));
+        assert!(!valid_topology_dispatch(
+            topology,
+            &payload.replace("SWITCH", "ROUTER")
+        ));
+        assert!(!valid_topology_dispatch(
+            topology,
+            &payload.replace("out-1", "--help")
+        ));
+        assert!(!valid_topology_dispatch(
+            topology,
+            &payload.replace("out-1", "out-01")
+        ));
+        assert!(!valid_topology_dispatch(
+            topology,
+            &payload.replace("\"generation\":3", "\"generation\":3,\"command\":\"id\"")
         ));
     }
 

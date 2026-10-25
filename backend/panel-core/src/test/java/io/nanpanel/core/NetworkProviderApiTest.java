@@ -48,13 +48,50 @@ class NetworkProviderApiTest {
 
     given().cookie("nanpanel_session", session.cookie())
         .get("/api/v1/network-providers")
-        .then().statusCode(200).body("size()", equalTo(1))
-        .body("[0].id", equalTo("p3-fixture-provider"))
-        .body("[0].capabilities", hasItem("p3.fixture.tcp"))
-        .body("[0].capabilityDetails[0].operations", hasItems("PLAN", "VALIDATE", "APPLY"));
+        .then().statusCode(200).body("size()", equalTo(2))
+        .body("id", hasItems("linux-netns", "p3-fixture-provider"))
+        .body("[1].capabilities", hasItem("p3.fixture.tcp"))
+        .body("[1].capabilityDetails[0].operations", hasItems("PLAN", "VALIDATE", "APPLY"));
     given().cookie("nanpanel_session", session.cookie())
         .get("/api/v1/network-providers")
-        .then().statusCode(200).body("[0].capabilityDetails[0].deviceKinds", hasItem("ROUTER"));
+        .then().statusCode(200).body("[1].capabilityDetails[0].deviceKinds", hasItem("ROUTER"));
+
+    given().cookie("nanpanel_session", session.cookie())
+        .get("/api/v1/network-providers")
+        .then().statusCode(200)
+        .body("[0].id", equalTo("linux-netns"))
+        .body("[0].capabilityDetails[0].deviceKinds", hasItem("SWITCH"))
+        .body("[0].capabilityDetails[0].operations",
+            hasItems("PLAN", "VALIDATE", "APPLY", "VERIFY", "COMPENSATE"));
+    var initialDraft = given().cookie("nanpanel_session", session.cookie())
+        .get("/api/v1/topology/draft").then().statusCode(200).extract();
+    Map<String, Object> switchNode = Map.of(
+        "id", UUID.randomUUID().toString(), "kind", "SWITCH", "name", "Provider bridge",
+        "position", Map.of("x", 0, "y", 0), "inputCount", 2, "outputCount", 2,
+        "ports", List.of(
+            Map.of("id", "in-1", "direction", "INPUT", "layer", "L2", "protocols", List.of("ETHERNET")),
+            Map.of("id", "in-2", "direction", "INPUT", "layer", "L2", "protocols", List.of("ETHERNET")),
+            Map.of("id", "out-1", "direction", "OUTPUT", "layer", "L2", "protocols", List.of("ETHERNET")),
+            Map.of("id", "out-2", "direction", "OUTPUT", "layer", "L2", "protocols", List.of("ETHERNET"))),
+        "providerId", "linux-netns");
+    var savedSwitch = given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.csrf())
+        .header("If-Match", initialDraft.header("ETag"))
+        .contentType("application/json")
+        .body(Map.of("nodes", List.of(switchNode), "links", List.of()))
+        .put("/api/v1/topology/draft").then().statusCode(200).extract();
+    String linuxPlanInput = mapper.writeValueAsString(Map.of(
+        "hostId", UUID.randomUUID().toString(), "hostGeneration", 1,
+        "reason", "Persist an isolated Linux bridge topology plan",
+        "revisionId", savedSwitch.path("revisionId"), "generation", savedSwitch.path("generation")));
+    var linuxPlan = given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.csrf()).contentType("application/json")
+        .body(Map.of("desiredSnapshot", linuxPlanInput))
+        .post("/api/v1/network-providers/linux-netns/plans")
+        .then().statusCode(201).body("state", equalTo("PLANNED")).extract();
+    given().cookie("nanpanel_session", session.cookie()).header("X-CSRF-Token", session.csrf())
+        .post("/api/v1/network-providers/linux-netns/operations/" + linuxPlan.path("id") + "/validate")
+        .then().statusCode(200).body("state", equalTo("DRIFTED"));
 
     String topologyEtag = given().cookie("nanpanel_session", session.cookie())
         .get("/api/v1/topology/draft").then().statusCode(200).extract().header("ETag");
@@ -458,13 +495,15 @@ class NetworkProviderApiTest {
         .put("/api/v1/plugins/p3-api-fixture/enabled")
         .then().statusCode(200).body("state", equalTo("DISABLED"));
     given().cookie("nanpanel_session", session.cookie()).get("/api/v1/network-providers")
-        .then().statusCode(200).body("size()", equalTo(0));
+        .then().statusCode(200).body("size()", equalTo(1))
+        .body("[0].id", equalTo("linux-netns"));
     given().cookie("nanpanel_session", session.cookie()).header("X-CSRF-Token", session.csrf())
         .contentType("application/json").body(Map.of("enabled", true))
         .put("/api/v1/plugins/p3-api-fixture/enabled")
         .then().statusCode(200).body("state", equalTo("STARTED"));
     given().cookie("nanpanel_session", session.cookie()).get("/api/v1/network-providers")
-        .then().statusCode(200).body("[0].id", equalTo("p3-fixture-provider"));
+        .then().statusCode(200).body("size()", equalTo(2))
+        .body("[1].id", equalTo("p3-fixture-provider"));
 
     var audit = given().cookie("nanpanel_session", session.cookie())
         .get("/api/v1/admin/audit-events?limit=100")

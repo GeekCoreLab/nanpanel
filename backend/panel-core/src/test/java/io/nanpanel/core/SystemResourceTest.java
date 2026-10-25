@@ -451,7 +451,8 @@ class SystemResourceTest {
     given().get("/api/v1/config-translators").then().statusCode(401);
     given().cookie("nanpanel_session", restoredCookie)
         .get("/api/v1/network-providers")
-        .then().statusCode(200).body("size()", equalTo(0));
+        .then().statusCode(200).body("size()", equalTo(1))
+        .body("[0].id", equalTo("linux-netns"));
     given().cookie("nanpanel_session", restoredCookie)
         .get("/api/v1/plugins")
         .then().statusCode(200).body("size()", equalTo(0));
@@ -1221,6 +1222,16 @@ class SystemResourceTest {
         .contentType("application/json").body(invalidNetworkRequest)
         .post("/api/v1/hosts/" + hostId + "/operations")
         .then().statusCode(422).body("code", equalTo("VALIDATION_FAILED"));
+    var directTopologyRequest = Map.of(
+        "capability", "network.topology.reconcile", "target", UUID.randomUUID().toString(),
+        "payload", Map.of(), "reason", "Direct topology Helper access must be rejected",
+        "expectedGeneration", 1);
+    given().cookie("nanpanel_session", restoredCookie)
+        .header("X-CSRF-Token", restored.path("csrfToken"))
+        .header("Idempotency-Key", "helper-topology-direct-01")
+        .contentType("application/json").body(directTopologyRequest)
+        .post("/api/v1/hosts/" + hostId + "/operations")
+        .then().statusCode(403).body("code", equalTo("NETWORK_PROVIDER_PLAN_REQUIRED"));
     var invalidContainerRequest = Map.of(
         "capability", "container.deploy", "target", "web-test",
         "payload", Map.of("image", "--privileged", "hostPort", 8080, "containerPort", 80),

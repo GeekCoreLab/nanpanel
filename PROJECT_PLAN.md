@@ -531,6 +531,8 @@ Agent Kubernetes runtime discovery 的代码测试和 `k3s-1` 部署证据见[�
 
 ### P6｜可编程虚拟设备
 
+2026-10-26 首个可执行 Provider 切片已实现：内建 `linux-netns` 从已保存拓扑 Revision 生成持久化计划，并经 Agent/Root Helper 在每 Revision 独立 netns 中创建 root `SWITCH` 的 Linux bridge 与 L2/Ethernet veth 网线。Verify 检查资源归属和零默认路由，并暴露两端内核 RX/TX byte/packet 计数；Compensate 只删除带对应归属标记的 netns，宿主接口与路由不进入操作载荷。Core 76 项测试、Rust 四项规定检查、Web 构建/单测/Playwright 和隔离 Linux bridge/router/nft/tc 实验通过。该切片仍待按不可变镜像部署到 `k3s-1` 并完成 Helper 运行时能力复核；下列 P6 总体验收项保持未完成，Router/Firewall/Packet Tap/OVS 执行和管理路径探测仍开放。
+
 - [ ] OVS/Bridge/Router/Firewall/Packet Tap Provider。
 - [ ] 虚拟网线链路指标、端口能力与 L2/L3 校验。
 - [ ] 更丰富的设备插入、镜像、拓扑版本比较与回放。

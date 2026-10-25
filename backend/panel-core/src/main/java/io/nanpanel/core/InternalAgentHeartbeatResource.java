@@ -75,6 +75,7 @@ public class InternalAgentHeartbeatResource {
                 "file.write.protected", "container.list", "container.logs", "container.start",
                 "container.stop", "container.deploy", "nginx.route.set",
                 "network.firewall.expose",
+                "network.topology.reconcile",
                 "k3s.preflight", "k3s.install", "k3s.upgrade",
                 "kubeedge.edgecore.join",
                 "kubernetes.runtime.detect",

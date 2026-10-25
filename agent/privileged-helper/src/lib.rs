@@ -23,6 +23,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio_util::codec::{Framed, LinesCodec};
 
 mod nginx_routes;
+mod topology;
 pub use nginx_routes::NginxRouteConfig;
 
 const MAX_FRAME: usize = 512 * 1024;
@@ -79,6 +80,7 @@ pub struct HelperConfig {
     pub container_runtime: Option<std::path::PathBuf>,
     nginx_routes: Option<nginx_routes::NginxRouteConfig>,
     network_operations_available: bool,
+    topology_operations_available: bool,
     netbird_binary: Option<std::path::PathBuf>,
 }
 
@@ -160,6 +162,7 @@ struct HelperRuntime {
     container_runtime: Option<Arc<std::path::PathBuf>>,
     nginx_routes: Option<Arc<NginxRouteConfig>>,
     network_operations_available: bool,
+    topology_operations_available: bool,
     kubeedge_available: bool,
     netbird_binary: Option<Arc<std::path::PathBuf>>,
     network_lock: tokio::sync::Mutex<()>,
@@ -261,6 +264,7 @@ impl HelperConfig {
             container_runtime,
             nginx_routes: None,
             network_operations_available,
+            topology_operations_available: topology::available(),
             netbird_binary,
         })
     }
@@ -295,6 +299,7 @@ pub async fn serve(config: HelperConfig) -> Result<()> {
         container_runtime: config.container_runtime.map(Arc::new),
         nginx_routes: config.nginx_routes.map(Arc::new),
         network_operations_available: config.network_operations_available,
+        topology_operations_available: config.topology_operations_available,
         kubeedge_available,
         netbird_binary: config.netbird_binary.map(Arc::new),
         network_lock: tokio::sync::Mutex::new(()),
@@ -387,6 +392,7 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                     &request.target,
                                     runtime.container_runtime.is_some(),
                                     runtime.network_operations_available,
+                                    runtime.topology_operations_available,
                                     runtime.netbird_binary.is_some(),
                                     runtime.nginx_routes.is_some(),
                                 )
@@ -398,6 +404,7 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                         Ok(serde_json::json!(available_capabilities(
                                             runtime.container_runtime.is_some(),
                                             runtime.network_operations_available,
+                                            runtime.topology_operations_available,
                                             runtime.netbird_binary.is_some(),
                                             runtime.kubeedge_available,
                                             runtime.nginx_routes.is_some(),
@@ -457,6 +464,10 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                     "network.firewall.expose" => {
                                         let _guard = runtime.network_lock.lock().await;
                                         expose_network_port(&request).await
+                                    }
+                                    "network.topology.reconcile" => {
+                                        let _guard = runtime.network_lock.lock().await;
+                                        topology::execute(&request).await
                                     }
                                     "network.overlay.peer_paths.read" => {
                                         collect_netbird_peer_paths(
@@ -589,6 +600,7 @@ fn validate_capability_target(
     target: &str,
     has_container_runtime: bool,
     network_operations_available: bool,
+    topology_operations_available: bool,
     netbird_status_available: bool,
     nginx_routes_available: bool,
 ) -> std::result::Result<(), String> {
@@ -627,6 +639,11 @@ fn validate_capability_target(
         {
             Ok(())
         }
+        "network.topology.reconcile"
+            if topology_operations_available && uuid::Uuid::parse_str(target).is_ok() =>
+        {
+            Ok(())
+        }
         "helper.status"
         | "helper.capabilities"
         | "agent.update"
@@ -649,6 +666,7 @@ fn validate_capability_target(
         | "container.stop"
         | "container.deploy"
         | "network.firewall.expose"
+        | "network.topology.reconcile"
         | "nginx.route.set" => Err("DENIED: target or parameters are invalid".to_owned()),
         _ => Err("DENIED: unsupported capability or target".to_owned()),
     }
@@ -660,6 +678,7 @@ fn validate_payload_presence(request: &Request) -> std::result::Result<(), Strin
         "package.install"
             | "file.write.protected"
             | "network.firewall.expose"
+            | "network.topology.reconcile"
             | "file.write"
             | "container.deploy"
             | "k3s.preflight"
@@ -670,6 +689,9 @@ fn validate_payload_presence(request: &Request) -> std::result::Result<(), Strin
     );
     if required != request.payload_json.is_some() {
         return Err("DENIED: payload presence does not match capability schema".to_owned());
+    }
+    if request.capability == "network.topology.reconcile" {
+        topology::validate_target_payload(&request.target, request.payload_json.as_deref())?;
     }
     Ok(())
 }
@@ -687,6 +709,7 @@ fn audit_target(request: &Request) -> String {
 fn available_capabilities(
     has_container_runtime: bool,
     network_operations_available: bool,
+    topology_operations_available: bool,
     netbird_status_available: bool,
     kubeedge_available: bool,
     nginx_routes_available: bool,
@@ -716,6 +739,9 @@ fn available_capabilities(
     }
     if network_operations_available {
         capabilities.push("network.firewall.expose");
+    }
+    if topology_operations_available {
+        capabilities.push("network.topology.reconcile");
     }
     if netbird_status_available {
         capabilities.push("network.overlay.peer_paths.read");
@@ -3464,6 +3490,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 false
             )
             .is_ok()
@@ -3593,7 +3620,9 @@ mod tests {
             .context("system clock is before Unix epoch")?
             .as_millis() as i64;
         let validate = |capability, target, containers, firewall, nginx| {
-            validate_capability_target(capability, target, containers, firewall, false, nginx)
+            validate_capability_target(
+                capability, target, containers, firewall, false, false, nginx,
+            )
         };
         assert!(validate("agent.update", "", false, false, false).is_ok());
         assert!(validate("systemd.restart", "ssh.service", false, false, false).is_ok());
@@ -3668,7 +3697,7 @@ mod tests {
         assert!(!valid_container_image("./nginx"));
         assert!(valid_network_interface("br-0"));
         assert!(!valid_network_interface("-eth0"));
-        let capabilities = available_capabilities(true, true, true, true, true);
+        let capabilities = available_capabilities(true, true, true, true, true, true);
         for capability in [
             "systemd.restart",
             "systemd.journal.read",
@@ -3680,6 +3709,7 @@ mod tests {
             "file.delete",
             "container.deploy",
             "network.firewall.expose",
+            "network.topology.reconcile",
             "k3s.preflight",
             "kubeedge.edgecore.join",
             "network.overlay.peer_paths.read",
@@ -3691,6 +3721,7 @@ mod tests {
             validate_capability_target(
                 "network.overlay.peer_paths.read",
                 "",
+                false,
                 false,
                 false,
                 true,
@@ -3705,12 +3736,14 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 false
             )
             .is_err()
         );
         assert!(
-            validate_capability_target("k3s.preflight", "", false, false, false, false).is_ok()
+            validate_capability_target("k3s.preflight", "", false, false, false, false, false)
+                .is_ok()
         );
         Ok(())
     }
@@ -3772,6 +3805,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 false
             )
             .is_err()
@@ -3783,28 +3817,29 @@ mod tests {
                 false,
                 true,
                 false,
+                false,
                 false
             )
             .is_ok()
         );
         assert!(
-            available_capabilities(false, false, false, true, false)
+            available_capabilities(false, false, false, false, true, false)
                 .contains(&"kubeedge.edgecore.join")
         );
         assert!(
-            !available_capabilities(false, false, false, false, false)
+            !available_capabilities(false, false, false, false, false, false)
                 .contains(&"kubeedge.edgecore.join")
         );
         assert!(
-            !available_capabilities(false, false, false, false, false)
+            !available_capabilities(false, false, false, false, false, false)
                 .contains(&"network.firewall.expose")
         );
         assert!(
-            available_capabilities(false, true, false, false, false)
+            available_capabilities(false, true, false, false, false, false)
                 .contains(&"network.firewall.expose")
         );
         assert!(
-            !available_capabilities(false, false, false, false, false)
+            !available_capabilities(false, false, false, false, false, false)
                 .contains(&"network.overlay.peer_paths.read")
         );
     }

@@ -1,0 +1,451 @@
+package io.nanpanel.core;
+
+import static io.nanpanel.core.AuthStore.query;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.nanpanel.plugin.api.NetworkProvider;
+import jakarta.enterprise.context.RequestScoped;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.Response;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ConcurrentHashMap;
+
+/** Linux bridge Provider whose entire resource graph is placed in a dedicated netns. */
+@RequestScoped
+public class LinuxNetnsProvider implements NetworkProvider {
+  public static final String ID = "linux-netns";
+  private static final UUID TOPOLOGY_ID = UUID.fromString("00000000-0000-4000-8000-000000000001");
+  private static final Set<String> OPERATIONS = Set.of(
+      "PLAN", "VALIDATE", "APPLY", "VERIFY", "COMPENSATE");
+  private static final Duration HELPER_WAIT = Duration.ofSeconds(24);
+  private final Map<UUID, Configuration> configurations = new ConcurrentHashMap<>();
+
+  @Inject AuthStore store;
+  @Inject ObjectMapper mapper;
+  @Inject HostHelperOperationResource helperOperations;
+  @Context ContainerRequestContext request;
+  @Context io.vertx.core.http.HttpServerRequest http;
+
+  private record HelperNode(String id, String kind) {}
+  private record HelperLink(String id, String sourceNodeId, String sourcePort,
+                            String targetNodeId, String targetPort, String layer,
+                            String protocol) {}
+  private record HelperPayload(String action, String topologyId, String revisionId,
+                               long generation, List<HelperNode> nodes,
+                               List<HelperLink> links) {}
+  private record Configuration(UUID hostId, long hostGeneration, String reason,
+                               UUID revisionId, long topologyGeneration,
+                               List<HelperNode> nodes, List<HelperLink> links) {}
+  private record HostState(long generation, String capabilities, String helperStatus,
+                           Instant lastSeen) {}
+  private record HelperResult(UUID id, String status, String result, String error) {}
+
+  @Override
+  public String id() {
+    return ID;
+  }
+
+  @Override
+  public Set<String> capabilities() {
+    return Set.of("linux.bridge");
+  }
+
+  @Override
+  public ProviderDescriptor descriptor() {
+    return new ProviderDescriptor(ID, "Linux Bridge (isolated netns)", "0.1.0",
+        "panel.io/plugins/v1");
+  }
+
+  @Override
+  public Set<Capability> capabilityDescriptors() {
+    return Set.of(new Capability("linux.bridge", OPERATIONS, Set.of("L2"),
+        Set.of("ETHERNET"), Set.of("SWITCH")));
+  }
+
+  @Override
+  public CompletionStage<String> observe(String resourceKey) {
+    try {
+      UUID providerOperationId = UUID.fromString(resourceKey);
+      List<Map<String, Object>> rows = store.transaction(connection -> query(connection,
+          "SELECT plan_configuration,state FROM network_provider_operation "
+              + "WHERE provider_id=? AND id=?",
+          ID, providerOperationId));
+      if (rows.isEmpty() || Set.of("COMPENSATED", "FAILED").contains(rows.getFirst().get("state"))) {
+        throw new IllegalArgumentException("Provider operation has no observable topology");
+      }
+      Configuration configuration = mapper.readValue(
+          String.valueOf(rows.getFirst().get("plan_configuration")), Configuration.class);
+      HelperResult result = runHelper(null, configuration, "VERIFY",
+          UUID.randomUUID().toString());
+      requireSucceeded(result, "Linux bridge observation");
+      return CompletableFuture.completedFuture(result.result());
+    } catch (Exception failure) {
+      return CompletableFuture.failedFuture(failure);
+    }
+  }
+
+  @Override
+  public CompletionStage<ChangePlan> plan(String desiredSnapshot, String observedSnapshot) {
+    Configuration configuration = parseConfiguration(desiredSnapshot);
+    UUID id = UUID.randomUUID();
+    ChangePlan plan = new ChangePlan(id, configuration.topologyGeneration(),
+        UUID.randomUUID().toString(), encode(configuration));
+    return CompletableFuture.completedFuture(plan);
+  }
+
+  @Override
+  public CompletionStage<ValidationResult> validate(ChangePlan plan) {
+    Configuration configuration = readConfiguration(plan);
+    String invalid = configurationError(configuration);
+    return CompletableFuture.completedFuture(new ValidationResult(invalid == null,
+        invalid == null ? "Topology revision, host generation, and Helper capability are current"
+            : invalid));
+  }
+
+  @Override
+  public CompletionStage<UUID> apply(ChangePlan plan) {
+    Configuration configuration = readConfiguration(plan);
+    String invalid = configurationError(configuration);
+    if (invalid != null) throw new IllegalStateException(invalid);
+    HelperResult result = runHelper(plan, configuration, "APPLY", plan.idempotencyKey());
+    requireSucceeded(result, "Linux bridge apply");
+    configurations.put(result.id(), configuration);
+    return CompletableFuture.completedFuture(result.id());
+  }
+
+  @Override
+  public CompletionStage<ValidationResult> verify(UUID operationId) {
+    Configuration configuration = configurations.get(operationId);
+    if (configuration == null) {
+      return CompletableFuture.completedFuture(
+          new ValidationResult(false, "Provider operation state was not restored"));
+    }
+    UUID providerOperationId = providerOperationId(operationId, configuration);
+    HelperResult result = runHelper(null, configuration, "VERIFY",
+        helperKey(providerOperationId, "verify"));
+    if (!"SUCCEEDED".equals(result.status())) {
+      return CompletableFuture.completedFuture(new ValidationResult(false,
+          bounded(result.error() == null ? "Helper verification failed" : result.error())));
+    }
+    try {
+      JsonNode report = mapper.readTree(result.result());
+      boolean verified = report.path("verified").asBoolean(false)
+          && TOPOLOGY_ID.toString().equals(report.path("topologyId").asText())
+          && configuration.revisionId().toString().equals(report.path("revisionId").asText())
+          && report.path("generation").asLong() == configuration.topologyGeneration();
+      return CompletableFuture.completedFuture(new ValidationResult(verified,
+          verified ? "Linux bridge and veth resources exist in the isolated netns; default route count is zero"
+              : "Helper reported that the isolated topology differs from the saved revision"));
+    } catch (Exception failure) {
+      return CompletableFuture.completedFuture(
+          new ValidationResult(false, "Helper verification result was invalid"));
+    }
+  }
+
+  @Override
+  public CompletionStage<ValidationResult> compensate(UUID operationId) {
+    Configuration configuration = configurations.get(operationId);
+    if (configuration == null) {
+      return CompletableFuture.completedFuture(
+          new ValidationResult(false, "Provider operation state was not restored"));
+    }
+    UUID providerOperationId = providerOperationId(operationId, configuration);
+    HelperResult result = runHelper(null, configuration, "COMPENSATE",
+        helperKey(providerOperationId, "compensate"));
+    if (!"SUCCEEDED".equals(result.status())) {
+      return CompletableFuture.completedFuture(new ValidationResult(false,
+          bounded(result.error() == null ? "Helper compensation failed" : result.error())));
+    }
+    configurations.remove(operationId);
+    return CompletableFuture.completedFuture(new ValidationResult(true,
+        "The isolated namespace for this topology revision was removed"));
+  }
+
+  @Override
+  public CompletionStage<ValidationResult> restoreOperation(ChangePlan plan, UUID operationId) {
+    try {
+      Configuration configuration = readConfiguration(plan);
+      UUID.fromString(operationId.toString());
+      configurations.put(operationId, configuration);
+      return CompletableFuture.completedFuture(
+          new ValidationResult(true, "Provider plan restored from Core storage"));
+    } catch (RuntimeException failure) {
+      return CompletableFuture.completedFuture(
+          new ValidationResult(false, "Provider plan could not be restored"));
+    }
+  }
+
+  private Configuration parseConfiguration(String snapshot) {
+    try {
+      JsonNode root = mapper.readTree(snapshot);
+      JsonNode hostId = root == null ? null : root.get("hostId");
+      JsonNode hostGeneration = root == null ? null : root.get("hostGeneration");
+      JsonNode reason = root == null ? null : root.get("reason");
+      JsonNode revisionClaim = root == null ? null : root.get("revisionId");
+      JsonNode generationClaim = root == null ? null : root.get("generation");
+      if (root == null || !root.isObject() || root.size() != 5 || hostId == null
+          || !hostId.isTextual() || hostGeneration == null || !hostGeneration.isIntegralNumber()
+          || !hostGeneration.canConvertToLong() || hostGeneration.longValue() < 1
+          || reason == null || !reason.isTextual() || revisionClaim == null
+          || !revisionClaim.isTextual() || generationClaim == null
+          || !generationClaim.isIntegralNumber() || !generationClaim.canConvertToLong()
+          || generationClaim.longValue() < 1) {
+        throw new IllegalArgumentException("Provider plan requires the expected Revision, execution host, and audit reason");
+      }
+      UUID selectedHost = UUID.fromString(hostId.asText());
+      String explanation = reason.asText().strip();
+      if (explanation.isEmpty() || explanation.length() > 500
+          || explanation.chars().anyMatch(Character::isISOControl)) {
+        throw new IllegalArgumentException("Provider operation reason is invalid");
+      }
+      Map<String, Object> head = store.transaction(connection -> {
+        var rows = query(connection,
+            "SELECT revision_id,generation,snapshot FROM topology_head WHERE id=1");
+        return rows.isEmpty() ? null : rows.getFirst();
+      });
+      if (head == null) throw new IllegalArgumentException("Saved topology revision is unavailable");
+      UUID revision = UUID.fromString(String.valueOf(head.get("revision_id")));
+      long generation = ((Number)head.get("generation")).longValue();
+      if (!revision.toString().equalsIgnoreCase(revisionClaim.asText())
+          || generation != generationClaim.longValue()) {
+        throw new IllegalArgumentException("Current topology Revision changed before the plan was created");
+      }
+      JsonNode savedTopology = mapper.readTree(String.valueOf(head.get("snapshot")));
+      JsonNode nodes = savedTopology.path("nodes");
+      JsonNode links = savedTopology.path("links");
+      if (generation < 1 || !nodes.isArray() || !links.isArray()) {
+        throw new IllegalArgumentException("Saved topology revision is invalid");
+      }
+      Set<String> selectedNodeIds = new HashSet<>();
+      List<HelperNode> helperNodes = new ArrayList<>();
+      for (JsonNode node : nodes) {
+        if (!ID.equals(node.path("providerId").asText())) continue;
+        if (!"SWITCH".equals(node.path("kind").asText())
+            || !node.path("id").isTextual()
+            || node.hasNonNull("parentId")) {
+          throw new IllegalArgumentException("Linux Bridge Provider accepts only root SWITCH devices");
+        }
+        UUID id = UUID.fromString(node.path("id").asText());
+        if (!selectedNodeIds.add(id.toString())) {
+          throw new IllegalArgumentException("Provider switch IDs must be unique");
+        }
+        helperNodes.add(new HelperNode(id.toString(), "SWITCH"));
+      }
+      if (helperNodes.isEmpty() || helperNodes.size() > 16 || links.size() > 64) {
+        throw new IllegalArgumentException("Linux Bridge plan needs 1 to 16 switches and at most 64 wires");
+      }
+      List<HelperLink> helperLinks = new ArrayList<>();
+      for (JsonNode link : links) {
+        String source = link.path("sourceNodeId").asText();
+        String target = link.path("targetNodeId").asText();
+        boolean sourceSelected = selectedNodeIds.contains(source);
+        boolean targetSelected = selectedNodeIds.contains(target);
+        if (sourceSelected != targetSelected) {
+          throw new IllegalArgumentException("A Provider switch wire cannot end at an unmanaged device");
+        }
+        if (!sourceSelected) continue;
+        if (!"L2".equals(link.path("layer").asText())
+            || !"ETHERNET".equals(link.path("protocol").asText())) {
+          throw new IllegalArgumentException("Linux Bridge wires must use L2 Ethernet ports");
+        }
+        helperLinks.add(new HelperLink(UUID.fromString(link.path("id").asText()).toString(),
+            UUID.fromString(source).toString(), link.path("sourcePort").asText(),
+            UUID.fromString(target).toString(), link.path("targetPort").asText(), "L2", "ETHERNET"));
+      }
+      return new Configuration(selectedHost, hostGeneration.longValue(), explanation, revision,
+          generation, List.copyOf(helperNodes), List.copyOf(helperLinks));
+    } catch (Exception failure) {
+      if (failure instanceof IllegalArgumentException invalid) throw invalid;
+      throw new IllegalArgumentException("Provider plan snapshot is invalid", failure);
+    }
+  }
+
+  private String configurationError(Configuration configuration) {
+    return store.transaction(connection -> {
+      var topologyRows = query(connection,
+          "SELECT revision_id,generation FROM topology_head WHERE id=1");
+      if (topologyRows.isEmpty()
+          || !configuration.revisionId().toString().equals(String.valueOf(topologyRows.getFirst().get("revision_id")))
+          || ((Number)topologyRows.getFirst().get("generation")).longValue()
+              != configuration.topologyGeneration()) {
+        return "Saved topology revision changed after this Provider plan was created";
+      }
+      String capabilityColumn = connection.getMetaData().getDatabaseProductName()
+          .equalsIgnoreCase("PostgreSQL") ? "h.capabilities::text" : "h.capabilities";
+      var hostRows = query(connection,
+          "SELECT h.generation," + capabilityColumn + " AS capabilities,"
+              + "(SELECT a.helper_status FROM agent a WHERE a.host_id=h.id "
+              + "ORDER BY a.last_seen DESC NULLS LAST,a.id LIMIT 1) AS helper_status,"
+              + "(SELECT a.last_seen FROM agent a WHERE a.host_id=h.id "
+              + "ORDER BY a.last_seen DESC NULLS LAST,a.id LIMIT 1) AS last_seen "
+              + "FROM host h WHERE h.id=?",
+          configuration.hostId());
+      if (hostRows.isEmpty()) return "Selected execution host no longer exists";
+      Map<String, Object> row = hostRows.getFirst();
+      long hostGeneration = ((Number)row.get("generation")).longValue();
+      if (hostGeneration != configuration.hostGeneration()) {
+        return "Execution host generation changed after this Provider plan was created";
+      }
+      JsonNode capabilities;
+      try {
+        capabilities = mapper.readTree(String.valueOf(row.get("capabilities")));
+      } catch (Exception failure) {
+        return "Execution host capability report is invalid";
+      }
+      boolean capable = capabilities != null && capabilities.isArray();
+      if (capable) {
+        capable = false;
+        for (JsonNode value : capabilities) {
+          if (value.isTextual() && "network.topology.reconcile".equals(value.asText())) {
+            capable = true;
+            break;
+          }
+        }
+      }
+      if (!capable) return "Execution host Helper does not report isolated topology support";
+      if (!"AVAILABLE".equals(row.get("helper_status"))) {
+        return "Execution host Helper is unavailable";
+      }
+      Instant lastSeen = instant(row.get("last_seen"));
+      var settings = query(connection,
+          "SELECT host_offline_after_seconds FROM platform_settings WHERE id=1");
+      int offlineAfter = settings.isEmpty() ? 90
+          : ((Number)settings.getFirst().get("host_offline_after_seconds")).intValue();
+      if (lastSeen == null || lastSeen.isBefore(Instant.now().minusSeconds(offlineAfter))) {
+        return "Execution host Agent is offline";
+      }
+      var pending = query(connection,
+          "SELECT id FROM operation WHERE host_id=? AND kind='HOST_HELPER_OPERATION' "
+              + "AND status IN ('PENDING','RUNNING','UNKNOWN') LIMIT 1",
+          configuration.hostId());
+      return pending.isEmpty() ? null : "Selected execution host has an unresolved Helper operation";
+    });
+  }
+
+  private HelperResult runHelper(ChangePlan plan, Configuration configuration,
+                                 String action, String key) {
+    HelperPayload payload = new HelperPayload(action, TOPOLOGY_ID.toString(),
+        configuration.revisionId().toString(), configuration.topologyGeneration(),
+        configuration.nodes(), configuration.links());
+    JsonNode payloadNode = mapper.valueToTree(payload);
+    HostHelperOperationResource.HelperOperationRequest helperRequest =
+        new HostHelperOperationResource.HelperOperationRequest(
+            "network.topology.reconcile", TOPOLOGY_ID.toString(), payloadNode,
+            configuration.reason(), 25, configuration.hostGeneration());
+    String actor = actorId();
+    String remoteAddress = http.remoteAddress() == null ? null : http.remoteAddress().host();
+    Response accepted = helperOperations.submitAs(configuration.hostId(), key, helperRequest,
+        actor, remoteAddress);
+    if (!(accepted.getEntity() instanceof Map<?, ?> entity)
+        || entity.get("id") == null) {
+      throw new IllegalStateException("Core did not return a Helper operation ID");
+    }
+    UUID helperOperationId = UUID.fromString(String.valueOf(entity.get("id")));
+    HelperResult result = waitForHelper(helperOperationId);
+    if (plan != null && "APPLY".equals(action)) configurations.put(helperOperationId, configuration);
+    return result;
+  }
+
+  private HelperResult waitForHelper(UUID operationId) {
+    long deadline = System.nanoTime() + HELPER_WAIT.toNanos();
+    while (System.nanoTime() < deadline) {
+      List<Map<String, Object>> rows = store.transaction(connection -> query(connection,
+          "SELECT id,status,result_json,error_json FROM operation WHERE id=?", operationId));
+      if (!rows.isEmpty()) {
+        Map<String, Object> row = rows.getFirst();
+        String status = String.valueOf(row.get("status"));
+        if (Set.of("SUCCEEDED", "FAILED", "CANCELLED").contains(status)) {
+          return new HelperResult(operationId, status, jsonText(row.get("result_json")),
+              jsonText(row.get("error_json")));
+        }
+      }
+      try {
+        Thread.sleep(200);
+      } catch (InterruptedException failure) {
+        Thread.currentThread().interrupt();
+        throw new IllegalStateException("Interrupted while waiting for the Helper", failure);
+      }
+    }
+    throw new IllegalStateException("Helper operation did not finish before the Provider deadline");
+  }
+
+  private void requireSucceeded(HelperResult result, String operation) {
+    if (!"SUCCEEDED".equals(result.status())) {
+      throw new IllegalStateException(operation + " failed: "
+          + bounded(result.error() == null ? "Helper reported a failure" : result.error()));
+    }
+  }
+
+  private String actorId() {
+    @SuppressWarnings("unchecked")
+    Map<String, Object> session = (Map<String, Object>)request.getProperty("session");
+    if (session == null || session.get("user_id") == null) {
+      throw new IllegalStateException("Authenticated Provider session is unavailable");
+    }
+    return String.valueOf(session.get("user_id"));
+  }
+
+  private Configuration readConfiguration(ChangePlan plan) {
+    try {
+      Configuration configuration = mapper.readValue(plan.configuration(), Configuration.class);
+      if (plan.generation() != configuration.topologyGeneration()) {
+        throw new IllegalArgumentException("Provider plan generation does not match its snapshot");
+      }
+      return configuration;
+    } catch (Exception failure) {
+      throw new IllegalArgumentException("Provider plan configuration is invalid", failure);
+    }
+  }
+
+  private String encode(Configuration configuration) {
+    try {
+      return mapper.writeValueAsString(configuration);
+    } catch (Exception failure) {
+      throw new IllegalStateException("Validated Provider plan could not be serialized", failure);
+    }
+  }
+
+  private UUID providerOperationId(UUID helperOperationId, Configuration configuration) {
+    return UUID.nameUUIDFromBytes((helperOperationId + configuration.revisionId().toString())
+        .getBytes(java.nio.charset.StandardCharsets.UTF_8));
+  }
+
+  private String helperKey(UUID providerOperationId, String action) {
+    return providerOperationId + "-" + action;
+  }
+
+  private String jsonText(Object value) {
+    if (value == null) return null;
+    if (value instanceof String text) return text;
+    try {
+      return mapper.writeValueAsString(value);
+    } catch (Exception failure) {
+      return null;
+    }
+  }
+
+  private String bounded(String value) {
+    if (value == null || value.isBlank()) return "Provider operation failed";
+    return value.length() <= 512 ? value : value.substring(0, 512);
+  }
+
+  private Instant instant(Object value) {
+    if (value instanceof java.sql.Timestamp timestamp) return timestamp.toInstant();
+    if (value instanceof OffsetDateTime offset) return offset.toInstant();
+    if (value instanceof Instant instant) return instant;
+    return null;
+  }
+}

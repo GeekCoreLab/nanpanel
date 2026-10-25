@@ -47,12 +47,13 @@ database credentials, TLS certificate, and volumes are retained when the script
 is run again. The deploy script rotates a legacy serving certificate if it is
 marked as a CA or lacks the TLS server-auth usage required by Rustls. It restarts
 Core and Web after rotation and refreshes the local Agent's trust certificate if
-`nanpanel-agent.service` is installed. When that service is enabled, the script
-also compares the running Core image's bundled Agent with
-`/usr/local/bin/nanpanel-agent`; it verifies the streamed ELF and SHA-256, backs
-up the previous binary under `/var/lib/nanpanel-agent/`, then atomically replaces
-and restarts the Agent. Enrollment identity, certificates, Helper, and systemd
-configuration are retained.
+`nanpanel-agent.service` is installed. When the local Root Helper is enabled, the
+script compares the running Core image's bundled Helper with
+`/usr/local/bin/nanpanel-helper`; it verifies the streamed ELF and SHA-256, backs
+up the previous binary under `/var/lib/nanpanel-helper/`, then atomically replaces
+and restarts the Helper. It does the same for the Agent under
+`/var/lib/nanpanel-agent/`. Enrollment identity, certificates, service files,
+and Helper configuration are retained.
 
 The deployment also binds the Core ServiceAccount to the read-only
 `nanpanel-topology-inventory` ClusterRole. It grants `get/list` for Namespace,

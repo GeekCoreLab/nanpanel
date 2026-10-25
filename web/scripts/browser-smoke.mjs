@@ -176,14 +176,15 @@ await page.getByRole('link', { name: '☷ 审计日志' }).click();
 await page.getByText('SETTINGS_UPDATED', { exact: true }).waitFor();
 await page.getByRole('link', { name: '⌘ 网络拓扑' }).click();
 await page.getByText('公网 Gateway', { exact: true }).waitFor();
+await page.getByRole('button', { name: /Istio 服务网络/ }).click();
 const serviceNetwork = page.locator('.service-network');
-await serviceNetwork.getByRole('heading', { name: 'Kubernetes 服务网络' }).waitFor();
-await serviceNetwork.getByText('catalog-api', { exact: true }).waitFor();
-const successfulProbes = serviceNetwork.getByText('TCP/8080 SUCCEEDED', { exact: true });
-await successfulProbes.first().waitFor();
-if (await successfulProbes.count() !== 2) throw new Error('Mock inventory should show two successful TCP endpoint probes');
-await serviceNetwork.getByRole('button', { name: '↻ 刷新清单' }).click();
-await serviceNetwork.getByText('catalog-canary', { exact: true }).waitFor();
+await serviceNetwork.getByRole('heading', { name: 'Istio 服务网络' }).waitFor();
+await serviceNetwork.getByText('实时 Istio 数据尚未连接').waitFor();
+if (await serviceNetwork.locator('.service-network-item').count() !== 0 ||
+    await serviceNetwork.locator('.service-network-flow').count() !== 0) {
+  throw new Error('Mock mode must not fabricate Kubernetes services or Istio traffic');
+}
+await page.getByRole('button', { name: /网络接入/ }).click();
 const netbirdPanel = page.locator('.netbird-provider');
 await netbirdPanel.getByRole('heading', { name: 'NetBird 受管 peer 组' }).waitFor();
 await netbirdPanel.getByText('Mock 示例', { exact: true }).waitFor();

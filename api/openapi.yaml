@@ -1133,7 +1133,7 @@ paths:
       tags: [KubernetesApplications]
       operationId: createKubernetesApplicationVersionDraft
       summary: 根据拓扑修改创建未部署版本草稿
-      description: 后端从当前存储清单生成受限的 Deployment 副本数/镜像及 Service selector 修改，并返回资源级 YAML diff。此操作不写入 Kubernetes。
+      description: 后端从当前存储清单生成受限的 Deployment 副本数/镜像及 Service selector 修改，并支持新增受限 Deployment 或 ClusterIP Service；返回资源级 YAML diff。此操作不写入 Kubernetes。
       x-implementation-status: implemented
       security:
       - cookieAuth: []
@@ -1768,11 +1768,11 @@ paths:
     get:
       tags: [NetworkProviders]
       operationId: listNetworkProviders
-      summary: 查询已装载的网络 Provider
+      summary: 查询内建和已装载的网络 Provider
       x-implementation-status: implemented
       responses:
         '200':
-          description: Provider 标识和能力，不返回任何外部凭据。
+          description: 内建 Linux netns Provider 与已装载插件 Provider 的标识和能力，不返回任何外部凭据。
           content:
             application/json:
               schema:
@@ -1825,7 +1825,7 @@ paths:
       tags: [NetworkProviders]
       operationId: createNetworkProviderPlan
       summary: 创建并持久化网络 Provider 计划
-      description: Provider 根据自身能力解释 desiredSnapshot 与可选的 observedSnapshot；Provider 凭据和执行配置只来自 Core 服务端环境，不写入请求。
+      description: Provider 根据自身能力解释 desiredSnapshot 与可选的 observedSnapshot；Provider 凭据和执行配置只来自 Core 服务端环境，不写入请求。内建 linux-netns Provider 的 desiredSnapshot JSON 仅包含 hostId、hostGeneration、revisionId、generation 和 reason；Core 从持久化拓扑快照构造 Helper payload 并拒绝过期 Revision。
       x-implementation-status: implemented
       requestBody:
         required: true
@@ -3404,7 +3404,7 @@ paths:
       tags: [Operations]
       operationId: submitHostHelperOperation
       summary: 提交类型化主机 Helper 操作
-      description: 支持软件包安装、受保护文件写入、Docker/Podman 容器操作、临时防火墙规则和主机文件浏览/读写/删除。Helper 校验固定操作类型和参数；不提供任意 Shell。映射到 Kubernetes Node 的主机拒绝 Agent 容器操作，容器生命周期归 Kubernetes/Kubelet/KubeEdge 管理，但 OS 与网络诊断仍可用。文件管理拒绝 .、.. 和符号链接路径组件，只读取 UTF-8 普通文件（最多 64 KiB），写入最多 32 KiB，删除仅针对普通文件；目录列表最多 200 项。读取的文件内容会出现在 Operation 结果中并留在持久化任务记录里。Core 检查主机版本、Agent 能力、在线状态和 Helper 状态；结果通过 durable Operation 回传。
+      description: 支持软件包安装、受保护文件写入、Docker/Podman 容器操作、临时防火墙规则和主机文件浏览/读写/删除。拓扑 netns 操作只能经 NetworkProvider 的持久化计划生命周期提交，不能通过此通用入口直接提交。Helper 校验固定操作类型和参数；不提供任意 Shell。映射到 Kubernetes Node 的主机拒绝 Agent 容器操作，容器生命周期归 Kubernetes/Kubelet/KubeEdge 管理，但 OS 与网络诊断仍可用。文件管理拒绝 .、.. 和符号链接路径组件，只读取 UTF-8 普通文件（最多 64 KiB），写入最多 32 KiB，删除仅针对普通文件；目录列表最多 200 项。读取的文件内容会出现在 Operation 结果中并留在持久化任务记录里。Core 检查主机版本、Agent 能力、在线状态和 Helper 状态；结果通过 durable Operation 回传。
       x-implementation-status: implemented
       parameters:
       - $ref: '#/components/parameters/IdempotencyKey'
@@ -5638,7 +5638,7 @@ components:
         desiredSnapshot:
           type: string
           maxLength: 65536
-          description: Provider-defined desired state encoded as JSON text.
+          description: Provider-defined desired state encoded as JSON text. The linux-netns Provider accepts exactly hostId, hostGeneration, revisionId, generation and reason, and derives devices/wires from Core's saved snapshot.
         observedSnapshot:
           type: [string, 'null']
           maxLength: 65536
@@ -5657,6 +5657,7 @@ components:
       type: object
       additionalProperties: false
       required: [providerId, resourceKey, snapshot]
+      description: Opaque JSON snapshot encoded as text. linux-netns observations include kernel RX/TX byte and packet counters for each virtual wire endpoint.
       properties:
         providerId:
           type: string
@@ -6093,7 +6094,7 @@ components:
           enum: [TCP, UDP, SCTP, null]
         state:
           type: string
-          enum: [READY, PROGRESSING, MISSING, UNAVAILABLE, ACTIVE, CONFIGURED, UNKNOWN]
+          enum: [READY, PROGRESSING, MISSING, UNAVAILABLE, ACTIVE, CONFIGURED, PENDING, UNKNOWN]
     KubernetesApplicationTopologyEdge:
       type: object
       additionalProperties: false
@@ -6111,17 +6112,55 @@ components:
     KubernetesApplicationVersionDraftRequest:
       type: object
       additionalProperties: false
-      required: [baseVersion, edits]
+      required: [baseVersion]
       properties:
         baseVersion:
           type: integer
           minimum: 1
         edits:
           type: array
-          minItems: 1
           maxItems: 32
           items:
             $ref: '#/components/schemas/KubernetesApplicationTopologyEdit'
+        additions:
+          type: array
+          maxItems: 32
+          description: 新增的受限 Deployment 或 ClusterIP Service；全部修改与新增资源合计最多 32 项。
+          items:
+            $ref: '#/components/schemas/KubernetesApplicationTopologyAddition'
+    KubernetesApplicationTopologyAddition:
+      type: object
+      additionalProperties: false
+      required: [kind, name, replicas, image, targetDeployment, servicePort, targetPort, serviceProtocol]
+      properties:
+        kind:
+          type: string
+          enum: [Deployment, Service]
+        name:
+          type: string
+          minLength: 1
+          maxLength: 63
+          pattern: '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
+        replicas:
+          type: [integer, 'null']
+          minimum: 0
+          maximum: 20
+        image:
+          type: [string, 'null']
+          maxLength: 512
+        targetDeployment:
+          type: [string, 'null']
+          maxLength: 63
+        servicePort:
+          type: [integer, 'null']
+          minimum: 1
+          maximum: 65535
+        targetPort:
+          type: [string, 'null']
+          maxLength: 15
+        serviceProtocol:
+          type: [string, 'null']
+          enum: [TCP, UDP, SCTP, null]
     KubernetesApplicationTopologyEdit:
       type: object
       additionalProperties: false
