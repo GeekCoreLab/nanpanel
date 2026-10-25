@@ -16,6 +16,8 @@ use crate::{Request, run_fixed_command, trusted_executable};
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_NODES: usize = 16;
 const MAX_LINKS: usize = 64;
+const MAX_ROUTER_ROUTES: usize = 64;
+const FIRST_VRF_TABLE_ID: u32 = 10_000;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "SCREAMING_SNAKE_CASE")]
@@ -183,6 +185,8 @@ struct Firewall {
 #[derive(Debug)]
 struct Router {
     node_id: Uuid,
+    vrf_name: String,
+    table_id: u32,
     interfaces: Vec<RouterAddress>,
     routes: Vec<RouterRoute>,
 }
@@ -213,6 +217,45 @@ pub(crate) fn available() -> bool {
         && ["/usr/sbin/sysctl", "/usr/bin/sysctl"]
             .iter()
             .any(|candidate| trusted_binary(Path::new(candidate)))
+}
+
+pub(crate) fn vrf_available() -> bool {
+    let Ok(ip) = ip_binary() else {
+        return false;
+    };
+    let namespace = format!("nanpanel-vrf-probe-{}", Uuid::new_v4().simple());
+    let created = std::process::Command::new(&ip)
+        .args(["netns", "add", namespace.as_str()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if !created {
+        return false;
+    }
+    let supported = std::process::Command::new(&ip)
+        .args([
+            "-n",
+            namespace.as_str(),
+            "link",
+            "add",
+            "npxvrf",
+            "type",
+            "vrf",
+            "table",
+            "10000",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    let removed = std::process::Command::new(&ip)
+        .args(["netns", "del", namespace.as_str()])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    supported && removed
 }
 
 pub(crate) fn ovs_available() -> bool {
@@ -339,19 +382,6 @@ fn compile(target: &str, request: TopologyRequest) -> Result<CompiledTopology, S
             );
         }
     }
-    if request
-        .nodes
-        .iter()
-        .filter(|node| node.kind == "ROUTER")
-        .count()
-        > 1
-    {
-        return Err(
-            "DENIED: one isolated topology namespace supports at most one Router routing table"
-                .to_owned(),
-        );
-    }
-
     let mut link_ids = HashSet::new();
     let mut used_ports = HashSet::new();
     for link in &request.links {
@@ -480,16 +510,25 @@ fn compile_routers(
         .filter(|node| node.kind == "ROUTER")
         .collect::<Vec<_>>();
     nodes.sort_by_key(|node| node.id);
+    let total_route_count = nodes
+        .iter()
+        .filter_map(|node| node.router_configuration.as_ref())
+        .map(|configuration| configuration.routes.len())
+        .sum::<usize>();
+    if total_route_count > MAX_ROUTER_ROUTES {
+        return Err("DENIED: topology exceeds its total static route limit".to_owned());
+    }
     nodes
         .into_iter()
-        .map(|node| {
+        .enumerate()
+        .map(|(index, node)| {
             let configuration = node
                 .router_configuration
                 .as_ref()
                 .ok_or_else(|| "DENIED: ROUTER requires IPv4 configuration".to_owned())?;
             if configuration.interfaces.is_empty()
                 || configuration.interfaces.len() > 16
-                || configuration.routes.len() > 64
+                || configuration.routes.len() > MAX_ROUTER_ROUTES
             {
                 return Err("DENIED: ROUTER configuration exceeds its interface or route limits".to_owned());
             }
@@ -513,6 +552,8 @@ fn compile_routers(
             }
             let mut configured = HashMap::new();
             let mut addresses = Vec::new();
+            let mut interface_networks = Vec::new();
+            let mut assigned_addresses = HashSet::new();
             for address in &configuration.interfaces {
                 let parsed = parse_ipv4_cidr(&address.address)
                     .ok_or_else(|| "DENIED: ROUTER interface requires a valid IPv4 CIDR".to_owned())?;
@@ -521,6 +562,18 @@ fn compile_routers(
                 {
                     return Err("DENIED: ROUTER interfaces must reference unique connected ports".to_owned());
                 }
+                let last = parsed.network | !prefix_mask(parsed.prefix);
+                if (parsed.prefix <= 30
+                    && (parsed.address == parsed.network || parsed.address == last))
+                    || !assigned_addresses.insert(parsed.address)
+                    || interface_networks.iter().any(|network: &Ipv4Cidr| {
+                        parsed.network <= (network.network | !prefix_mask(network.prefix))
+                            && network.network <= last
+                    })
+                {
+                    return Err("DENIED: ROUTER interface addresses must be unique usable hosts on non-overlapping networks".to_owned());
+                }
+                interface_networks.push(parsed);
                 let interface = port_interfaces
                     .get(&address.port)
                     .ok_or_else(|| "DENIED: ROUTER interface is not connected".to_owned())?;
@@ -543,15 +596,24 @@ fn compile_routers(
                 if !port_interfaces.contains_key(&route.output_port)
                     || !output_ports.contains(&route.output_port)
                     || !destinations.insert(route.destination.as_str())
-                    || configured.values().any(|connected| connected.network == destination.network
-                        && connected.prefix == destination.prefix)
+                    || (route.destination != "0.0.0.0/0"
+                        && configured.values().any(|connected| {
+                            destination.network <= (connected.network | !prefix_mask(connected.prefix))
+                                && connected.network
+                                    <= (destination.network | !prefix_mask(destination.prefix))
+                        }))
                 {
-                    return Err("DENIED: ROUTER routes must be unique and cannot replace directly connected networks".to_owned());
+                    return Err("DENIED: ROUTER routes must be unique and cannot overlap directly connected networks".to_owned());
                 }
                 if let Some(gateway) = &route.gateway {
                     let gateway = parse_ipv4(gateway)
                         .ok_or_else(|| "DENIED: ROUTER next hop must be a valid IPv4 address".to_owned())?;
-                    if (gateway & prefix_mask(address.prefix)) != address.network {
+                    let last = address.network | !prefix_mask(address.prefix);
+                    if (gateway & prefix_mask(address.prefix)) != address.network
+                        || gateway == address.address
+                        || (address.prefix <= 30
+                            && (gateway == address.network || gateway == last))
+                    {
                         return Err("DENIED: ROUTER next hop must belong to the output interface subnet".to_owned());
                     }
                 }
@@ -563,6 +625,8 @@ fn compile_routers(
             }
             Ok(Router {
                 node_id: node.id,
+                vrf_name: format!("npr{index:02x}"),
+                table_id: FIRST_VRF_TABLE_ID + index as u32,
                 interfaces: addresses,
                 routes,
             })
@@ -572,6 +636,7 @@ fn compile_routers(
 
 #[derive(Clone, Copy, Debug)]
 struct Ipv4Cidr {
+    address: u32,
     network: u32,
     prefix: u8,
     canonical: bool,
@@ -583,6 +648,7 @@ fn parse_ipv4_cidr(value: &str) -> Option<Ipv4Cidr> {
     let prefix = prefix.parse::<u8>().ok().filter(|prefix| *prefix <= 32)?;
     let network = address & prefix_mask(prefix);
     Some(Ipv4Cidr {
+        address,
         network,
         prefix,
         canonical: address == network,
@@ -704,6 +770,10 @@ impl CompiledTopology {
             .nodes
             .iter()
             .any(|node| node.id == node_id && node.kind == "ROUTER")
+    }
+
+    fn router_for_node(&self, node_id: Uuid) -> Option<&Router> {
+        self.routers.iter().find(|router| router.node_id == node_id)
     }
 }
 
@@ -1515,8 +1585,66 @@ async fn configure_routers(topology: &CompiledTopology) -> Result<(), String> {
     }
     let ip = ip_binary()?;
     let sysctl = sysctl_binary()?;
+    in_namespace(
+        &sysctl,
+        &topology.namespace,
+        &["-w".to_owned(), "net.ipv4.ip_forward=1".to_owned()],
+    )
+    .await?;
     for router in &topology.routers {
+        in_namespace(
+            &ip,
+            &topology.namespace,
+            &[
+                "link".to_owned(),
+                "add".to_owned(),
+                router.vrf_name.clone(),
+                "type".to_owned(),
+                "vrf".to_owned(),
+                "table".to_owned(),
+                router.table_id.to_string(),
+            ],
+        )
+        .await?;
+        in_namespace(
+            &ip,
+            &topology.namespace,
+            &[
+                "link".to_owned(),
+                "set".to_owned(),
+                "dev".to_owned(),
+                router.vrf_name.clone(),
+                "alias".to_owned(),
+                router_vrf_alias(topology, router),
+            ],
+        )
+        .await?;
+        in_namespace(
+            &ip,
+            &topology.namespace,
+            &[
+                "link".to_owned(),
+                "set".to_owned(),
+                "dev".to_owned(),
+                router.vrf_name.clone(),
+                "up".to_owned(),
+            ],
+        )
+        .await?;
         for address in &router.interfaces {
+            in_namespace(
+                &ip,
+                &topology.namespace,
+                &[
+                    "link".to_owned(),
+                    "set".to_owned(),
+                    "dev".to_owned(),
+                    address.interface.clone(),
+                    "master".to_owned(),
+                    router.vrf_name.clone(),
+                ],
+            )
+            .await?;
             in_namespace(
                 &ip,
                 &topology.namespace,
@@ -1530,16 +1658,12 @@ async fn configure_routers(topology: &CompiledTopology) -> Result<(), String> {
             )
             .await?;
         }
-        in_namespace(
-            &sysctl,
-            &topology.namespace,
-            &["-w".to_owned(), "net.ipv4.ip_forward=1".to_owned()],
-        )
-        .await?;
         for route in &router.routes {
             let mut args = vec![
                 "route".to_owned(),
                 "replace".to_owned(),
+                "table".to_owned(),
+                router.table_id.to_string(),
                 route.destination.clone(),
             ];
             if let Some(gateway) = &route.gateway {
@@ -1562,18 +1686,20 @@ async fn verify(topology: &CompiledTopology) -> Result<String, String> {
     if !namespace_exists(&ip, &topology.namespace).await? {
         return Err("FAILED: topology network namespace does not exist".to_owned());
     }
-    let route_output = in_namespace(
+    let default_route_output = in_namespace(
         &ip,
         &topology.namespace,
         &[
             "-j".to_owned(),
             "route".to_owned(),
             "show".to_owned(),
+            "table".to_owned(),
+            "all".to_owned(),
             "default".to_owned(),
         ],
     )
     .await?;
-    let default_routes = serde_json::from_str::<Value>(&route_output)
+    let default_routes = serde_json::from_str::<Vec<Value>>(&default_route_output)
         .map_err(|_| "UNCERTAIN: network namespace route output is invalid".to_owned())?;
     let expected_default_routes = topology
         .routers
@@ -1581,15 +1707,6 @@ async fn verify(topology: &CompiledTopology) -> Result<String, String> {
         .flat_map(|router| &router.routes)
         .filter(|route| route.destination == "0.0.0.0/0")
         .count();
-    if default_routes
-        .as_array()
-        .is_none_or(|routes| routes.len() != expected_default_routes)
-    {
-        return Err(
-            "FAILED: isolated topology namespace has an undeclared default route".to_owned(),
-        );
-    }
-
     let link_output = in_namespace(
         &ip,
         &topology.namespace,
@@ -1604,6 +1721,22 @@ async fn verify(topology: &CompiledTopology) -> Result<String, String> {
     .await?;
     let links = serde_json::from_str::<Vec<Value>>(&link_output)
         .map_err(|_| "UNCERTAIN: network namespace link output is invalid".to_owned())?;
+    if !router_vrfs_match(&links, &topology.routers, topology) {
+        return Err("FAILED: isolated Router VRF devices, routing tables, or ownership markers have drifted".to_owned());
+    }
+    let rule_output = in_namespace(
+        &ip,
+        &topology.namespace,
+        &["-j".to_owned(), "rule".to_owned(), "show".to_owned()],
+    )
+    .await?;
+    let rules = serde_json::from_str::<Vec<Value>>(&rule_output)
+        .map_err(|_| "UNCERTAIN: topology IPv4 policy rules are invalid".to_owned())?;
+    if !router_l3mdev_rule_matches(&rules, !topology.routers.is_empty()) {
+        return Err(
+            "FAILED: isolated Router l3mdev policy rule is missing or has drifted".to_owned(),
+        );
+    }
     for node in &topology.request.nodes {
         if topology.is_ovs_switch(node.id) {
             if !verify_ovs_bridge(topology, node.id).await? {
@@ -1629,7 +1762,7 @@ async fn verify(topology: &CompiledTopology) -> Result<String, String> {
                     .and_then(|value| value.get("info_kind"))
                     .and_then(Value::as_str)
                     == Some("bridge")
-                && link.get("alias").and_then(Value::as_str) == Some(expected.as_str())
+                && link_alias(link) == Some(expected.as_str())
         });
         if bridge.is_none() {
             return Err(format!(
@@ -1656,14 +1789,16 @@ async fn verify(topology: &CompiledTopology) -> Result<String, String> {
                 node_id,
                 side
             );
-            let expected_master = if topology.is_monitor_interface(interface)
-                || topology.is_router(node_id)
-                || topology.is_ovs_switch(node_id)
-            {
-                None
-            } else {
-                topology.bridges.get(&node_id).map(String::as_str)
-            };
+            let expected_master =
+                if topology.is_monitor_interface(interface) || topology.is_ovs_switch(node_id) {
+                    None
+                } else if topology.is_router(node_id) {
+                    topology
+                        .router_for_node(node_id)
+                        .map(|router| router.vrf_name.as_str())
+                } else {
+                    topology.bridges.get(&node_id).map(String::as_str)
+                };
             let attached = links.iter().any(|actual| {
                 actual.get("ifname").and_then(Value::as_str) == Some(interface)
                     && actual
@@ -1671,7 +1806,7 @@ async fn verify(topology: &CompiledTopology) -> Result<String, String> {
                         .and_then(|value| value.get("info_kind"))
                         .and_then(Value::as_str)
                         == Some("veth")
-                    && actual.get("alias").and_then(Value::as_str) == Some(expected_alias.as_str())
+                    && link_alias(actual) == Some(expected_alias.as_str())
                     && actual.get("master").and_then(Value::as_str) == expected_master
             });
             if !attached {
@@ -1740,7 +1875,7 @@ async fn verify(topology: &CompiledTopology) -> Result<String, String> {
             "route".to_owned(),
             "show".to_owned(),
             "table".to_owned(),
-            "main".to_owned(),
+            "all".to_owned(),
         ],
     )
     .await?;
@@ -1753,21 +1888,43 @@ async fn verify(topology: &CompiledTopology) -> Result<String, String> {
                 router.node_id
             ));
         }
-        let forwarding = in_namespace(
-            &sysctl_binary()?,
+        let table_routes = in_namespace(
+            &ip,
             &topology.namespace,
-            &["-n".to_owned(), "net.ipv4.ip_forward".to_owned()],
+            &[
+                "-j".to_owned(),
+                "route".to_owned(),
+                "show".to_owned(),
+                "table".to_owned(),
+                router.table_id.to_string(),
+            ],
         )
         .await?;
-        if forwarding.trim() != "1" {
+        let table_routes = serde_json::from_str::<Vec<Value>>(&table_routes)
+            .map_err(|_| "UNCERTAIN: Router VRF route output is invalid".to_owned())?;
+        if !router_routes_match(&table_routes, router) {
             return Err(format!(
-                "FAILED: router {} IPv4 forwarding is disabled",
+                "FAILED: Router {} static routes are missing or have drifted",
                 router.node_id
             ));
         }
     }
-    if !router_routes_match(&routes, &topology.routers) {
-        return Err("FAILED: isolated Router static routes are missing or have drifted".to_owned());
+    let forwarding = in_namespace(
+        &sysctl_binary()?,
+        &topology.namespace,
+        &["-n".to_owned(), "net.ipv4.ip_forward".to_owned()],
+    )
+    .await?;
+    if !topology.routers.is_empty() && forwarding.trim() != "1" {
+        return Err("FAILED: isolated Router IPv4 forwarding is disabled".to_owned());
+    }
+    if !all_static_routes_match(&routes, &topology.routers)
+        || !all_default_routes_match(&default_routes, &topology.routers)
+    {
+        return Err(
+            "FAILED: isolated Router static or default routes are missing or have drifted"
+                .to_owned(),
+        );
     }
     let mut link_metrics = Vec::with_capacity(topology.request.links.len());
     for link in &topology.request.links {
@@ -1858,11 +2015,8 @@ async fn router_addresses_match(
     Ok(true)
 }
 
-fn router_routes_match(actual: &[Value], routers: &[Router]) -> bool {
-    let expected_count = routers
-        .iter()
-        .map(|router| router.routes.len())
-        .sum::<usize>();
+fn router_routes_match(actual: &[Value], router: &Router) -> bool {
+    let expected_count = router.routes.len();
     let static_routes = actual
         .iter()
         .filter(|route| {
@@ -1873,9 +2027,9 @@ fn router_routes_match(actual: &[Value], routers: &[Router]) -> bool {
     if static_routes.len() != expected_count {
         return false;
     }
-    let expected_defaults = routers
+    let expected_defaults = router
+        .routes
         .iter()
-        .flat_map(|router| &router.routes)
         .filter(|route| route.destination == "0.0.0.0/0")
         .count();
     let actual_defaults = actual
@@ -1890,22 +2044,94 @@ fn router_routes_match(actual: &[Value], routers: &[Router]) -> bool {
     if actual_defaults != expected_defaults {
         return false;
     }
-    routers
+    router.routes.iter().all(|expected| {
+        static_routes.iter().any(|actual| {
+            let actual_destination = match actual.get("dst").and_then(Value::as_str) {
+                None | Some("default") => "0.0.0.0/0",
+                Some(destination) => destination,
+            };
+            let actual_gateway = actual.get("gateway").and_then(Value::as_str);
+            let actual_device = actual.get("dev").and_then(Value::as_str);
+            actual_destination == expected.destination
+                && actual_gateway == expected.gateway.as_deref()
+                && actual_device == Some(expected.interface.as_str())
+        })
+    })
+}
+
+fn all_static_routes_match(actual: &[Value], routers: &[Router]) -> bool {
+    let expected_count = routers
+        .iter()
+        .map(|router| router.routes.len())
+        .sum::<usize>();
+    let actual_count = actual
+        .iter()
+        .filter(|route| {
+            route.get("protocol").and_then(Value::as_str) == Some("static")
+                || route.get("proto").and_then(Value::as_str) == Some("static")
+        })
+        .count();
+    actual_count == expected_count
+}
+
+fn all_default_routes_match(actual: &[Value], routers: &[Router]) -> bool {
+    let expected_count = routers
         .iter()
         .flat_map(|router| &router.routes)
-        .all(|expected| {
-            static_routes.iter().any(|actual| {
-                let actual_destination = match actual.get("dst").and_then(Value::as_str) {
-                    None | Some("default") => "0.0.0.0/0",
-                    Some(destination) => destination,
-                };
-                let actual_gateway = actual.get("gateway").and_then(Value::as_str);
-                let actual_device = actual.get("dev").and_then(Value::as_str);
-                actual_destination == expected.destination
-                    && actual_gateway == expected.gateway.as_deref()
-                    && actual_device == Some(expected.interface.as_str())
+        .filter(|route| route.destination == "0.0.0.0/0")
+        .count();
+    actual.len() == expected_count
+}
+
+fn router_vrf_alias(topology: &CompiledTopology, router: &Router) -> String {
+    format!(
+        "nanpanel:{}:{}:{}:{}:vrf",
+        topology.request.topology_id,
+        topology.request.revision_id,
+        topology.request.generation,
+        router.node_id
+    )
+}
+
+fn link_alias(link: &Value) -> Option<&str> {
+    link.get("ifalias")
+        .or_else(|| link.get("alias"))
+        .and_then(Value::as_str)
+}
+
+fn router_vrfs_match(links: &[Value], routers: &[Router], topology: &CompiledTopology) -> bool {
+    let actual_vrfs = links
+        .iter()
+        .filter(|link| link.pointer("/linkinfo/info_kind").and_then(Value::as_str) == Some("vrf"))
+        .collect::<Vec<_>>();
+    actual_vrfs.len() == routers.len()
+        && routers.iter().all(|router| {
+            actual_vrfs.iter().any(|actual| {
+                actual.get("ifname").and_then(Value::as_str) == Some(router.vrf_name.as_str())
+                    && link_alias(actual) == Some(router_vrf_alias(topology, router).as_str())
+                    && actual
+                        .pointer("/linkinfo/info_data/table")
+                        .and_then(Value::as_u64)
+                        == Some(u64::from(router.table_id))
+                    && actual
+                        .get("flags")
+                        .and_then(Value::as_array)
+                        .is_some_and(|flags| flags.iter().any(|flag| flag.as_str() == Some("UP")))
             })
         })
+}
+
+fn router_l3mdev_rule_matches(rules: &[Value], expected: bool) -> bool {
+    let l3mdev_rules = rules
+        .iter()
+        .filter(|rule| rule.get("l3mdev").is_some())
+        .collect::<Vec<_>>();
+    if expected {
+        l3mdev_rules.len() == 1
+            && l3mdev_rules[0].get("priority").and_then(Value::as_u64) == Some(1000)
+    } else {
+        l3mdev_rules.is_empty()
+    }
 }
 
 fn firewall_rule_comment(
@@ -2150,15 +2376,17 @@ async fn namespace_owned(topology: &CompiledTopology, ip: &Path) -> Result<bool,
                 .and_then(|value| value.get("info_kind"))
                 .and_then(Value::as_str)
                 == Some("bridge")
-            && link.get("alias").and_then(Value::as_str) == Some(expected.as_str())
+            && link_alias(link) == Some(expected.as_str())
     }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        Router, RouterRoute, SwitchBackend, compile, decode, firewall_rules_match,
-        has_packet_mirror, interface_statistics, router_routes_match, validate_target_payload,
+        FIRST_VRF_TABLE_ID, Router, RouterRoute, SwitchBackend, all_static_routes_match, compile,
+        decode, firewall_rules_match, has_packet_mirror, interface_statistics,
+        router_l3mdev_rule_matches, router_routes_match, router_vrf_alias, router_vrfs_match,
+        validate_target_payload,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -2456,12 +2684,14 @@ mod tests {
     }
 
     #[test]
-    fn compiles_a_single_isolated_ipv4_router_with_connected_interfaces_and_routes()
-    -> anyhow::Result<()> {
+    fn compiles_multiple_ipv4_routers_with_independent_routing_tables() -> anyhow::Result<()> {
         let topology_id = Uuid::new_v4();
         let source = Uuid::new_v4();
         let router = Uuid::new_v4();
         let target = Uuid::new_v4();
+        let source2 = Uuid::new_v4();
+        let router2 = Uuid::new_v4();
+        let target2 = Uuid::new_v4();
         let mut payload = json!({
             "action": "APPLY",
             "topologyId": topology_id,
@@ -2476,13 +2706,26 @@ mod tests {
                     ],
                     "routes": [{"destination": "198.18.3.0/24", "gateway": "198.18.2.2", "outputPort": "out-1"}]
                 }},
-                {"id": target, "kind": "SWITCH"}
+                {"id": target, "kind": "SWITCH"},
+                {"id": source2, "kind": "SWITCH"},
+                {"id": router2, "kind": "ROUTER", "routerConfiguration": {
+                    "interfaces": [
+                        {"port": "in-1", "address": "198.18.4.1/24"},
+                        {"port": "out-1", "address": "198.18.5.1/24"}
+                    ],
+                    "routes": [{"destination": "198.18.3.0/24", "gateway": "198.18.5.2", "outputPort": "out-1"}]
+                }},
+                {"id": target2, "kind": "SWITCH"}
             ],
             "links": [
                 {"id": Uuid::new_v4(), "sourceNodeId": source, "sourcePort": "out-1",
                  "targetNodeId": router, "targetPort": "in-1", "layer": "L2", "protocol": "ETHERNET"},
                 {"id": Uuid::new_v4(), "sourceNodeId": router, "sourcePort": "out-1",
-                 "targetNodeId": target, "targetPort": "in-1", "layer": "L2", "protocol": "ETHERNET"}
+                 "targetNodeId": target, "targetPort": "in-1", "layer": "L2", "protocol": "ETHERNET"},
+                {"id": Uuid::new_v4(), "sourceNodeId": source2, "sourcePort": "out-1",
+                 "targetNodeId": router2, "targetPort": "in-1", "layer": "L2", "protocol": "ETHERNET"},
+                {"id": Uuid::new_v4(), "sourceNodeId": router2, "sourcePort": "out-1",
+                 "targetNodeId": target2, "targetPort": "in-1", "layer": "L2", "protocol": "ETHERNET"}
             ]
         });
         let compiled = compile(
@@ -2490,10 +2733,11 @@ mod tests {
             decode(&payload.to_string()).map_err(anyhow::Error::msg)?,
         )
         .map_err(anyhow::Error::msg)?;
-        assert_eq!(compiled.routers.len(), 1);
+        assert_eq!(compiled.routers.len(), 2);
         let compiled_router = compiled
             .routers
-            .first()
+            .iter()
+            .find(|candidate| candidate.node_id == router)
             .ok_or_else(|| anyhow::anyhow!("compiled router is missing"))?;
         assert_eq!(compiled_router.interfaces.len(), 2);
         assert_eq!(compiled_router.routes.len(), 1);
@@ -2507,20 +2751,62 @@ mod tests {
             compiled_router.routes[0].gateway.as_deref(),
             Some("198.18.2.2")
         );
+        let compiled_router2 = compiled
+            .routers
+            .iter()
+            .find(|candidate| candidate.node_id == router2)
+            .ok_or_else(|| anyhow::anyhow!("second compiled router is missing"))?;
+        assert_ne!(compiled_router.table_id, compiled_router2.table_id);
+        assert_ne!(compiled_router.vrf_name, compiled_router2.vrf_name);
+        assert_eq!(
+            compiled_router.routes[0].destination,
+            compiled_router2.routes[0].destination
+        );
+        let actual_vrfs = compiled
+            .routers
+            .iter()
+            .map(|candidate| {
+                json!({
+                    "ifname": candidate.vrf_name,
+                    "ifalias": router_vrf_alias(&compiled, candidate),
+                    "flags": ["NOARP", "UP"],
+                    "linkinfo": {
+                        "info_kind": "vrf",
+                        "info_data": {"table": candidate.table_id}
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        assert!(router_vrfs_match(
+            &actual_vrfs,
+            &compiled.routers,
+            &compiled
+        ));
+        let mut drifted_vrfs = actual_vrfs.clone();
+        drifted_vrfs[0]["linkinfo"]["info_data"]["table"] =
+            json!(u64::from(FIRST_VRF_TABLE_ID + 100));
+        assert!(!router_vrfs_match(
+            &drifted_vrfs,
+            &compiled.routers,
+            &compiled
+        ));
+        assert!(router_l3mdev_rule_matches(
+            &[json!({"priority": 1000, "l3mdev": null})],
+            true
+        ));
+        assert!(!router_l3mdev_rule_matches(&[], true));
 
         payload["nodes"][1]["routerConfiguration"]["routes"][0]["gateway"] = json!("198.18.4.2");
         assert!(
             validate_target_payload(&topology_id.to_string(), Some(&payload.to_string())).is_err()
         );
+        payload["nodes"][1]["routerConfiguration"]["routes"][0]["gateway"] = json!("198.18.2.255");
+        assert!(
+            validate_target_payload(&topology_id.to_string(), Some(&payload.to_string())).is_err()
+        );
         payload["nodes"][1]["routerConfiguration"]["routes"][0]["gateway"] = json!("198.18.2.2");
-        payload["nodes"]
-            .as_array_mut()
-            .ok_or_else(|| anyhow::anyhow!("nodes are missing"))?
-            .push(json!({
-                "id": Uuid::new_v4(), "kind": "ROUTER", "routerConfiguration": {
-                    "interfaces": [{"port": "in-1", "address": "198.18.4.1/24"}], "routes": []
-                }
-            }));
+        payload["nodes"][1]["routerConfiguration"]["interfaces"][0]["address"] =
+            json!("198.18.2.3/24");
         assert!(
             validate_target_payload(&topology_id.to_string(), Some(&payload.to_string())).is_err()
         );
@@ -2531,6 +2817,8 @@ mod tests {
     fn verifies_exact_router_static_routes_and_rejects_an_extra_default_route() {
         let expected = [Router {
             node_id: Uuid::new_v4(),
+            vrf_name: "npr00".to_owned(),
+            table_id: FIRST_VRF_TABLE_ID,
             interfaces: vec![],
             routes: vec![RouterRoute {
                 destination: "0.0.0.0/0".to_owned(),
@@ -2541,11 +2829,51 @@ mod tests {
         let actual = vec![json!({
             "dst": "default", "gateway": "198.18.2.2", "dev": "npl00a", "protocol": "static"
         })];
-        assert!(router_routes_match(&actual, &expected));
+        assert!(router_routes_match(&actual, &expected[0]));
         let mut drifted = actual.clone();
         drifted.push(json!({
             "dst": "default", "gateway": "198.18.2.254", "dev": "npl00a", "protocol": "boot"
         }));
-        assert!(!router_routes_match(&drifted, &expected));
+        assert!(!router_routes_match(&drifted, &expected[0]));
+    }
+
+    #[test]
+    fn permits_the_same_route_prefix_in_distinct_router_tables() {
+        let first = Router {
+            node_id: Uuid::new_v4(),
+            vrf_name: "npr00".to_owned(),
+            table_id: FIRST_VRF_TABLE_ID,
+            interfaces: vec![],
+            routes: vec![RouterRoute {
+                destination: "198.18.99.0/24".to_owned(),
+                gateway: Some("198.18.2.2".to_owned()),
+                interface: "npl00a".to_owned(),
+            }],
+        };
+        let second = Router {
+            node_id: Uuid::new_v4(),
+            vrf_name: "npr01".to_owned(),
+            table_id: FIRST_VRF_TABLE_ID + 1,
+            interfaces: vec![],
+            routes: vec![RouterRoute {
+                destination: "198.18.99.0/24".to_owned(),
+                gateway: Some("198.18.3.2".to_owned()),
+                interface: "npl01a".to_owned(),
+            }],
+        };
+        let first_table = vec![json!({
+            "dst": "198.18.99.0/24", "gateway": "198.18.2.2",
+            "dev": "npl00a", "protocol": "static"
+        })];
+        let second_table = vec![json!({
+            "dst": "198.18.99.0/24", "gateway": "198.18.3.2",
+            "dev": "npl01a", "protocol": "static"
+        })];
+        assert!(router_routes_match(&first_table, &first));
+        assert!(router_routes_match(&second_table, &second));
+        assert!(all_static_routes_match(
+            &[first_table[0].clone(), second_table[0].clone()],
+            &[first, second]
+        ));
     }
 }

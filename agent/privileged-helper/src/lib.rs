@@ -81,6 +81,7 @@ pub struct HelperConfig {
     nginx_routes: Option<nginx_routes::NginxRouteConfig>,
     network_operations_available: bool,
     topology_operations_available: bool,
+    vrf_operations_available: bool,
     ovs_operations_available: bool,
     netbird_binary: Option<std::path::PathBuf>,
 }
@@ -164,6 +165,7 @@ struct HelperRuntime {
     nginx_routes: Option<Arc<NginxRouteConfig>>,
     network_operations_available: bool,
     topology_operations_available: bool,
+    vrf_operations_available: bool,
     ovs_operations_available: bool,
     kubeedge_available: bool,
     netbird_binary: Option<Arc<std::path::PathBuf>>,
@@ -254,6 +256,8 @@ impl HelperConfig {
         if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
             bail!("Agent binary directory must be root-owned and not group/world writable");
         }
+        let topology_operations_available = topology::available();
+        let vrf_operations_available = topology_operations_available && topology::vrf_available();
         Ok(Self {
             socket_path: path,
             allowed_agent_uid,
@@ -266,7 +270,8 @@ impl HelperConfig {
             container_runtime,
             nginx_routes: None,
             network_operations_available,
-            topology_operations_available: topology::available(),
+            topology_operations_available,
+            vrf_operations_available,
             ovs_operations_available: topology::ovs_available(),
             netbird_binary,
         })
@@ -303,6 +308,7 @@ pub async fn serve(config: HelperConfig) -> Result<()> {
         nginx_routes: config.nginx_routes.map(Arc::new),
         network_operations_available: config.network_operations_available,
         topology_operations_available: config.topology_operations_available,
+        vrf_operations_available: config.vrf_operations_available,
         ovs_operations_available: config.ovs_operations_available,
         kubeedge_available,
         netbird_binary: config.netbird_binary.map(Arc::new),
@@ -404,18 +410,27 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                 Err(error) => Err(error),
                                 Ok(()) => match request.capability.as_str() {
                                     "helper.status" => Ok("AVAILABLE".to_owned()),
-                                    "helper.capabilities" => {
-                                        Ok(serde_json::json!(available_capabilities(
-                                            runtime.container_runtime.is_some(),
-                                            runtime.network_operations_available,
-                                            runtime.topology_operations_available,
-                                            runtime.ovs_operations_available,
-                                            runtime.netbird_binary.is_some(),
-                                            runtime.kubeedge_available,
-                                            runtime.nginx_routes.is_some(),
-                                        ))
-                                        .to_string())
-                                    }
+                                    "helper.capabilities" => Ok(serde_json::json!(
+                                        available_capabilities(CapabilityState {
+                                            has_container_runtime: runtime
+                                                .container_runtime
+                                                .is_some(),
+                                            network_operations_available: runtime
+                                                .network_operations_available,
+                                            topology_operations_available: runtime
+                                                .topology_operations_available,
+                                            vrf_operations_available: runtime
+                                                .vrf_operations_available,
+                                            ovs_operations_available: runtime
+                                                .ovs_operations_available,
+                                            netbird_status_available: runtime
+                                                .netbird_binary
+                                                .is_some(),
+                                            kubeedge_available: runtime.kubeedge_available,
+                                            nginx_routes_available: runtime.nginx_routes.is_some(),
+                                        })
+                                    )
+                                    .to_string()),
                                     "agent.update" => {
                                         update_agent(
                                             &runtime.controller_url,
@@ -711,15 +726,19 @@ fn audit_target(request: &Request) -> String {
     request.target.clone()
 }
 
-fn available_capabilities(
+#[derive(Clone, Copy, Default)]
+struct CapabilityState {
     has_container_runtime: bool,
     network_operations_available: bool,
     topology_operations_available: bool,
+    vrf_operations_available: bool,
     ovs_operations_available: bool,
     netbird_status_available: bool,
     kubeedge_available: bool,
     nginx_routes_available: bool,
-) -> Vec<&'static str> {
+}
+
+fn available_capabilities(state: CapabilityState) -> Vec<&'static str> {
     let mut capabilities = vec![
         "systemd.restart",
         "systemd.journal.read",
@@ -734,7 +753,7 @@ fn available_capabilities(
         "file.write",
         "file.delete",
     ];
-    if has_container_runtime {
+    if state.has_container_runtime {
         capabilities.extend([
             "container.list",
             "container.logs",
@@ -743,22 +762,25 @@ fn available_capabilities(
             "container.deploy",
         ]);
     }
-    if network_operations_available {
+    if state.network_operations_available {
         capabilities.push("network.firewall.expose");
     }
-    if topology_operations_available {
+    if state.topology_operations_available {
         capabilities.push("network.topology.reconcile");
     }
-    if topology_operations_available && ovs_operations_available {
+    if state.topology_operations_available && state.vrf_operations_available {
+        capabilities.push("network.topology.vrf");
+    }
+    if state.topology_operations_available && state.ovs_operations_available {
         capabilities.push("network.topology.ovs");
     }
-    if netbird_status_available {
+    if state.netbird_status_available {
         capabilities.push("network.overlay.peer_paths.read");
     }
-    if kubeedge_available {
+    if state.kubeedge_available {
         capabilities.push("kubeedge.edgecore.join");
     }
-    if nginx_routes_available {
+    if state.nginx_routes_available {
         capabilities.push("nginx.route.set");
     }
     capabilities
@@ -3392,6 +3414,19 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    fn all_capability_state() -> CapabilityState {
+        CapabilityState {
+            has_container_runtime: true,
+            network_operations_available: true,
+            topology_operations_available: true,
+            vrf_operations_available: true,
+            ovs_operations_available: true,
+            netbird_status_available: true,
+            kubeedge_available: true,
+            nginx_routes_available: true,
+        }
+    }
+
     #[test]
     fn k3s_install_accepts_secure_tokens_and_rejects_environment_injection() {
         let secure_token = format!("K10{}::server:{}", "a".repeat(64), "b".repeat(32));
@@ -3706,7 +3741,7 @@ mod tests {
         assert!(!valid_container_image("./nginx"));
         assert!(valid_network_interface("br-0"));
         assert!(!valid_network_interface("-eth0"));
-        let capabilities = available_capabilities(true, true, true, true, true, true, true);
+        let capabilities = available_capabilities(all_capability_state());
         for capability in [
             "systemd.restart",
             "systemd.journal.read",
@@ -3719,6 +3754,7 @@ mod tests {
             "container.deploy",
             "network.firewall.expose",
             "network.topology.reconcile",
+            "network.topology.vrf",
             "network.topology.ovs",
             "k3s.preflight",
             "kubeedge.edgecore.join",
@@ -3727,10 +3763,16 @@ mod tests {
         ] {
             assert!(capabilities.contains(&capability));
         }
-        let capabilities_without_ovs =
-            available_capabilities(true, true, true, false, true, true, true);
+        let mut without_ovs = all_capability_state();
+        without_ovs.ovs_operations_available = false;
+        let capabilities_without_ovs = available_capabilities(without_ovs);
         assert!(capabilities_without_ovs.contains(&"network.topology.reconcile"));
         assert!(!capabilities_without_ovs.contains(&"network.topology.ovs"));
+        let mut without_vrf = all_capability_state();
+        without_vrf.vrf_operations_available = false;
+        let capabilities_without_vrf = available_capabilities(without_vrf);
+        assert!(capabilities_without_vrf.contains(&"network.topology.reconcile"));
+        assert!(!capabilities_without_vrf.contains(&"network.topology.vrf"));
         assert!(
             validate_capability_target(
                 "network.overlay.peer_paths.read",
@@ -3837,23 +3879,28 @@ mod tests {
             .is_ok()
         );
         assert!(
-            available_capabilities(false, false, false, false, false, true, false)
-                .contains(&"kubeedge.edgecore.join")
+            available_capabilities(CapabilityState {
+                kubeedge_available: true,
+                ..CapabilityState::default()
+            })
+            .contains(&"kubeedge.edgecore.join")
         );
         assert!(
-            !available_capabilities(false, false, false, false, false, false, false)
-                .contains(&"kubeedge.edgecore.join")
+            !available_capabilities(CapabilityState::default()).contains(&"kubeedge.edgecore.join")
         );
         assert!(
-            !available_capabilities(false, false, false, false, false, false, false)
+            !available_capabilities(CapabilityState::default())
                 .contains(&"network.firewall.expose")
         );
         assert!(
-            available_capabilities(false, true, false, false, false, false, false)
-                .contains(&"network.firewall.expose")
+            available_capabilities(CapabilityState {
+                network_operations_available: true,
+                ..CapabilityState::default()
+            })
+            .contains(&"network.firewall.expose")
         );
         assert!(
-            !available_capabilities(false, false, false, false, false, false, false)
+            !available_capabilities(CapabilityState::default())
                 .contains(&"network.overlay.peer_paths.read")
         );
     }

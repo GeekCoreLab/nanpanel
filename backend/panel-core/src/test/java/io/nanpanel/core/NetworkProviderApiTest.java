@@ -182,6 +182,12 @@ class NetworkProviderApiTest {
     Map<String, Object> rightRouterSwitch = new java.util.LinkedHashMap<>(switchNode);
     rightRouterSwitch.put("id", UUID.randomUUID().toString());
     rightRouterSwitch.put("name", "Router egress segment");
+    Map<String, Object> leftRouterSwitch2 = new java.util.LinkedHashMap<>(switchNode);
+    leftRouterSwitch2.put("id", UUID.randomUUID().toString());
+    leftRouterSwitch2.put("name", "Second Router ingress segment");
+    Map<String, Object> rightRouterSwitch2 = new java.util.LinkedHashMap<>(switchNode);
+    rightRouterSwitch2.put("id", UUID.randomUUID().toString());
+    rightRouterSwitch2.put("name", "Second Router egress segment");
     Map<String, Object> linuxRouter = Map.of(
         "id", UUID.randomUUID().toString(), "kind", "ROUTER", "name", "Isolated IPv4 Router",
         "position", Map.of("x", 300, "y", 0), "inputCount", 1, "outputCount", 1,
@@ -194,17 +200,32 @@ class NetworkProviderApiTest {
                 Map.of("port", "out-1", "address", "198.18.2.1/24")),
             "routes", List.of(Map.of("destination", "198.18.3.0/24", "gateway", "198.18.2.2",
                 "outputPort", "out-1"))));
+    Map<String, Object> linuxRouter2 = new java.util.LinkedHashMap<>(linuxRouter);
+    linuxRouter2.put("id", UUID.randomUUID().toString());
+    linuxRouter2.put("name", "Second isolated IPv4 Router");
+    linuxRouter2.put("routerConfiguration", Map.of(
+        "interfaces", List.of(Map.of("port", "in-1", "address", "198.18.4.1/24"),
+            Map.of("port", "out-1", "address", "198.18.5.1/24")),
+        "routes", List.of(Map.of("destination", "198.18.3.0/24", "gateway", "198.18.5.2",
+            "outputPort", "out-1"))));
     List<Map<String, Object>> routerLinks = List.of(
         Map.of("id", UUID.randomUUID().toString(), "sourceNodeId", leftRouterSwitch.get("id"),
             "sourcePort", "out-1", "targetNodeId", linuxRouter.get("id"), "targetPort", "in-1",
             "layer", "L2", "protocol", "ETHERNET", "status", "UNVERIFIED"),
         Map.of("id", UUID.randomUUID().toString(), "sourceNodeId", linuxRouter.get("id"),
             "sourcePort", "out-1", "targetNodeId", rightRouterSwitch.get("id"), "targetPort", "in-1",
+            "layer", "L2", "protocol", "ETHERNET", "status", "UNVERIFIED"),
+        Map.of("id", UUID.randomUUID().toString(), "sourceNodeId", leftRouterSwitch2.get("id"),
+            "sourcePort", "out-1", "targetNodeId", linuxRouter2.get("id"), "targetPort", "in-1",
+            "layer", "L2", "protocol", "ETHERNET", "status", "UNVERIFIED"),
+        Map.of("id", UUID.randomUUID().toString(), "sourceNodeId", linuxRouter2.get("id"),
+            "sourcePort", "out-1", "targetNodeId", rightRouterSwitch2.get("id"), "targetPort", "in-1",
             "layer", "L2", "protocol", "ETHERNET", "status", "UNVERIFIED"));
     var savedRouter = given().cookie("nanpanel_session", session.cookie())
         .header("X-CSRF-Token", session.csrf()).header("If-Match", routerEtag)
         .contentType("application/json")
-        .body(Map.of("nodes", List.of(leftRouterSwitch, linuxRouter, rightRouterSwitch),
+        .body(Map.of("nodes", List.of(leftRouterSwitch, linuxRouter, rightRouterSwitch,
+            leftRouterSwitch2, linuxRouter2, rightRouterSwitch2),
             "links", routerLinks))
         .put("/api/v1/topology/draft").then().statusCode(200).extract();
     String routerPlanInput = mapper.writeValueAsString(Map.of(
@@ -225,6 +246,9 @@ class NetworkProviderApiTest {
     });
     assertEquals("198.18.3.0/24", mapper.readTree(persistedRouterPlan)
         .path("nodes").get(1).path("routerConfiguration").path("routes").get(0)
+        .path("destination").asText());
+    assertEquals("198.18.3.0/24", mapper.readTree(persistedRouterPlan)
+        .path("nodes").get(4).path("routerConfiguration").path("routes").get(0)
         .path("destination").asText());
 
     String topologyEtag = given().cookie("nanpanel_session", session.cookie())

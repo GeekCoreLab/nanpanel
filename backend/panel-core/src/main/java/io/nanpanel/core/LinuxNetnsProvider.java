@@ -19,6 +19,7 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -299,8 +300,15 @@ public class LinuxNetnsProvider implements NetworkProvider {
       if (helperNodes.isEmpty() || helperNodes.size() > 16 || links.size() > 64) {
         throw new IllegalArgumentException("Linux netns plan needs 1 to 16 devices and at most 64 wires");
       }
-      if (helperNodes.stream().filter(node -> "ROUTER".equals(node.kind())).count() > 1) {
-        throw new IllegalArgumentException("One isolated Linux netns topology supports at most one Router routing table");
+      int totalRouterRoutes = helperNodes.stream()
+          .filter(node -> "ROUTER".equals(node.kind()))
+          .map(HelperNode::routerConfiguration)
+          .filter(Objects::nonNull)
+          .filter(configuration -> configuration.routes() != null)
+          .mapToInt(configuration -> configuration.routes().size())
+          .sum();
+      if (totalRouterRoutes > 64) {
+        throw new IllegalArgumentException("Linux netns topology supports at most 64 static routes across all Routers");
       }
       boolean usesOvs = helperNodes.stream().anyMatch(node -> "OPENVSWITCH".equals(node.switchBackend()));
       if (usesOvs && helperNodes.stream().anyMatch(node ->
@@ -415,12 +423,25 @@ public class LinuxNetnsProvider implements NetworkProvider {
         if (node.id().equals(link.targetNodeId())) connected.add(link.targetPort());
       }
       Map<String, Ipv4Cidr> configured = new HashMap<>();
+      Set<Long> assignedAddresses = new HashSet<>();
+      List<Ipv4Cidr> connectedNetworks = new ArrayList<>();
       for (HelperRouterInterface iface : configuration.interfaces()) {
         Ipv4Cidr address = iface == null ? null : parseIpv4Cidr(iface.address());
         if (iface == null || iface.port() == null || address == null
             || !connected.contains(iface.port()) || configured.putIfAbsent(iface.port(), address) != null) {
           return "ROUTER interface addresses must reference unique connected ports and valid IPv4 CIDRs";
         }
+        long last = address.network() | (~ipv4Mask(address.prefix()) & 0xffff_ffffL);
+        boolean overlaps = connectedNetworks.stream().anyMatch(existing -> {
+          long existingLast = existing.network() | (~ipv4Mask(existing.prefix()) & 0xffff_ffffL);
+          return address.network() <= existingLast && existing.network() <= last;
+        });
+        if ((address.prefix() <= 30
+            && (address.address() == address.network() || address.address() == last))
+            || !assignedAddresses.add(address.address()) || overlaps) {
+          return "ROUTER interface addresses must be unique usable hosts on non-overlapping networks";
+        }
+        connectedNetworks.add(address);
       }
       if (!configured.keySet().containsAll(connected)) {
         return "ROUTER requires an IPv4 address on every connected interface";
@@ -434,13 +455,22 @@ public class LinuxNetnsProvider implements NetworkProvider {
             || !destinations.add(route.destination())) {
           return "ROUTER static routes must use unique canonical IPv4 networks and configured output interfaces";
         }
-        if (configured.values().stream().anyMatch(address -> address.network() == destination.network()
-            && address.prefix() == destination.prefix())) {
-          return "ROUTER static routes cannot replace directly connected networks";
+        if (!"0.0.0.0/0".equals(route.destination())
+            && connectedNetworks.stream().anyMatch(address -> {
+              long destinationLast = destination.network()
+                  | (~ipv4Mask(destination.prefix()) & 0xffff_ffffL);
+              long connectedLast = address.network()
+                  | (~ipv4Mask(address.prefix()) & 0xffff_ffffL);
+              return destination.network() <= connectedLast && address.network() <= destinationLast;
+            })) {
+          return "ROUTER static routes cannot overlap directly connected networks";
         }
         if (route.gateway() != null) {
           Long gateway = parseIpv4(route.gateway());
-          if (gateway == null || (gateway & ipv4Mask(output.prefix())) != output.network()) {
+          long last = output.network() | (~ipv4Mask(output.prefix()) & 0xffff_ffffL);
+          if (gateway == null || (gateway & ipv4Mask(output.prefix())) != output.network()
+              || gateway == output.address()
+              || (output.prefix() <= 30 && (gateway == output.network() || gateway == last))) {
             return "ROUTER next hops must belong to the selected output interface subnet";
           }
         }
@@ -449,7 +479,7 @@ public class LinuxNetnsProvider implements NetworkProvider {
     return null;
   }
 
-  private record Ipv4Cidr(long network, int prefix, boolean canonical) {}
+  private record Ipv4Cidr(long address, long network, int prefix, boolean canonical) {}
 
   private Ipv4Cidr parseIpv4Cidr(String value) {
     if (value == null) return null;
@@ -459,7 +489,7 @@ public class LinuxNetnsProvider implements NetworkProvider {
     if (address == null) return null;
     int prefix = Integer.parseInt(parts[1]);
     long network = address & ipv4Mask(prefix);
-    return new Ipv4Cidr(network, prefix, address == network);
+    return new Ipv4Cidr(address, network, prefix, address == network);
   }
 
   private Long parseIpv4(String value) {
@@ -512,7 +542,10 @@ public class LinuxNetnsProvider implements NetworkProvider {
       boolean capable = capabilities != null && capabilities.isArray();
       boolean ovsRequired = configuration.nodes().stream()
           .anyMatch(node -> "OPENVSWITCH".equals(node.switchBackend()));
+      boolean vrfRequired = configuration.nodes().stream()
+          .anyMatch(node -> "ROUTER".equals(node.kind()));
       boolean ovsCapable = false;
+      boolean vrfCapable = false;
       if (capable) {
         capable = false;
         for (JsonNode value : capabilities) {
@@ -522,11 +555,17 @@ public class LinuxNetnsProvider implements NetworkProvider {
           if (value.isTextual() && "network.topology.ovs".equals(value.asText())) {
             ovsCapable = true;
           }
+          if (value.isTextual() && "network.topology.vrf".equals(value.asText())) {
+            vrfCapable = true;
+          }
         }
       }
       if (!capable) return "Execution host Helper does not report isolated topology support";
       if (ovsRequired && !ovsCapable) {
         return "Execution host Helper does not report isolated OVS topology support";
+      }
+      if (vrfRequired && !vrfCapable) {
+        return "Execution host Helper does not report isolated Router VRF support";
       }
       if (!"AVAILABLE".equals(row.get("helper_status"))) {
         return "Execution host Helper is unavailable";

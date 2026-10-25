@@ -998,13 +998,14 @@ fn valid_network_topology_payload(payload: NetworkTopologyPayload) -> bool {
         .iter()
         .map(|node| node.id.as_str())
         .collect::<std::collections::HashSet<_>>();
+    let total_router_routes = payload
+        .nodes
+        .iter()
+        .filter_map(|node| node.router_configuration.as_ref())
+        .map(|configuration| configuration.routes.len())
+        .sum::<usize>();
     if node_ids.len() != payload.nodes.len()
-        || payload
-            .nodes
-            .iter()
-            .filter(|node| node.kind == "ROUTER")
-            .count()
-            > 1
+        || total_router_routes > 64
         || payload.nodes.iter().any(|node| {
             !valid_topology_uuid(&node.id)
                 || !matches!(
@@ -1150,6 +1151,8 @@ fn valid_router_configuration(
         .chain(outputs.into_iter().flat_map(|ports| ports.iter().copied()))
         .collect::<std::collections::HashSet<_>>();
     let mut interfaces = std::collections::HashMap::new();
+    let mut connected_networks = Vec::new();
+    let mut assigned_addresses = std::collections::HashSet::new();
     for interface in &configuration.interfaces {
         if !connected.contains(interface.port.as_str()) {
             return false;
@@ -1157,8 +1160,27 @@ fn valid_router_configuration(
         let Some((network, prefix)) = ipv4_cidr(&interface.address) else {
             return false;
         };
+        let Some((local, _)) = interface.address.split_once('/') else {
+            return false;
+        };
+        let Some(local) = ipv4(local) else {
+            return false;
+        };
+        let last = network | !ipv4_mask(prefix);
+        if (prefix <= 30 && (local == network || local == last))
+            || !assigned_addresses.insert(local)
+            || connected_networks
+                .iter()
+                .any(|(other_network, other_prefix)| {
+                    network <= (*other_network | !ipv4_mask(*other_prefix))
+                        && *other_network <= last
+                })
+        {
+            return false;
+        }
+        connected_networks.push((network, prefix));
         if interfaces
-            .insert(interface.port.as_str(), (network, prefix))
+            .insert(interface.port.as_str(), (network, prefix, local))
             .is_some()
         {
             return false;
@@ -1184,9 +1206,13 @@ fn valid_router_configuration(
         if !canonical_destination
             || !output_ports.contains(route.output_port.as_str())
             || !destinations.insert(route.destination.as_str())
-            || interfaces
-                .values()
-                .any(|connected| *connected == (network, prefix))
+            || (route.destination != "0.0.0.0/0"
+                && connected_networks
+                    .iter()
+                    .any(|(connected_network, connected_prefix)| {
+                        network <= (*connected_network | !ipv4_mask(*connected_prefix))
+                            && *connected_network <= (network | !ipv4_mask(prefix))
+                    }))
         {
             return false;
         }
@@ -1194,7 +1220,10 @@ fn valid_router_configuration(
             let Some(gateway) = ipv4(gateway) else {
                 return false;
             };
+            let last = output.0 | !ipv4_mask(output.1);
             gateway & ipv4_mask(output.1) == output.0
+                && gateway != output.2
+                && (output.1 > 30 || (gateway != output.0 && gateway != last))
         })
     })
 }
@@ -2094,7 +2123,7 @@ mod tests {
     }
 
     #[test]
-    fn topology_dispatch_validates_router_routes_and_limits_to_one_router() {
+    fn topology_dispatch_validates_multiple_router_tables_and_ipv4_routes() {
         let topology = "11111111-1111-4111-8111-111111111111";
         let payload = r#"{
           "action":"APPLY","topologyId":"11111111-1111-4111-8111-111111111111",
@@ -2106,7 +2135,14 @@ mod tests {
                {"port":"in-1","address":"198.18.1.1/24"},
                {"port":"out-1","address":"198.18.2.1/24"}],
               "routes":[{"destination":"198.18.3.0/24","gateway":"198.18.2.2","outputPort":"out-1"}]}},
-            {"id":"66666666-6666-4666-8666-666666666666","kind":"SWITCH"}
+            {"id":"66666666-6666-4666-8666-666666666666","kind":"SWITCH"},
+            {"id":"88888888-8888-4888-8888-888888888888","kind":"SWITCH"},
+            {"id":"99999999-9999-4999-8999-999999999999","kind":"ROUTER",
+             "routerConfiguration":{"interfaces":[
+               {"port":"in-1","address":"198.18.4.1/24"},
+               {"port":"out-1","address":"198.18.5.1/24"}],
+              "routes":[{"destination":"198.18.3.0/24","gateway":"198.18.5.2","outputPort":"out-1"}]}},
+            {"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","kind":"SWITCH"}
           ],
           "links":[
             {"id":"55555555-5555-4555-8555-555555555555",
@@ -2116,6 +2152,14 @@ mod tests {
             {"id":"77777777-7777-4777-8777-777777777777",
              "sourceNodeId":"44444444-4444-4444-8444-444444444444","sourcePort":"out-1",
              "targetNodeId":"66666666-6666-4666-8666-666666666666","targetPort":"in-1",
+             "layer":"L2","protocol":"ETHERNET"},
+            {"id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+             "sourceNodeId":"88888888-8888-4888-8888-888888888888","sourcePort":"out-1",
+             "targetNodeId":"99999999-9999-4999-8999-999999999999","targetPort":"in-1",
+             "layer":"L2","protocol":"ETHERNET"},
+            {"id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+             "sourceNodeId":"99999999-9999-4999-8999-999999999999","sourcePort":"out-1",
+             "targetNodeId":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","targetPort":"in-1",
              "layer":"L2","protocol":"ETHERNET"}
           ]
         }"#;
@@ -2123,6 +2167,14 @@ mod tests {
         assert!(!valid_topology_dispatch(
             topology,
             &payload.replace("198.18.2.2", "198.18.4.2")
+        ));
+        assert!(!valid_topology_dispatch(
+            topology,
+            &payload.replace("198.18.2.2", "198.18.2.255")
+        ));
+        assert!(!valid_topology_dispatch(
+            topology,
+            &payload.replace("198.18.1.1/24", "198.18.2.3/24")
         ));
         assert!(!valid_topology_dispatch(
             topology,

@@ -5231,7 +5231,10 @@ components:
       required: [port, address]
       properties:
         port: {type: string, pattern: '^(in|out)-([1-9]|1[0-6])$'}
-        address: {type: string, pattern: '^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$'}
+        address:
+          type: string
+          pattern: '^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])$'
+          description: IPv4 host CIDR. Within one Router, host addresses must be unique and connected networks must not overlap.
     RouterStaticRoute:
       type: object
       additionalProperties: false
@@ -5244,6 +5247,7 @@ components:
       type: object
       additionalProperties: false
       required: [interfaces, routes]
+      description: Each executable Router uses an independent Linux VRF routing table inside the topology namespace. The topology may contain at most 64 static routes across all Routers.
       properties:
         interfaces:
           type: array

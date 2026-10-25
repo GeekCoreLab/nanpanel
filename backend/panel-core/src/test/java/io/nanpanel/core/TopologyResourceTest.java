@@ -173,6 +173,26 @@ class TopologyResourceTest {
         .body(Map.of("nodes", List.of(source, invalidRouter, target), "links", links))
         .put("/api/v1/topology/draft").then().statusCode(422)
         .body("code", org.hamcrest.Matchers.equalTo("INVALID_TOPOLOGY"));
+    invalidRouter.put("routerConfiguration", Map.of(
+        "interfaces", configuration.get("interfaces"),
+        "routes", List.of(Map.of("destination", "198.18.3.0/24", "gateway", "198.18.2.255",
+            "outputPort", "out-1"))));
+    given().cookie("nanpanel_session", sessionCookie)
+        .header("X-CSRF-Token", csrfToken).header("If-Match", saved.header("ETag"))
+        .contentType("application/json")
+        .body(Map.of("nodes", List.of(source, invalidRouter, target), "links", links))
+        .put("/api/v1/topology/draft").then().statusCode(422)
+        .body("code", org.hamcrest.Matchers.equalTo("INVALID_TOPOLOGY"));
+    invalidRouter.put("routerConfiguration", Map.of(
+        "interfaces", List.of(Map.of("port", "in-1", "address", "198.18.2.3/24"),
+            Map.of("port", "out-1", "address", "198.18.2.1/24")),
+        "routes", List.of()));
+    given().cookie("nanpanel_session", sessionCookie)
+        .header("X-CSRF-Token", csrfToken).header("If-Match", saved.header("ETag"))
+        .contentType("application/json")
+        .body(Map.of("nodes", List.of(source, invalidRouter, target), "links", links))
+        .put("/api/v1/topology/draft").then().statusCode(422)
+        .body("code", org.hamcrest.Matchers.equalTo("INVALID_TOPOLOGY"));
     assertEquals(1, getDraft().path("generation").asInt());
   }
 

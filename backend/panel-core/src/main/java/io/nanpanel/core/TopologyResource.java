@@ -374,6 +374,13 @@ public class TopologyResource {
       String routerError = routerConfigurationError(node, value.links());
       if (routerError != null) return routerError;
     }
+    int totalRouterRoutes = value.nodes().stream()
+        .filter(node -> "ROUTER".equals(node.kind()) && node.routerConfiguration() != null)
+        .map(NodeView::routerConfiguration)
+        .filter(configuration -> configuration.routes() != null)
+        .mapToInt(configuration -> configuration.routes().size())
+        .sum();
+    if (totalRouterRoutes > 64) return "拓扑中的 Router 静态路由总数不能超过 64";
     for (NodeView node : value.nodes()) {
       String parentId = node.parentId();
       Set<String> seen = new HashSet<>();
@@ -600,13 +607,17 @@ public class TopologyResource {
     if (configuration == null) return null;
     if (!"ROUTER".equals(node.kind()) || configuration.interfaces() == null
         || configuration.routes() == null || configuration.interfaces().size() > 16
-        || configuration.routes().size() > 64) return "Router 配置字段或节点种类无效";
+        || configuration.interfaces().isEmpty() || configuration.routes().size() > 64) {
+      return "Router 配置字段或节点种类无效";
+    }
     Set<String> connectedPorts = new HashSet<>();
     for (LinkInput link : links) {
       if (node.id().equals(link.sourceNodeId())) connectedPorts.add(link.sourcePort());
       if (node.id().equals(link.targetNodeId())) connectedPorts.add(link.targetPort());
     }
     Map<String, Ipv4Cidr> configured = new HashMap<>();
+    Set<Long> assignedAddresses = new HashSet<>();
+    List<Ipv4Cidr> connectedNetworks = new ArrayList<>();
     for (RouterInterfaceAddressView iface : configuration.interfaces()) {
       if (iface == null || iface.port() == null || iface.address() == null
           || node.ports().stream().noneMatch(port -> iface.port().equals(port.id()))
@@ -615,6 +626,17 @@ public class TopologyResource {
       }
       Ipv4Cidr address = parseIpv4Cidr(iface.address());
       if (address == null) return "Router 接口地址必须是有效 IPv4 CIDR";
+      long last = address.network() | (~maskForPrefix(address.prefix()) & 0xffff_ffffL);
+      boolean overlaps = connectedNetworks.stream().anyMatch(existing -> {
+        long existingLast = existing.network() | (~maskForPrefix(existing.prefix()) & 0xffff_ffffL);
+        return address.network() <= existingLast && existing.network() <= last;
+      });
+      if ((address.prefix() <= 30
+          && (address.address() == address.network() || address.address() == last))
+          || !assignedAddresses.add(address.address()) || overlaps) {
+        return "Router 接口必须使用唯一的可用主机地址，且直连网段不能重叠";
+      }
+      connectedNetworks.add(address);
       configured.put(iface.port(), address);
     }
     if (!configuration.interfaces().isEmpty() && !configured.keySet().containsAll(connectedPorts)) {
@@ -629,12 +651,20 @@ public class TopologyResource {
       Ipv4Cidr destination = parseIpv4Cidr(route.destination());
       if (destination == null || !destination.canonicalAddress()
           || !destinations.add(route.destination())) return "Router 静态路由目标必须是唯一的规范 IPv4 网段";
-      if (configured.values().stream().anyMatch(address -> address.network() == destination.network()
-          && address.prefix() == destination.prefix())) return "静态路由不能覆盖 Router 接口的直连网段";
+      if (!"0.0.0.0/0".equals(route.destination())
+          && connectedNetworks.stream().anyMatch(address -> {
+            long destinationLast = destination.network()
+                | (~maskForPrefix(destination.prefix()) & 0xffff_ffffL);
+            long connectedLast = address.network() | (~maskForPrefix(address.prefix()) & 0xffff_ffffL);
+            return destination.network() <= connectedLast && address.network() <= destinationLast;
+          })) return "静态路由不能与 Router 接口的直连网段重叠";
       if (route.gateway() != null) {
         Long gateway = parseIpv4(route.gateway());
         Ipv4Cidr output = configured.get(route.outputPort());
-        if (gateway == null || (gateway & maskForPrefix(output.prefix())) != output.network()) {
+        long last = output.network() | (~maskForPrefix(output.prefix()) & 0xffff_ffffL);
+        if (gateway == null || (gateway & maskForPrefix(output.prefix())) != output.network()
+            || gateway == output.address()
+            || (output.prefix() <= 30 && (gateway == output.network() || gateway == last))) {
           return "Router 下一跳必须位于所选接口的直连网段";
         }
       }

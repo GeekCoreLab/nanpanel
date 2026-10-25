@@ -17,9 +17,20 @@ process exits; a trap also removes the test links and nftables table on failure.
 The lab proves Linux bridge/router/static-route/bridge-Firewall/Packet Tap
 kernel behavior and management-route isolation. Provider unit/API checks cover
 typed Router and Firewall plans plus Helper policy verifiers, but the lab does
-not apply a NaNPanel Provider graph or reconcile its state. The first Router
-Provider supports IPv4 and one routing table per topology; multiple independent
-Routers and broader L3 behavior remain separate P6 acceptance items.
+not apply a NaNPanel Provider graph or reconcile its state.
+
+`./tests/p6/multi-router-vrf-lab.sh` creates one isolated topology namespace
+with two Linux VRF Routers and separate endpoint namespaces. It installs the
+same destination prefix in both VRF tables with different next hops, checks
+VRF-specific route lookup, and sends a real TCP request across both Routers.
+The script hashes host default routes before and after. This validates Linux
+VRF dataplane behavior and the namespace boundary, not the complete
+Core-to-Agent-to-Helper Apply lifecycle. Router execution requires kernel VRF
+support; IPv6, NAT, dynamic routing, and cross-Provider L3 remain outside this
+P6 slice.
+The Helper reports `network.topology.vrf` only when it can create a VRF in a
+temporary named network namespace; Core requires that capability when a saved
+plan includes Routers.
 
 `./tests/p6/openvswitch-netdev-lab.sh` downloads a temporary Debian container,
 installs OVS only inside that container, removes its default route, starts a
