@@ -4800,13 +4800,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                required: [items]
-                properties:
-                  items:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/TopologyRevisionSummary'
+                $ref: '#/components/schemas/TopologyRevisionList'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
@@ -5346,6 +5340,16 @@ components:
           - string
           - 'null'
           format: uuid
+    TopologyRevisionList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/TopologyRevisionSummary'
     TopologyRevisionSummary:
       type: object
       additionalProperties: false

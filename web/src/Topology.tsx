@@ -9,7 +9,7 @@ import {
 import { api, isMock, isP0Lab } from './lib/api';
 import { createUuid } from './lib/uuid.ts';
 import NetbirdProviderPanel from './NetbirdProviderPanel';
-import { connectionError, connectionReviewMessage, createTopologyNode, draftError, nodePresets, resolveRouteNextHop, unmatchedRouteGateways, validNodeShape } from './lib/topology-model';
+import { compareTopologyDrafts, connectionError, connectionReviewMessage, createTopologyNode, draftError, nodePresets, resolveRouteNextHop, unmatchedRouteGateways, validNodeShape } from './lib/topology-model';
 import { TopologyCanvas } from './topology/TopologyCanvas';
 import { TopologyContextMenu, TopologyContextMenuGroup, TopologyContextMenuHeading, TopologyContextMenuItem } from './topology/TopologyContextMenu';
 import './topology-status.css';
@@ -18,7 +18,8 @@ import './topology-workspaces.css';
 import './gateway-asset-picker.css';
 import './service-network.css';
 import './topology-node-settings.css';
-import type { Host, HostNetworkInventory, HostPage, KubernetesClusterList, KubernetesClusterSummary, KubernetesServiceInventorySnapshot, KubernetesServiceProbeSnapshot, KubernetesTopologyNamespaceDetail, KubernetesTopologyNamespaceSnapshot, TopologyDraft, TopologyDraftWrite, TopologyLayer, TopologyLink, TopologyNode, TopologyNodeKind, TopologyProtocol } from './lib/types';
+import './topology-revisions.css';
+import type { Host, HostNetworkInventory, HostPage, KubernetesClusterList, KubernetesClusterSummary, KubernetesServiceInventorySnapshot, KubernetesServiceProbeSnapshot, KubernetesTopologyNamespaceDetail, KubernetesTopologyNamespaceSnapshot, TopologyDraft, TopologyDraftWrite, TopologyLayer, TopologyLink, TopologyNode, TopologyNodeKind, TopologyProtocol, TopologyRevisionList, TopologyRevisionSummary } from './lib/types';
 
 type DeviceNode = Node<{
   model: TopologyNode;
@@ -162,6 +163,11 @@ function Editor() {
   const [namespaceDetails, setNamespaceDetails] = useState<Record<string, KubernetesTopologyNamespaceDetail>>({});
   const [expandedNamespace, setExpandedNamespace] = useState<string>(); const [expandedPod, setExpandedPod] = useState<string>(); const [kubernetesError, setKubernetesError] = useState(''); const [kubernetesBusy, setKubernetesBusy] = useState(false);
   const [routeEvidence, setRouteEvidence] = useState<P0RouteEvidence>();
+  const [revisionHistoryOpen, setRevisionHistoryOpen] = useState(false);
+  const [revisionSummaries, setRevisionSummaries] = useState<TopologyRevisionSummary[]>([]);
+  const [selectedRevision, setSelectedRevision] = useState<TopologyDraft>();
+  const [revisionLoading, setRevisionLoading] = useState(false);
+  const [revisionError, setRevisionError] = useState('');
   const [menu, setMenu] = useState<Menu>(); const canvasRef = useRef<HTMLElement>(null);
   const [nodeSettings, setNodeSettings] = useState<NodeSettings>(); const [nodeSettingsError, setNodeSettingsError] = useState('');
   const observedRouterSignatureRef = useRef('');
@@ -176,6 +182,36 @@ function Editor() {
     setBusy(true); setError(''); setMenu(undefined);
     try { const r = await api<TopologyDraft>('/topology/draft', 'GET', undefined, {}, true); const payload = { nodes: r.data.nodes.map(node => ({ ...node, parentId: node.parentId ?? null, assetId: node.assetId ?? null, clusterId: node.clusterId ?? null })), links: r.data.links.map(({ state: _state, ...link }) => link) }; const invalid = draftError(payload); if (invalid) throw new Error(invalid); setNodes(payload.nodes.map(node => asNode(node))); setEdges(r.data.links.map(asEdge)); setFolderId(null); setWorkspace('topology'); setEtag(r.etag ?? ''); setDirty(false); setLoaded(true); setMessage(`已读取 Revision ${r.data.generation}；链路状态来自运行观测`); requestAnimationFrame(() => { void fitView({ padding: .2 }); }); }
     catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  }
+  async function openRevisionHistory() {
+    setRevisionHistoryOpen(true); setRevisionError(''); setSelectedRevision(undefined); setRevisionLoading(true);
+    try {
+      const result = await api<TopologyRevisionList>('/topology/revisions?limit=50', 'GET', undefined, {}, true);
+      setRevisionSummaries(result.data.items);
+      if (result.data.items.length) {
+        const revision = await api<TopologyDraft>(`/topology/revisions/${encodeURIComponent(result.data.items[0].revisionId)}`, 'GET', undefined, {}, true);
+        setSelectedRevision(revision.data);
+      }
+    } catch (e) { setRevisionError((e as Error).message); }
+    finally { setRevisionLoading(false); }
+  }
+  async function selectRevision(revisionId: string) {
+    setRevisionLoading(true); setRevisionError(''); setSelectedRevision(undefined);
+    try {
+      const revision = await api<TopologyDraft>(`/topology/revisions/${encodeURIComponent(revisionId)}`, 'GET', undefined, {}, true);
+      setSelectedRevision(revision.data);
+    } catch (e) { setRevisionError((e as Error).message); }
+    finally { setRevisionLoading(false); }
+  }
+  function replayRevision() {
+    if (!selectedRevision) return;
+    if (dirty && !window.confirm('当前画布有未保存修改。回放历史版本会替换这些修改，但不会立即保存或部署。继续吗？')) return;
+    setNodes(selectedRevision.nodes.map(node => asNode(node)));
+    setEdges(selectedRevision.links.map(link => asEdge(link)));
+    setFolderId(null); setWorkspace('topology'); setDirty(true); setRouteEvidence(undefined);
+    setRevisionHistoryOpen(false);
+    setMessage(`Revision ${selectedRevision.generation} 已回放为未保存草稿；保存前不会应用网络规则`);
+    requestAnimationFrame(() => { void fitView({ padding: .2 }); });
   }
   async function loadServiceInventory(refresh = false) {
     if (isMock) {
@@ -639,13 +675,17 @@ function Editor() {
       .toLocaleLowerCase().includes(serviceSearch.trim().toLocaleLowerCase())) ?? [];
   const observedIstioRequests = serviceInventory?.istio.traffic.reduce((count, edge) =>
     count + edge.requestCount, 0) ?? 0;
+  const revisionDiff = selectedRevision ? compareTopologyDrafts(selectedRevision, draft()) : undefined;
+  const topologyNodeName = (nodeId: string) => draft().nodes.find(node => node.id === nodeId)?.name
+    ?? selectedRevision?.nodes.find(node => node.id === nodeId)?.name ?? nodeId;
+  const topologyLinkName = (link: TopologyLink) => `${topologyNodeName(link.sourceNodeId)}:${link.sourcePort} → ${topologyNodeName(link.targetNodeId)}:${link.targetPort}`;
   const inventoryStale = serviceInventory?.observedAt
     ? inventoryClock - new Date(serviceInventory.observedAt).getTime() > 120_000 : false;
   const istioTelemetryStale = serviceInventory?.istio.observedAt
     ? inventoryClock - new Date(serviceInventory.istio.observedAt).getTime() > 120_000 : false;
   return <>
     {folderId && <nav className="topology-breadcrumb" aria-label="拓扑层级"><button className="secondary" onClick={() => { setFolderId(null); setWorkspace('topology'); requestAnimationFrame(() => { void fitView({ padding: .2 }); }); }}>主拓扑</button>{folderPath().map((item, index) => <span key={item.id}><span className="muted">/</span>{index === folderPath().length - 1 ? <strong>{item.name}</strong> : <button className="secondary" onClick={() => enterFolder(item.id)}>{item.name}</button>}</span>)}</nav>}
-    <div className="page-heading"><div><h1>{isP0Lab ? '拓扑到实际路由 P0 实验' : folder?.name ?? '网络拓扑实验室'}</h1><p>{folderId ? '编辑此文件夹内的期望网络拓扑；下方可逐级浏览 Namespace、Ingress、Service 和 Pod。' : workspace === 'istio' ? '查看 Kubernetes Service、EndpointSlice 与 Istio Envoy 的真实流量观测。' : workspace === 'providers' ? '管理已接入的网络 Provider 配置。' : '双击文件夹进入子拓扑。绿色出口 → 蓝色入口，用多端口节点组织期望转发路径。'}</p></div><div className="topology-actions">{(workspace === 'topology' || !!folderId || isP0Lab) && <><button className="secondary" disabled={busy} onClick={load}>{dirty ? '重新读取（丢弃未保存）' : '↻ 重新读取'}</button><button className="primary" disabled={!loaded || busy || !dirty || !etag} onClick={save}>{busy ? '处理中…' : '保存草稿'}</button></>}{!folderId && workspace === 'topology' && <button className="secondary" disabled={!loaded || busy || assetPickerBusy} onClick={() => void loadHostAssets()}>{assetPickerBusy ? '读取主机…' : '＋ 添加主机资产'}</button>}{isP0Lab && <button className="primary" disabled={!loaded || busy || !!draftError(draft()) || !!p0RouteError(draft())} onClick={applyP0Route}>{busy ? '处理中…' : '应用到 FRP 实际路由'}</button>}</div></div>
+    <div className="page-heading"><div><h1>{isP0Lab ? '拓扑到实际路由 P0 实验' : folder?.name ?? '网络拓扑实验室'}</h1><p>{folderId ? '编辑此文件夹内的期望网络拓扑；下方可逐级浏览 Namespace、Ingress、Service 和 Pod。' : workspace === 'istio' ? '查看 Kubernetes Service、EndpointSlice 与 Istio Envoy 的真实流量观测。' : workspace === 'providers' ? '管理已接入的网络 Provider 配置。' : '双击文件夹进入子拓扑。绿色出口 → 蓝色入口，用多端口节点组织期望转发路径。'}</p></div><div className="topology-actions">{(workspace === 'topology' || !!folderId || isP0Lab) && <><button className="secondary" disabled={busy} onClick={load}>{dirty ? '重新读取（丢弃未保存）' : '↻ 重新读取'}</button><button className="primary" disabled={!loaded || busy || !dirty || !etag} onClick={save}>{busy ? '处理中…' : '保存草稿'}</button></>}{!folderId && workspace === 'topology' && !isP0Lab && <button className="secondary" disabled={!loaded || busy || revisionLoading} onClick={() => void openRevisionHistory()}>{revisionLoading ? '读取版本…' : '版本比较 / 回放'}</button>}{!folderId && workspace === 'topology' && <button className="secondary" disabled={!loaded || busy || assetPickerBusy} onClick={() => void loadHostAssets()}>{assetPickerBusy ? '读取主机…' : '＋ 添加主机资产'}</button>}{isP0Lab && <button className="primary" disabled={!loaded || busy || !!draftError(draft()) || !!p0RouteError(draft())} onClick={applyP0Route}>{busy ? '处理中…' : '应用到 FRP 实际路由'}</button>}</div></div>
     <div className="alert">{workspace === 'topology' || folderId || isP0Lab ? <>右键画布添加交换机、转发器或 K3s 文件夹；右键节点调整端口，右键连线删除。每个端口仅连接一条线；同色连接、自连接、跨层级连接与环路均不允许。{isP0Lab ? 'P0 实验仅接受 Gateway → NAT Host → Service，并把配置部署到隔离 FRP 容器。' : '拓扑及内部编辑保存为期望草稿，不直接修改主机路由表或 Kubernetes 资源。'}</> : workspace === 'istio' ? '此视图只展示 Core 从 Kubernetes API 与 Istio Envoy 采集的数据；Mock 模式会明确提示未连接，不生成服务或流量样例。' : 'Provider 配置单独呈现，不与主拓扑和运行观测混排。'}</div>
     {error && <div className="alert error" role="alert">{error}</div>}
     {routeEvidence && <div className="alert" role="status"><strong>实际路由已验证</strong> · {routeEvidence.route} · HTTP {routeEvidence.httpStatus} · 响应 {routeEvidence.responseBody} · SHA-256 {routeEvidence.configSha256}<pre className="p0-route-diff">{routeEvidence.diff}</pre></div>}
@@ -776,6 +816,29 @@ function Editor() {
         {nodeSettingsError && <div className="alert error" role="alert">{nodeSettingsError}</div>}
         <div className="form-actions"><button type="button" className="secondary" onClick={() => setNodeSettings(undefined)}>取消</button><button className="primary">保存节点设置</button></div>
       </form>
+    </section></div>}
+    {revisionHistoryOpen && <div className="modal-backdrop"><section className="modal topology-revision-dialog" role="dialog" aria-modal="true" aria-labelledby="topology-revision-title">
+      <div className="card-title"><div><span className="eyebrow">IMMUTABLE TOPOLOGY REVISIONS</span><h2 id="topology-revision-title">版本比较与回放</h2><p>回放只载入为当前未保存草稿；需要再次保存创建新 Revision，且不会应用网络规则。</p></div><button className="icon-button" aria-label="关闭版本比较" onClick={() => setRevisionHistoryOpen(false)}>×</button></div>
+      {revisionError && <div className="alert error" role="alert">{revisionError}</div>}
+      <div className="topology-revision-layout">
+        <div className="topology-revision-list" aria-label="历史拓扑版本">
+          {revisionSummaries.map(revision => <button type="button" key={revision.revisionId} aria-pressed={selectedRevision?.revisionId === revision.revisionId} onClick={() => void selectRevision(revision.revisionId)}><strong>Revision {revision.generation}</strong><small>{revision.nodeCount} 节点 · {revision.linkCount} 链路</small><time>{new Date(revision.updatedAt).toLocaleString()}</time></button>)}
+          {!revisionLoading && !revisionSummaries.length && <p className="empty">没有可读取的历史 Revision。</p>}
+        </div>
+        <div className="topology-revision-diff">
+          {revisionLoading && <p className="empty">读取 Revision…</p>}
+          {!revisionLoading && revisionDiff && <>
+            <p className="muted">Revision {selectedRevision?.generation} → 当前画布{dirty ? '（含未保存修改）' : ''}</p>
+            <h3>节点 · +{revisionDiff.nodes.added.length} / −{revisionDiff.nodes.removed.length} / 修改 {revisionDiff.nodes.changed.length}</h3>
+            <ul>{revisionDiff.nodes.added.map(node => <li className="added" key={`node-added-${node.id}`}>+ {node.name}</li>)}{revisionDiff.nodes.removed.map(node => <li className="removed" key={`node-removed-${node.id}`}>− {node.name}</li>)}{revisionDiff.nodes.changed.map(change => <li className="changed" key={`node-changed-${change.after.id}`}>~ {change.before.name} → {change.after.name} · {change.fields.join(', ')}</li>)}</ul>
+            <h3>链路 · +{revisionDiff.links.added.length} / −{revisionDiff.links.removed.length} / 修改 {revisionDiff.links.changed.length}</h3>
+            <ul>{revisionDiff.links.added.map(link => <li className="added" key={`link-added-${link.id}`}>+ {topologyLinkName(link)}</li>)}{revisionDiff.links.removed.map(link => <li className="removed" key={`link-removed-${link.id}`}>− {topologyLinkName(link)}</li>)}{revisionDiff.links.changed.map(change => <li className="changed" key={`link-changed-${change.after.id}`}>~ {topologyLinkName(change.after)} · {change.fields.join(', ')}</li>)}</ul>
+            {!revisionDiff.nodes.added.length && !revisionDiff.nodes.removed.length && !revisionDiff.nodes.changed.length && !revisionDiff.links.added.length && !revisionDiff.links.removed.length && !revisionDiff.links.changed.length && <p className="empty">该 Revision 与当前画布一致。</p>}
+          </>}
+          {!revisionLoading && !selectedRevision && !revisionError && <p className="empty">选择一个 Revision 查看与当前画布的差异。</p>}
+        </div>
+      </div>
+      <div className="form-actions"><button type="button" className="secondary" onClick={() => setRevisionHistoryOpen(false)}>关闭</button><button type="button" className="primary" disabled={!selectedRevision || revisionLoading} onClick={replayRevision}>回放为未保存草稿</button></div>
     </section></div>}
     {assetPickerOpen && <div className="modal-backdrop"><section className="modal topology-asset-picker" role="dialog" aria-modal="true" aria-labelledby="topology-asset-picker-title"><div className="card-title"><div><span className="eyebrow">REGISTERED HOSTS</span><h2 id="topology-asset-picker-title">添加主机资产到主拓扑</h2></div><button className="icon-button" aria-label="关闭添加主机资产" onClick={() => setAssetPickerOpen(false)}>×</button></div><p>选择已登记主机后，拓扑会绑定该资产并自动读取 Agent 上报的路由表。</p><div className="topology-asset-list">{assetChoices.map(host => { const bound = nodes.some(node => node.data.model.assetId === host.id); return <button className="topology-asset-option" key={host.id} disabled={bound} onClick={() => addHostAsset(host)}><span><strong>{host.hostname}</strong><small>{host.os ?? 'OS 未知'} · {host.arch ?? '架构未知'} · {host.agentId ? 'Agent 已绑定' : '等待 Agent'}</small></span><span className={`badge ${host.status === 'ONLINE' ? 'online' : host.status === 'OFFLINE' ? 'offline' : 'unknown'}`}>{bound ? '已添加' : host.status}</span></button>; })}</div>{assetNextCursor && <button className="secondary" disabled={assetPickerBusy} onClick={() => void loadMoreHostAssets()}>{assetPickerBusy ? '读取中…' : '加载更多主机'}</button>}{!assetChoices.length && <div className="empty">还没有已登记主机。</div>}</section></div>}
   </>;

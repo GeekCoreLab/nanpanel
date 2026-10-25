@@ -55,6 +55,8 @@ All endpoints require an active administrator session with the initial password 
 
 The current ETag is the strong value `"topology-<generation>"`. A successful PUT writes the immutable Revision, updates the current pointer and records `TOPOLOGY_DRAFT_UPDATED` in one database transaction. The response includes `revisionId`, `generation`, `updatedAt`, `updatedBy` and per-link state. PUT replaces the complete desired graph and does not use `Idempotency-Key`; after a transport failure, clients must read again and confirm before retrying.
 
+The console compares a selected historical graph with the current canvas by stable node and link IDs, including changed node settings, ports, positions, and link protocol. Replaying a Revision only loads its desired graph into the editor as an unsaved draft. It does not call a Provider or change a host/Kubernetes network. Saving that draft uses the current head ETag and creates a new Revision; it never rewinds the current pointer to the historical row.
+
 Submitted link `status` is always `UNVERIFIED`. Response `state` values are `PENDING`, `VERIFIED`, `ERROR` or `UNSUPPORTED`; the state describes runtime evidence and cannot be set by a draft write. New or changed links begin as `PENDING`. Saving the graph never marks a link healthy.
 
 ## Example

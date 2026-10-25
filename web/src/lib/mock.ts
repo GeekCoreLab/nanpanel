@@ -19,6 +19,7 @@ const versions = new Map<string, number>();
 const etag = (key: string) => `"mock-${key}-${versions.get(key) ?? 1}"`;
 const bump = (key: string) => versions.set(key, (versions.get(key) ?? 1) + 1);
 let topology: TopologyDraft = { ...initialTopology(), revisionId: id(), generation: 0, updatedAt: now(), updatedBy: null };
+const topologyRevisions: TopologyDraft[] = [structuredClone(topology)];
 const operations: Operation[] = [];
 const audit: AuditEvent[] = [];
 const mockFileContents = new Map<string, Map<string, string>>();
@@ -124,13 +125,27 @@ export async function mockRequest(path: string, options: RequestInit, authentica
  if (p === '/auth/password') { if (passwords.get(current.id) !== b.currentPassword) return fail(400, 'INVALID_PASSWORD', '旧密码不正确'); if ([...String(b.newPassword)].length < 15 || [...String(b.newPassword)].length > 128 || b.newPassword === b.currentPassword) return fail(422, 'PASSWORD_REJECTED', '新密码须为 15–128 字符，且与旧密码不同'); passwords.set(current.id, b.newPassword); current.mustChangePassword = false; log('PASSWORD_CHANGED', 'user', current.id, '修改本人密码'); currentUserId = null; sessions = []; return ok(null, 204); }
  if (p === '/auth/sessions') return ok({ items: sessions });
  if (p.startsWith('/auth/sessions/') && method === 'DELETE') { sessions = sessions.filter(s => s.id !== p.split('/').pop()); return ok(null, 204); }
+ if (p === '/topology/revisions' && method === 'GET') {
+  const limit = Math.max(1, Math.min(Number(url.searchParams.get('limit') ?? 50), 100));
+  return ok({ items: topologyRevisions.slice(0, limit).map(revision => ({
+   revisionId: revision.revisionId, generation: revision.generation,
+   nodeCount: revision.nodes.length, linkCount: revision.links.length,
+   updatedAt: revision.updatedAt, updatedBy: revision.updatedBy,
+  })) });
+ }
+ const topologyRevisionMatch = p.match(/^\/topology\/revisions\/([^/]+)$/);
+ if (topologyRevisionMatch && method === 'GET') {
+  const revision = topologyRevisions.find(value => value.revisionId === decodeURIComponent(topologyRevisionMatch[1]));
+  return revision ? ok(structuredClone(revision)) : fail(404, 'NOT_FOUND', '拓扑 Revision 不存在');
+ }
  if (p === '/topology/draft') {
   if (method === 'GET') return ok(topology, 200, { ETag: etag('topology'), 'Cache-Control': 'no-store' });
   if (method !== 'PUT') return fail(405, 'METHOD_NOT_ALLOWED', '草稿仅支持 GET / PUT');
   if (!headers.has('If-Match')) return fail(428, 'PRECONDITION_REQUIRED', '保存草稿需要 If-Match');
   if (!match('topology')) return fail(412, 'PRECONDITION_FAILED', '草稿已被修改，请重新读取后检查再保存');
   const error = draftError(b); if (error) return fail(422, 'INVALID_TOPOLOGY', error);
-  topology = { ...structuredClone(b), links: b.links.map((link: TopologyLink) => ({ ...link, state: 'PENDING' })), revisionId: id(), generation: topology.generation + 1, updatedAt: now(), updatedBy: current.id }; bump('topology');
+  topology = { ...structuredClone(b), links: b.links.map((link: TopologyLink) => ({ ...link, state: 'PENDING' })), revisionId: id(), generation: topology.generation + 1, updatedAt: now(), updatedBy: current.id };
+  topologyRevisions.unshift(structuredClone(topology)); topologyRevisions.length = Math.min(topologyRevisions.length, 100); bump('topology');
   log('TOPOLOGY_DRAFT_UPDATED', 'topology', null, `保存期望拓扑草稿：${topology.nodes.length} 个节点、${topology.links.length} 条未验证连接`);
   return ok(topology, 200, { ETag: etag('topology'), 'Cache-Control': 'no-store' });
  }

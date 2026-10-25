@@ -10,6 +10,7 @@ export type TopologyNode = { id: string; kind: TopologyNodeKind; name: string; p
 export type TopologyLink = { id: string; sourceNodeId: string; sourcePort: string; targetNodeId: string; targetPort: string; layer: TopologyLayer; protocol: TopologyProtocol; status: "UNVERIFIED"; state?: "PENDING" | "VERIFIED" | "ERROR" | "UNSUPPORTED" };
 export type TopologyDraftWrite = { nodes: (TopologyNode)[]; links: (TopologyLink)[] };
 export type TopologyDraft = { revisionId: string; generation: number; nodes: (TopologyNode)[]; links: (TopologyLink)[]; updatedAt: string; updatedBy: string | null };
+export type TopologyRevisionList = { items: (TopologyRevisionSummary)[] };
 export type TopologyRevisionSummary = { revisionId: string; generation: number; nodeCount: number; linkCount: number; updatedAt: string; updatedBy: string | null };
 export type SystemInfo = { name: string; version: string; stage: string };
 export type Host = { id: string; hostname: string; os: string | null; arch: string | null; generation: number; status: "UNKNOWN" | "ONLINE" | "OFFLINE"; capabilities: (string)[]; agentId: string | null; lastSeenAt: string | null; createdAt: string };

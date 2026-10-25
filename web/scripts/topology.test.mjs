@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { connectionError, createTopologyNode, draftError, initialTopology, resolveRouteNextHop, unmatchedRouteGateways, validNodeShape } from '../src/lib/topology-model.ts';
+import { compareTopologyDrafts, connectionError, createTopologyNode, draftError, initialTopology, resolveRouteNextHop, unmatchedRouteGateways, validNodeShape } from '../src/lib/topology-model.ts';
 import { mockRequest, DEMO_PASSWORD } from '../src/lib/mock.ts';
 const node = kind => createTopologyNode(kind, { x: 0, y: 0 });
 const link = (source, target, out = 'out-1', input = 'in-1', layer = 'L4', protocol = 'TCP') => ({ id: crypto.randomUUID(), sourceNodeId: source.id, sourcePort: out, targetNodeId: target.id, targetPort: input, layer, protocol, status: 'UNVERIFIED' });
@@ -91,6 +91,32 @@ test('unmodeled unique route gateways are deduplicated for observed Router nodes
   ], sourceHostIds, owners), ['10.0.0.8', '10.0.0.9']);
 });
 
+test('topology revision comparison reports node and link changes by stable identity', () => {
+  const gateway = node('GATEWAY');
+  const host = node('HOST');
+  const service = node('SERVICE');
+  const oldLink = link(gateway, host);
+  const before = { nodes: [gateway, host], links: [oldLink] };
+  const renamedHost = { ...host, name: '边缘主机二' };
+  const newLink = link(renamedHost, service, 'out-1', 'in-1', 'L4', 'UDP');
+  const after = {
+    nodes: [service, { ...renamedHost, position: { y: 10, x: 20 } }, gateway],
+    links: [{ ...oldLink, protocol: 'UDP' }, newLink],
+  };
+  const diff = compareTopologyDrafts(before, after);
+  assert.deepEqual(diff.nodes.added.map(item => item.id), [service.id]);
+  assert.deepEqual(diff.nodes.removed, []);
+  assert.deepEqual(diff.nodes.changed.map(item => item.after.id), [host.id]);
+  assert.deepEqual(diff.nodes.changed[0].fields, ['name', 'position']);
+  assert.deepEqual(diff.links.added.map(item => item.id), [newLink.id]);
+  assert.deepEqual(diff.links.removed, []);
+  assert.deepEqual(diff.links.changed.map(item => item.after.id), [oldLink.id]);
+  assert.deepEqual(diff.links.changed[0].fields, ['protocol']);
+  assert.deepEqual(compareTopologyDrafts(before, { nodes: [...before.nodes].reverse(), links: before.links }), {
+    nodes: { added: [], removed: [], changed: [] }, links: { added: [], removed: [], changed: [] },
+  });
+});
+
 test('Mock cluster hierarchy exposes namespaces, ingress routes, pods and container details', async () => {
   let csrfToken = (await (await mockRequest('/auth/csrf', { method: 'GET' })).json()).csrfToken;
   const login = await (await mockRequest('/auth/login', { method: 'POST', headers: { 'X-CSRF-Token': csrfToken }, body: JSON.stringify({ username: 'admin', password: DEMO_PASSWORD }) })).json();
@@ -129,7 +155,7 @@ test('Mock topology API requires auth, CSRF, matching ETag; save is atomic and r
   assert.equal(initial.response.status, 200);
   const tag = initial.response.headers.get('ETag');
   const write = { nodes: [...initial.data.nodes, node('SWITCH'), node('MERGE'), node('SPLIT'), node('FORWARDER')], links: [] };
-  write.links.push(link(write.nodes[0], write.nodes[3]));
+  write.links.push(link(write.nodes[0], write.nodes[1]));
   assert.equal((await call('PUT', write)).response.status, 428);
   assert.equal((await call('PUT', write, tag, 'invalid')).response.status, 403);
   assert.equal((await call('PUT', write, '"stale"')).response.status, 412);
@@ -137,11 +163,17 @@ test('Mock topology API requires auth, CSRF, matching ETag; save is atomic and r
   assert.equal((await call('PUT', invalid, tag)).response.status, 422);
   assert.equal((await call('GET')).response.headers.get('ETag'), tag);
   const saved = await call('PUT', write, tag);
-  assert.equal(saved.response.status, 200);
+  assert.equal(saved.response.status, 200, JSON.stringify(saved.data));
   assert.notEqual(saved.response.headers.get('ETag'), tag);
   assert.deepEqual(saved.data.nodes, write.nodes);
   assert.equal(saved.data.links[0].status, 'UNVERIFIED');
   assert.equal(saved.data.updatedBy, login.user.id);
+  const revisions = await (await mockRequest('/topology/revisions?limit=50', { method: 'GET' })).json();
+  assert.equal(revisions.items[0].revisionId, saved.data.revisionId);
+  assert.equal(revisions.items[0].generation, 1);
+  const historical = await (await mockRequest(`/topology/revisions/${saved.data.revisionId}`, { method: 'GET' })).json();
+  assert.deepEqual(historical.nodes, saved.data.nodes);
+  assert.equal(historical.links[0].state, 'PENDING');
   assert.equal((await call('PUT', write, tag)).response.status, 412);
   const audit = await (await mockRequest('/admin/audit-events', { method: 'GET' })).json();
   assert.ok(audit.items.some(e => e.action === 'TOPOLOGY_DRAFT_UPDATED'));

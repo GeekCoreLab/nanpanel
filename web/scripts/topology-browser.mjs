@@ -62,6 +62,18 @@ try {
   await expect(page.getByRole('menu')).toHaveCount(0);
   await page.getByRole('button', { name: '保存草稿', exact: true }).click();
   await expect(page.getByRole('status')).toContainText('草稿已保存');
+  await page.getByRole('button', { name: '版本比较 / 回放' }).click();
+  const revisions = page.getByRole('dialog', { name: '版本比较与回放' });
+  await expect(revisions).toBeVisible();
+  await revisions.getByRole('button', { name: /Revision 0/ }).click();
+  await expect(revisions.locator('.topology-revision-diff h3').first()).toContainText('节点 · +4 / −0');
+  await revisions.getByRole('button', { name: '回放为未保存草稿' }).click();
+  await expect(revisions).toHaveCount(0);
+  await expect(page.locator('.react-flow__node-device')).toHaveCount(3);
+  await expect(page.getByRole('status')).toContainText('Revision 0 已回放为未保存草稿');
+  await page.getByRole('button', { name: '重新读取（丢弃未保存）' }).click();
+  await expect(page.locator('.react-flow__node-device')).toHaveCount(7);
+  await expect(page.locator('.react-flow__edge')).toHaveCount(2);
   await page.locator('nav a[href="#overview"]').click();
   await page.locator('nav a[href="#topology"]').click();
   await expect(page.locator('.react-flow__node-device')).toHaveCount(7);
@@ -199,5 +211,5 @@ try {
   await expect(device('K3s Service')).toBeVisible();
   await expect(page.locator('.react-flow__edge')).toHaveCount(1);
   if (errors.length) throw new Error(errors.join('\n'));
-  console.log('PASS: base topology editing, searchable Gateway host asset binding, automatic route next-hop matching, Host/Gateway asset save and reload with Router reconstruction, nested folder editing and persistence, Namespace/Ingress/Service/Pod/container drill-down, mobile menu; no page errors');
+  console.log('PASS: base topology editing, immutable revision compare and unsaved replay, searchable Gateway host asset binding, automatic route next-hop matching, Host/Gateway asset save and reload with Router reconstruction, nested folder editing and persistence, Namespace/Ingress/Service/Pod/container drill-down, mobile menu; no page errors');
 } finally { await browser.close(); }

@@ -29,7 +29,7 @@ Mock 状态只保存在当前页面内存；刷新会重置用户、密码、任
 - 平台设置：站点名称、展示时区、离线阈值、已结束任务保留期，使用 ETag 防止覆盖并发更新。
 - 账号：本人改密、会话查看与撤销；改密后重新登录。
 - 审计：脱敏记录、动作/摘要搜索、结果筛选。
-- 网络拓扑分为独立工作区：拓扑编辑、Istio 服务网络、网络接入。拓扑编辑使用 React Flow 管理持久化 Revision，支持多层文件夹、Host/Gateway 资产绑定、按 ETag 保存/重新读取，以及基于 Host 真实路由观察生成只读 Router/连接。保存期望图不会部署或改写主机路由表。公网 Gateway 的可搜索主机选择器在混合模式读取真实 `/hosts` 资产；纯 Mock 演示使用 fixture。详见 [拓扑语义/API](../api/topology.md)。
+- 网络拓扑分为独立工作区：拓扑编辑、Istio 服务网络、网络接入。拓扑编辑使用 React Flow 管理持久化 Revision，支持多层文件夹、Host/Gateway 资产绑定、按 ETag 保存/重新读取、历史版本差异与回放为未保存草稿，以及基于 Host 真实路由观察生成只读 Router/连接。回放后保存会创建新的 Revision，不会直接回退历史指针；保存期望图不会部署或改写主机路由表。公网 Gateway 的可搜索主机选择器在混合模式读取真实 `/hosts` 资产；纯 Mock 演示使用 fixture。详见 [拓扑语义/API](../api/topology.md)。
 - Istio 服务网络工作区仅展示 Core 从 Kubernetes API/EndpointSlice 与 Istio Envoy 遥测采集的数据，包括 Service、端点就绪、sidecar、请求数、HTTP 响应和 mTLS。默认混合模式及 Live 模式请求真实同源 Core API。纯 Mock 模式明确显示 `LIVE_ISTIO_REQUIRED`，不生成服务或流量样例。服务与流量分栏按需展开，并分别标记过期数据。
 
 桌面侧栏与移动端横向导航均可使用。主机列表支持游标翻页，名称搜索仅匹配当前页；其他列表仍展示 API 首页面（默认最多 20 条）。不要把页面数量当成全量统计。仪表盘主机和任务计数来自真实 overview，操作明细接口尚未接入。

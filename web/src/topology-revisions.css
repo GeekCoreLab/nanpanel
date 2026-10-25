@@ -1,0 +1,100 @@
+.topology-revision-dialog {
+  width: min(980px, 96vw);
+  max-height: min(90vh, 900px);
+  overflow: auto;
+}
+
+.topology-revision-dialog > .card-title {
+  align-items: flex-start;
+  padding: 0 0 16px;
+}
+
+.topology-revision-dialog > .card-title h2 {
+  margin: 5px 0;
+}
+
+.topology-revision-dialog > .card-title p {
+  margin: 0;
+  max-width: 680px;
+  font-size: 11px;
+  line-height: 1.7;
+}
+
+.topology-revision-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, .75fr) minmax(0, 1.5fr);
+  gap: 16px;
+  min-height: 300px;
+}
+
+.topology-revision-list {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  max-height: 56vh;
+  overflow: auto;
+}
+
+.topology-revision-list > button {
+  display: grid;
+  gap: 5px;
+  padding: 11px 12px;
+  border: 1px solid var(--line, #dbe3ee);
+  border-radius: 7px;
+  background: #fff;
+  color: var(--ink, #314765);
+  text-align: left;
+}
+
+.topology-revision-list > button[aria-pressed="true"] {
+  border-color: #83a9ee;
+  background: #f4f8ff;
+  box-shadow: 0 0 0 2px #6292ee18;
+}
+
+.topology-revision-list small,
+.topology-revision-list time {
+  color: var(--muted, #73839a);
+  font-size: 10px;
+}
+
+.topology-revision-diff {
+  min-width: 0;
+  max-height: 56vh;
+  overflow: auto;
+  padding: 13px 15px;
+  border: 1px solid #e7edf5;
+  border-radius: 7px;
+  background: #fbfcfe;
+}
+
+.topology-revision-diff h3 {
+  margin: 15px 0 7px;
+  color: #405977;
+  font-size: 11px;
+}
+
+.topology-revision-diff ul {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding-left: 19px;
+  color: #728198;
+  font-size: 10px;
+}
+
+.topology-revision-diff li {
+  overflow-wrap: anywhere;
+}
+
+.topology-revision-diff li.added { color: #248361; }
+.topology-revision-diff li.removed { color: #b65c57; }
+.topology-revision-diff li.changed { color: #a17a2b; }
+
+@media (max-width: 620px) {
+  .topology-revision-dialog { padding: 18px 15px; }
+  .topology-revision-dialog > .card-title { padding-bottom: 13px; }
+  .topology-revision-layout { grid-template-columns: 1fr; }
+  .topology-revision-list { grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: 28vh; }
+  .topology-revision-diff { max-height: 35vh; }
+}

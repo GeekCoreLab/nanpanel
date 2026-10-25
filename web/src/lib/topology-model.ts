@@ -11,6 +11,48 @@ export type RouteNextHopResolution =
 
 export type ObservedRoute = { sourceHostId: string; gateway?: string | null };
 
+export type TopologyRevisionDiff<TNode extends { id: string }, TLink extends { id: string }> = {
+  nodes: { added: TNode[]; removed: TNode[]; changed: { before: TNode; after: TNode; fields: string[] }[] };
+  links: { added: TLink[]; removed: TLink[]; changed: { before: TLink; after: TLink; fields: string[] }[] };
+};
+
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const object = value as Record<string, unknown>;
+    return `{${Object.keys(object).sort().map(key => `${JSON.stringify(key)}:${canonical(object[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+function changedFields(before: { id: string }, after: { id: string }): string[] {
+  const oldValues = before as Record<string, unknown>;
+  const newValues = after as Record<string, unknown>;
+  return [...new Set([...Object.keys(oldValues), ...Object.keys(newValues)])].sort()
+    .filter(key => canonical(oldValues[key]) !== canonical(newValues[key]));
+}
+
+function compareById<T extends { id: string }>(before: readonly T[], after: readonly T[]) {
+  const oldById = new Map(before.map(item => [item.id, item]));
+  const newById = new Map(after.map(item => [item.id, item]));
+  const added = after.filter(item => !oldById.has(item.id));
+  const removed = before.filter(item => !newById.has(item.id));
+  const changed = after.flatMap(item => {
+    const old = oldById.get(item.id);
+    const fields = old ? changedFields(old, item) : [];
+    return old && fields.length ? [{ before: old, after: item, fields }] : [];
+  });
+  return { added, removed, changed };
+}
+
+/** Compare immutable revisions by stable IDs while ignoring object key order. */
+export function compareTopologyDrafts<TNode extends { id: string }, TLink extends { id: string }>(
+  before: { nodes: readonly TNode[]; links: readonly TLink[] },
+  after: { nodes: readonly TNode[]; links: readonly TLink[] },
+): TopologyRevisionDiff<TNode, TLink> {
+  return { nodes: compareById(before.nodes, after.nodes), links: compareById(before.links, after.links) };
+}
+
 /** Resolve a route gateway only when exactly one different Host or Router node owns its address. */
 export function resolveRouteNextHop(
   gateway: string | null | undefined,
