@@ -531,11 +531,13 @@ Agent Kubernetes runtime discovery 的代码测试和 `k3s-1` 部署证据见[�
 
 ### P6｜可编程虚拟设备
 
-2026-10-26 首个可执行 Provider 切片已实现：内建 `linux-netns` 从已保存拓扑 Revision 生成持久化计划，并经 Agent/Root Helper 在每 Revision 独立 netns 中创建 root `SWITCH` 的 Linux bridge 与 L2/Ethernet veth 网线。Verify 检查资源归属和零默认路由，并暴露两端内核 RX/TX byte/packet 计数；Compensate 只删除带对应归属标记的 netns，宿主接口与路由不进入操作载荷。Core 76 项测试、Rust 四项规定检查、Web 构建/单测/Playwright 和隔离 Linux bridge/router/nft/tc 实验通过。Commit `d0b9d17946b9a1de63be904f85217b7fa1095a34` 的 Actions 与不可变 GHCR Core/Web 镜像发布成功并已部署到 `k3s-1`；Core/Web rollout、数据库健康检查、Helper/Agent 二进制哈希和 Helper 只读能力报告均通过。未在目标生产拓扑执行 Provider Apply。部署证据见[首个 Linux netns Provider 部署](tests/p6/runs/2026-10-26-k3s-1-linux-netns-provider.md)。下列 P6 总体验收项保持未完成，Router/Firewall/Packet Tap/OVS 执行和管理路径探测仍开放。
+2026-10-26 首个可执行 Provider 切片已实现：内建 `linux-netns` 从已保存拓扑 Revision 生成持久化计划，并经 Agent/Root Helper 在每 Revision 独立 netns 中创建 root `SWITCH` 的 Linux bridge 与 L2/Ethernet veth 网线。Verify 检查资源归属和零默认路由，并暴露两端内核 RX/TX byte/packet 计数；Compensate 只删除带对应归属标记的 netns，宿主接口与路由不进入操作载荷。Core 76 项测试、Rust 四项规定检查、Web 构建/单测/Playwright 和隔离 Linux bridge/router/nft/tc 实验通过。Commit `d0b9d17946b9a1de63be904f85217b7fa1095a34` 的 Actions 与不可变 GHCR Core/Web 镜像发布成功并已部署到 `k3s-1`；Core/Web rollout、数据库健康检查、Helper/Agent 二进制哈希和 Helper 只读能力报告均通过。未在目标生产拓扑执行 Provider Apply。部署证据见[首个 Linux netns Provider 部署](tests/p6/runs/2026-10-26-k3s-1-linux-netns-provider.md)。
+
+2026-10-26 第二切片为同一 Provider 增加严格三端口 `PACKET_TAP`：Helper 在 per-topology netns 内用 `tc mirred` 镜像两侧业务出口到隔离监控网线，并在 Verify 中检查过滤器与接口归属。Core 76 项测试、Rust 四项规定检查、Web 17 项测试/构建/Playwright 和隔离 Linux Packet Tap 数据面实验通过。Commit `f3a1b18978e0a0cb361ef73697a6f56bdc998634` 的 Actions run `40219654056` 成功；不可变 GHCR Core/Web 镜像已部署到 `k3s-1`，Core/Web 各 1/1 Ready，PostgreSQL 及原 5 GiB PVC 保持 Ready/Bound，公开页面 HTTP 200、数据库健康检查 UP、Helper/Agent active，部署后的 Helper 只读能力包含 `network.topology.reconcile`。没有在目标生产拓扑执行 Provider Apply。详见[Packet Tap 切片与部署验收](tests/p6/runs/2026-10-26-packet-tap-slice.md)。
 
 - [ ] OVS/Bridge/Router/Firewall/Packet Tap Provider。
 - [ ] 虚拟网线链路指标、端口能力与 L2/L3 校验。
-- [ ] 更丰富的设备插入、镜像、拓扑版本比较与回放。
+- [x] 设备插入、Packet Tap 镜像、拓扑版本比较与回放：Canvas context menu 支持添加/调整设备；版本差异按节点与连接稳定 ID 展示，历史 Revision 仅回放为未保存草稿；Playwright 已覆盖这些路径，Packet Tap 内核镜像见[切片验收](tests/p6/runs/2026-10-26-packet-tap-slice.md)。
 
 **验收**：证明实际网络规则生效，不把“画出连线”当作设备已联通；可证明错误配置不会永久切断管理通道。
 
