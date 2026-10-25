@@ -7,8 +7,10 @@ import {
 import { api, isMock } from './lib/api';
 import type {
   KubernetesApplication,
+  KubernetesApplicationCreateRequest,
   KubernetesApplicationDetail,
   KubernetesApplicationList,
+  KubernetesApplicationPreview,
   KubernetesApplicationTopologyNode,
   KubernetesApplicationVersion,
   KubernetesApplicationVersionDraftRequest,
@@ -21,6 +23,14 @@ import './applications.css';
 
 type View = 'topology' | 'versions';
 type Editable = { replicas?: number; image?: string; targetDeployment?: string };
+type KubernetesApplicationSource = KubernetesApplicationCreateRequest['source'];
+const creationSources: { id: KubernetesApplicationSource; label: string; hint: string }[] = [
+  { id: 'FORM', label: '图形化创建', hint: '镜像、端口、副本与环境变量' },
+  { id: 'DOCKER_RUN', label: 'Docker run', hint: '导入 docker run 命令' },
+  { id: 'DOCKER_COMPOSE', label: 'Compose', hint: '导入 Docker Compose YAML' },
+  { id: 'KUBERNETES', label: 'Kubernetes YAML', hint: '导入 Deployment / Service' },
+  { id: 'BOOKINFO', label: 'Bookinfo', hint: '创建微服务测试示例' },
+];
 
 const stateLabels: Record<string, string> = {
   DEPLOYED: '运行中', APPLYING: '部署中', FAILED: '失败', PARTIAL: '部分完成',
@@ -45,7 +55,16 @@ export default function Applications({ notify }: { notify: (message: string) => 
   const [clusterId, setClusterId] = useState('');
   const [namespaces, setNamespaces] = useState<string[]>([]);
   const [namespace, setNamespace] = useState('');
-  const [displayName, setDisplayName] = useState('Bookinfo 测试应用');
+  const [displayName, setDisplayName] = useState('新建应用');
+  const [applicationName, setApplicationName] = useState('web-app');
+  const [createSource, setCreateSource] = useState<KubernetesApplicationSource>('FORM');
+  const [image, setImage] = useState('nginx:1.27');
+  const [replicas, setReplicas] = useState('1');
+  const [containerPort, setContainerPort] = useState('80');
+  const [servicePort, setServicePort] = useState('80');
+  const [environmentText, setEnvironmentText] = useState('');
+  const [definition, setDefinition] = useState('');
+  const [preview, setPreview] = useState<KubernetesApplicationPreview>();
   const [changes, setChanges] = useState<Record<string, Editable>>({});
   const [view, setView] = useState<View>('topology');
   const [wizard, setWizard] = useState(false);
@@ -119,15 +138,86 @@ export default function Applications({ notify }: { notify: (message: string) => 
     setChanges(current => ({ ...current, [node.id]: { ...current[node.id], ...value } }));
   }, []);
 
-  async function createBookinfo(event: FormEvent<HTMLFormElement>) {
+  function buildCreateRequest(): KubernetesApplicationCreateRequest {
+    const environment: Record<string, string> = {};
+    if (createSource === 'FORM' && environmentText.trim()) {
+      for (const line of environmentText.split('\n').map(value => value.trim()).filter(Boolean)) {
+        const separator = line.indexOf('=');
+        if (separator < 1) throw new Error(`环境变量必须写成 KEY=VALUE：${line}`);
+        const key = line.slice(0, separator).trim();
+        if (!key) throw new Error('环境变量名称不能为空。');
+        if (Object.hasOwn(environment, key)) throw new Error(`环境变量重复：${key}`);
+        environment[key] = line.slice(separator + 1);
+      }
+    }
+    const numeric = (value: string, label: string) => {
+      if (!value.trim()) return null;
+      const parsed = Number(value);
+      if (!Number.isInteger(parsed)) throw new Error(`${label}必须是整数。`);
+      return parsed;
+    };
+    return {
+      clusterId,
+      namespace,
+      applicationName: createSource === 'BOOKINFO' ? 'bookinfo' : applicationName.trim(),
+      displayName: displayName.trim(),
+      source: createSource,
+      image: createSource === 'FORM' ? image.trim() : null,
+      replicas: createSource === 'FORM' ? numeric(replicas, '副本数') : null,
+      containerPort: createSource === 'FORM' ? numeric(containerPort, '容器端口') : null,
+      servicePort: createSource === 'FORM' && containerPort.trim()
+        ? numeric(servicePort, 'Service 端口') : null,
+      environment,
+      definition: createSource === 'DOCKER_RUN' || createSource === 'DOCKER_COMPOSE'
+        || createSource === 'KUBERNETES' ? definition : null,
+    };
+  }
+
+  function beginCreate() {
+    setError('');
+    setWizardStep(1);
+    setPreview(undefined);
+    setCreateSource('FORM');
+    setDisplayName('新建应用');
+    setApplicationName('web-app');
+    setImage('nginx:1.27');
+    setReplicas('1');
+    setContainerPort('80');
+    setServicePort('80');
+    setEnvironmentText('');
+    setDefinition('');
+    setWizard(true);
+  }
+
+  async function submitCreateWizard(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!clusterId || !namespace) { setError('请先选择已登记集群和现有 Namespace。'); return; }
-    setBusy('create');
     setError('');
+    let request: KubernetesApplicationCreateRequest;
     try {
-      const result = await api<KubernetesApplicationDetail>('/kubernetes/applications/bookinfo', 'POST', {
-        clusterId, namespace, displayName: displayName.trim(),
-      }, {}, true);
+      request = buildCreateRequest();
+    } catch (cause) {
+      setError((cause as Error).message);
+      return;
+    }
+    if (wizardStep === 1) {
+      setBusy('preview');
+      try {
+        const result = await api<KubernetesApplicationPreview>(
+          '/kubernetes/applications/preview', 'POST', request, {}, true,
+        );
+        setPreview(result.data);
+        setWizardStep(2);
+      } catch (cause) {
+        setError((cause as Error).message);
+      } finally {
+        setBusy('');
+      }
+      return;
+    }
+    setBusy('create');
+    try {
+      const result = await api<KubernetesApplicationDetail>('/kubernetes/applications', 'POST', request, {}, true);
       setItems(current => [result.data.application, ...current.filter(item => item.id !== result.data.application.id)]);
       setSelectedId(result.data.application.id);
       setDetail(result.data);
@@ -136,7 +226,7 @@ export default function Applications({ notify }: { notify: (message: string) => 
       setWizard(false);
       setWizardStep(1);
       await loadApplication(result.data.application.id);
-      notify(`Bookinfo 已部署到 ${result.data.application.clusterName} / ${namespace}`);
+      notify(`${result.data.application.displayName} 已部署到 ${result.data.application.clusterName} / ${namespace}`);
     } catch (cause) {
       setError((cause as Error).message);
     } finally {
@@ -209,7 +299,7 @@ export default function Applications({ notify }: { notify: (message: string) => 
   return <div className="applications-page">
     <div className="applications-heading">
       <div><span className="eyebrow">KUBERNETES WORKLOADS</span><h1>应用管理</h1><p>将 Kubernetes 工作负载作为应用管理。拓扑由版本 YAML 生成，修改先形成 diff，确认后才部署。</p></div>
-      <div className="applications-actions"><button className="secondary" onClick={() => void loadList()} disabled={loading}>↻ 刷新</button><button className="primary" onClick={() => { setError(''); setWizard(true); }} disabled={isMock}>＋ 创建应用</button></div>
+      <div className="applications-actions"><button className="secondary" onClick={() => void loadList()} disabled={loading}>↻ 刷新</button><button className="primary" onClick={beginCreate} disabled={isMock}>＋ 创建应用</button></div>
     </div>
     {error && <div className="alert error" role="alert">{error}</div>}
     {isMock && <div className="alert">Mock 演示环境没有真实集群应用接口。此页面在 Live API 模式下连接已登记集群。</div>}
@@ -217,7 +307,7 @@ export default function Applications({ notify }: { notify: (message: string) => 
       <aside className="application-list-panel">
         <div className="application-list-heading"><div><span className="eyebrow">APPLICATIONS</span><strong>应用列表</strong></div><span className="application-count">{items.length}</span></div>
         {loading && <p className="application-muted">正在读取应用…</p>}
-        {!loading && items.length === 0 && !error && <div className="application-empty-small"><b>◇</b><span>还没有应用</span><small>从 Bookinfo 示例开始体验拓扑和版本管理。</small><button className="link" onClick={() => setWizard(true)}>创建测试应用 →</button></div>}
+        {!loading && items.length === 0 && !error && <div className="application-empty-small"><b>◇</b><span>还没有应用</span><small>使用图形化向导或导入容器清单创建应用。</small><button className="link" onClick={beginCreate}>创建第一个应用 →</button></div>}
         <div className="application-list">
           {items.map(item => <button key={item.id} className={`application-list-item ${selectedId === item.id ? 'active' : ''}`} onClick={() => { setSelectedId(item.id); setView('topology'); }}>
             <span className="application-symbol">▦</span><span className="application-list-copy"><strong>{item.displayName}</strong><small>{item.clusterName} · {item.namespace}</small><small>版本 v{item.currentVersion} · {item.templateId}</small></span><AppState value={item.state} />
@@ -226,7 +316,7 @@ export default function Applications({ notify }: { notify: (message: string) => 
         <div className="application-list-footer"><span className="application-live-dot" />已接入的应用清单</div>
       </aside>
       <section className="application-content">
-        {!selectedApp || !detail ? <div className="application-blank"><div className="application-blank-icon">▦</div><h2>{items.length ? '选择一个应用' : '开始管理 Kubernetes 应用'}</h2><p>应用拓扑根据部署 YAML 自动生成。创建版本后检查资源 diff，再手动确认部署。</p><button className="primary" onClick={() => setWizard(true)} disabled={isMock}>＋ 创建 Bookinfo 测试应用</button></div> : <>
+        {!selectedApp || !detail ? <div className="application-blank"><div className="application-blank-icon">▦</div><h2>{items.length ? '选择一个应用' : '开始管理 Kubernetes 应用'}</h2><p>应用拓扑根据部署 YAML 自动生成。创建版本后检查资源 diff，再手动确认部署。</p><button className="primary" onClick={beginCreate} disabled={isMock}>＋ 创建应用</button></div> : <>
           <div className="application-detail-heading">
             <div className="application-detail-title"><span className="application-title-icon">▦</span><div><div className="application-title-line"><h2>{detail.application.displayName}</h2><AppState value={detail.application.state} /></div><p><span className="mono">{detail.application.clusterName}</span><i>›</i><span>{detail.application.namespace}</span><i>›</i><span>{detail.application.templateId}</span></p></div></div>
             <div className="application-version-chip"><small>当前版本</small><strong>v{detail.application.currentVersion}</strong></div>
@@ -267,19 +357,40 @@ export default function Applications({ notify }: { notify: (message: string) => 
         </>}
       </section>
     </div>
-    {wizard && <div className="modal-backdrop"><div className="modal application-wizard" role="dialog" aria-modal="true" aria-labelledby="bookinfo-title">
-      <div className="application-wizard-header"><div><span className="eyebrow">APPLICATION TEMPLATE · 01 / 01</span><h2 id="bookinfo-title">创建 Bookinfo 测试应用</h2></div><button className="icon-button" aria-label="关闭" onClick={() => { if (!busy) setWizard(false); }}>×</button></div>
-      <div className="application-wizard-steps"><span className="active"><i>1</i>选择目标</span><b /><span className={wizardStep === 2 ? 'active' : ''}><i>2</i>检查清单</span></div>
-      <form onSubmit={createBookinfo}>
-        {wizardStep === 1 ? <div className="application-wizard-fields">
-          <label className="field"><span>应用名称</span><input value={displayName} maxLength={80} required onChange={event => setDisplayName(event.target.value)} /></label>
-          <label className="field"><span>目标集群</span><select required value={clusterId} onChange={event => setClusterId(event.target.value)}><option value="">选择已登记集群</option>{clusters.map(cluster => <option key={cluster.id} value={cluster.id}>{cluster.name} · {cluster.kind}</option>)}</select></label>
-          <label className="field"><span>目标 Namespace</span><select required value={namespace} disabled={!namespaces.length} onChange={event => setNamespace(event.target.value)}><option value="">{namespaces.length ? '选择 Namespace' : '读取 Namespace…'}</option>{namespaces.map(value => <option key={value} value={value}>{value}</option>)}</select></label>
+    {wizard && <div className="modal-backdrop"><div className="modal application-wizard" role="dialog" aria-modal="true" aria-labelledby="application-create-title">
+      <div className="application-wizard-header"><div><span className="eyebrow">APPLICATION · CREATE WIZARD</span><h2 id="application-create-title">创建 Kubernetes 应用</h2></div><button className="icon-button" aria-label="关闭" onClick={() => { if (!busy) setWizard(false); }}>×</button></div>
+      <div className="application-wizard-steps"><span className={wizardStep === 1 ? 'active' : ''}><i>1</i>配置来源</span><b /><span className={wizardStep === 2 ? 'active' : ''}><i>2</i>预览并确认</span></div>
+      {error && <div className="alert error application-wizard-error" role="alert">{error}</div>}
+      {busy && <div className="application-operation-progress" role="status"><i />{busy === 'preview' ? '正在解析输入、检查资源并生成 YAML 预览…' : busy === 'create' ? '正在登记应用，创建 Namespace 资源并校验拓扑…' : '正在处理应用请求…'}</div>}
+      <form onSubmit={submitCreateWizard}>
+        {wizardStep === 1 ? <fieldset disabled={busy !== ''} className="application-wizard-fieldset"><div className="application-wizard-fields application-wizard-inputs">
+          <div className="application-source-grid" aria-label="应用创建方式">{creationSources.map(source => <button type="button" aria-pressed={createSource === source.id} key={source.id} className={`application-source-card ${createSource === source.id ? 'active' : ''}`} onClick={() => { setCreateSource(source.id); if (source.id === 'BOOKINFO') { setApplicationName('bookinfo'); setDisplayName('Bookinfo 测试应用'); } else if (applicationName === 'bookinfo') { setApplicationName('web-app'); setDisplayName('新建应用'); } setPreview(undefined); }}>{source.label}<small>{source.hint}</small></button>)}</div>
+          <div className="application-wizard-targets">
+            <label className="field"><span>应用显示名称</span><input value={displayName} maxLength={80} required onChange={event => setDisplayName(event.target.value)} /></label>
+            <label className="field"><span>应用标识（DNS 名称）</span><input value={createSource === 'BOOKINFO' ? 'bookinfo' : applicationName} disabled={createSource === 'BOOKINFO'} maxLength={63} pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?" required onChange={event => setApplicationName(event.target.value)} /></label>
+            <label className="field"><span>目标集群</span><select required value={clusterId} onChange={event => setClusterId(event.target.value)}><option value="">选择已登记集群</option>{clusters.map(cluster => <option key={cluster.id} value={cluster.id}>{cluster.name} · {cluster.kind}</option>)}</select></label>
+            <label className="field"><span>目标 Namespace</span><select required value={namespace} disabled={!namespaces.length} onChange={event => setNamespace(event.target.value)}><option value="">{namespaces.length ? '选择 Namespace' : '读取 Namespace…'}</option>{namespaces.map(value => <option key={value} value={value}>{value}</option>)}</select></label>
+          </div>
           {!clusters.length && !loading && <div className="alert">尚未登记 Kubernetes 集群。请先前往“集群管理”导入集群并授予 Namespace 级资源权限。</div>}
           {clusters.length > 0 && !namespaces.length && <div className="alert">无法读取 Namespace。请确认集群凭据具有 Namespace get/list 权限。</div>}
-          <div className="application-template-summary"><span className="template-icon">✦</span><div><strong>Bookinfo 微服务示例</strong><small>4 Services · 6 Deployments · 4 ServiceAccounts</small></div><span className="template-tag">Istio 可选</span></div>
-        </div> : <div className="application-bookinfo-review"><h3>将创建以下命名空间资源</h3><div className="bookinfo-resource-grid"><span><b>04</b>Service</span><span><b>06</b>Deployment</span><span><b>04</b>ServiceAccount</span></div><p>集群：<strong>{clusters.find(cluster => cluster.id === clusterId)?.name}</strong></p><p>Namespace：<strong>{namespace}</strong></p><div className="alert">不会安装 Istio、创建 Ingress 或读取 Secret。若目标中存在同名资源，创建会被拒绝且不会接管。</div></div>}
-        <div className="form-actions application-wizard-actions"><button type="button" className="secondary" onClick={() => wizardStep === 2 ? setWizardStep(1) : setWizard(false)} disabled={busy !== ''}>{wizardStep === 2 ? '上一步' : '取消'}</button>{wizardStep === 1 ? <button type="button" className="primary" disabled={!clusterId || !namespace || !displayName.trim()} onClick={() => setWizardStep(2)}>下一步 →</button> : <button className="primary" disabled={busy === 'create'}>{busy === 'create' ? '正在部署…' : '确认创建并部署'}</button>}</div>
+          {createSource === 'FORM' && <div className="application-source-fields">
+            <label className="field"><span>容器镜像</span><input value={image} required placeholder="nginx:1.27" onChange={event => setImage(event.target.value)} /></label>
+            <div className="application-inline-fields"><label className="field"><span>副本数（0–20）</span><input type="number" min="0" max="20" value={replicas} required onChange={event => setReplicas(event.target.value)} /></label><label className="field"><span>容器端口（可选）</span><input type="number" min="1" max="65535" value={containerPort} onChange={event => setContainerPort(event.target.value)} /></label><label className="field"><span>Service 端口</span><input type="number" min="1" max="65535" value={servicePort} disabled={!containerPort} onChange={event => setServicePort(event.target.value)} /></label></div>
+            <label className="field"><span>环境变量（每行 KEY=VALUE）</span><textarea rows={3} value={environmentText} placeholder={'APP_MODE=production\nLOG_LEVEL=info'} onChange={event => setEnvironmentText(event.target.value)} /></label>
+            <small className="application-security-note">环境变量会明文写入 Deployment YAML，请勿填写密码、令牌或其他 Secret。</small>
+          </div>}
+          {createSource === 'DOCKER_RUN' && <label className="field application-definition-field"><span>Docker run 命令</span><textarea rows={5} required value={definition} placeholder={'docker run -d --name web -p 8080:80 nginx:1.27'} onChange={event => setDefinition(event.target.value)} /></label>}
+          {createSource === 'DOCKER_COMPOSE' && <label className="field application-definition-field"><span>Docker Compose YAML</span><textarea rows={7} required value={definition} placeholder={'services:\n  web:\n    image: nginx:1.27\n    ports:\n      - "8080:80"'} onChange={event => setDefinition(event.target.value)} /></label>}
+          {createSource === 'KUBERNETES' && <label className="field application-definition-field"><span>Kubernetes Deployment / Service YAML</span><textarea rows={7} required value={definition} placeholder={'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n...'} onChange={event => setDefinition(event.target.value)} /></label>}
+          {createSource === 'BOOKINFO' && <div className="application-template-summary"><span className="template-icon">✦</span><div><strong>Bookinfo 微服务示例</strong><small>4 Services · 6 Deployments · 4 ServiceAccounts</small></div><span className="template-tag">Istio 可选</span></div>}
+        </div></fieldset> : <div className="application-create-review">
+          <div className="application-review-heading"><div><span className="eyebrow">MANIFEST PREVIEW</span><h3>{displayName}</h3><p>{clusters.find(cluster => cluster.id === clusterId)?.name} · {namespace} · {applicationName}</p></div><span className="application-review-total">{preview?.totalResources ?? 0}<small>个资源</small></span></div>
+          <div className="bookinfo-resource-grid">{Object.entries(preview?.resourceCounts ?? {}).map(([kind, count]) => <span key={kind}><b>{String(count).padStart(2, '0')}</b>{kind}</span>)}</div>
+          {!!preview?.notes.length && <ul className="application-preview-notes">{preview.notes.map(note => <li key={note}>{note}</li>)}</ul>}
+          <pre className="application-manifest-preview">{preview?.manifestYaml ?? ''}</pre>
+          <p className="application-confirm-copy">确认后将创建初始版本并部署到所选 Namespace。已有同名资源时会拒绝创建，不接管集群中现有资源。</p>
+        </div>}
+        <div className="form-actions application-wizard-actions"><button type="button" className="secondary" onClick={() => { if (wizardStep === 2) { setWizardStep(1); setPreview(undefined); } else setWizard(false); }} disabled={busy !== ''}>{wizardStep === 2 ? '修改配置' : '取消'}</button>{wizardStep === 1 ? <button type="submit" className="primary" disabled={!clusterId || !namespace || !displayName.trim() || busy !== ''}>{busy === 'preview' ? '正在解析并生成预览…' : '生成清单预览 →'}</button> : <button className="primary" disabled={busy !== ''}>{busy === 'create' ? '正在登记并部署…' : '确认创建并部署'}</button>}</div>
       </form>
     </div></div>}
   </div>;
@@ -303,6 +414,10 @@ function deploymentTargetName(name: string) {
   return name.replace(/-v[0-9]+$/, '');
 }
 
+function deploymentTarget(resource: KubernetesApplicationTopologyNode) {
+  return resource.targetDeployment ?? deploymentTargetName(resource.name);
+}
+
 function ApplicationFlowNodeCard({ data, selected }: NodeProps<ApplicationFlowNode>) {
   const { resource, changes, targets, controlsDisabled, onUpdate } = data;
   const deployment = resource.kind === 'Deployment';
@@ -320,7 +435,7 @@ function ApplicationFlowNodeCard({ data, selected }: NodeProps<ApplicationFlowNo
       <label className="application-node-control nodrag nowheel"><span>副本数</span><input aria-label={`${resource.name} 副本数`} type="number" min={0} max={20} disabled={controlsDisabled} value={changes.replicas ?? resource.replicas ?? 1} onChange={event => onUpdate(resource, { replicas: Number(event.target.value) })} /></label>
       <label className="application-node-control nodrag nowheel"><span>容器镜像</span><input aria-label={`${resource.name} 容器镜像`} type="text" disabled={controlsDisabled} value={changes.image ?? resource.image ?? ''} onChange={event => onUpdate(resource, { image: event.target.value })} /></label>
     </> : <>
-      <small>ClusterIP Service · 9080/TCP</small>
+      <small>ClusterIP Service · {resource.targetDeployment ?? '未连接'}</small>
       <label className="application-node-control nodrag nowheel"><span>选择后端</span><select aria-label={`${resource.name} 后端 Deployment`} disabled={controlsDisabled} value={changes.targetDeployment ?? resource.targetDeployment ?? ''} onChange={event => onUpdate(resource, { targetDeployment: event.target.value })}>
         {targets.map(target => <option key={target} value={target}>{target}</option>)}
       </select></label>
@@ -355,7 +470,7 @@ function ApplicationTopologyFlowCanvas({
   );
   const targets = useMemo(
     () => [...new Set(visibleResources.filter(resource => resource.kind === 'Deployment')
-      .map(resource => deploymentTargetName(resource.name)))],
+      .map(deploymentTarget))],
     [visibleResources],
   );
   const edges = useMemo<Edge[]>(() => {
@@ -381,7 +496,7 @@ function ApplicationTopologyFlowCanvas({
     const changed = services.flatMap(service => {
       const target = changes[service.id]?.targetDeployment;
       if (target === undefined) return [];
-      return deployments.filter(deployment => deploymentTargetName(deployment.name) === target)
+      return deployments.filter(deployment => deploymentTarget(deployment) === target)
         .map(deployment => ({
           id: `${service.id}->${deployment.id}`,
           source: service.id,

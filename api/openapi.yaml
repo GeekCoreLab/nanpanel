@@ -961,6 +961,78 @@ paths:
               schema: { $ref: '#/components/schemas/KubernetesApplicationList' }
         '401':
           $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [KubernetesApplications]
+      operationId: createKubernetesApplication
+      summary: 从图形化配置或受支持的清单创建应用
+      description: 接受 Bookinfo、图形化容器配置、docker run、Docker Compose 或 Kubernetes Deployment/Service/ServiceAccount 清单。写入集群前需先调用 preview。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/KubernetesApplicationCreateRequest' }
+      responses:
+        '201':
+          description: 应用初始版本已创建并部署。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationDetail' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: 应用名称或 Kubernetes 资源名称已被占用。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: 输入语法无效或包含不支持的资源和字段。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '502':
+          description: 集群 API 不可用或应用创建失败。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '503':
+          description: 创建或清理部分失败，应用状态会记录为 PARTIAL。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /api/v1/kubernetes/applications/preview:
+    post:
+      tags: [KubernetesApplications]
+      operationId: previewKubernetesApplication
+      summary: 校验创建输入并预览标准化 YAML
+      description: 不连接或写入 Kubernetes；只解析受支持的输入并返回资源数量、注意事项和将部署的标准化 YAML。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/KubernetesApplicationCreateRequest' }
+      responses:
+        '200':
+          description: 清单预览和资源计数。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationPreview' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '422':
+          description: 输入语法无效或包含不支持的资源和字段。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
   /api/v1/kubernetes/applications/bookinfo:
     post:
       tags: [KubernetesApplications]
@@ -5784,6 +5856,78 @@ components:
           type: string
           minLength: 1
           maxLength: 80
+    KubernetesApplicationCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [clusterId, namespace, applicationName, displayName, source]
+      properties:
+        clusterId:
+          type: string
+          format: uuid
+        namespace:
+          type: string
+          minLength: 1
+          maxLength: 63
+          pattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
+        applicationName:
+          type: string
+          minLength: 1
+          maxLength: 63
+          pattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
+        displayName:
+          type: string
+          minLength: 1
+          maxLength: 80
+        source:
+          type: string
+          enum: [BOOKINFO, FORM, DOCKER_RUN, DOCKER_COMPOSE, KUBERNETES]
+        image:
+          type: [string, 'null']
+          maxLength: 512
+        replicas:
+          type: [integer, 'null']
+          minimum: 0
+          maximum: 20
+        containerPort:
+          type: [integer, 'null']
+          minimum: 1
+          maximum: 65535
+        servicePort:
+          type: [integer, 'null']
+          minimum: 1
+          maximum: 65535
+        environment:
+          type: object
+          maxProperties: 64
+          additionalProperties:
+            type: string
+            maxLength: 4096
+        definition:
+          type: [string, 'null']
+          maxLength: 262144
+    KubernetesApplicationPreview:
+      type: object
+      additionalProperties: false
+      required: [resourceCounts, totalResources, manifestYaml, notes]
+      properties:
+        resourceCounts:
+          type: object
+          additionalProperties:
+            type: integer
+            minimum: 0
+        totalResources:
+          type: integer
+          minimum: 1
+          maximum: 64
+        manifestYaml:
+          type: string
+          maxLength: 1048576
+        notes:
+          type: array
+          maxItems: 16
+          items:
+            type: string
+            maxLength: 500
     KubernetesApplicationList:
       type: object
       additionalProperties: false
@@ -5818,7 +5962,7 @@ components:
           maxLength: 80
         templateId:
           type: string
-          enum: [bookinfo]
+          enum: [bookinfo, graphical, docker-run, docker-compose, kubernetes-manifest]
         currentVersion:
           type: integer
           minimum: 0

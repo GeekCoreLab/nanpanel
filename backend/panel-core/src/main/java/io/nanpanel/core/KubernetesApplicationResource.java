@@ -31,6 +31,20 @@ public class KubernetesApplicationResource {
   }
 
   @POST
+  @Path("preview")
+  public Response preview(KubernetesApplicationService.CreateApplicationRequest input) {
+    actor();
+    return execute(() -> Response.ok(applications.preview(input)).build());
+  }
+
+  @POST
+  public Response create(KubernetesApplicationService.CreateApplicationRequest input) {
+    String actor = actor();
+    return execute(() -> Response.status(Response.Status.CREATED).entity(
+        applications.createApplication(actor, clientIp(), input)).build());
+  }
+
+  @POST
   @Path("bookinfo")
   public Response createBookinfo(KubernetesApplicationService.CreateBookinfoRequest input) {
     String actor = actor();

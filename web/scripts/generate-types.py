@@ -17,6 +17,9 @@ def ts(value):
     if isinstance(kind, list):
         return ' | '.join(ts({**value, 'type': x}) for x in kind)
     if kind == 'object':
+        additional = value.get('additionalProperties')
+        if not value.get('properties') and isinstance(additional, dict):
+            return 'Record<string, ' + ts(additional) + '>'
         return '{ ' + '; '.join(k + ('' if k in value.get('required', []) else '?') + ': ' + ts(v) for k, v in value.get('properties', {}).items()) + ' }'
     if kind == 'array':
         return '(' + ts(value['items']) + ')[]'

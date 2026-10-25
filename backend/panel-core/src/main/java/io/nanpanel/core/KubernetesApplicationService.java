@@ -281,8 +281,14 @@ public class KubernetesApplicationService {
 
   @Inject AuthStore store;
   @Inject KubernetesClusterRegistryService clusters;
+  @Inject KubernetesApplicationManifestFactory manifestFactory;
 
   public record CreateBookinfoRequest(UUID clusterId, String namespace, String displayName) {}
+  public record CreateApplicationRequest(UUID clusterId, String namespace, String applicationName,
+      String displayName, String source, String image, Integer replicas, Integer containerPort,
+      Integer servicePort, Map<String, String> environment, String definition) {}
+  public record ApplicationPreview(Map<String, Integer> resourceCounts, int totalResources,
+      String manifestYaml, List<String> notes) {}
   public record DraftRequest(Integer baseVersion, List<TopologyEdit> edits) {}
   public record TopologyEdit(String resourceId, Integer replicas, String image,
       String targetDeployment) {}
@@ -352,10 +358,41 @@ public class KubernetesApplicationService {
 
   public ApplicationDetail createBookinfo(String actor, String remoteAddress,
       CreateBookinfoRequest input) {
-    validateCreate(input);
+    if (input == null) throw invalid("创建请求不能为空");
+    return createApplication(actor, remoteAddress, new CreateApplicationRequest(input.clusterId(),
+        input.namespace(), "bookinfo", input.displayName(), "BOOKINFO", null, null, null, null,
+        Map.of(), null));
+  }
+
+  public ApplicationPreview preview(CreateApplicationRequest input) {
+    ValidatedCreate create = validateCreate(input);
+    List<HasMetadata> resources = prepareInitialResources(create.definition().resources(),
+        input.namespace(), UUID.randomUUID(), create.definition().templateId());
+    Map<String, Integer> counts = new java.util.TreeMap<>();
+    resources.forEach(resource -> counts.merge(resource.getKind(), 1, Integer::sum));
+    List<String> notes = new ArrayList<>(create.definition().notes());
+    resources.forEach(resource -> resource.getMetadata().getLabels().remove(APPLICATION_ID));
+    notes.add("创建时会为每个资源写入此应用专属的所有权 UUID 标签。");
+    if (resources.stream().anyMatch(ServiceAccount.class::isInstance)) {
+      notes.add("应用内 ServiceAccount 不会自动挂载 Kubernetes API Token；镜像拉取凭据引用会保留。");
+    }
+    List<String> externalAccounts = externalServiceAccounts(resources);
+    if (!externalAccounts.isEmpty()) {
+      notes.add("Deployment 会引用但不会修改这些外部 ServiceAccount；创建前会检查其存在："
+          + String.join(", ", externalAccounts));
+    }
+    return new ApplicationPreview(Map.copyOf(counts), resources.size(), serialize(resources),
+        List.copyOf(notes));
+  }
+
+  public ApplicationDetail createApplication(String actor, String remoteAddress,
+      CreateApplicationRequest input) {
+    ValidatedCreate create = validateCreate(input);
     UUID id = UUID.randomUUID();
     Instant now = Instant.now();
     String displayName = input.displayName().trim();
+    String applicationName = create.applicationName();
+    String templateId = create.definition().templateId();
     String yaml;
     List<HasMetadata> resources;
     try (KubernetesClient client = clusters.openClientForOperations(input.clusterId())) {
@@ -363,33 +400,38 @@ public class KubernetesApplicationService {
         throw new ApplicationException(404, "KUBERNETES_NAMESPACE_NOT_FOUND",
             "目标 Namespace 不存在，请选择集群中已存在的 Namespace");
       }
-      resources = prepareInitialResources(client, input.namespace(), id);
+      resources = prepareInitialResources(create.definition().resources(), input.namespace(), id,
+          templateId);
       yaml = serialize(resources);
+      ensureReferencedServiceAccountsExist(client, input.namespace(), resources);
       ensureResourcesAvailable(client, input.namespace(), resources);
       AppRow app = new AppRow(id, input.clusterId(), clusterName(input.clusterId()), input.namespace(),
-          "bookinfo", displayName, TEMPLATE_BOOKINFO, 0, "APPLYING", now, now, actor);
+          applicationName, displayName, templateId, 0, "APPLYING", now, now, actor);
       try {
         store.transaction(connection -> {
           update(connection, "INSERT INTO kubernetes_application (id,cluster_id,namespace,"
                   + "application_name,display_name,template_id,current_version,state,created_by,"
                   + "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-              id, input.clusterId(), input.namespace(), "bookinfo", displayName,
-              TEMPLATE_BOOKINFO, 0, "APPLYING", actor, Timestamp.from(now), Timestamp.from(now));
+              id, input.clusterId(), input.namespace(), applicationName, displayName,
+              templateId, 0, "APPLYING", actor, Timestamp.from(now), Timestamp.from(now));
           update(connection, "INSERT INTO kubernetes_application_version (application_id,version,"
                   + "base_version,manifest_yaml,manifest_sha256,manifest_diff,state,requested_by,created_at) "
                   + "VALUES (?,?,?,?,?,?,?,?,?)",
               id, 1, 0, yaml, sha256(yaml),
-              "初始版本：根据 Bookinfo 模板创建 4 个 ServiceAccount、4 个 Service、"
-                  + "6 个 Deployment，共 14 个 Namespace 资源。",
+              "初始版本：通过 " + templateId + " 创建 " + resources.size()
+                  + " 个 Namespace 资源。",
               "APPLYING", actor, Timestamp.from(now));
-          audit(connection, actor, "KUBERNETES_APPLICATION_BOOKINFO_CREATED",
+          String action = TEMPLATE_BOOKINFO.equals(templateId)
+              ? "KUBERNETES_APPLICATION_BOOKINFO_CREATED" : "KUBERNETES_APPLICATION_CREATED";
+          audit(connection, actor, action,
               "kubernetes_application", id.toString(), "ACCEPTED", remoteAddress,
-              "已接受 Bookinfo 应用创建；集群 " + input.clusterId() + "，Namespace " + input.namespace());
+              "已接受应用创建；来源 " + templateId + "，集群 " + input.clusterId()
+                  + "，Namespace " + input.namespace());
           return null;
         });
       } catch (RuntimeException failure) {
         throw new ApplicationException(409, "KUBERNETES_APPLICATION_EXISTS",
-            "该集群 Namespace 中已有 bookinfo 应用或记录");
+            "该集群 Namespace 中已有同名应用或记录");
       }
       boolean rolledBack = false;
       try {
@@ -400,21 +442,21 @@ public class KubernetesApplicationService {
         String state = rolledBack ? "FAILED" : "PARTIAL";
         String message = safeMessage(deployFailure);
         markVersionFailure(actor, remoteAddress, id, state, message,
-            "Bookinfo 初始资源创建" + (rolledBack ? "失败并已清理已创建资源" : "部分失败，清理未能全部完成"));
+            "应用初始资源创建" + (rolledBack ? "失败并已清理已创建资源" : "部分失败，清理未能全部完成"));
         throw new ApplicationException(rolledBack ? 502 : 503,
             rolledBack ? "KUBERNETES_APPLICATION_CREATE_FAILED" : "KUBERNETES_APPLICATION_PARTIAL",
-            rolledBack ? "Bookinfo 创建失败，已清理本次创建的资源" : "Bookinfo 创建部分失败，请查看应用状态并手动核对资源");
+            rolledBack ? "应用创建失败，已清理本次创建的资源" : "应用创建部分失败，请查看应用状态并手动核对资源");
       }
       Topology initialTopology;
       try {
         initialTopology = topology(client, id, input.namespace(), resources, resourceUids(id));
       } catch (RuntimeException topologyFailure) {
         markVersionFailure(actor, remoteAddress, id, "PARTIAL", safeMessage(topologyFailure),
-            "Bookinfo 已创建，但拓扑观测发现资源所有权不匹配");
+            "应用已创建，但拓扑观测发现资源所有权不匹配");
         throw new ApplicationException(503, "KUBERNETES_APPLICATION_PARTIAL",
-            "Bookinfo 资源已创建，但所有权校验未通过；应用状态为 PARTIAL");
+            "应用资源已创建，但所有权校验未通过；应用状态为 PARTIAL");
       }
-      finishDeployment(actor, remoteAddress, id, 1, "Bookinfo 初始版本已部署");
+      finishDeployment(actor, remoteAddress, id, 1, "应用初始版本已部署");
       AppRow deployed = new AppRow(app.id(), app.clusterId(), app.clusterName(), app.namespace(),
           app.name(), app.displayName(), app.templateId(), 1, "DEPLOYED", app.createdAt(), now, actor);
       return new ApplicationDetail(view(deployed), initialTopology, yaml);
@@ -430,6 +472,9 @@ public class KubernetesApplicationService {
       throw apiFailure(failure);
     }
   }
+
+  private record ValidatedCreate(String applicationName,
+      KubernetesApplicationManifestFactory.Definition definition) {}
 
   public ApplicationDetail createDraft(String actor, String remoteAddress, UUID applicationId,
       DraftRequest input) {
@@ -594,11 +639,25 @@ public class KubernetesApplicationService {
     }
   }
 
-  private void validateCreate(CreateBookinfoRequest input) {
+  private ValidatedCreate validateCreate(CreateApplicationRequest input) {
     if (input == null || input.clusterId() == null || !validNamespace(input.namespace())
         || input.displayName() == null || input.displayName().isBlank()
-        || input.displayName().trim().length() > 80) {
-      throw invalid("clusterId、有效 Namespace 和 1–80 字符的应用显示名称均为必填项");
+        || input.displayName().trim().length() > 80 || input.source() == null) {
+      throw invalid("clusterId、有效 Namespace、创建方式和 1–80 字符的应用显示名称均为必填项");
+    }
+    String applicationName = "BOOKINFO".equals(input.source()) ? "bookinfo"
+        : input.applicationName() == null ? "" : input.applicationName().trim();
+    if (!DNS_LABEL.matcher(applicationName).matches()) {
+      throw invalid("应用标识必须是 1–63 位小写字母、数字或连字符，且首尾为字母或数字");
+    }
+    try {
+      KubernetesApplicationManifestFactory.CreateRequest request =
+          new KubernetesApplicationManifestFactory.CreateRequest(applicationName,
+              input.displayName().trim(), input.source(), input.image(), input.replicas(),
+              input.containerPort(), input.servicePort(), input.environment(), input.definition());
+      return new ValidatedCreate(applicationName, manifestFactory.create(request, BOOKINFO_MANIFEST));
+    } catch (KubernetesApplicationManifestFactory.ApplicationDefinitionException failure) {
+      throw invalid(failure.getMessage());
     }
   }
 
@@ -606,22 +665,199 @@ public class KubernetesApplicationService {
     return namespace != null && DNS_LABEL.matcher(namespace).matches();
   }
 
-  private static List<HasMetadata> prepareInitialResources(KubernetesClient client,
-      String namespace, UUID applicationId) {
-    List<HasMetadata> resources = parse(client, BOOKINFO_MANIFEST);
+  private static List<HasMetadata> prepareInitialResources(List<HasMetadata> source,
+      String namespace, UUID applicationId, String templateId) {
+    if (source == null || source.isEmpty() || source.size() > 64) {
+      throw invalid("应用清单资源数量必须在 1–64 个之间");
+    }
+    List<HasMetadata> resources = new ArrayList<>(source);
     Map<String, Integer> actualCounts = new HashMap<>();
     resources.forEach(resource -> actualCounts.merge(resource.getKind(), 1, Integer::sum));
-    if (!BOOKINFO_RESOURCE_COUNTS.equals(actualCounts)) throw new ApplicationException(500,
-        "BOOKINFO_TEMPLATE_INVALID", "Bookinfo 模板资源数量不符合预期");
-    for (HasMetadata resource : resources) {
-      if (!supported(resource)) throw invalid("Bookinfo 模板含有不支持的资源类型");
-      resource.setMetadata(new ObjectMetaBuilder(resource.getMetadata())
-          .withNamespace(namespace)
-          .addToLabels(MANAGED_BY, "nanpanel")
-          .addToLabels(APPLICATION_ID, applicationId.toString())
-          .build());
+    if (actualCounts.getOrDefault("Deployment", 0) == 0) {
+      throw invalid("应用至少需要一个 Deployment 工作负载");
     }
+    if (TEMPLATE_BOOKINFO.equals(templateId) && !BOOKINFO_RESOURCE_COUNTS.equals(actualCounts)) {
+      throw new ApplicationException(500, "BOOKINFO_TEMPLATE_INVALID", "Bookinfo 模板资源数量不符合预期");
+    }
+    Set<String> ids = new HashSet<>();
+    for (HasMetadata resource : resources) {
+      if (!supported(resource) || resource.getMetadata() == null
+          || !validResourceName(resource.getMetadata().getName())) {
+        throw invalid("只支持名称有效的 Deployment、Service 和 ServiceAccount 资源");
+      }
+      String id = resourceId(resource);
+      if (!ids.add(id)) throw invalid("应用清单包含重复资源: " + id);
+      normalizeResource(resource, namespace, applicationId);
+    }
+    validateApplicationResources(resources);
     return resources;
+  }
+
+  private static void normalizeResource(HasMetadata resource, String namespace, UUID applicationId) {
+    Map<String, String> labels = resource.getMetadata().getLabels() == null
+        ? new HashMap<>() : new HashMap<>(resource.getMetadata().getLabels());
+    labels.put(MANAGED_BY, "nanpanel");
+    labels.put(APPLICATION_ID, applicationId.toString());
+    ObjectMetaBuilder metadata = new ObjectMetaBuilder().withName(resource.getMetadata().getName())
+        .withNamespace(namespace).withLabels(labels);
+    if (resource.getMetadata().getAnnotations() != null) {
+      metadata.withAnnotations(new HashMap<>(resource.getMetadata().getAnnotations()));
+    }
+    resource.setMetadata(metadata.build());
+    if (resource instanceof Deployment deployment) {
+      deployment.setStatus(null);
+      validateDeployment(deployment);
+    } else if (resource instanceof Service service) {
+      service.setStatus(null);
+      validateService(service);
+    } else if (resource instanceof ServiceAccount account) {
+      account.setSecrets(null);
+      account.setAutomountServiceAccountToken(false);
+    }
+  }
+
+  private static void validateDeployment(Deployment deployment) {
+    var spec = deployment.getSpec();
+    if (spec == null || spec.getSelector() == null || spec.getTemplate() == null
+        || spec.getTemplate().getSpec() == null || spec.getTemplate().getMetadata() == null
+        || spec.getTemplate().getSpec().getContainers() == null
+        || spec.getTemplate().getSpec().getContainers().isEmpty()) {
+      throw invalid("Deployment 必须包含 selector、Pod 模板和至少一个容器");
+    }
+    int replicas = spec.getReplicas() == null ? 1 : spec.getReplicas();
+    if (replicas < 0 || replicas > MAX_REPLICAS) throw invalid("Deployment 副本数必须在 0–20 之间");
+    spec.setReplicas(replicas);
+    if (spec.getSelector().getMatchExpressions() != null
+        && !spec.getSelector().getMatchExpressions().isEmpty()) {
+      throw invalid("暂不支持 Deployment selector.matchExpressions");
+    }
+    Map<String, String> selector = spec.getSelector().getMatchLabels() == null
+        ? new HashMap<>() : new HashMap<>(spec.getSelector().getMatchLabels());
+    Map<String, String> podLabels = spec.getTemplate().getMetadata().getLabels() == null
+        ? new HashMap<>() : new HashMap<>(spec.getTemplate().getMetadata().getLabels());
+    if (selector.isEmpty()
+        || !selector.entrySet().stream().allMatch(entry -> entry.getValue().equals(podLabels.get(entry.getKey())))) {
+      throw invalid("Deployment selector 必须与 Pod 模板标签匹配");
+    }
+    String appLabel = podLabels.get("app");
+    if (appLabel == null || appLabel.isBlank()) {
+      String fallback = deployment.getMetadata().getName();
+      podLabels.put("app", fallback);
+      selector.put("app", fallback);
+    }
+    spec.getSelector().setMatchLabels(selector);
+    spec.getTemplate().getMetadata().setLabels(podLabels);
+    var pod = spec.getTemplate().getSpec();
+    if (Boolean.TRUE.equals(pod.getHostNetwork()) || Boolean.TRUE.equals(pod.getHostPID())
+        || Boolean.TRUE.equals(pod.getHostIPC())) {
+      throw invalid("不允许导入 hostNetwork、hostPID 或 hostIPC Deployment");
+    }
+    if (pod.getVolumes() != null && pod.getVolumes().stream().anyMatch(volume ->
+        volume.getHostPath() != null || volume.getSecret() != null || volume.getConfigMap() != null
+            || volume.getProjected() != null)) {
+      throw invalid("不允许导入 HostPath、Secret、ConfigMap 或 Projected Volume");
+    }
+    if (pod.getSecurityContext() != null && pod.getSecurityContext().getSysctls() != null
+        && !pod.getSecurityContext().getSysctls().isEmpty()) {
+      throw invalid("暂不支持 Pod sysctls");
+    }
+    List<io.fabric8.kubernetes.api.model.Container> containers = new ArrayList<>(pod.getContainers());
+    if (pod.getInitContainers() != null) containers.addAll(pod.getInitContainers());
+    for (var container : containers) {
+      if (container.getImage() == null || !IMAGE.matcher(container.getImage().trim()).matches()) {
+        throw invalid("Deployment 中的容器镜像格式无效");
+      }
+      container.setImage(container.getImage().trim());
+      if (container.getSecurityContext() != null
+          && Boolean.TRUE.equals(container.getSecurityContext().getPrivileged())) {
+        throw invalid("不允许导入 privileged 容器");
+      }
+      if (container.getSecurityContext() != null
+          && Boolean.TRUE.equals(container.getSecurityContext().getAllowPrivilegeEscalation())) {
+        throw invalid("不允许启用 allowPrivilegeEscalation");
+      }
+      if (container.getSecurityContext() != null
+          && container.getSecurityContext().getCapabilities() != null
+          && container.getSecurityContext().getCapabilities().getAdd() != null
+          && !container.getSecurityContext().getCapabilities().getAdd().isEmpty()) {
+        throw invalid("不允许为容器增加 Linux capabilities");
+      }
+      if (container.getPorts() != null && container.getPorts().stream().anyMatch(port -> port.getHostPort() != null)) {
+        throw invalid("不允许导入 hostPort；请使用 Kubernetes Service 暴露端口");
+      }
+      if (container.getEnv() != null && container.getEnv().stream().anyMatch(env ->
+          env.getValueFrom() != null && (env.getValueFrom().getSecretKeyRef() != null
+              || env.getValueFrom().getConfigMapKeyRef() != null))) {
+        throw invalid("暂不支持引用 Secret 或 ConfigMap 的环境变量；请先将资源纳入应用清单");
+      }
+      if (container.getEnvFrom() != null && container.getEnvFrom().stream().anyMatch(source ->
+          source.getSecretRef() != null || source.getConfigMapRef() != null)) {
+        throw invalid("暂不支持 envFrom 引用 Secret 或 ConfigMap");
+      }
+      if (container.getVolumeMounts() != null && container.getVolumeMounts().stream()
+          .anyMatch(mount -> "Bidirectional".equals(mount.getMountPropagation()))) {
+        throw invalid("不允许 Bidirectional mountPropagation");
+      }
+    }
+  }
+
+  private static void validateService(Service service) {
+    var spec = service.getSpec();
+    if (spec == null || spec.getSelector() == null || spec.getSelector().isEmpty()
+        || spec.getPorts() == null || spec.getPorts().isEmpty()) {
+      throw invalid("Service 必须包含 selector 和至少一个端口");
+    }
+    if (spec.getType() != null && !"ClusterIP".equals(spec.getType())) {
+      throw invalid("导入的 Service 只支持 ClusterIP 类型");
+    }
+    if (spec.getExternalName() != null || spec.getExternalIPs() != null
+        && !spec.getExternalIPs().isEmpty()) {
+      throw invalid("不支持 ExternalName 或 externalIPs Service");
+    }
+    spec.setType("ClusterIP");
+    spec.setClusterIP(null);
+    spec.setClusterIPs(null);
+    spec.setIpFamilies(null);
+    spec.setIpFamilyPolicy(null);
+    spec.setHealthCheckNodePort(null);
+    spec.getPorts().forEach(port -> port.setNodePort(null));
+  }
+
+  private static void validateApplicationResources(List<HasMetadata> resources) {
+    List<Deployment> deployments = resources.stream().filter(Deployment.class::isInstance)
+        .map(Deployment.class::cast).toList();
+    for (Service service : resources.stream().filter(Service.class::isInstance)
+        .map(Service.class::cast).toList()) {
+      boolean matches = deployments.stream().anyMatch(deployment ->
+          matches(service.getSpec().getSelector(), deployment.getSpec().getTemplate()
+              .getMetadata().getLabels()));
+      if (!matches) throw invalid("Service selector 没有匹配应用内 Deployment: "
+          + service.getMetadata().getName());
+    }
+  }
+
+  private static List<String> externalServiceAccounts(List<HasMetadata> resources) {
+    Set<String> included = resources.stream().filter(ServiceAccount.class::isInstance)
+        .map(ServiceAccount.class::cast).map(account -> account.getMetadata().getName())
+        .collect(java.util.stream.Collectors.toSet());
+    return resources.stream().filter(Deployment.class::isInstance).map(Deployment.class::cast)
+        .map(deployment -> deployment.getSpec().getTemplate().getSpec().getServiceAccountName())
+        .filter(name -> name != null && !name.isBlank() && !"default".equals(name)
+            && !included.contains(name))
+        .distinct().sorted().toList();
+  }
+
+  private static void ensureReferencedServiceAccountsExist(KubernetesClient client,
+      String namespace, List<HasMetadata> resources) {
+    for (String account : externalServiceAccounts(resources)) {
+      if (client.serviceAccounts().inNamespace(namespace).withName(account).get() == null) {
+        throw invalid("Deployment 引用了不存在的 ServiceAccount: " + account);
+      }
+    }
+  }
+
+  private static boolean validResourceName(String name) {
+    return name != null && name.length() <= 63 && DNS_LABEL.matcher(name).matches();
   }
 
   private static List<HasMetadata> parse(KubernetesClient client, String yaml) {
@@ -803,7 +1039,8 @@ public class KubernetesApplicationService {
         String image = deployment.getSpec().getTemplate().getSpec().getContainers().stream()
             .map(container -> container.getImage()).filter(value -> value != null).findFirst().orElse(null);
         nodes.add(new TopologyNode(id, "Deployment", deployment.getMetadata().getName(),
-            replicas, ready, image, null, state));
+            replicas, ready, image, deployment.getSpec().getTemplate().getMetadata().getLabels()
+                .get("app"), state));
       } else if (item instanceof Service service) {
         String id = resourceId(item);
         String expectedUid = resourceUids.get(id);
