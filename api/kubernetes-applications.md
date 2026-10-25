@@ -4,7 +4,7 @@ NaNPanel 把受管 Kubernetes 工作负载记录为应用。每个应用版本�
 
 ## Bookinfo 引导
 
-`POST /api/v1/kubernetes/applications/bookinfo` 创建 Istio Bookinfo 示例：4 个 ServiceAccount、4 个 Service 和 5 个 Deployment（`reviews` 的 v1/v2/v3 都保留）。选择已登记集群和其中现有 Namespace；同名资源已存在时拒绝创建，不接管已有资源。创建失败时控制面会清理本次创建的资源，清理结果记录为 `FAILED` 或 `PARTIAL`。
+`POST /api/v1/kubernetes/applications/bookinfo` 创建 Istio Bookinfo 示例：4 个 ServiceAccount、4 个 Service 和 6 个 Deployment（`reviews` 的 v1/v2/v3 都保留），共 14 个命名空间资源。选择已登记集群和其中现有 Namespace；同名资源已存在时拒绝创建，不接管已有资源。创建失败时控制面会清理本次创建的资源，清理结果记录为 `FAILED` 或 `PARTIAL`。
 
 模板遵循 [Istio Bookinfo 示例](https://istio.io/latest/docs/examples/bookinfo/) 的基础 Kubernetes 工作负载结构。该向导不安装 Istio、不创建 Ingress、不读取 Secret，也不代表应用内部调用链已由 YAML 验证。
 

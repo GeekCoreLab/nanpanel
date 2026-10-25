@@ -966,7 +966,7 @@ paths:
       tags: [KubernetesApplications]
       operationId: createBookinfoApplication
       summary: 在现有 Namespace 中创建 Bookinfo 测试应用
-      description: 创建 4 个 ServiceAccount、4 个 Service 与 5 个 Deployment。只支持命名空间级资源；不安装 Istio、不创建 Ingress，也不读取 Secret。所选资源名称必须未被占用。
+      description: 创建 4 个 ServiceAccount、4 个 Service 与 6 个 Deployment，共 14 个命名空间级资源。不安装 Istio、不创建 Ingress，也不读取 Secret。所选资源名称必须未被占用。
       x-implementation-status: implemented
       security:
       - cookieAuth: []

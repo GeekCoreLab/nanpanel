@@ -38,6 +38,10 @@ public class KubernetesApplicationService {
   private static final String APPLICATION_ID = "nanpanel.io/application-id";
   private static final int MAX_APPLICATIONS = 200;
   private static final int MAX_REPLICAS = 20;
+  private static final Map<String, Integer> BOOKINFO_RESOURCE_COUNTS = Map.of(
+      "ServiceAccount", 4,
+      "Service", 4,
+      "Deployment", 6);
   private static final Pattern DNS_LABEL =
       Pattern.compile("[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?");
   private static final Pattern IMAGE =
@@ -374,7 +378,9 @@ public class KubernetesApplicationService {
           update(connection, "INSERT INTO kubernetes_application_version (application_id,version,"
                   + "base_version,manifest_yaml,manifest_sha256,manifest_diff,state,requested_by,created_at) "
                   + "VALUES (?,?,?,?,?,?,?,?,?)",
-              id, 1, 0, yaml, sha256(yaml), "初始版本：根据 Bookinfo 模板创建 13 个 Namespace 资源。",
+              id, 1, 0, yaml, sha256(yaml),
+              "初始版本：根据 Bookinfo 模板创建 4 个 ServiceAccount、4 个 Service、"
+                  + "6 个 Deployment，共 14 个 Namespace 资源。",
               "APPLYING", actor, Timestamp.from(now));
           audit(connection, actor, "KUBERNETES_APPLICATION_BOOKINFO_CREATED",
               "kubernetes_application", id.toString(), "ACCEPTED", remoteAddress,
@@ -603,7 +609,9 @@ public class KubernetesApplicationService {
   private static List<HasMetadata> prepareInitialResources(KubernetesClient client,
       String namespace, UUID applicationId) {
     List<HasMetadata> resources = parse(client, BOOKINFO_MANIFEST);
-    if (resources.size() != 13) throw new ApplicationException(500,
+    Map<String, Integer> actualCounts = new HashMap<>();
+    resources.forEach(resource -> actualCounts.merge(resource.getKind(), 1, Integer::sum));
+    if (!BOOKINFO_RESOURCE_COUNTS.equals(actualCounts)) throw new ApplicationException(500,
         "BOOKINFO_TEMPLATE_INVALID", "Bookinfo 模板资源数量不符合预期");
     for (HasMetadata resource : resources) {
       if (!supported(resource)) throw invalid("Bookinfo 模板含有不支持的资源类型");
