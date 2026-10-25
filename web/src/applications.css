@@ -239,3 +239,7 @@ main:has(.applications-page)>footer{display:none}
 .application-confirm-copy{flex:0 0 auto;margin:8px 0 0;color:#8592a4;font-size:8px;line-height:1.5}
 @media(max-width:700px){.application-source-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.application-source-card:last-child{grid-column:span 2}.application-wizard{width:calc(100vw - 20px);height:calc(100dvh - 20px);max-height:calc(100dvh - 20px);padding:15px}.application-wizard-targets{gap:7px}.application-wizard-fields .field input,.application-wizard-fields .field select{height:33px;padding:6px 8px;font-size:9px}.application-inline-fields{gap:6px}}
 @media(max-width:430px){.application-wizard-targets{grid-template-columns:minmax(0,1fr)}.application-inline-fields{grid-template-columns:repeat(2,minmax(0,1fr))}.application-inline-fields .field:last-child{grid-column:span 2}.application-source-grid{gap:5px}.application-source-card{padding:7px;font-size:8px}.application-source-card small{font-size:6px}}
+
+.application-list-heading-actions{display:flex;align-items:center;gap:5px}
+.application-list-heading-actions>.secondary,.application-list-heading-actions>.primary{min-height:28px;padding:5px 8px;font-size:9px}
+.application-list-heading-actions>.secondary{width:29px;padding:4px}

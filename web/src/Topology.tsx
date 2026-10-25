@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import type { WheelEvent as ReactWheelEvent } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -11,6 +11,7 @@ import { createUuid } from './lib/uuid.ts';
 import NetbirdProviderPanel from './NetbirdProviderPanel';
 import { connectionError, connectionReviewMessage, createTopologyNode, draftError, nodePresets, resolveRouteNextHop, unmatchedRouteGateways, validNodeShape } from './lib/topology-model';
 import { TopologyCanvas } from './topology/TopologyCanvas';
+import { TopologyContextMenu, TopologyContextMenuGroup, TopologyContextMenuHeading, TopologyContextMenuItem } from './topology/TopologyContextMenu';
 import './topology-status.css';
 import './topology-hierarchy.css';
 import './topology-workspaces.css';
@@ -161,7 +162,7 @@ function Editor() {
   const [namespaceDetails, setNamespaceDetails] = useState<Record<string, KubernetesTopologyNamespaceDetail>>({});
   const [expandedNamespace, setExpandedNamespace] = useState<string>(); const [expandedPod, setExpandedPod] = useState<string>(); const [kubernetesError, setKubernetesError] = useState(''); const [kubernetesBusy, setKubernetesBusy] = useState(false);
   const [routeEvidence, setRouteEvidence] = useState<P0RouteEvidence>();
-  const [menu, setMenu] = useState<Menu>(); const menuRef = useRef<HTMLDivElement>(null); const canvasRef = useRef<HTMLElement>(null);
+  const [menu, setMenu] = useState<Menu>(); const canvasRef = useRef<HTMLElement>(null);
   const [nodeSettings, setNodeSettings] = useState<NodeSettings>(); const [nodeSettingsError, setNodeSettingsError] = useState('');
   const observedRouterSignatureRef = useRef('');
   const { screenToFlowPosition, fitView } = useReactFlow<DeviceNode>();
@@ -317,14 +318,6 @@ function Editor() {
       .finally(() => { if (!cancelled) setKubernetesBusy(false); });
     return () => { cancelled = true; };
   }, [folderId, activeFolderClusterId]);
-  useEffect(() => {
-    if (!menu) return;
-    const dismiss = (e: globalThis.MouseEvent) => { if (!menuRef.current?.contains(e.target as globalThis.Node)) setMenu(undefined); };
-    const escape = (e: KeyboardEvent) => { if (e.key === 'Escape') setMenu(undefined); };
-    document.addEventListener('pointerdown', dismiss); document.addEventListener('keydown', escape);
-    return () => { document.removeEventListener('pointerdown', dismiss); document.removeEventListener('keydown', escape); };
-  }, [menu]);
-  useEffect(() => { if (menu) menuRef.current?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus(); }, [menu]);
   async function save() {
     const payload = draft(); const invalid = draftError(payload); if (invalid) { setError(invalid); return; }
     setBusy(true); setError('');
@@ -342,7 +335,7 @@ function Editor() {
   }
   function openMenu(event: { preventDefault(): void; clientX: number; clientY: number }, nodeId?: string, edgeId?: string, insertionPoint?: { x: number; y: number }) {
     event.preventDefault(); if (!loaded || busy) return;
-    setMenu({ x: Math.max(8, Math.min(event.clientX, window.innerWidth - 278)), y: Math.max(8, Math.min(event.clientY, window.innerHeight - 450)), point: screenToFlowPosition(insertionPoint ?? { x: event.clientX, y: event.clientY }), nodeId, edgeId });
+    setMenu({ x: event.clientX, y: event.clientY, point: screenToFlowPosition(insertionPoint ?? { x: event.clientX, y: event.clientY }), nodeId, edgeId });
   }
   function openNodeSettings(node: TopologyNode) {
     const firstPort = node.ports[0];
@@ -758,10 +751,21 @@ function Editor() {
     </section>}
     {!folderId && workspace === 'providers' && <NetbirdProviderPanel />}
     {(workspace === 'topology' || !!folderId || isP0Lab) && <div className="topology-caption"><span>全拓扑 {nodes.filter(node => !node.data.observedOnly).length} 个配置节点 · Agent 自动发现 {autoRouterNodes.length} 个 Router；期望连接 {edges.length} 条 · 当前层 {activeNodes.filter(node => !node.data.observedOnly).length} 个节点 · {activeEdges.length} 条期望连接 · {dirty ? '有未保存的修改' : '草稿未修改'}</span><span role="status">{message || (busy ? '正在读取草稿…' : '')}</span></div>}
-    {menu && <div className="topology-menu" role="menu" aria-label="拓扑右键菜单" ref={menuRef} style={{ left: menu.x, top: menu.y } as CSSProperties}>
-      {contextNode ? <><strong>{contextNode.name} · {contextNode.inputCount} 入 / {contextNode.outputCount} 出</strong>{contextNode.kind === 'FOLDER' && <button role="menuitem" onClick={() => enterFolder(contextNode.id)}>打开层级视图</button>}<button role="menuitem" onClick={() => openNodeSettings(contextNode)}>编辑节点信息</button>{(['inputCount', 'outputCount'] as const).map(direction => <div key={direction} className="menu-port-actions">{[1, -1].map(delta => <button role="menuitem" key={delta} disabled={!portChangeCandidate(contextNode, direction, delta)} onClick={() => changePorts(contextNode, direction, delta)}>{delta > 0 ? '增加' : '减少'}{direction === 'inputCount' ? '入口' : '出口'}</button>)}</div>)}<button role="menuitem" className="danger" onClick={() => removeNode(contextNode.id)}>删除节点及关联连接</button></> : menu.edgeId ? <><strong>期望连接 · {linkStateLabels[(contextEdge?.data?.state ?? 'PENDING') as keyof typeof linkStateLabels]} · {contextEdge?.data?.layer as string}/{(contextEdge?.data?.protocol ?? 'TCP') as string}</strong><button role="menuitem" className="danger" onClick={() => { setEdges(current => current.filter(e => e.id !== menu.edgeId)); setDirty(true); setRouteEvidence(undefined); setMenu(undefined); }}>删除连接</button></> : <><strong>添加节点</strong>{(Object.keys(nodePresets) as TopologyNodeKind[]).map(kind => <button role="menuitem" key={kind} onClick={() => addNode(kind)}><span>{nodePresets[kind].name}</span><small>{nodePresets[kind].inputs} 入 / {nodePresets[kind].outputs} 出</small></button>)}</>}
-      <button role="menuitem" className="menu-cancel" onClick={() => setMenu(undefined)}>关闭菜单 · Esc</button>
-    </div>}
+    {menu && <TopologyContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}>
+      {contextNode ? <>
+        <TopologyContextMenuHeading>{contextNode.name} · {contextNode.inputCount} 入 / {contextNode.outputCount} 出</TopologyContextMenuHeading>
+        {contextNode.kind === 'FOLDER' && <TopologyContextMenuItem onClick={() => enterFolder(contextNode.id)}>打开层级视图</TopologyContextMenuItem>}
+        <TopologyContextMenuItem onClick={() => openNodeSettings(contextNode)}>编辑节点信息</TopologyContextMenuItem>
+        {(['inputCount', 'outputCount'] as const).map(direction => <TopologyContextMenuGroup key={direction}>{[1, -1].map(delta => <TopologyContextMenuItem key={delta} disabled={!portChangeCandidate(contextNode, direction, delta)} closeOnSelect={false} onClick={() => changePorts(contextNode, direction, delta)}>{delta > 0 ? '增加' : '减少'}{direction === 'inputCount' ? '入口' : '出口'}</TopologyContextMenuItem>)}</TopologyContextMenuGroup>)}
+        <TopologyContextMenuItem className="danger" onClick={() => removeNode(contextNode.id)}>删除节点及关联连接</TopologyContextMenuItem>
+      </> : menu.edgeId ? <>
+        <TopologyContextMenuHeading>期望连接 · {linkStateLabels[(contextEdge?.data?.state ?? 'PENDING') as keyof typeof linkStateLabels]} · {contextEdge?.data?.layer as string}/{(contextEdge?.data?.protocol ?? 'TCP') as string}</TopologyContextMenuHeading>
+        <TopologyContextMenuItem className="danger" onClick={() => { setEdges(current => current.filter(e => e.id !== menu.edgeId)); setDirty(true); setRouteEvidence(undefined); setMenu(undefined); }}>删除连接</TopologyContextMenuItem>
+      </> : <>
+        <TopologyContextMenuHeading>添加节点</TopologyContextMenuHeading>
+        {(Object.keys(nodePresets) as TopologyNodeKind[]).map(kind => <TopologyContextMenuItem key={kind} onClick={() => addNode(kind)}><span>{nodePresets[kind].name}</span><small>{nodePresets[kind].inputs} 入 / {nodePresets[kind].outputs} 出</small></TopologyContextMenuItem>)}
+      </>}
+    </TopologyContextMenu>}
     {nodeSettings && <div className="modal-backdrop"><section className="modal topology-node-settings" role="dialog" aria-modal="true" aria-labelledby="topology-node-settings-title">
       <div className="card-title"><div><span className="eyebrow">TOPOLOGY NODE</span><h2 id="topology-node-settings-title">节点与接口信息</h2></div><button className="icon-button" aria-label="关闭节点设置" onClick={() => setNodeSettings(undefined)}>×</button></div>
       <form onSubmit={saveNodeSettings}>

@@ -20,6 +20,7 @@ import type {
   KubernetesTopologyNamespaceSnapshot,
 } from './lib/types';
 import { TopologyCanvas } from './topology/TopologyCanvas';
+import { TopologyContextMenu, TopologyContextMenuHeading, TopologyContextMenuItem } from './topology/TopologyContextMenu';
 import './applications.css';
 
 type View = 'topology' | 'versions';
@@ -305,15 +306,11 @@ export default function Applications({ notify }: { notify: (message: string) => 
   }
 
   return <div className="applications-page">
-    <div className="applications-heading">
-      <div><span className="eyebrow">KUBERNETES WORKLOADS</span><h1>应用管理</h1><p>将 Kubernetes 工作负载作为应用管理。拓扑由版本 YAML 生成，修改先形成 diff，确认后才部署。</p></div>
-      <div className="applications-actions"><button className="secondary" onClick={() => void loadList()} disabled={loading}>↻ 刷新</button><button className="primary" onClick={beginCreate} disabled={isMock}>＋ 创建应用</button></div>
-    </div>
     {error && <div className="alert error" role="alert">{error}</div>}
     {isMock && <div className="alert">Mock 演示环境没有真实集群应用接口。此页面在 Live API 模式下连接已登记集群。</div>}
     <div className="application-layout">
       <aside className="application-list-panel">
-        <div className="application-list-heading"><div><span className="eyebrow">APPLICATIONS</span><strong>应用列表</strong></div><span className="application-count">{items.length}</span></div>
+        <div className="application-list-heading"><div><span className="eyebrow">APPLICATIONS</span><strong>应用列表</strong></div><div className="application-list-heading-actions"><button type="button" className="secondary" title="刷新应用列表" aria-label="刷新应用列表" onClick={() => void loadList()} disabled={loading}>↻</button><button type="button" className="primary" onClick={beginCreate} disabled={isMock}>＋ 创建</button><span className="application-count">{items.length}</span></div></div>
         {loading && <p className="application-muted">正在读取应用…</p>}
         {!loading && items.length === 0 && !error && <div className="application-empty-small"><b>◇</b><span>还没有应用</span><small>使用图形化向导或导入容器清单创建应用。</small><button className="link" onClick={beginCreate}>创建第一个应用 →</button></div>}
         <div className="application-list">
@@ -469,6 +466,7 @@ function ApplicationTopologyFlowCanvas({
   const { fitView } = useReactFlow<ApplicationFlowNode, Edge>();
   const [connectionMessage, setConnectionMessage] = useState('');
   const [editingNode, setEditingNode] = useState<KubernetesApplicationTopologyNode>();
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; resource: KubernetesApplicationTopologyNode; connectedTo?: string }>();
   const visibleResources = useMemo(
     () => resources.filter(resource => resource.kind === 'Service' || resource.kind === 'Deployment'),
     [resources],
@@ -573,7 +571,14 @@ function ApplicationTopologyFlowCanvas({
       onConnect={connect}
       onNodeContextMenu={(event, node) => {
         event.preventDefault();
-        if (!busy && !hasDraft) setEditingNode(node.data.resource);
+        if (!busy && !hasDraft) setContextMenu({ x: event.clientX, y: event.clientY, resource: node.data.resource });
+      }}
+      onEdgeContextMenu={(event, edge) => {
+        event.preventDefault();
+        if (busy || hasDraft) return;
+        const service = nodes.find(node => node.id === edge.source)?.data.resource;
+        const deployment = nodes.find(node => node.id === edge.target)?.data.resource;
+        if (service?.kind === 'Service') setContextMenu({ x: event.clientX, y: event.clientY, resource: service, connectedTo: deployment?.name });
       }}
       isValidConnection={validConnection}
       connectionMode={ConnectionMode.Strict}
@@ -589,6 +594,14 @@ function ApplicationTopologyFlowCanvas({
       noWheelClassName="nowheel"
       fitView
     />
+    {contextMenu && <TopologyContextMenu x={contextMenu.x} y={contextMenu.y} onClose={() => setContextMenu(undefined)}>
+      <TopologyContextMenuHeading>{contextMenu.connectedTo
+        ? `${contextMenu.resource.name} → ${contextMenu.connectedTo}`
+        : `${contextMenu.resource.kind === 'Service' ? 'Service' : '工作负载'} · ${contextMenu.resource.name}`}</TopologyContextMenuHeading>
+      <TopologyContextMenuItem onClick={() => { setEditingNode(contextMenu.resource); setContextMenu(undefined); }}>
+        {contextMenu.resource.kind === 'Service' ? '编辑端口与连接' : '编辑副本与镜像'}
+      </TopologyContextMenuItem>
+    </TopologyContextMenu>}
     {connectionMessage && <div className="application-flow-message" role="status">{connectionMessage}</div>}
     {editingNode && <ApplicationNodeSettingsDialog
       key={editingNode.id}
