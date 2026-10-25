@@ -1,7 +1,9 @@
 use std::{
     collections::{HashMap, HashSet},
+    fs::{self, OpenOptions},
+    io::Write,
     net::Ipv4Addr,
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -15,7 +17,7 @@ const NETWORK_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_NODES: usize = 16;
 const MAX_LINKS: usize = 64;
 
-#[derive(Clone, Copy, Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields, rename_all = "SCREAMING_SNAKE_CASE")]
 enum Action {
     Apply,
@@ -39,8 +41,16 @@ struct TopologyRequest {
 struct TopologyNode {
     id: Uuid,
     kind: String,
+    switch_backend: Option<SwitchBackend>,
     firewall_policy: Option<FirewallPolicy>,
     router_configuration: Option<RouterConfiguration>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum SwitchBackend {
+    Bridge,
+    Openvswitch,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -137,10 +147,21 @@ struct CompiledTopology {
     request: TopologyRequest,
     namespace: String,
     bridges: HashMap<Uuid, String>,
+    ovs_switches: HashSet<Uuid>,
     interfaces: HashMap<Uuid, (String, String)>,
     routers: Vec<Router>,
     packet_taps: Vec<PacketTap>,
     firewalls: Vec<Firewall>,
+}
+
+impl CompiledTopology {
+    fn uses_ovs(&self) -> bool {
+        !self.ovs_switches.is_empty()
+    }
+
+    fn is_ovs_switch(&self, node_id: Uuid) -> bool {
+        self.ovs_switches.contains(&node_id)
+    }
 }
 
 #[derive(Debug)]
@@ -194,6 +215,50 @@ pub(crate) fn available() -> bool {
             .any(|candidate| trusted_binary(Path::new(candidate)))
 }
 
+pub(crate) fn ovs_available() -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    ["/usr/sbin/ovsdb-server", "/usr/bin/ovsdb-server"]
+        .iter()
+        .any(|candidate| trusted_binary(Path::new(candidate)))
+        && ["/usr/sbin/ovs-vswitchd", "/usr/bin/ovs-vswitchd"]
+            .iter()
+            .any(|candidate| trusted_binary(Path::new(candidate)))
+        && ["/usr/sbin/ovsdb-tool", "/usr/bin/ovsdb-tool"]
+            .iter()
+            .any(|candidate| trusted_binary(Path::new(candidate)))
+        && ["/usr/sbin/ovs-vsctl", "/usr/bin/ovs-vsctl"]
+            .iter()
+            .any(|candidate| trusted_binary(Path::new(candidate)))
+        && ["/usr/sbin/ovs-appctl", "/usr/bin/ovs-appctl"]
+            .iter()
+            .any(|candidate| trusted_binary(Path::new(candidate)))
+        && ovs_schema().is_some_and(|path| trusted_system_file(&path))
+        && fs::symlink_metadata("/dev/net/tun")
+            .is_ok_and(|metadata| metadata.file_type().is_char_device())
+        && OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/net/tun")
+            .is_ok()
+}
+
+fn ovs_schema() -> Option<PathBuf> {
+    [
+        "/usr/share/openvswitch/vswitch.ovsschema",
+        "/usr/local/share/openvswitch/vswitch.ovsschema",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .find(|path| trusted_system_file(path))
+}
+
+fn trusted_system_file(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(path).is_ok_and(|metadata| {
+        metadata.is_file() && metadata.uid() == 0 && metadata.mode() & 0o022 == 0
+    })
+}
+
 pub(crate) fn validate_target_payload(target: &str, payload: Option<&str>) -> Result<(), String> {
     let payload = payload.ok_or_else(|| "DENIED: topology payload is required".to_owned())?;
     let request = decode(payload)?;
@@ -229,6 +294,7 @@ fn compile(target: &str, request: TopologyRequest) -> Result<CompiledTopology, S
 
     let mut node_ids = HashSet::new();
     let mut node_kinds = HashMap::new();
+    let mut ovs_switches = HashSet::new();
     for node in &request.nodes {
         if !node_ids.insert(node.id)
             || !matches!(
@@ -236,7 +302,15 @@ fn compile(target: &str, request: TopologyRequest) -> Result<CompiledTopology, S
                 "SWITCH" | "PACKET_TAP" | "FIREWALL" | "ROUTER"
             )
         {
-            return Err("DENIED: Linux netns Provider accepts unique SWITCH, PACKET_TAP, and FIREWALL nodes only".to_owned());
+            return Err("DENIED: Linux netns Provider accepts unique SWITCH, PACKET_TAP, FIREWALL, and ROUTER nodes only".to_owned());
+        }
+        match (&node.kind[..], node.switch_backend) {
+            ("SWITCH", Some(SwitchBackend::Openvswitch)) => {
+                ovs_switches.insert(node.id);
+            }
+            ("SWITCH", Some(SwitchBackend::Bridge) | None) => {}
+            (_, None) => {}
+            _ => return Err("DENIED: only SWITCH nodes can select a switch backend".to_owned()),
         }
         if (node.kind == "FIREWALL") != node.firewall_policy.is_some()
             || (node.kind == "ROUTER") != node.router_configuration.is_some()
@@ -246,6 +320,24 @@ fn compile(target: &str, request: TopologyRequest) -> Result<CompiledTopology, S
             );
         }
         node_kinds.insert(node.id, node.kind.as_str());
+    }
+    if !ovs_switches.is_empty() {
+        if request
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind.as_str(), "FIREWALL" | "PACKET_TAP"))
+        {
+            return Err(
+                "DENIED: OVS topology plans cannot include Firewall or Packet Tap devices"
+                    .to_owned(),
+            );
+        }
+        if request.action == Action::Apply && !ovs_available() {
+            return Err(
+                "DENIED: OVS backend requires trusted OVS userspace tools, schema, and /dev/net/tun"
+                    .to_owned(),
+            );
+        }
     }
     if request
         .nodes
@@ -353,6 +445,7 @@ fn compile(target: &str, request: TopologyRequest) -> Result<CompiledTopology, S
         request,
         namespace,
         bridges,
+        ovs_switches,
         interfaces,
         routers,
         packet_taps,
@@ -662,6 +755,451 @@ async fn in_namespace(program: &Path, namespace: &str, args: &[String]) -> Resul
     run_fixed_command(&ip_binary()?, &command, NETWORK_TIMEOUT).await
 }
 
+fn ovs_run_dir(topology: &CompiledTopology) -> PathBuf {
+    Path::new("/run/nanpanel/topology-ovs").join(&topology.namespace)
+}
+
+fn ovs_owner(topology: &CompiledTopology) -> String {
+    format!(
+        "nanpanel:{}:{}:{}",
+        topology.request.topology_id, topology.request.revision_id, topology.request.generation
+    )
+}
+
+fn ovs_owned_dir(path: &Path, mode: u32) -> Result<bool, String> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let created = match fs::create_dir(path) {
+        Ok(()) => {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode))
+                .map_err(|_| "FAILED: cannot secure OVS runtime directory".to_owned())?;
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+        Err(_) => return Err("FAILED: cannot create OVS runtime directory".to_owned()),
+    };
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| "FAILED: cannot inspect OVS runtime directory".to_owned())?;
+    if !metadata.file_type().is_dir() || metadata.uid() != 0 || metadata.mode() & 0o022 != 0 {
+        return Err(
+            "DENIED: OVS runtime directory is not a protected root-owned directory".to_owned(),
+        );
+    }
+    Ok(created)
+}
+
+fn ensure_ovs_runtime_dir(topology: &CompiledTopology) -> Result<PathBuf, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    ovs_owned_dir(Path::new("/run/nanpanel"), 0o755)?;
+    ovs_owned_dir(Path::new("/run/nanpanel/topology-ovs"), 0o700)?;
+    let directory = ovs_run_dir(topology);
+    let created = ovs_owned_dir(&directory, 0o700)?;
+    fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+        .map_err(|_| "FAILED: cannot secure OVS topology directory".to_owned())?;
+    let owner_file = directory.join("owner");
+    if !created && !owner_file.exists() {
+        return Err(
+            "DENIED: refusing to claim an OVS runtime directory without its ownership marker"
+                .to_owned(),
+        );
+    }
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&owner_file)
+    {
+        Ok(mut file) => {
+            file.write_all(ovs_owner(topology).as_bytes())
+                .and_then(|()| file.sync_all())
+                .map_err(|_| "FAILED: cannot write OVS ownership marker".to_owned())?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if read_ovs_owner(topology)?.as_deref() != Some(ovs_owner(topology).as_str()) {
+                return Err(
+                    "DENIED: OVS runtime directory belongs to another topology revision".to_owned(),
+                );
+            }
+        }
+        Err(_) => return Err("FAILED: cannot create OVS ownership marker".to_owned()),
+    }
+    let metadata = fs::symlink_metadata(&owner_file)
+        .map_err(|_| "FAILED: cannot inspect OVS ownership marker".to_owned())?;
+    if !metadata.file_type().is_file() || metadata.uid() != 0 || metadata.mode() & 0o077 != 0 {
+        return Err("DENIED: OVS ownership marker is not a private root-owned file".to_owned());
+    }
+    Ok(directory)
+}
+
+fn read_ovs_owner(topology: &CompiledTopology) -> Result<Option<String>, String> {
+    use std::os::unix::fs::MetadataExt;
+    let directory = ovs_run_dir(topology);
+    let Ok(directory_metadata) = fs::symlink_metadata(&directory) else {
+        return Ok(None);
+    };
+    if !directory_metadata.file_type().is_dir()
+        || directory_metadata.uid() != 0
+        || directory_metadata.mode() & 0o077 != 0
+    {
+        return Err("DENIED: OVS topology directory is not protected".to_owned());
+    }
+    let owner_file = directory.join("owner");
+    let metadata = fs::symlink_metadata(&owner_file)
+        .map_err(|_| "DENIED: OVS topology ownership marker is missing".to_owned())?;
+    if !metadata.file_type().is_file() || metadata.uid() != 0 || metadata.mode() & 0o077 != 0 {
+        return Err("DENIED: OVS topology ownership marker is not protected".to_owned());
+    }
+    fs::read_to_string(owner_file)
+        .map(Some)
+        .map_err(|_| "FAILED: cannot read OVS topology ownership marker".to_owned())
+}
+
+fn ovs_paths(topology: &CompiledTopology) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBuf) {
+    let directory = ovs_run_dir(topology);
+    (
+        directory.join("conf.db"),
+        directory.join("db.sock"),
+        directory.join("db.pid"),
+        directory.join("db.ctl"),
+        directory.join("switch.ctl"),
+    )
+}
+
+fn path_arg(path: &Path) -> Result<String, String> {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| "DENIED: OVS runtime path is invalid".to_owned())
+}
+
+async fn ovs_vsctl(topology: &CompiledTopology, args: &[String]) -> Result<String, String> {
+    let ovs_vsctl = trusted_executable(&["/usr/sbin/ovs-vsctl", "/usr/bin/ovs-vsctl"])?;
+    let (_, socket, _, _, _) = ovs_paths(topology);
+    let mut command = vec![
+        format!("--db=unix:{}", path_arg(&socket)?),
+        "--timeout=5".to_owned(),
+    ];
+    command.extend_from_slice(args);
+    run_fixed_command(&ovs_vsctl, &command, NETWORK_TIMEOUT).await
+}
+
+async fn ovs_read(topology: &CompiledTopology, args: &[String]) -> Result<String, String> {
+    ovs_vsctl(topology, args).await
+}
+
+fn ovs_value(output: &str) -> String {
+    let output = output.trim();
+    serde_json::from_str::<String>(output).unwrap_or_else(|_| output.to_owned())
+}
+
+fn ovs_bridge_owner(topology: &CompiledTopology, node_id: Uuid) -> String {
+    format!("{}:{}", ovs_owner(topology), node_id)
+}
+
+fn ovs_port_owner(topology: &CompiledTopology, link_id: Uuid, node_id: Uuid, side: &str) -> String {
+    format!("{}:{}:{}:{}", ovs_owner(topology), link_id, node_id, side)
+}
+
+async fn start_ovs(topology: &CompiledTopology) -> Result<(), String> {
+    if !topology.uses_ovs() {
+        return Ok(());
+    }
+    let directory = ensure_ovs_runtime_dir(topology)?;
+    let schema =
+        ovs_schema().ok_or_else(|| "DENIED: trusted OVS schema is unavailable".to_owned())?;
+    let (database, socket, db_pid, db_ctl, switch_ctl) = ovs_paths(topology);
+    let db_log = directory.join("db.log");
+    let switch_pid = directory.join("switch.pid");
+    let switch_log = directory.join("switch.log");
+    let ovsdb_tool = trusted_executable(&["/usr/sbin/ovsdb-tool", "/usr/bin/ovsdb-tool"])?;
+    run_fixed_command(
+        &ovsdb_tool,
+        &[
+            "create".to_owned(),
+            path_arg(&database)?,
+            path_arg(&schema)?,
+        ],
+        NETWORK_TIMEOUT,
+    )
+    .await?;
+    let ovsdb_server = trusted_executable(&["/usr/sbin/ovsdb-server", "/usr/bin/ovsdb-server"])?;
+    in_namespace(
+        &ovsdb_server,
+        &topology.namespace,
+        &[
+            format!("--remote=punix:{}", path_arg(&socket)?),
+            format!("--pidfile={}", path_arg(&db_pid)?),
+            format!("--unixctl={}", path_arg(&db_ctl)?),
+            format!("--log-file={}", path_arg(&db_log)?),
+            "--detach".to_owned(),
+            "--no-chdir".to_owned(),
+            path_arg(&database)?,
+        ],
+    )
+    .await?;
+    let mut initialized = false;
+    for _ in 0..50 {
+        if ovs_vsctl(topology, &["--no-wait".to_owned(), "init".to_owned()])
+            .await
+            .is_ok()
+        {
+            initialized = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if !initialized {
+        return Err("FAILED: private OVSDB did not become ready".to_owned());
+    }
+    let ovs_vswitchd = trusted_executable(&["/usr/sbin/ovs-vswitchd", "/usr/bin/ovs-vswitchd"])?;
+    in_namespace(
+        &ovs_vswitchd,
+        &topology.namespace,
+        &[
+            format!("--pidfile={}", path_arg(&switch_pid)?),
+            format!("--unixctl={}", path_arg(&switch_ctl)?),
+            format!("--log-file={}", path_arg(&switch_log)?),
+            "--detach".to_owned(),
+            "--no-chdir".to_owned(),
+            format!("unix:{}", path_arg(&socket)?),
+        ],
+    )
+    .await?;
+    let ovs_appctl = trusted_executable(&["/usr/sbin/ovs-appctl", "/usr/bin/ovs-appctl"])?;
+    let mut running = false;
+    for _ in 0..50 {
+        if run_fixed_command(
+            &ovs_appctl,
+            &[
+                "-t".to_owned(),
+                path_arg(&switch_ctl)?,
+                "version".to_owned(),
+            ],
+            Duration::from_secs(2),
+        )
+        .await
+        .is_ok()
+        {
+            running = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if !running {
+        return Err("FAILED: private ovs-vswitchd did not become ready".to_owned());
+    }
+    Ok(())
+}
+
+async fn stop_ovs_daemon(appctl: &Path, control: &Path, pid: &Path) -> Result<(), String> {
+    if !pid.exists() {
+        return Ok(());
+    }
+    if !control.exists() {
+        return Err("FAILED: OVS daemon PID exists without its private control socket".to_owned());
+    }
+    run_fixed_command(
+        appctl,
+        &["-t".to_owned(), path_arg(control)?, "exit".to_owned()],
+        NETWORK_TIMEOUT,
+    )
+    .await?;
+    for _ in 0..100 {
+        if !pid.exists() {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Err("UNCERTAIN: OVS daemon did not stop after its private exit request".to_owned())
+}
+
+async fn cleanup_ovs(topology: &CompiledTopology) -> Result<(), String> {
+    if !topology.uses_ovs() {
+        return Ok(());
+    }
+    let Some(owner) = read_ovs_owner(topology)? else {
+        return Ok(());
+    };
+    if owner != ovs_owner(topology) {
+        return Err(
+            "DENIED: refusing to stop OVS daemons owned by another topology revision".to_owned(),
+        );
+    }
+    let appctl = trusted_executable(&["/usr/sbin/ovs-appctl", "/usr/bin/ovs-appctl"])?;
+    let (_, _, db_pid, db_ctl, switch_ctl) = ovs_paths(topology);
+    let switch_pid = ovs_run_dir(topology).join("switch.pid");
+    stop_ovs_daemon(&appctl, &switch_ctl, &switch_pid).await?;
+    stop_ovs_daemon(&appctl, &db_ctl, &db_pid).await?;
+    fs::remove_dir_all(ovs_run_dir(topology))
+        .map_err(|_| "FAILED: cannot remove stopped OVS topology runtime".to_owned())
+}
+
+async fn add_ovs_bridge(topology: &CompiledTopology, node_id: Uuid) -> Result<(), String> {
+    let bridge = topology
+        .bridges
+        .get(&node_id)
+        .ok_or_else(|| "DENIED: OVS switch bridge name is missing".to_owned())?;
+    let owner = ovs_bridge_owner(topology, node_id);
+    ovs_vsctl(
+        topology,
+        &[
+            "add-br".to_owned(),
+            bridge.clone(),
+            "--".to_owned(),
+            "set".to_owned(),
+            "Bridge".to_owned(),
+            bridge.clone(),
+            "datapath_type=netdev".to_owned(),
+            "other_config:disable-in-band=true".to_owned(),
+            format!("external_ids:nanpanel-owner={owner}"),
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+async fn add_ovs_port(
+    topology: &CompiledTopology,
+    node_id: Uuid,
+    interface: &str,
+    link_id: Uuid,
+    side: &str,
+) -> Result<(), String> {
+    let bridge = topology
+        .bridges
+        .get(&node_id)
+        .ok_or_else(|| "DENIED: OVS switch bridge name is missing".to_owned())?;
+    ovs_vsctl(
+        topology,
+        &[
+            "add-port".to_owned(),
+            bridge.clone(),
+            interface.to_owned(),
+            "--".to_owned(),
+            "set".to_owned(),
+            "Port".to_owned(),
+            interface.to_owned(),
+            format!(
+                "external_ids:nanpanel-owner={}",
+                ovs_port_owner(topology, link_id, node_id, side)
+            ),
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+async fn verify_ovs_bridge(topology: &CompiledTopology, node_id: Uuid) -> Result<bool, String> {
+    let Some(owner) = read_ovs_owner(topology)? else {
+        return Ok(false);
+    };
+    if owner != ovs_owner(topology) {
+        return Ok(false);
+    }
+    let appctl = trusted_executable(&["/usr/sbin/ovs-appctl", "/usr/bin/ovs-appctl"])?;
+    let (_, _, db_pid, db_ctl, switch_ctl) = ovs_paths(topology);
+    let switch_pid = ovs_run_dir(topology).join("switch.pid");
+    if !db_pid.exists() || !switch_pid.exists() {
+        return Ok(false);
+    }
+    for control in [&db_ctl, &switch_ctl] {
+        if run_fixed_command(
+            &appctl,
+            &["-t".to_owned(), path_arg(control)?, "version".to_owned()],
+            Duration::from_secs(2),
+        )
+        .await
+        .is_err()
+        {
+            return Ok(false);
+        }
+    }
+    let Some(bridge) = topology.bridges.get(&node_id) else {
+        return Ok(false);
+    };
+    let datapath = ovs_read(
+        topology,
+        &[
+            "get".to_owned(),
+            "Bridge".to_owned(),
+            bridge.clone(),
+            "datapath_type".to_owned(),
+        ],
+    )
+    .await?;
+    let actual_owner = ovs_read(
+        topology,
+        &[
+            "get".to_owned(),
+            "Bridge".to_owned(),
+            bridge.clone(),
+            "external_ids:nanpanel-owner".to_owned(),
+        ],
+    )
+    .await?;
+    Ok(ovs_value(&datapath) == "netdev"
+        && ovs_value(&actual_owner) == ovs_bridge_owner(topology, node_id))
+}
+
+async fn verify_ovs_ports(topology: &CompiledTopology) -> Result<bool, String> {
+    for node in topology
+        .request
+        .nodes
+        .iter()
+        .filter(|node| topology.is_ovs_switch(node.id))
+    {
+        let Some(bridge) = topology.bridges.get(&node.id) else {
+            return Ok(false);
+        };
+        let mut expected_interfaces = HashSet::new();
+        for link in &topology.request.links {
+            if link.source_node_id == node.id {
+                let Some((interface, _)) = topology.interfaces.get(&link.id) else {
+                    return Ok(false);
+                };
+                expected_interfaces.insert(interface.clone());
+            } else if link.target_node_id == node.id {
+                let Some((_, interface)) = topology.interfaces.get(&link.id) else {
+                    return Ok(false);
+                };
+                expected_interfaces.insert(interface.clone());
+            }
+        }
+        let output = ovs_read(topology, &["list-ports".to_owned(), bridge.clone()]).await?;
+        let actual_interfaces = output
+            .lines()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect::<HashSet<_>>();
+        if actual_interfaces != expected_interfaces {
+            return Ok(false);
+        }
+        for link in &topology.request.links {
+            let (interface, side) = if link.source_node_id == node.id {
+                (&topology.interfaces[&link.id].0, "source")
+            } else if link.target_node_id == node.id {
+                (&topology.interfaces[&link.id].1, "target")
+            } else {
+                continue;
+            };
+            let owner = ovs_read(
+                topology,
+                &[
+                    "get".to_owned(),
+                    "Port".to_owned(),
+                    interface.clone(),
+                    "external_ids:nanpanel-owner".to_owned(),
+                ],
+            )
+            .await?;
+            if ovs_value(&owner) != ovs_port_owner(topology, link.id, node.id, side) {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
 async fn apply(topology: &CompiledTopology) -> Result<String, String> {
     let ip = ip_binary()?;
     if namespace_exists(&ip, &topology.namespace).await? {
@@ -670,6 +1208,8 @@ async fn apply(topology: &CompiledTopology) -> Result<String, String> {
             Err(_) => Err("FAILED: this topology revision already has a namespace with drift; verify or compensate it before retrying".to_owned()),
         };
     }
+
+    cleanup_ovs(topology).await?;
 
     run_fixed_command(
         &ip,
@@ -682,8 +1222,11 @@ async fn apply(topology: &CompiledTopology) -> Result<String, String> {
     )
     .await?;
     let result = apply_created(topology, &ip).await;
-    if result.is_err() {
-        let _ = run_fixed_command(
+    if let Err(error) = result {
+        if let Err(cleanup_error) = cleanup_ovs(topology).await {
+            return Err(format!("{error}; OVS cleanup failed: {cleanup_error}"));
+        }
+        if let Err(namespace_error) = run_fixed_command(
             &ip,
             &[
                 "netns".to_owned(),
@@ -692,7 +1235,13 @@ async fn apply(topology: &CompiledTopology) -> Result<String, String> {
             ],
             NETWORK_TIMEOUT,
         )
-        .await;
+        .await
+        {
+            return Err(format!(
+                "{error}; namespace cleanup failed: {namespace_error}"
+            ));
+        }
+        return Err(error);
     }
     result
 }
@@ -709,8 +1258,13 @@ async fn apply_created(topology: &CompiledTopology, ip: &Path) -> Result<String,
         ],
     )
     .await?;
+    start_ovs(topology).await?;
     for node in &topology.request.nodes {
         let bridge = &topology.bridges[&node.id];
+        if topology.is_ovs_switch(node.id) {
+            add_ovs_bridge(topology, node.id).await?;
+            continue;
+        }
         in_namespace(
             ip,
             &topology.namespace,
@@ -812,7 +1366,9 @@ async fn apply_created(topology: &CompiledTopology, ip: &Path) -> Result<String,
                 .packet_taps
                 .iter()
                 .any(|tap| tap.node_id == node_id && port == "out-2");
-            if !mirror_output && !topology.is_router(node_id) {
+            if topology.is_ovs_switch(node_id) {
+                add_ovs_port(topology, node_id, interface, link.id, side).await?;
+            } else if !mirror_output && !topology.is_router(node_id) {
                 in_namespace(
                     ip,
                     &topology.namespace,
@@ -1049,6 +1605,15 @@ async fn verify(topology: &CompiledTopology) -> Result<String, String> {
     let links = serde_json::from_str::<Vec<Value>>(&link_output)
         .map_err(|_| "UNCERTAIN: network namespace link output is invalid".to_owned())?;
     for node in &topology.request.nodes {
+        if topology.is_ovs_switch(node.id) {
+            if !verify_ovs_bridge(topology, node.id).await? {
+                return Err(format!(
+                    "FAILED: OVS switch {} bridge or private daemon is missing or has drifted",
+                    node.id
+                ));
+            }
+            continue;
+        }
         let expected = format!(
             "nanpanel:{}:{}:{}:{}",
             topology.request.topology_id,
@@ -1073,6 +1638,9 @@ async fn verify(topology: &CompiledTopology) -> Result<String, String> {
             ));
         }
     }
+    if !verify_ovs_ports(topology).await? {
+        return Err("FAILED: OVS bridge ports or ownership markers have drifted".to_owned());
+    }
     for link in &topology.request.links {
         let (source, target) = &topology.interfaces[&link.id];
         for (interface, node_id, side) in [
@@ -1088,12 +1656,14 @@ async fn verify(topology: &CompiledTopology) -> Result<String, String> {
                 node_id,
                 side
             );
-            let expected_master =
-                if topology.is_monitor_interface(interface) || topology.is_router(node_id) {
-                    None
-                } else {
-                    topology.bridges.get(&node_id).map(String::as_str)
-                };
+            let expected_master = if topology.is_monitor_interface(interface)
+                || topology.is_router(node_id)
+                || topology.is_ovs_switch(node_id)
+            {
+                None
+            } else {
+                topology.bridges.get(&node_id).map(String::as_str)
+            };
             let attached = links.iter().any(|actual| {
                 actual.get("ifname").and_then(Value::as_str) == Some(interface)
                     && actual
@@ -1514,13 +2084,15 @@ fn interface_statistics(links: &[Value], interface: &str) -> Option<Value> {
 
 async fn compensate(topology: &CompiledTopology) -> Result<String, String> {
     let ip = ip_binary()?;
-    if namespace_exists(&ip, &topology.namespace).await? {
-        if !namespace_owned(topology, &ip).await? {
-            return Err(
-                "DENIED: refusing to remove a namespace without this topology's ownership marker"
-                    .to_owned(),
-            );
-        }
+    let exists = namespace_exists(&ip, &topology.namespace).await?;
+    if exists && !namespace_owned(topology, &ip).await? {
+        return Err(
+            "DENIED: refusing to remove a namespace without this topology's ownership marker"
+                .to_owned(),
+        );
+    }
+    cleanup_ovs(topology).await?;
+    if exists {
         run_fixed_command(
             &ip,
             &[
@@ -1542,6 +2114,9 @@ async fn compensate(topology: &CompiledTopology) -> Result<String, String> {
 }
 
 async fn namespace_owned(topology: &CompiledTopology, ip: &Path) -> Result<bool, String> {
+    if topology.uses_ovs() {
+        return Ok(read_ovs_owner(topology)?.as_deref() == Some(ovs_owner(topology).as_str()));
+    }
     let Some(node) = topology.request.nodes.first() else {
         return Ok(false);
     };
@@ -1582,8 +2157,8 @@ async fn namespace_owned(topology: &CompiledTopology, ip: &Path) -> Result<bool,
 #[cfg(test)]
 mod tests {
     use super::{
-        Router, RouterRoute, compile, decode, firewall_rules_match, has_packet_mirror,
-        interface_statistics, router_routes_match, validate_target_payload,
+        Router, RouterRoute, SwitchBackend, compile, decode, firewall_rules_match,
+        has_packet_mirror, interface_statistics, router_routes_match, validate_target_payload,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -1609,6 +2184,56 @@ mod tests {
     fn accepts_only_isolated_linux_bridge_topologies() -> anyhow::Result<()> {
         let (target, payload) = sample();
         validate_target_payload(&target, Some(&payload)).map_err(anyhow::Error::msg)?;
+        Ok(())
+    }
+
+    #[test]
+    fn decodes_ovs_backend_and_rejects_mixing_it_with_packet_tap() -> anyhow::Result<()> {
+        let (target, payload) = sample();
+        let mut value = serde_json::from_str::<serde_json::Value>(&payload)?;
+        value["nodes"][0]["switchBackend"] = json!("OPENVSWITCH");
+        let decoded = decode(&value.to_string()).map_err(anyhow::Error::msg)?;
+        assert_eq!(
+            decoded.nodes[0].switch_backend,
+            Some(SwitchBackend::Openvswitch)
+        );
+
+        value["nodes"][1]["kind"] = json!("PACKET_TAP");
+        let error = compile(
+            &target,
+            decode(&value.to_string()).map_err(anyhow::Error::msg)?,
+        )
+        .expect_err("OVS and Packet Tap must not share a topology revision");
+        assert!(error.contains("cannot include Firewall or Packet Tap"));
+        value["nodes"][0]["switchBackend"] = json!("UNSUPPORTED");
+        assert!(decode(&value.to_string()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn ovs_verify_and_compensate_compile_without_apply_prerequisites() -> anyhow::Result<()> {
+        let (target, payload) = sample();
+        let mut value = serde_json::from_str::<serde_json::Value>(&payload)?;
+        value["nodes"][0]["switchBackend"] = json!("OPENVSWITCH");
+        for action in ["VERIFY", "COMPENSATE"] {
+            value["action"] = json!(action);
+            compile(
+                &target,
+                decode(&value.to_string()).map_err(anyhow::Error::msg)?,
+            )
+            .map_err(anyhow::Error::msg)?;
+        }
+
+        value["action"] = json!("APPLY");
+        let result = compile(
+            &target,
+            decode(&value.to_string()).map_err(anyhow::Error::msg)?,
+        );
+        if super::ovs_available() {
+            result.map_err(anyhow::Error::msg)?;
+        } else {
+            assert!(result.is_err_and(|error| error.contains("trusted OVS userspace tools")));
+        }
         Ok(())
     }
 

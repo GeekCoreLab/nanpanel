@@ -25,7 +25,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 
-/** Linux bridge, Firewall, and Packet Tap Provider isolated in a dedicated netns. */
+/** Linux bridge/OVS, Firewall, Packet Tap, and Router Provider isolated in a dedicated netns. */
 @RequestScoped
 public class LinuxNetnsProvider implements NetworkProvider {
   public static final String ID = "linux-netns";
@@ -48,7 +48,8 @@ public class LinuxNetnsProvider implements NetworkProvider {
   private record HelperStaticRoute(String destination, String gateway, String outputPort) {}
   private record HelperRouterConfiguration(List<HelperRouterInterface> interfaces,
                                            List<HelperStaticRoute> routes) {}
-  private record HelperNode(String id, String kind, HelperFirewallPolicy firewallPolicy,
+  private record HelperNode(String id, String kind, String switchBackend,
+                            HelperFirewallPolicy firewallPolicy,
                             HelperRouterConfiguration routerConfiguration) {}
   private record HelperLink(String id, String sourceNodeId, String sourcePort,
                             String targetNodeId, String targetPort, String layer,
@@ -70,12 +71,12 @@ public class LinuxNetnsProvider implements NetworkProvider {
 
   @Override
   public Set<String> capabilities() {
-    return Set.of("linux.bridge", "linux.router.ipv4");
+    return Set.of("linux.bridge", "linux.ovs", "linux.router.ipv4");
   }
 
   @Override
   public ProviderDescriptor descriptor() {
-    return new ProviderDescriptor(ID, "Linux Bridge, IPv4 Router, Firewall and Packet Tap (isolated netns)", "0.4.0",
+    return new ProviderDescriptor(ID, "Linux Bridge and OVS, IPv4 Router, Firewall and Packet Tap (isolated netns)", "0.5.0",
         "panel.io/plugins/v1");
   }
 
@@ -85,7 +86,9 @@ public class LinuxNetnsProvider implements NetworkProvider {
         new Capability("linux.bridge", OPERATIONS, Set.of("L2"),
             Set.of("ETHERNET"), Set.of("SWITCH", "PACKET_TAP", "FIREWALL")),
         new Capability("linux.router.ipv4", OPERATIONS, Set.of("L2"),
-            Set.of("ETHERNET"), Set.of("ROUTER"))));
+            Set.of("ETHERNET"), Set.of("ROUTER")),
+        new Capability("linux.ovs", OPERATIONS, Set.of("L2"),
+            Set.of("ETHERNET"), Set.of("SWITCH"))));
   }
 
   @Override
@@ -160,7 +163,7 @@ public class LinuxNetnsProvider implements NetworkProvider {
           && configuration.revisionId().toString().equals(report.path("revisionId").asText())
           && report.path("generation").asLong() == configuration.topologyGeneration();
       return CompletableFuture.completedFuture(new ValidationResult(verified,
-          verified ? "Linux bridges, Packet Tap mirror filters, and veth resources match in the isolated netns; default route count is zero"
+          verified ? "Linux bridges, OVS bridges, Packet Tap mirror filters, and veth resources match in the isolated netns; default route count is zero"
               : "Helper reported that the isolated topology differs from the saved revision"));
     } catch (Exception failure) {
       return CompletableFuture.completedFuture(
@@ -254,6 +257,17 @@ public class LinuxNetnsProvider implements NetworkProvider {
           throw new IllegalArgumentException(
               "Linux netns Provider accepts only root SWITCH, PACKET_TAP, FIREWALL, and ROUTER devices");
         }
+        String switchBackend = null;
+        JsonNode backendNode = node.get("switchBackend");
+        if ("SWITCH".equals(kind)) {
+          switchBackend = backendNode == null || backendNode.isNull()
+              ? "BRIDGE" : backendNode.asText();
+          if (!Set.of("BRIDGE", "OPENVSWITCH").contains(switchBackend)) {
+            throw new IllegalArgumentException("SWITCH backend must be BRIDGE or OPENVSWITCH");
+          }
+        } else if (backendNode != null && !backendNode.isNull()) {
+          throw new IllegalArgumentException("Only SWITCH can select a switch backend");
+        }
         UUID id = UUID.fromString(node.path("id").asText());
         if (!selectedNodeIds.add(id.toString())) {
           throw new IllegalArgumentException("Provider device IDs must be unique");
@@ -279,13 +293,20 @@ public class LinuxNetnsProvider implements NetworkProvider {
           throw new IllegalArgumentException("Only ROUTER can include a router configuration");
         }
         selectedNodeKinds.put(id.toString(), kind);
-        helperNodes.add(new HelperNode(id.toString(), kind, policy, routerConfiguration));
+        helperNodes.add(new HelperNode(id.toString(), kind, switchBackend, policy,
+            routerConfiguration));
       }
       if (helperNodes.isEmpty() || helperNodes.size() > 16 || links.size() > 64) {
         throw new IllegalArgumentException("Linux netns plan needs 1 to 16 devices and at most 64 wires");
       }
       if (helperNodes.stream().filter(node -> "ROUTER".equals(node.kind())).count() > 1) {
         throw new IllegalArgumentException("One isolated Linux netns topology supports at most one Router routing table");
+      }
+      boolean usesOvs = helperNodes.stream().anyMatch(node -> "OPENVSWITCH".equals(node.switchBackend()));
+      if (usesOvs && helperNodes.stream().anyMatch(node ->
+          "FIREWALL".equals(node.kind()) || "PACKET_TAP".equals(node.kind()))) {
+        throw new IllegalArgumentException(
+            "OVS topology plans currently cannot include Firewall or Packet Tap devices");
       }
       List<HelperLink> helperLinks = new ArrayList<>();
       for (JsonNode link : links) {
@@ -489,16 +510,24 @@ public class LinuxNetnsProvider implements NetworkProvider {
         return "Execution host capability report is invalid";
       }
       boolean capable = capabilities != null && capabilities.isArray();
+      boolean ovsRequired = configuration.nodes().stream()
+          .anyMatch(node -> "OPENVSWITCH".equals(node.switchBackend()));
+      boolean ovsCapable = false;
       if (capable) {
         capable = false;
         for (JsonNode value : capabilities) {
           if (value.isTextual() && "network.topology.reconcile".equals(value.asText())) {
             capable = true;
-            break;
+          }
+          if (value.isTextual() && "network.topology.ovs".equals(value.asText())) {
+            ovsCapable = true;
           }
         }
       }
       if (!capable) return "Execution host Helper does not report isolated topology support";
+      if (ovsRequired && !ovsCapable) {
+        return "Execution host Helper does not report isolated OVS topology support";
+      }
       if (!"AVAILABLE".equals(row.get("helper_status"))) {
         return "Execution host Helper is unavailable";
       }

@@ -287,6 +287,33 @@ class TopologyResourceTest {
     assertEquals(savedEtag, lastEtag);
   }
 
+  @Test
+  void persistsOnlySupportedSwitchBackendsOnSwitchNodes() {
+    getDraft();
+    Map<String, Object> switchNode = node(UUID.randomUUID(), "SWITCH", "OVS switch",
+        100, 100, null, null, 2, 2, List.of(
+            port("in-1", "INPUT", "L2", List.of("ETHERNET")),
+            port("in-2", "INPUT", "L2", List.of("ETHERNET")),
+            port("out-1", "OUTPUT", "L2", List.of("ETHERNET")),
+            port("out-2", "OUTPUT", "L2", List.of("ETHERNET"))));
+    switchNode.put("switchBackend", "OPENVSWITCH");
+    var saved = given().cookie("nanpanel_session", sessionCookie)
+        .header("X-CSRF-Token", csrfToken).header("If-Match", lastEtag)
+        .contentType("application/json")
+        .body(Map.of("nodes", List.of(switchNode), "links", List.of()))
+        .put("/api/v1/topology/draft").then().statusCode(200).extract();
+    assertEquals("OPENVSWITCH", saved.path("nodes[0].switchBackend"));
+
+    Map<String, Object> invalid = new LinkedHashMap<>(switchNode);
+    invalid.put("switchBackend", "UNSAFE");
+    given().cookie("nanpanel_session", sessionCookie)
+        .header("X-CSRF-Token", csrfToken).header("If-Match", saved.header("ETag"))
+        .contentType("application/json")
+        .body(Map.of("nodes", List.of(invalid), "links", List.of()))
+        .put("/api/v1/topology/draft").then().statusCode(422)
+        .body("code", org.hamcrest.Matchers.equalTo("INVALID_TOPOLOGY"));
+  }
+
   private String lastEtag;
 
   private JsonNode getDraft() {

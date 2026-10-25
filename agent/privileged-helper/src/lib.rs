@@ -81,6 +81,7 @@ pub struct HelperConfig {
     nginx_routes: Option<nginx_routes::NginxRouteConfig>,
     network_operations_available: bool,
     topology_operations_available: bool,
+    ovs_operations_available: bool,
     netbird_binary: Option<std::path::PathBuf>,
 }
 
@@ -163,6 +164,7 @@ struct HelperRuntime {
     nginx_routes: Option<Arc<NginxRouteConfig>>,
     network_operations_available: bool,
     topology_operations_available: bool,
+    ovs_operations_available: bool,
     kubeedge_available: bool,
     netbird_binary: Option<Arc<std::path::PathBuf>>,
     network_lock: tokio::sync::Mutex<()>,
@@ -265,6 +267,7 @@ impl HelperConfig {
             nginx_routes: None,
             network_operations_available,
             topology_operations_available: topology::available(),
+            ovs_operations_available: topology::ovs_available(),
             netbird_binary,
         })
     }
@@ -300,6 +303,7 @@ pub async fn serve(config: HelperConfig) -> Result<()> {
         nginx_routes: config.nginx_routes.map(Arc::new),
         network_operations_available: config.network_operations_available,
         topology_operations_available: config.topology_operations_available,
+        ovs_operations_available: config.ovs_operations_available,
         kubeedge_available,
         netbird_binary: config.netbird_binary.map(Arc::new),
         network_lock: tokio::sync::Mutex::new(()),
@@ -405,6 +409,7 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                             runtime.container_runtime.is_some(),
                                             runtime.network_operations_available,
                                             runtime.topology_operations_available,
+                                            runtime.ovs_operations_available,
                                             runtime.netbird_binary.is_some(),
                                             runtime.kubeedge_available,
                                             runtime.nginx_routes.is_some(),
@@ -710,6 +715,7 @@ fn available_capabilities(
     has_container_runtime: bool,
     network_operations_available: bool,
     topology_operations_available: bool,
+    ovs_operations_available: bool,
     netbird_status_available: bool,
     kubeedge_available: bool,
     nginx_routes_available: bool,
@@ -742,6 +748,9 @@ fn available_capabilities(
     }
     if topology_operations_available {
         capabilities.push("network.topology.reconcile");
+    }
+    if topology_operations_available && ovs_operations_available {
+        capabilities.push("network.topology.ovs");
     }
     if netbird_status_available {
         capabilities.push("network.overlay.peer_paths.read");
@@ -3697,7 +3706,7 @@ mod tests {
         assert!(!valid_container_image("./nginx"));
         assert!(valid_network_interface("br-0"));
         assert!(!valid_network_interface("-eth0"));
-        let capabilities = available_capabilities(true, true, true, true, true, true);
+        let capabilities = available_capabilities(true, true, true, true, true, true, true);
         for capability in [
             "systemd.restart",
             "systemd.journal.read",
@@ -3710,6 +3719,7 @@ mod tests {
             "container.deploy",
             "network.firewall.expose",
             "network.topology.reconcile",
+            "network.topology.ovs",
             "k3s.preflight",
             "kubeedge.edgecore.join",
             "network.overlay.peer_paths.read",
@@ -3717,6 +3727,10 @@ mod tests {
         ] {
             assert!(capabilities.contains(&capability));
         }
+        let capabilities_without_ovs =
+            available_capabilities(true, true, true, false, true, true, true);
+        assert!(capabilities_without_ovs.contains(&"network.topology.reconcile"));
+        assert!(!capabilities_without_ovs.contains(&"network.topology.ovs"));
         assert!(
             validate_capability_target(
                 "network.overlay.peer_paths.read",
@@ -3823,23 +3837,23 @@ mod tests {
             .is_ok()
         );
         assert!(
-            available_capabilities(false, false, false, false, true, false)
+            available_capabilities(false, false, false, false, false, true, false)
                 .contains(&"kubeedge.edgecore.join")
         );
         assert!(
-            !available_capabilities(false, false, false, false, false, false)
+            !available_capabilities(false, false, false, false, false, false, false)
                 .contains(&"kubeedge.edgecore.join")
         );
         assert!(
-            !available_capabilities(false, false, false, false, false, false)
+            !available_capabilities(false, false, false, false, false, false, false)
                 .contains(&"network.firewall.expose")
         );
         assert!(
-            available_capabilities(false, true, false, false, false, false)
+            available_capabilities(false, true, false, false, false, false, false)
                 .contains(&"network.firewall.expose")
         );
         assert!(
-            !available_capabilities(false, false, false, false, false, false)
+            !available_capabilities(false, false, false, false, false, false, false)
                 .contains(&"network.overlay.peer_paths.read")
         );
     }

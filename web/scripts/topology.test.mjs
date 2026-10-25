@@ -40,6 +40,11 @@ test('direction, explicit fan-in/fan-out, port occupancy, references and cycles'
   assert.ok(draftError({ nodes: [gateway, gateway], links: [] }));
   assert.equal(draftError({ nodes: [{ ...node('ROUTER'), providerId: 'linux.bridge' }], links: [] }), null);
   assert.ok(draftError({ nodes: [{ ...node('ROUTER'), providerId: '../host' }], links: [] }));
+  const switchNode = node('SWITCH');
+  assert.equal(switchNode.switchBackend, 'BRIDGE');
+  assert.equal(draftError({ nodes: [{ ...switchNode, switchBackend: 'OPENVSWITCH' }], links: [] }), null);
+  assert.ok(draftError({ nodes: [{ ...switchNode, switchBackend: 'UNSAFE' }], links: [] }));
+  assert.ok(draftError({ nodes: [{ ...node('ROUTER'), switchBackend: 'OPENVSWITCH' }], links: [] }));
   assert.ok(draftError({ nodes: [{ ...gateway, position: { x: Infinity, y: 0 } }], links: [] }));
   assert.ok(draftError({ nodes, links: [{ ...link(gateway, merge), status: 'HEALTHY' }] }));
   assert.ok(draftError({ nodes, links: [link(gateway, merge, 'out-1', 'in-1', 'L4', 'HTTP')] }));
@@ -55,6 +60,7 @@ test('Provider device binding requires declared device, port, and lifecycle capa
   assert.equal(providerSupportsDevice(provider, 'ROUTER', 'L4', ['TCP']), true);
   assert.equal(providerSupportsDevice(provider, 'ROUTER', 'L4', ['TCP', 'UDP']), false);
   assert.equal(providerSupportsDevice(provider, 'SWITCH', 'L4', ['TCP']), false);
+  assert.equal(providerSupportsDevice({ ...provider, capabilityDetails: [{ ...provider.capabilityDetails[0], deviceKinds: ['SWITCH'], layers: ['L2'], protocols: ['ETHERNET'] }] }, 'SWITCH', 'L2', ['ETHERNET']), true);
   assert.equal(providerSupportsDevice({ ...provider, capabilityDetails: [{ ...provider.capabilityDetails[0], operations: ['PLAN', 'VALIDATE'] }] }, 'ROUTER', 'L4', ['TCP']), false);
 });
 

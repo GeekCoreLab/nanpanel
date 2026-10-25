@@ -694,6 +694,7 @@ struct NetworkTopologyPayload {
 struct NetworkTopologyNode {
     id: String,
     kind: String,
+    switch_backend: Option<String>,
     firewall_policy: Option<NetworkFirewallPolicy>,
     router_configuration: Option<NetworkRouterConfiguration>,
 }
@@ -1010,9 +1011,27 @@ fn valid_network_topology_payload(payload: NetworkTopologyPayload) -> bool {
                     node.kind.as_str(),
                     "SWITCH" | "PACKET_TAP" | "FIREWALL" | "ROUTER"
                 )
+                || (node.kind == "SWITCH"
+                    && node
+                        .switch_backend
+                        .as_deref()
+                        .is_some_and(|backend| !matches!(backend, "BRIDGE" | "OPENVSWITCH")))
+                || (node.kind != "SWITCH" && node.switch_backend.is_some())
                 || (node.kind == "FIREWALL") != node.firewall_policy.is_some()
                 || (node.kind == "ROUTER") != node.router_configuration.is_some()
         })
+    {
+        return false;
+    }
+    let uses_ovs = payload
+        .nodes
+        .iter()
+        .any(|node| node.switch_backend.as_deref() == Some("OPENVSWITCH"));
+    if uses_ovs
+        && payload
+            .nodes
+            .iter()
+            .any(|node| matches!(node.kind.as_str(), "FIREWALL" | "PACKET_TAP"))
     {
         return false;
     }
@@ -1987,6 +2006,15 @@ mod tests {
           }]
         }"#;
         assert!(valid_topology_dispatch(topology, payload));
+        let ovs_payload = payload.replace(
+            "\"kind\":\"SWITCH\"",
+            "\"kind\":\"SWITCH\",\"switchBackend\":\"OPENVSWITCH\"",
+        );
+        assert!(valid_topology_dispatch(topology, &ovs_payload));
+        assert!(!valid_topology_dispatch(
+            topology,
+            &ovs_payload.replace("OPENVSWITCH", "UNSUPPORTED")
+        ));
         assert!(!valid_topology_dispatch(
             "66666666-6666-4666-8666-666666666666",
             payload
@@ -2037,6 +2065,13 @@ mod tests {
           ]
         }"#;
         assert!(valid_topology_dispatch(topology, payload));
+        assert!(!valid_topology_dispatch(
+            topology,
+            &payload.replace(
+                "\"kind\":\"SWITCH\"",
+                "\"kind\":\"SWITCH\",\"switchBackend\":\"OPENVSWITCH\""
+            )
+        ));
         assert!(!valid_topology_dispatch(
             topology,
             &payload.replace("\"inputPort\":\"in-1\"", "\"inputPort\":\"in-2\"")

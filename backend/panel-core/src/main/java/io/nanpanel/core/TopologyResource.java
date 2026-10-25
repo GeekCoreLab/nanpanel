@@ -69,7 +69,8 @@ public class TopologyResource {
   public record NodeView(String id, String kind, String name, Position position,
                          int inputCount, int outputCount, List<PortView> ports,
                          String parentId, String assetId, String clusterId, String ipAddress,
-                         String description, String providerId, FirewallPolicyView firewallPolicy,
+                         String description, String providerId, String switchBackend,
+                         FirewallPolicyView firewallPolicy,
                          RouterConfigurationView routerConfiguration) {}
   public record LinkView(String id, String sourceNodeId, String sourcePort, String targetNodeId,
                          String targetPort, String layer, String protocol, String status,
@@ -245,6 +246,8 @@ public class TopologyResource {
               && !node.get("ipAddress").isTextual()
           || node.has("providerId") && !node.get("providerId").isNull()
               && !node.get("providerId").isTextual()
+          || node.has("switchBackend") && !node.get("switchBackend").isNull()
+              && !node.get("switchBackend").isTextual()
           || node.has("firewallPolicy") && !node.get("firewallPolicy").isNull()
               && !validFirewallPolicyShape(node.get("firewallPolicy"))
           || node.has("routerConfiguration") && !node.get("routerConfiguration").isNull()
@@ -306,7 +309,7 @@ public class TopologyResource {
               ? null : node.ipAddress().strip(), node.description() == null || node.description().isBlank()
                   ? null : node.description().strip(), node.providerId() == null
                       || node.providerId().isBlank() ? null : node.providerId().strip(),
-          node.firewallPolicy(), node.routerConfiguration());
+          node.switchBackend(), node.firewallPolicy(), node.routerConfiguration());
     }).toList();
     List<LinkInput> links = input.links().stream().map(link -> {
       if (link == null) {
@@ -360,6 +363,11 @@ public class TopologyResource {
       if (node.ipAddress() != null && (!"ROUTER".equals(node.kind())
           || !validIpAddress(node.ipAddress()))) {
         return "下一跳 IP 只能设置在 Router 节点上，且必须是有效 IPv4/IPv6 地址";
+      }
+      if (node.switchBackend() != null
+          && (!"SWITCH".equals(node.kind())
+              || !Set.of("BRIDGE", "OPENVSWITCH").contains(node.switchBackend()))) {
+        return "交换机后端只能为 SWITCH 选择 BRIDGE 或 OPENVSWITCH";
       }
       String firewallError = firewallPolicyError(node);
       if (firewallError != null) return firewallError;
@@ -508,7 +516,7 @@ public class TopologyResource {
   private boolean objectWithNodeKeys(JsonNode value) {
     Set<String> allowed = Set.of("id", "kind", "name", "position", "inputCount",
         "outputCount", "ports", "parentId", "assetId", "clusterId", "ipAddress",
-        "description", "providerId", "firewallPolicy", "routerConfiguration");
+        "description", "providerId", "switchBackend", "firewallPolicy", "routerConfiguration");
     Set<String> required = Set.of("id", "kind", "name", "position", "inputCount",
         "outputCount", "ports");
     if (value == null || !value.isObject() || value.size() < required.size()

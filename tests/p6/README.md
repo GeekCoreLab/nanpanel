@@ -19,5 +19,16 @@ kernel behavior and management-route isolation. Provider unit/API checks cover
 typed Router and Firewall plans plus Helper policy verifiers, but the lab does
 not apply a NaNPanel Provider graph or reconcile its state. The first Router
 Provider supports IPv4 and one routing table per topology; multiple independent
-Routers, OVS-backed execution, and Core-to-Agent Provider dispatch on a live
-host remain separate P6 acceptance items.
+Routers and broader L3 behavior remain separate P6 acceptance items.
+
+`./tests/p6/openvswitch-netdev-lab.sh` downloads a temporary Debian container,
+installs OVS only inside that container, removes its default route, starts a
+private OVSDB and `ovs-vswitchd`, and attaches two veth ports to a `netdev`
+bridge. A raw Ethernet broadcast with a custom EtherType must arrive on the
+other veth; the script also checks exact Bridge/Port ownership markers and
+hashes host default routes before and after. The container is removed after the
+lab, and no host OVS package or daemon is installed. This proves the OVS
+userspace datapath behavior, not a Core-to-Helper Provider Apply. The target
+`k3s-1` currently lacks the optional OVS tools and therefore does not advertise
+`network.topology.ovs`; the deployed Provider rejects OVS plans there until an
+operator separately provisions those host prerequisites.

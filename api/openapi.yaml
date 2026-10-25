@@ -5314,6 +5314,10 @@ components:
           maxLength: 80
           pattern: ^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$
           description: Optional selected NetworkProvider ID; assignment records intent and does not deploy the node.
+        switchBackend:
+          type: [string, 'null']
+          enum: [BRIDGE, OPENVSWITCH, null]
+          description: Desired SWITCH datapath backend; OPENVSWITCH requires an execution Helper with isolated OVS userspace support.
         firewallPolicy:
           oneOf:
           - $ref: '#/components/schemas/FirewallPolicy'

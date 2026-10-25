@@ -66,10 +66,15 @@ class NetworkProviderApiTest {
         .body("[0].capabilityDetails[0].operations",
             hasItems("PLAN", "VALIDATE", "APPLY", "VERIFY", "COMPENSATE"))
         .body("[0].capabilities", hasItem("linux.router.ipv4"))
+        .body("[0].capabilities", hasItem("linux.ovs"))
         .body("[0].capabilityDetails[1].id", equalTo("linux.router.ipv4"))
         .body("[0].capabilityDetails[1].deviceKinds", hasItem("ROUTER"))
         .body("[0].capabilityDetails[1].layers", hasItem("L2"))
-        .body("[0].capabilityDetails[1].protocols", hasItem("ETHERNET"));
+        .body("[0].capabilityDetails[1].protocols", hasItem("ETHERNET"))
+        .body("[0].capabilityDetails[2].id", equalTo("linux.ovs"))
+        .body("[0].capabilityDetails[2].deviceKinds", hasItem("SWITCH"))
+        .body("[0].capabilityDetails[2].operations",
+            hasItems("PLAN", "VALIDATE", "APPLY", "VERIFY", "COMPENSATE"));
     var initialDraft = given().cookie("nanpanel_session", session.cookie())
         .get("/api/v1/topology/draft").then().statusCode(200).extract();
     Map<String, Object> switchNode = Map.of(

@@ -41,9 +41,16 @@ read-only route inventory; it is not enough to configure a real router.
    interface addresses, exact static routes, forwarding state, and absence of
    undeclared default routes before reporting success. Compensation removes
    only a namespace with the matching ownership marker.
-5. Add OVS support and broader L3 behavior only after each device has an
-   explicit configuration model, typed Helper schema, and real kernel
-   acceptance evidence.
+5. Offer Open vSwitch as an explicit `SWITCH` backend of the built-in Provider.
+   Start a private OVSDB and `ovs-vswitchd` for each topology revision; use the
+   `netdev` userspace datapath inside that revision's network namespace. Keep
+   OVS files, sockets, and ownership markers in a private `/run/nanpanel` path.
+   Do not use a host OVS daemon or install OVS automatically. Require trusted
+   OVS tools, schema, and `/dev/net/tun` before Apply. Reject Firewall and
+   Packet Tap nodes in an OVS graph until their datapath behavior is verified.
+6. Add multiple independent Router tables and broader L3 behavior only after
+   each Router has an explicit routing-table model, typed Helper schema, and
+   isolated forwarding acceptance evidence.
 
 ## Consequences
 
@@ -55,7 +62,9 @@ read-only route inventory; it is not enough to configure a real router.
 - A saved graph remains desired state until an operator creates and advances a
   persisted Provider operation.
 - Router execution is IPv4-only and limited to one routing table per topology;
-  multiple independent Routers, OVS, and management-path probes remain open.
+  multiple independent Routers and broader L3 behavior remain open. OVS switch
+  execution is capability-gated and uses an isolated userspace datapath; the
+  current OVS slice rejects Firewall and Packet Tap devices.
   RX/TX counters are passive kernel snapshots; the Provider does not generate
   test traffic or claim end-to-end connectivity.
 - The network namespace registry under `/run/netns` is host-visible metadata;
@@ -67,9 +76,11 @@ The Rust Helper validates the typed request again at the privilege boundary.
 Provider verification checks namespace ownership, bridge/veth device kinds,
 port-to-bridge membership, exact Router addresses/routes/forwarding state,
 exact Firewall chain policy and rules, Packet Tap `mirred` egress filters, and
-absence of undeclared default routes. The isolated P6 Linux lab separately
+absence of undeclared default routes. For OVS, it also checks private daemon
+control sockets, `netdev` bridge type, exact bridge/port ownership, and bridge
+membership. The isolated P6 Linux and OVS labs separately
 exercises real bridge-family Firewall drops, routed TCP, a static IPv4 route,
-host nftables, and `tc` behavior while hashing host default routes before and
-after. The Provider is deployed to `k3s-1` and its runtime Helper capability is
-verified read-only; production-topology Apply remains a separate acceptance
-gate.
+host nftables, `tc` behavior, and raw Ethernet forwarding through OVS while
+hashing host default routes before and after. The Provider is deployed to
+`k3s-1` and its runtime Helper capability is verified read-only;
+production-topology Apply remains a separate acceptance gate.

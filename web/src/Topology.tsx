@@ -137,7 +137,8 @@ function Device({ data, selected }: NodeProps<DeviceNode>) {
 }
 const nodeTypes = { device: Device };
 type Menu = { x: number; y: number; point: { x: number; y: number }; nodeId?: string; edgeId?: string };
-type NodeSettings = { nodeId: string; name: string; description: string; layer: TopologyLayer; protocols: TopologyProtocol[]; providerId: string; firewallPolicy: FirewallPolicy; routerConfiguration: RouterConfiguration };
+type SwitchBackend = 'BRIDGE' | 'OPENVSWITCH';
+type NodeSettings = { nodeId: string; name: string; description: string; layer: TopologyLayer; protocols: TopologyProtocol[]; providerId: string; switchBackend: SwitchBackend; firewallPolicy: FirewallPolicy; routerConfiguration: RouterConfiguration };
 const protocolOptions: Record<TopologyLayer, TopologyProtocol[]> = {
   L2: ['ETHERNET'], L3: ['IP'], L4: ['TCP', 'UDP', 'SCTP'], L7: ['HTTP', 'HTTPS'],
 };
@@ -407,7 +408,7 @@ function Editor() {
   }
   function openNodeSettings(node: TopologyNode) {
     const firstPort = node.ports[0];
-    setNodeSettings({ nodeId: node.id, name: node.name, description: node.description ?? '', layer: firstPort?.layer ?? 'L4', protocols: [...(firstPort?.protocols ?? ['TCP'])], providerId: node.providerId ?? '', firewallPolicy: { defaultAction: node.firewallPolicy?.defaultAction ?? 'DROP', rules: (node.firewallPolicy?.rules ?? []).map(rule => ({ ...rule })) }, routerConfiguration: { interfaces: (node.routerConfiguration?.interfaces ?? []).map(iface => ({ ...iface })), routes: (node.routerConfiguration?.routes ?? []).map(route => ({ ...route })) } });
+    setNodeSettings({ nodeId: node.id, name: node.name, description: node.description ?? '', layer: firstPort?.layer ?? 'L4', protocols: [...(firstPort?.protocols ?? ['TCP'])], providerId: node.providerId ?? '', switchBackend: node.switchBackend ?? 'BRIDGE', firewallPolicy: { defaultAction: node.firewallPolicy?.defaultAction ?? 'DROP', rules: (node.firewallPolicy?.rules ?? []).map(rule => ({ ...rule })) }, routerConfiguration: { interfaces: (node.routerConfiguration?.interfaces ?? []).map(iface => ({ ...iface })), routes: (node.routerConfiguration?.routes ?? []).map(route => ({ ...route })) } });
     setNodeSettingsError(''); setMenu(undefined);
   }
   function saveNodeSettings(event: FormEvent<HTMLFormElement>) {
@@ -423,10 +424,15 @@ function Editor() {
     }
     const updated = { ...current, name: nodeSettings.name.trim(), description: nodeSettings.description.trim() || null,
       providerId: nodeSettings.providerId || null,
+      switchBackend: current.kind === 'SWITCH' ? nodeSettings.switchBackend : null,
       firewallPolicy: current.kind === 'FIREWALL' ? nodeSettings.firewallPolicy : null,
       routerConfiguration: current.kind === 'ROUTER' && (nodeSettings.routerConfiguration.interfaces.length || nodeSettings.routerConfiguration.routes.length) ? nodeSettings.routerConfiguration : null,
       ports: current.ports.map(port => ({ ...port, layer: nodeSettings.layer, protocols: [...nodeSettings.protocols] })) };
     const candidateNodes = nodes.map(node => node.id === current.id ? updated : node.data.model);
+    const providerUsesOvs = candidateNodes.some(node => node.providerId === 'linux-netns' && node.kind === 'SWITCH' && node.switchBackend === 'OPENVSWITCH');
+    if (providerUsesOvs && candidateNodes.some(node => node.providerId === 'linux-netns' && ['FIREWALL', 'PACKET_TAP'].includes(node.kind))) {
+      setNodeSettingsError('Open vSwitch 切片当前不能与同一 linux-netns Provider 下的 Firewall 或 Packet Tap 共存。'); return;
+    }
     const invalid = draftError({ nodes: candidateNodes, links: edges.map(asLink) });
     if (invalid) { setNodeSettingsError(`这些接口设置会使当前拓扑无效：${invalid}`); return; }
     setNodes(existing => existing.map(node => node.id === current.id ? { ...node, data: { ...node.data, model: updated } } : node));
@@ -858,6 +864,7 @@ function Editor() {
             {compatibleProviders.map(provider => <option key={provider.id} value={provider.id}>{provider.name ?? provider.id} ({provider.id})</option>)}
           </select></label>
           <small>{networkProvidersError ? `无法读取 Core Provider 能力：${networkProvidersError}` : compatibleProviders.length ? 'Provider 必须声明此设备、接口层/协议及完整变更和补偿阶段。绑定只记录执行目标，不代表网络规则已经应用。' : '当前没有已加载 Provider 声明支持此设备及接口能力；节点仍只作为期望配置保存。'}</small>
+          {settingsNode.kind === 'SWITCH' && nodeSettings.providerId === 'linux-netns' && <label className="field"><span>交换机数据面</span><select aria-label="交换机数据面" value={nodeSettings.switchBackend} onChange={event => setNodeSettings({ ...nodeSettings, switchBackend: event.target.value as SwitchBackend })}><option value="BRIDGE">Linux Bridge</option><option value="OPENVSWITCH">Open vSwitch（用户态）</option></select><small>Open vSwitch 需要执行主机报告 network.topology.ovs；当前隔离切片不支持同图混用 Firewall 或 Packet Tap。</small></label>}
         </>}
         {settingsNode?.kind === 'FIREWALL' && <section className="topology-firewall-policy" aria-label="期望防火墙策略">
           <h3>防火墙期望策略</h3>
