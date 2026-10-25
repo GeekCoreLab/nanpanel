@@ -1,4 +1,9 @@
-import { useEffect, useMemo, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
+import {
+  Background, ConnectionMode, Controls, Handle, MarkerType, Position, ReactFlow, ReactFlowProvider,
+  useNodesState, useReactFlow,
+  type Connection, type Edge, type Node, type NodeProps,
+} from '@xyflow/react';
 import { api, isMock } from './lib/api';
 import type {
   KubernetesApplication,
@@ -110,17 +115,9 @@ export default function Applications({ notify }: { notify: (message: string) => 
   const deployments = useMemo(() => nodeList.filter(node => node.kind === 'Deployment'), [nodeList]);
   const services = useMemo(() => nodeList.filter(node => node.kind === 'Service'), [nodeList]);
   const accounts = useMemo(() => nodeList.filter(node => node.kind === 'ServiceAccount'), [nodeList]);
-  const positioned = useMemo(() => {
-    const map = new Map<string, { x: number; y: number }>();
-    services.forEach((node, index) => map.set(node.id, { x: 300, y: 65 + index * 140 }));
-    deployments.forEach((node, index) => map.set(node.id, { x: 650, y: 82 + index * 155 }));
-    return map;
-  }, [services, deployments]);
-  const topologyHeight = Math.max(4 * 140 + 70, deployments.length * 155 + 48, 460);
-
-  function updateNode(node: KubernetesApplicationTopologyNode, value: Editable) {
+  const updateNode = useCallback((node: KubernetesApplicationTopologyNode, value: Editable) => {
     setChanges(current => ({ ...current, [node.id]: { ...current[node.id], ...value } }));
-  }
+  }, []);
 
   async function createBookinfo(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -249,28 +246,19 @@ export default function Applications({ notify }: { notify: (message: string) => 
             {hasDraft && <div className="application-draft-banner"><span>◈</span><div><strong>v{currentDraft?.version} 有待确认差异</strong><small>检查版本历史中的 YAML diff，确认后部署；拓扑编辑会先锁定到该草稿。</small></div><button className="link" onClick={() => setView('versions')}>查看 diff →</button></div>}
             <section className="application-topology-card">
               <div className="application-section-heading"><div><span className="eyebrow">YAML DERIVED TOPOLOGY</span><h3>应用拓扑</h3><p>连线来自 Service selector 与 Deployment Pod 标签的匹配结果。</p></div><span className="application-topology-legend"><i className="service-dot" /> Service <i className="deployment-dot" /> Deployment</span></div>
-              <div className="application-topology-canvas" style={{ height: topologyHeight }}>
-                <svg viewBox={`0 0 1000 ${topologyHeight}`} preserveAspectRatio="none" aria-hidden="true">
-                  {detail.topology.edges.map(edge => {
-                    const from = positioned.get(edge.source); const to = positioned.get(edge.target);
-                    if (!from || !to) return null;
-                    return <path key={edge.id} d={`M ${from.x} ${from.y} C 445 ${from.y}, 495 ${to.y}, ${to.x} ${to.y}`} />;
-                  })}
-                </svg>
-                {services.map((node, index) => <ApplicationNode key={node.id} node={node} style={{ left: '3%', top: 22 + index * 140 }}>
-                  <div className="application-node-row"><span className="node-type service">SVC</span><AppState value={node.state} /></div>
-                  <strong>{node.name}</strong><small>ClusterIP Service · 9080/TCP</small>
-                  <label className="application-node-control"><span>选择后端</span><select aria-label={`${node.name} 后端 Deployment`} disabled={hasDraft || busy !== ''} value={changes[node.id]?.targetDeployment ?? node.targetDeployment ?? ''} onChange={event => updateNode(node, { targetDeployment: event.target.value })}>{[...new Set(deployments.map(target => target.name.replace(/-v[0-9]+$/, '')))].map(appName => <option key={appName} value={appName}>{appName}</option>)}</select></label>
-                </ApplicationNode>)}
-                {deployments.map((node, index) => <ApplicationNode key={node.id} node={node} style={{ left: '62%', top: 8 + index * 155 }}>
-                  <div className="application-node-row"><span className="node-type deployment">DEP</span><AppState value={node.state} /></div>
-                  <strong>{node.name}</strong><small>{node.readyReplicas ?? 0}/{node.replicas ?? 0} Ready · {node.targetDeployment ?? 'Deployment'}</small>
-                  <label className="application-node-control"><span>副本数</span><input aria-label={`${node.name} 副本数`} type="number" min={0} max={20} disabled={hasDraft || busy !== ''} value={changes[node.id]?.replicas ?? node.replicas ?? 1} onChange={event => updateNode(node, { replicas: Number(event.target.value) })} /></label>
-                  <label className="application-node-control"><span>容器镜像</span><input aria-label={`${node.name} 容器镜像`} type="text" disabled={hasDraft || busy !== ''} value={changes[node.id]?.image ?? node.image ?? ''} onChange={event => updateNode(node, { image: event.target.value })} /></label>
-                </ApplicationNode>)}
+              <div className="application-topology-canvas">
+                <ApplicationTopologyFlow
+                  key={detail.application.id}
+                  resources={nodeList}
+                  topologyEdges={detail.topology.edges}
+                  changes={changes}
+                  hasDraft={hasDraft}
+                  busy={busy !== ''}
+                  onUpdate={updateNode}
+                />
               </div>
               {!!accounts.length && <div className="application-account-row"><span>ServiceAccount</span>{accounts.map(account => <span className="account-chip" key={account.id}>♙ {account.name}</span>)}</div>}
-              <div className="application-topology-footnote">移动节点只调整视图。副本、镜像和 Service 连接的修改会写入候选 YAML，并在部署前显示资源级 diff。</div>
+              <div className="application-topology-footnote">拖动节点调整布局；拖动 Service 绿色端口到 Deployment 蓝色端口可重接服务。节点布局只影响当前视图，副本、镜像和连接修改会进入 YAML diff。</div>
             </section>
           </> : <section className="application-versions-card">
             <div className="application-section-heading"><div><span className="eyebrow">IMMUTABLE MANIFEST HISTORY</span><h3>版本历史</h3><p>草稿不会修改集群；只有状态为“待确认”的版本可提交部署。</p></div></div>
@@ -297,8 +285,198 @@ export default function Applications({ notify }: { notify: (message: string) => 
   </div>;
 }
 
-function ApplicationNode({ node, style, children }: { node: KubernetesApplicationTopologyNode; style: CSSProperties; children: ReactNode }) {
-  return <article className={`application-topology-node ${node.kind.toLowerCase()}`} style={style} data-node-id={node.id}>{children}</article>;
+type ApplicationFlowNodeData = {
+  resource: KubernetesApplicationTopologyNode;
+  changes: Editable;
+  targets: string[];
+  controlsDisabled: boolean;
+  onUpdate: (node: KubernetesApplicationTopologyNode, value: Editable) => void;
+};
+type ApplicationFlowNode = Node<ApplicationFlowNodeData, 'application'>;
+
+function applicationFlowNodePosition(node: KubernetesApplicationTopologyNode, index: number) {
+  if (node.kind === 'Service') return { x: 40, y: 42 + index * 128 };
+  return { x: 430 + (index % 2) * 340, y: 36 + Math.floor(index / 2) * 174 };
+}
+
+function deploymentTargetName(name: string) {
+  return name.replace(/-v[0-9]+$/, '');
+}
+
+function ApplicationFlowNodeCard({ data, selected }: NodeProps<ApplicationFlowNode>) {
+  const { resource, changes, targets, controlsDisabled, onUpdate } = data;
+  const deployment = resource.kind === 'Deployment';
+  return <article className={`application-flow-node ${deployment ? 'deployment' : 'service'} ${selected ? 'selected' : ''}`}>
+    {deployment
+      ? <Handle id="deployment-input" type="target" position={Position.Left} className="application-flow-handle deployment-input" isConnectable={!controlsDisabled} />
+      : <Handle id="service-output" type="source" position={Position.Right} className="application-flow-handle service-output" isConnectable={!controlsDisabled} />}
+    <div className="application-flow-node-heading">
+      <span className={`node-type ${deployment ? 'deployment' : 'service'}`}>{deployment ? 'DEPLOYMENT' : 'SERVICE'}</span>
+      <AppState value={resource.state} />
+    </div>
+    <strong title={resource.name}>{resource.name}</strong>
+    {deployment ? <>
+      <small>{resource.readyReplicas ?? 0}/{resource.replicas ?? 0} Ready</small>
+      <label className="application-node-control nodrag nowheel"><span>副本数</span><input aria-label={`${resource.name} 副本数`} type="number" min={0} max={20} disabled={controlsDisabled} value={changes.replicas ?? resource.replicas ?? 1} onChange={event => onUpdate(resource, { replicas: Number(event.target.value) })} /></label>
+      <label className="application-node-control nodrag nowheel"><span>容器镜像</span><input aria-label={`${resource.name} 容器镜像`} type="text" disabled={controlsDisabled} value={changes.image ?? resource.image ?? ''} onChange={event => onUpdate(resource, { image: event.target.value })} /></label>
+    </> : <>
+      <small>ClusterIP Service · 9080/TCP</small>
+      <label className="application-node-control nodrag nowheel"><span>选择后端</span><select aria-label={`${resource.name} 后端 Deployment`} disabled={controlsDisabled} value={changes.targetDeployment ?? resource.targetDeployment ?? ''} onChange={event => onUpdate(resource, { targetDeployment: event.target.value })}>
+        {targets.map(target => <option key={target} value={target}>{target}</option>)}
+      </select></label>
+    </>}
+  </article>;
+}
+
+const applicationFlowNodeTypes = { application: ApplicationFlowNodeCard };
+
+type ApplicationTopologyFlowProps = {
+  resources: KubernetesApplicationTopologyNode[];
+  topologyEdges: KubernetesApplicationDetail['topology']['edges'];
+  changes: Record<string, Editable>;
+  hasDraft: boolean;
+  busy: boolean;
+  onUpdate: (node: KubernetesApplicationTopologyNode, value: Editable) => void;
+};
+
+function ApplicationTopologyFlow(props: ApplicationTopologyFlowProps) {
+  return <ReactFlowProvider><ApplicationTopologyFlowCanvas {...props} /></ReactFlowProvider>;
+}
+
+function ApplicationTopologyFlowCanvas({
+  resources, topologyEdges, changes, hasDraft, busy, onUpdate,
+}: ApplicationTopologyFlowProps) {
+  const [nodes, setNodes, onNodesChange] = useNodesState<ApplicationFlowNode>([]);
+  const { fitView } = useReactFlow<ApplicationFlowNode, Edge>();
+  const [connectionMessage, setConnectionMessage] = useState('');
+  const visibleResources = useMemo(
+    () => resources.filter(resource => resource.kind === 'Service' || resource.kind === 'Deployment'),
+    [resources],
+  );
+  const targets = useMemo(
+    () => [...new Set(visibleResources.filter(resource => resource.kind === 'Deployment')
+      .map(resource => deploymentTargetName(resource.name)))],
+    [visibleResources],
+  );
+  const edges = useMemo<Edge[]>(() => {
+    const deployments = visibleResources.filter(resource => resource.kind === 'Deployment');
+    const services = visibleResources.filter(resource => resource.kind === 'Service');
+    const adjustedServices = new Set(services
+      .filter(resource => changes[resource.id]?.targetDeployment !== undefined)
+      .map(resource => resource.id));
+    const current = topologyEdges
+      .filter(edge => !adjustedServices.has(edge.source))
+      .map(edge => ({
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        sourceHandle: 'service-output',
+        targetHandle: 'deployment-input',
+        type: 'smoothstep' as const,
+        markerEnd: { type: MarkerType.ArrowClosed, color: '#91addc' },
+        style: { stroke: '#91addc', strokeWidth: 2 },
+        selectable: false,
+        deletable: false,
+      }));
+    const changed = services.flatMap(service => {
+      const target = changes[service.id]?.targetDeployment;
+      if (target === undefined) return [];
+      return deployments.filter(deployment => deploymentTargetName(deployment.name) === target)
+        .map(deployment => ({
+          id: `${service.id}->${deployment.id}`,
+          source: service.id,
+          target: deployment.id,
+          sourceHandle: 'service-output',
+          targetHandle: 'deployment-input',
+          type: 'smoothstep' as const,
+          markerEnd: { type: MarkerType.ArrowClosed, color: '#91addc' },
+          style: { stroke: '#91addc', strokeWidth: 2 },
+          selectable: false,
+          deletable: false,
+        }));
+    });
+    return [...current, ...changed];
+  }, [visibleResources, topologyEdges, changes]);
+  const flowKey = `${visibleResources.map(resource => resource.id).join('|')}`;
+
+  useEffect(() => {
+    setNodes(current => {
+      const previousPositions = new Map(current.map(node => [node.id, node.position]));
+      const serviceIndex = new Map(visibleResources.filter(resource => resource.kind === 'Service')
+        .map((resource, index) => [resource.id, index]));
+      const deploymentIndex = new Map(visibleResources.filter(resource => resource.kind === 'Deployment')
+        .map((resource, index) => [resource.id, index]));
+      return visibleResources.map(resource => ({
+        id: resource.id,
+        type: 'application' as const,
+        position: previousPositions.get(resource.id)
+          ?? applicationFlowNodePosition(resource, serviceIndex.get(resource.id) ?? deploymentIndex.get(resource.id) ?? 0),
+        data: {
+          resource,
+          changes: changes[resource.id] ?? {},
+          targets,
+          controlsDisabled: busy || hasDraft,
+          onUpdate,
+        },
+        draggable: !busy,
+      }));
+    });
+  }, [visibleResources, changes, targets, busy, hasDraft, onUpdate, setNodes]);
+
+  useEffect(() => {
+    if (!nodes.length) return;
+    const frame = requestAnimationFrame(() => { void fitView({ padding: 0.16, duration: 180 }); });
+    return () => cancelAnimationFrame(frame);
+  }, [flowKey, nodes.length, fitView]);
+
+  const validConnection = (connection: Edge | Connection) => {
+    const source = nodes.find(node => node.id === connection.source);
+    const target = nodes.find(node => node.id === connection.target);
+    return !busy && !hasDraft && source?.data.resource.kind === 'Service'
+      && target?.data.resource.kind === 'Deployment';
+  };
+
+  function connect(connection: Connection) {
+    const source = nodes.find(node => node.id === connection.source);
+    const target = nodes.find(node => node.id === connection.target);
+    if (!source || !target || source.data.resource.kind !== 'Service'
+        || target.data.resource.kind !== 'Deployment') return;
+    const targetName = target.data.resource.targetDeployment ?? deploymentTargetName(target.data.resource.name);
+    const currentTarget = changes[source.id]?.targetDeployment ?? source.data.resource.targetDeployment;
+    if (targetName === currentTarget) {
+      setConnectionMessage(`${source.data.resource.name} 已连接到 ${targetName}。`);
+      return;
+    }
+    onUpdate(source.data.resource, { targetDeployment: targetName });
+    setConnectionMessage(`已将 ${source.data.resource.name} 重接到 ${targetName}；生成版本差异后可检查 YAML。`);
+  }
+
+  return <>
+    <ReactFlow<ApplicationFlowNode, Edge>
+      nodes={nodes}
+      edges={edges}
+      nodeTypes={applicationFlowNodeTypes}
+      onNodesChange={onNodesChange}
+      onConnect={connect}
+      isValidConnection={validConnection}
+      connectionMode={ConnectionMode.Strict}
+      onConnectEnd={(_, state) => {
+        if (state.toHandle && !state.isValid) setConnectionMessage('只允许从 Service 输出端连接到 Deployment 输入端。');
+      }}
+      nodesDraggable={!busy}
+      nodesConnectable={!busy && !hasDraft}
+      elementsSelectable={false}
+      deleteKeyCode={null}
+      minZoom={0.3}
+      maxZoom={1.8}
+      noWheelClassName="nowheel"
+      fitView
+    >
+      <Background color="#dbe3ee" gap={22} />
+      <Controls />
+    </ReactFlow>
+    {connectionMessage && <div className="application-flow-message" role="status">{connectionMessage}</div>}
+  </>;
 }
 
 function VersionCard({ version, busy, onDeploy }: { version: KubernetesApplicationVersion; busy: boolean; onDeploy: () => void }) {
