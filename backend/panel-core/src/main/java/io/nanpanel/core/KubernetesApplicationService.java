@@ -1346,11 +1346,8 @@ public class KubernetesApplicationService {
             throw conflict;
           } catch (RuntimeException failure) {
             state = "UNAVAILABLE";
-            String reason = failure instanceof KubernetesClientException clientFailure
-                ? "Kubernetes API HTTP " + clientFailure.getCode()
-                : failure.getClass().getSimpleName();
-            LOG.warnf("Unable to observe Kubernetes application Deployment %s/%s (%s)",
-                namespace, deployment.getMetadata().getName(), reason);
+            LOG.warn("Unable to observe Kubernetes application Deployment " + namespace + "/"
+                + deployment.getMetadata().getName(), failure);
           }
         }
         String image = deployment.getSpec().getTemplate().getSpec().getContainers().stream()
