@@ -42,6 +42,7 @@ public class KubernetesApplicationService {
   private static final String APPLICATION_ID = "nanpanel.io/application-id";
   private static final int MAX_APPLICATIONS = 200;
   private static final int MAX_REPLICAS = 20;
+  private static final int MAX_RESOURCE_YAML_LENGTH = 262_144;
   private static final Map<String, Integer> BOOKINFO_RESOURCE_COUNTS = Map.of(
       "ServiceAccount", 4,
       "Service", 4,
@@ -295,18 +296,23 @@ public class KubernetesApplicationService {
   public record ApplicationPreview(Map<String, Integer> resourceCounts, int totalResources,
       String manifestYaml, List<String> notes) {}
   public record DraftRequest(Integer baseVersion, List<TopologyEdit> edits,
-      List<TopologyAddition> additions) {}
+      List<TopologyAddition> additions, List<TopologyYamlEdit> yamlEdits,
+      List<TopologyYamlAddition> yamlAdditions) {}
   public record TopologyEdit(String resourceId, Integer replicas, String image,
       String targetDeployment, Integer servicePort, String targetPort, String serviceProtocol) {}
   public record TopologyAddition(String kind, String name, Integer replicas, String image,
       String targetDeployment, Integer servicePort, String targetPort, String serviceProtocol) {}
+  public record TopologyYamlEdit(String resourceId, String sourceYaml) {}
+  public record TopologyYamlAddition(String sourceYaml) {}
   public record ApplicationList(List<ApplicationView> items) {}
   public record ApplicationView(UUID id, UUID clusterId, String clusterName, String namespace,
       String name, String displayName, String templateId, int currentVersion, String state,
       Instant createdAt, Instant updatedAt) {}
   public record TopologyNode(String id, String kind, String name, Integer replicas,
       Integer readyReplicas, String image, String targetDeployment, Integer servicePort,
-      String targetPort, String serviceProtocol, String state) {}
+      String targetPort, String serviceProtocol, List<TopologyServicePort> servicePorts,
+      String state, String sourceYaml) {}
+  public record TopologyServicePort(String name, int port, String targetPort, String protocol) {}
   public record TopologyEdge(String id, String source, String target) {}
   public record Topology(List<TopologyNode> nodes, List<TopologyEdge> edges) {}
   public record ApplicationDetail(ApplicationView application, Topology topology,
@@ -490,10 +496,34 @@ public class KubernetesApplicationService {
     List<TopologyEdit> edits = input == null || input.edits() == null ? List.of() : input.edits();
     List<TopologyAddition> additions = input == null || input.additions() == null
         ? List.of() : input.additions();
+    List<TopologyYamlEdit> yamlEdits = input == null || input.yamlEdits() == null
+        ? List.of() : input.yamlEdits();
+    List<TopologyYamlAddition> yamlAdditions = input == null || input.yamlAdditions() == null
+        ? List.of() : input.yamlAdditions();
     if (input == null || input.baseVersion() == null || input.baseVersion() < 1
-        || edits.size() + additions.size() < 1 || edits.size() + additions.size() > 32
-        || additions.size() > 32) {
+        || edits.size() + additions.size() + yamlEdits.size() + yamlAdditions.size() < 1
+        || edits.size() + additions.size() + yamlEdits.size() + yamlAdditions.size() > 32
+        || additions.size() + yamlAdditions.size() > 32) {
       throw invalid("版本草稿需要基础版本及 1–32 项拓扑修改或新增资源");
+    }
+    Set<String> editedResourceIds = new HashSet<>();
+    for (TopologyEdit edit : edits) {
+      if (edit == null || edit.resourceId() == null || !editedResourceIds.add(edit.resourceId())) {
+        throw invalid("拓扑修改包含重复或无效资源");
+      }
+    }
+    for (TopologyYamlEdit edit : yamlEdits) {
+      if (edit == null || edit.resourceId() == null || !editedResourceIds.add(edit.resourceId())) {
+        throw invalid("表单修改与源 YAML 修改不能重复引用同一资源");
+      }
+    }
+    long sourceYamlLength = yamlEdits.stream()
+        .mapToLong(edit -> edit.sourceYaml() == null ? 0 : edit.sourceYaml().length()).sum()
+        + yamlAdditions.stream()
+            .mapToLong(addition -> addition.sourceYaml() == null ? 0 : addition.sourceYaml().length())
+            .sum();
+    if (sourceYamlLength > MAX_RESOURCE_YAML_LENGTH) {
+      throw invalid("本次源 YAML 修改总长度不能超过 256 KiB");
     }
     AppRow app = app(applicationId);
     if (!"DEPLOYED".equals(app.state())) {
@@ -509,14 +539,19 @@ public class KubernetesApplicationService {
       if (current == null) throw new ApplicationException(409,
           "KUBERNETES_APPLICATION_VERSION_MISSING", "找不到当前应用版本清单");
       List<HasMetadata> before = parse(client, current.manifestYaml());
-      List<HasMetadata> after = applyEdits(before, edits, additions);
+      List<HasMetadata> after = applyYamlEdits(client, app.namespace(), applicationId,
+          before, yamlEdits);
+      after = applyEdits(after, edits, additions);
+      after = applyYamlAdditions(client, app.namespace(), applicationId, after, yamlAdditions);
       after = applyAdditions(client, app.namespace(), applicationId, after, additions);
+      validateApplicationResources(after);
+      ensureReferencedServiceAccountsExist(client, app.namespace(), after);
       String newYaml = serialize(after);
       String diff = resourceDiff(before, after);
       if (diff.isBlank()) throw invalid("拓扑没有产生 YAML 变化，请修改已有资源或添加 Deployment / Service");
       Map<String, String> knownResourceUids = resourceUids(applicationId);
-      Set<String> pendingResourceIds = additions.stream()
-          .map(addition -> addition.kind() + "/" + addition.name())
+      Set<String> pendingResourceIds = after.stream().map(KubernetesApplicationService::resourceId)
+          .filter(id -> !knownResourceUids.containsKey(id))
           .collect(java.util.stream.Collectors.toSet());
       Topology candidateTopology = topology(client, app.id(), app.namespace(), after,
           knownResourceUids, pendingResourceIds);
@@ -998,6 +1033,80 @@ public class KubernetesApplicationService {
     return clean;
   }
 
+  private static List<HasMetadata> applyYamlEdits(KubernetesClient client, String namespace,
+      UUID applicationId, List<HasMetadata> source, List<TopologyYamlEdit> edits) {
+    if (edits.isEmpty()) return source;
+    Map<String, HasMetadata> resources = new LinkedHashMap<>();
+    for (HasMetadata item : source) resources.put(resourceId(item), item);
+    Set<String> edited = new HashSet<>();
+    for (TopologyYamlEdit edit : edits) {
+      if (edit == null || edit.resourceId() == null || !edited.add(edit.resourceId())) {
+        throw invalid("源 YAML 修改包含重复或无效资源");
+      }
+      HasMetadata current = resources.get(edit.resourceId());
+      if (current == null || !supported(current)) {
+        throw invalid("源 YAML 修改引用了应用清单之外或不支持的资源");
+      }
+      HasMetadata replacement = parseSingleApplicationResource(client, edit.sourceYaml());
+      if (!edit.resourceId().equals(resourceId(replacement))) {
+        throw invalid("源 YAML 不能修改资源的 kind 或名称");
+      }
+      normalizeResource(replacement, namespace, applicationId);
+      resources.put(edit.resourceId(), replacement);
+    }
+    return new ArrayList<>(resources.values());
+  }
+
+  private static List<HasMetadata> applyYamlAdditions(KubernetesClient client, String namespace,
+      UUID applicationId, List<HasMetadata> source, List<TopologyYamlAddition> additions) {
+    if (additions.isEmpty()) return source;
+    if (source.size() + additions.size() > 64) {
+      throw invalid("应用清单资源总数不能超过 64 个");
+    }
+    List<HasMetadata> resources = new ArrayList<>(source);
+    Set<String> ids = resources.stream().map(KubernetesApplicationService::resourceId)
+        .collect(java.util.stream.Collectors.toCollection(HashSet::new));
+    for (TopologyYamlAddition addition : additions) {
+      if (addition == null) throw invalid("新增源 YAML 不能为空");
+      HasMetadata resource = parseSingleApplicationResource(client, addition.sourceYaml());
+      if (!(resource instanceof Deployment || resource instanceof Service)
+          || resource.getMetadata() == null
+          || !validResourceName(resource.getMetadata().getName())) {
+        throw invalid("源 YAML 新增只支持名称有效的 Deployment 或 Service");
+      }
+      String id = resourceId(resource);
+      if (!ids.add(id)) throw invalid("应用清单包含重复资源: " + id);
+      normalizeResource(resource, namespace, applicationId);
+      if (fetch(client, resource.getKind(), namespace, resource.getMetadata().getName()) != null) {
+        throw new ApplicationException(409, "KUBERNETES_APPLICATION_RESOURCE_CONFLICT",
+            id + " 已存在，未接管该资源");
+      }
+      resources.add(resource);
+    }
+    return resources;
+  }
+
+  private static HasMetadata parseSingleApplicationResource(KubernetesClient client,
+      String sourceYaml) {
+    if (sourceYaml == null || sourceYaml.isBlank()
+        || sourceYaml.length() > MAX_RESOURCE_YAML_LENGTH) {
+      throw invalid("每项源 YAML 必须为 1–262144 个字符");
+    }
+    List<HasMetadata> resources;
+    try {
+      resources = client.load(new ByteArrayInputStream(
+          sourceYaml.getBytes(StandardCharsets.UTF_8))).items();
+    } catch (RuntimeException failure) {
+      throw invalid("源 YAML 格式无效");
+    }
+    if (resources.size() != 1 || !supported(resources.getFirst())
+        || resources.getFirst().getMetadata() == null
+        || !validResourceName(resources.getFirst().getMetadata().getName())) {
+      throw invalid("每张卡片的源 YAML 必须只包含一个名称有效的 Deployment、Service 或 ServiceAccount");
+    }
+    return resources.getFirst();
+  }
+
   private static List<HasMetadata> applyEdits(List<HasMetadata> source,
       List<TopologyEdit> edits, List<TopologyAddition> additions) {
     Map<String, HasMetadata> resources = new LinkedHashMap<>();
@@ -1204,7 +1313,7 @@ public class KubernetesApplicationService {
             .map(container -> container.getImage()).filter(value -> value != null).findFirst().orElse(null);
         nodes.add(new TopologyNode(id, "Deployment", deployment.getMetadata().getName(),
             replicas, ready, image, deployment.getSpec().getTemplate().getMetadata().getLabels()
-                .get("app"), null, null, null, state));
+                .get("app"), null, null, null, List.of(), state, serialize(List.of(deployment))));
       } else if (item instanceof Service service) {
         String id = resourceId(item);
         String expectedUid = resourceUids.get(id);
@@ -1217,6 +1326,14 @@ public class KubernetesApplicationService {
         String targetPort = serviceTargetPort == null ? String.valueOf(firstPort.getPort())
             : String.valueOf(serviceTargetPort.getValue());
         String protocol = firstPort.getProtocol() == null ? "TCP" : firstPort.getProtocol();
+        List<TopologyServicePort> servicePorts = service.getSpec().getPorts().stream()
+            .map(port -> {
+              IntOrString targetPortValue = port.getTargetPort();
+              return new TopologyServicePort(port.getName(), port.getPort(),
+                  targetPortValue == null ? String.valueOf(port.getPort())
+                      : String.valueOf(targetPortValue.getValue()),
+                  port.getProtocol() == null ? "TCP" : port.getProtocol());
+            }).toList();
         String state = pending ? "PENDING" : "ACTIVE";
         if (!pending) {
           try {
@@ -1230,7 +1347,8 @@ public class KubernetesApplicationService {
           }
         }
         nodes.add(new TopologyNode(id, "Service", service.getMetadata().getName(),
-            null, null, null, target, firstPort.getPort(), targetPort, protocol, state));
+            null, null, null, target, firstPort.getPort(), targetPort, protocol,
+            servicePorts, state, serialize(List.of(service))));
         for (Deployment deployment : deployments) {
           Map<String, String> labels = deployment.getSpec().getTemplate().getMetadata().getLabels();
           if (matches(service.getSpec().getSelector(), labels)) {
@@ -1252,7 +1370,8 @@ public class KubernetesApplicationService {
           state = "UNAVAILABLE";
         }
         nodes.add(new TopologyNode(id, "ServiceAccount", account.getMetadata().getName(),
-            null, null, null, null, null, null, null, state));
+            null, null, null, null, null, null, null, List.of(), state,
+            serialize(List.of(account))));
       }
     }
     nodes.sort(Comparator.comparing(TopologyNode::kind).thenComparing(TopologyNode::name));

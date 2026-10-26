@@ -6099,7 +6099,7 @@ components:
     KubernetesApplicationTopologyNode:
       type: object
       additionalProperties: false
-      required: [id, kind, name, replicas, readyReplicas, image, targetDeployment, servicePort, targetPort, serviceProtocol, state]
+      required: [id, kind, name, replicas, readyReplicas, image, targetDeployment, servicePort, targetPort, serviceProtocol, servicePorts, state, sourceYaml]
       properties:
         id:
           type: string
@@ -6133,9 +6133,36 @@ components:
         serviceProtocol:
           type: [string, 'null']
           enum: [TCP, UDP, SCTP, null]
+        servicePorts:
+          type: array
+          maxItems: 32
+          items:
+            $ref: '#/components/schemas/KubernetesApplicationTopologyServicePort'
         state:
           type: string
           enum: [READY, PROGRESSING, MISSING, UNAVAILABLE, ACTIVE, CONFIGURED, PENDING, UNKNOWN]
+        sourceYaml:
+          type: string
+          maxLength: 262144
+          description: A single resource manifest for editing this card into an application version draft.
+    KubernetesApplicationTopologyServicePort:
+      type: object
+      additionalProperties: false
+      required: [name, port, targetPort, protocol]
+      properties:
+        name:
+          type: [string, 'null']
+          maxLength: 15
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        targetPort:
+          type: string
+          maxLength: 15
+        protocol:
+          type: string
+          enum: [TCP, UDP, SCTP]
     KubernetesApplicationTopologyEdge:
       type: object
       additionalProperties: false
@@ -6166,9 +6193,43 @@ components:
         additions:
           type: array
           maxItems: 32
-          description: 新增的受限 Deployment 或 ClusterIP Service；全部修改与新增资源合计最多 32 项。
+          description: 新增的受限 Deployment 或 ClusterIP Service；表单修改、源 YAML 修改及新增资源合计最多 32 项。
           items:
             $ref: '#/components/schemas/KubernetesApplicationTopologyAddition'
+        yamlEdits:
+          type: array
+          maxItems: 32
+          description: Replace one existing resource with its edited source YAML. The kind and name stay fixed; only Deployment, Service, or ServiceAccount are accepted.
+          items:
+            $ref: '#/components/schemas/KubernetesApplicationTopologyYamlEdit'
+        yamlAdditions:
+          type: array
+          maxItems: 32
+          description: Add one resource from source YAML. Only validated Deployment and ClusterIP Service resources are accepted.
+          items:
+            $ref: '#/components/schemas/KubernetesApplicationTopologyYamlAddition'
+    KubernetesApplicationTopologyYamlEdit:
+      type: object
+      additionalProperties: false
+      required: [resourceId, sourceYaml]
+      properties:
+        resourceId:
+          type: string
+          minLength: 1
+          maxLength: 256
+        sourceYaml:
+          type: string
+          minLength: 1
+          maxLength: 262144
+    KubernetesApplicationTopologyYamlAddition:
+      type: object
+      additionalProperties: false
+      required: [sourceYaml]
+      properties:
+        sourceYaml:
+          type: string
+          minLength: 1
+          maxLength: 262144
     KubernetesApplicationTopologyAddition:
       type: object
       additionalProperties: false

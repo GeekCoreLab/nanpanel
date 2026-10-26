@@ -26,7 +26,11 @@ import './applications.css';
 
 type View = 'topology' | 'versions';
 type Editable = { replicas?: number; image?: string; targetDeployment?: string; servicePort?: number; targetPort?: string; serviceProtocol?: 'TCP' | 'UDP' | 'SCTP' };
-type PendingApplicationNode = KubernetesApplicationTopologyAddition & { id: string; position: { x: number; y: number } };
+type PendingApplicationNode = KubernetesApplicationTopologyAddition & {
+  id: string;
+  position: { x: number; y: number };
+  sourceYaml?: string;
+};
 type KubernetesApplicationSource = KubernetesApplicationCreateRequest['source'];
 const creationSources: { id: KubernetesApplicationSource; label: string; hint: string }[] = [
   { id: 'FORM', label: '图形化创建', hint: '镜像、端口、副本与环境变量' },
@@ -44,6 +48,28 @@ const stateLabels: Record<string, string> = {
 
 function stateClass(state: string) {
   return state.toLowerCase().replaceAll('_', '-');
+}
+
+function additionSourceYaml(addition: KubernetesApplicationTopologyAddition) {
+  const scalar = (value: string) => JSON.stringify(value);
+  if (addition.kind === 'Deployment') {
+    const name = scalar(addition.name);
+    return [
+      'apiVersion: apps/v1', 'kind: Deployment', 'metadata:', `  name: ${name}`, 'spec:',
+      `  replicas: ${addition.replicas ?? 1}`, '  selector:', '    matchLabels:', `      app: ${name}`,
+      '  template:', '    metadata:', '      labels:', `        app: ${name}`, '    spec:',
+      '      containers:', '        - name: app', `          image: ${scalar(addition.image ?? 'nginx:1.27')}`,
+      '          imagePullPolicy: IfNotPresent', '',
+    ].join('\n');
+  }
+  const target = scalar(addition.targetDeployment ?? '');
+  const serviceTarget = scalar(addition.targetPort ?? '80');
+  return [
+    'apiVersion: v1', 'kind: Service', 'metadata:', `  name: ${scalar(addition.name)}`, 'spec:',
+    '  type: ClusterIP', '  selector:', `    app: ${target}`, '  ports:', '    - name: http',
+    `      port: ${addition.servicePort ?? 80}`, `      protocol: ${addition.serviceProtocol ?? 'TCP'}`,
+    `      targetPort: ${serviceTarget}`, '',
+  ].join('\n');
 }
 
 function AppState({ value }: { value: string }) {
@@ -70,6 +96,7 @@ export default function Applications({ notify }: { notify: (message: string) => 
   const [definition, setDefinition] = useState('');
   const [preview, setPreview] = useState<KubernetesApplicationPreview>();
   const [changes, setChanges] = useState<Record<string, Editable>>({});
+  const [yamlSourceChanges, setYamlSourceChanges] = useState<Record<string, string>>({});
   const [additions, setAdditions] = useState<PendingApplicationNode[]>([]);
   const [view, setView] = useState<View>('topology');
   const [wizard, setWizard] = useState(false);
@@ -109,6 +136,7 @@ export default function Applications({ notify }: { notify: (message: string) => 
       setDetail(result.data);
       setVersions(history.data.items);
       setChanges({});
+      setYamlSourceChanges({});
       setAdditions([]);
     } catch (cause) {
       setError((cause as Error).message);
@@ -137,16 +165,39 @@ export default function Applications({ notify }: { notify: (message: string) => 
   const currentDraft = versions.find(item => item.state === 'DRAFT');
   const hasDraft = Boolean(currentDraft);
   const nodeList = detail?.topology.nodes ?? [];
+  const hasYamlChanges = nodeList.some(node => yamlSourceChanges[node.id] !== undefined
+    && yamlSourceChanges[node.id] !== node.sourceYaml);
   const deployments = useMemo(() => nodeList.filter(node => node.kind === 'Deployment'), [nodeList]);
   const services = useMemo(() => nodeList.filter(node => node.kind === 'Service'), [nodeList]);
   const accounts = useMemo(() => nodeList.filter(node => node.kind === 'ServiceAccount'), [nodeList]);
   const updateNode = useCallback((node: KubernetesApplicationTopologyNode, value: Editable) => {
     if (node.id.startsWith('pending:')) {
       setAdditions(current => current.map(addition => addition.id === node.id
-        ? { ...addition, ...value } : addition));
+        ? { ...addition, ...value, sourceYaml: undefined } : addition));
       return;
     }
     setChanges(current => ({ ...current, [node.id]: { ...current[node.id], ...value } }));
+    setYamlSourceChanges(current => {
+      if (!Object.hasOwn(current, node.id)) return current;
+      const next = { ...current };
+      delete next[node.id];
+      return next;
+    });
+  }, []);
+
+  const saveResourceYaml = useCallback((node: KubernetesApplicationTopologyNode, sourceYaml: string) => {
+    if (node.id.startsWith('pending:')) {
+      setAdditions(current => current.map(addition => addition.id === node.id
+        ? { ...addition, sourceYaml } : addition));
+      return;
+    }
+    setChanges(current => {
+      if (!Object.hasOwn(current, node.id)) return current;
+      const next = { ...current };
+      delete next[node.id];
+      return next;
+    });
+    setYamlSourceChanges(current => ({ ...current, [node.id]: sourceYaml }));
   }, []);
 
   function buildCreateRequest(): KubernetesApplicationCreateRequest {
@@ -234,6 +285,7 @@ export default function Applications({ notify }: { notify: (message: string) => 
       setDetail(result.data);
       setVersions([]);
       setChanges({});
+      setYamlSourceChanges({});
       setWizard(false);
       setWizardStep(1);
       await loadApplication(result.data.application.id);
@@ -247,7 +299,15 @@ export default function Applications({ notify }: { notify: (message: string) => 
 
   async function createDraft() {
     if (!detail || hasDraft) return;
+    const yamlEdits: NonNullable<KubernetesApplicationVersionDraftRequest['yamlEdits']> =
+      nodeList.flatMap(node => {
+        const sourceYaml = yamlSourceChanges[node.id];
+        return sourceYaml !== undefined && sourceYaml !== node.sourceYaml
+          ? [{ resourceId: node.id, sourceYaml }] : [];
+      });
+    const yamlEditedIds = new Set(yamlEdits.map(edit => edit.resourceId));
     const edits: KubernetesApplicationVersionDraftRequest['edits'] = nodeList.flatMap(node => {
+      if (yamlEditedIds.has(node.id)) return [];
       const changed = changes[node.id];
       if (!changed) return [];
       const edit: NonNullable<KubernetesApplicationVersionDraftRequest['edits']>[number] = {
@@ -269,10 +329,14 @@ export default function Applications({ notify }: { notify: (message: string) => 
           && edit.servicePort === null && edit.targetPort === null && edit.serviceProtocol === null) return [];
       return [edit];
     });
-    const newResources: KubernetesApplicationTopologyAddition[] = additions.map(
-      ({ id: _id, position: _position, ...resource }) => resource,
+    const yamlAdditions: NonNullable<KubernetesApplicationVersionDraftRequest['yamlAdditions']> =
+      additions.flatMap(addition => addition.sourceYaml
+        ? [{ sourceYaml: addition.sourceYaml }] : []);
+    const newResources: KubernetesApplicationTopologyAddition[] = additions.flatMap(
+      ({ id: _id, position: _position, sourceYaml: _sourceYaml, ...resource }) =>
+        _sourceYaml ? [] : [resource],
     );
-    if (!edits.length && !newResources.length) {
+    if (!edits.length && !yamlEdits.length && !newResources.length && !yamlAdditions.length) {
       setError('请先修改已有资源，或在拓扑空白处右键添加 Deployment / Service。'); return;
     }
     setBusy('draft');
@@ -280,10 +344,12 @@ export default function Applications({ notify }: { notify: (message: string) => 
     try {
       const result = await api<KubernetesApplicationDetail>(
         `/kubernetes/applications/${encodeURIComponent(detail.application.id)}/versions`, 'POST',
-        { baseVersion: detail.application.currentVersion, edits, additions: newResources }, {}, true,
+        { baseVersion: detail.application.currentVersion, edits, additions: newResources,
+          yamlEdits, yamlAdditions }, {}, true,
       );
       setDetail(result.data);
       setChanges({});
+      setYamlSourceChanges({});
       await loadApplication(result.data.application.id);
       setView('versions');
       notify('版本差异已生成；当前未修改集群，请检查 diff 后显式部署。');
@@ -297,6 +363,12 @@ export default function Applications({ notify }: { notify: (message: string) => 
   function removePendingNode(nodeId: string) {
     setAdditions(current => current.filter(addition => addition.id !== nodeId));
     setChanges(current => {
+      const next = { ...current };
+      delete next[nodeId];
+      return next;
+    });
+    setYamlSourceChanges(current => {
+      if (!Object.hasOwn(current, nodeId)) return current;
       const next = { ...current };
       delete next[nodeId];
       return next;
@@ -358,29 +430,31 @@ export default function Applications({ notify }: { notify: (message: string) => 
           <div className="application-tabs" role="tablist" aria-label="应用管理视图">
             <button role="tab" aria-selected={view === 'topology'} className={view === 'topology' ? 'active' : ''} onClick={() => setView('topology')}>⌘ 拓扑与配置</button>
             <button role="tab" aria-selected={view === 'versions'} className={view === 'versions' ? 'active' : ''} onClick={() => setView('versions')}>◷ 版本历史 <span>{versions.length}</span></button>
-            <div className="application-tab-actions"><button className="secondary" onClick={() => void loadApplication(detail.application.id)}>刷新拓扑</button>{view === 'topology' && <button className="primary" disabled={(!Object.keys(changes).length && !additions.length) || additions.some(addition => addition.kind === 'Service' && !addition.targetDeployment) || hasDraft || busy !== ''} title={additions.some(addition => addition.kind === 'Service' && !addition.targetDeployment) ? '请将新增 Service 连到 Deployment 后再生成差异' : undefined} onClick={() => void createDraft()}>{busy === 'draft' ? '生成差异中…' : '生成版本差异 →'}</button>}</div>
+            <div className="application-tab-actions"><button className="secondary" onClick={() => void loadApplication(detail.application.id)}>刷新拓扑</button>{view === 'topology' && <button className="primary" disabled={(!Object.keys(changes).length && !hasYamlChanges && !additions.length) || additions.some(addition => addition.kind === 'Service' && !addition.targetDeployment && !addition.sourceYaml) || hasDraft || busy !== ''} title={additions.some(addition => addition.kind === 'Service' && !addition.targetDeployment && !addition.sourceYaml) ? '请将新增 Service 连到 Deployment 后再生成差异' : undefined} onClick={() => void createDraft()}>{busy === 'draft' ? '生成差异中…' : '生成版本差异 →'}</button>}</div>
           </div>
           {view === 'topology' ? <>
             {hasDraft && <div className="application-draft-banner"><span>◈</span><div><strong>v{currentDraft?.version} 有待确认差异</strong><small>检查版本历史中的 YAML diff，确认后部署；拓扑编辑会先锁定到该草稿。</small></div><button className="link" onClick={() => setView('versions')}>查看 diff →</button></div>}
             <section className="application-topology-card">
-              <div className="application-section-heading"><div><span className="eyebrow">YAML DERIVED TOPOLOGY</span><h3>应用拓扑</h3><p>连线来自 Service selector 与 Deployment Pod 标签的匹配结果。</p></div><span className="application-topology-legend"><i className="service-dot" /> Service <i className="deployment-dot" /> Deployment</span></div>
+              <div className="application-section-heading"><div><span className="eyebrow">YAML DERIVED TOPOLOGY</span><h3>应用拓扑</h3><p>连线来自 Service selector 与 Deployment Pod 标签的匹配结果；ServiceAccount 也可单独查看和编辑。</p></div><span className="application-topology-legend"><i className="service-dot" /> Service <i className="deployment-dot" /> Deployment <i className="account-dot" /> ServiceAccount</span></div>
               <div className="application-topology-canvas">
                 <ApplicationTopologyFlow
                   key={detail.application.id}
                   resources={nodeList}
                   topologyEdges={detail.topology.edges}
                   changes={changes}
+                  yamlSourceChanges={yamlSourceChanges}
                   additions={additions}
                   hasDraft={hasDraft}
                   busy={busy !== ''}
                   onUpdate={updateNode}
-                  onAdditionChange={addition => setAdditions(current => [...current, addition])}
+                  onSourceYamlSave={saveResourceYaml}
+                  onAdditionChange={addition => setAdditions(current => current.some(item => item.id === addition.id)
+                    ? current.map(item => item.id === addition.id ? addition : item) : [...current, addition])}
                   onRemoveAddition={removePendingNode}
                 />
               </div>
               {additions.some(addition => addition.kind === 'Service' && !addition.targetDeployment) && <div className="alert" role="status">新增 Service 尚未连接到 Deployment；拖动 Service 绿色端口到 Deployment 蓝色端口后即可生成差异。</div>}
-              {!!accounts.length && <div className="application-account-row"><span>ServiceAccount</span>{accounts.map(account => <span className="account-chip" key={account.id}>♙ {account.name}</span>)}</div>}
-              <div className="application-topology-footnote">空白处右键添加 Deployment 或 Service；拖动节点调整布局，拖动 Service 绿色端口到 Deployment 蓝色端口可连接/重接服务；右键卡片配置资源。新增与修改先生成 YAML diff，拓扑布局只保留在当前视图。</div>
+              <div className="application-topology-footnote">空白处右键添加 Deployment 或 Service；拖动节点调整布局，拖动 Service 绿色端口到 Deployment 蓝色端口可连接/重接服务。每张资源卡都可编辑独立源 YAML；变更先生成版本 diff，只有显式确认部署才会写入集群。</div>
             </section>
           </> : <section className="application-versions-card">
             <div className="application-section-heading"><div><span className="eyebrow">IMMUTABLE MANIFEST HISTORY</span><h3>版本历史</h3><p>草稿不会修改集群；只有状态为“待确认”的版本可提交部署。</p></div></div>
@@ -432,6 +506,8 @@ type ApplicationFlowNodeData = {
   resource: KubernetesApplicationTopologyNode;
   changes: Editable;
   controlsDisabled: boolean;
+  sourceYamlEdited: boolean;
+  onEditSourceYaml: (resource: KubernetesApplicationTopologyNode) => void;
 };
 type ApplicationFlowNode = Node<ApplicationFlowNodeData, 'application'>;
 type ApplicationContextMenuState = {
@@ -443,8 +519,9 @@ type ApplicationContextMenuState = {
 };
 
 function applicationFlowNodePosition(node: KubernetesApplicationTopologyNode, index: number) {
-  if (node.kind === 'Service') return { x: 40, y: 42 + index * 128 };
-  return { x: 430 + (index % 2) * 340, y: 36 + Math.floor(index / 2) * 174 };
+  if (node.kind === 'Service') return { x: 40, y: 42 + index * 224 };
+  if (node.kind === 'ServiceAccount') return { x: 1_190, y: 42 + index * 224 };
+  return { x: 430 + (index % 2) * 380, y: 36 + Math.floor(index / 2) * 224 };
 }
 
 function deploymentTargetName(name: string) {
@@ -458,23 +535,38 @@ function deploymentTarget(resource: KubernetesApplicationTopologyNode) {
 function ApplicationFlowNodeCard({ data, selected }: NodeProps<ApplicationFlowNode>) {
   const { resource, changes, controlsDisabled } = data;
   const deployment = resource.kind === 'Deployment';
-  return <article className={`application-flow-node ${deployment ? 'deployment' : 'service'} ${selected ? 'selected' : ''}`}>
-    {deployment
-      ? <Handle id="deployment-input" type="target" position={Position.Left} className="application-flow-handle deployment-input" isConnectable={!controlsDisabled} />
-      : <Handle id="service-output" type="source" position={Position.Right} className="application-flow-handle service-output" isConnectable={!controlsDisabled} />}
+  const service = resource.kind === 'Service';
+  const account = resource.kind === 'ServiceAccount';
+  const title = deployment ? 'DEPLOYMENT' : service ? 'SERVICE' : 'SERVICE ACCOUNT';
+  const servicePortSummary = resource.servicePorts.map((port, index) => {
+    const displayedPort = index === 0 ? changes.servicePort ?? port.port : port.port;
+    const displayedTarget = index === 0 ? changes.targetPort ?? port.targetPort : port.targetPort;
+    const displayedProtocol = index === 0 ? changes.serviceProtocol ?? port.protocol : port.protocol;
+    return `${port.name ? `${port.name}: ` : ''}${displayedPort}/${displayedProtocol} → ${displayedTarget}`;
+  }).join(' · ');
+  return <article className={`application-flow-node ${resource.kind.toLowerCase()} ${selected ? 'selected' : ''}`}>
+    {deployment && <Handle id="deployment-input" type="target" position={Position.Left} className="application-flow-handle deployment-input" isConnectable={!controlsDisabled} />}
+    {service && <Handle id="service-output" type="source" position={Position.Right} className="application-flow-handle service-output" isConnectable={!controlsDisabled} />}
     <div className="application-flow-node-heading">
-      <span className={`node-type ${deployment ? 'deployment' : 'service'}`}>{deployment ? 'DEPLOYMENT' : 'SERVICE'}</span>
+      <span className={`node-type ${resource.kind.toLowerCase()}`}>{title}</span>
       <AppState value={resource.state} />
     </div>
     <strong title={resource.name}>{resource.name}</strong>
     {deployment ? <>
       <small>{resource.readyReplicas ?? 0}/{changes.replicas ?? resource.replicas ?? 0} Ready</small>
       <small className="application-node-image">{changes.image ?? resource.image ?? '未声明镜像'}</small>
-    </> : <>
-      <small>ClusterIP · {changes.servicePort ?? resource.servicePort ?? '—'}/{changes.serviceProtocol ?? resource.serviceProtocol ?? 'TCP'} → {changes.targetPort ?? resource.targetPort ?? '—'}</small>
+    </> : service ? <>
+      <small>ClusterIP · {servicePortSummary || `${resource.servicePort ?? '—'}/${resource.serviceProtocol ?? 'TCP'} → ${resource.targetPort ?? '—'}`}</small>
       <small>后端：{changes.targetDeployment ?? resource.targetDeployment ?? '通过拓扑连线指定'}</small>
+    </> : <>
+      <small>应用级身份资源</small>
+      <small>ServiceAccount Token 自动挂载已关闭</small>
     </>}
-    <small className="application-node-edit-hint">右键配置</small>
+    <div className="application-flow-node-footer">
+      {data.sourceYamlEdited && <small className="application-yaml-pending">YAML 待生成版本差异</small>}
+      <button type="button" className="application-yaml-button nodrag" disabled={controlsDisabled}
+        onClick={event => { event.stopPropagation(); data.onEditSourceYaml(resource); }}>编辑源 YAML</button>
+    </div>
   </article>;
 }
 
@@ -484,10 +576,12 @@ type ApplicationTopologyFlowProps = {
   resources: KubernetesApplicationTopologyNode[];
   topologyEdges: KubernetesApplicationDetail['topology']['edges'];
   changes: Record<string, Editable>;
+  yamlSourceChanges: Record<string, string>;
   additions: PendingApplicationNode[];
   hasDraft: boolean;
   busy: boolean;
   onUpdate: (node: KubernetesApplicationTopologyNode, value: Editable) => void;
+  onSourceYamlSave: (node: KubernetesApplicationTopologyNode, sourceYaml: string) => void;
   onAdditionChange: (addition: PendingApplicationNode) => void;
   onRemoveAddition: (id: string) => void;
 };
@@ -497,14 +591,19 @@ function ApplicationTopologyFlow(props: ApplicationTopologyFlowProps) {
 }
 
 function ApplicationTopologyFlowCanvas({
-  resources, topologyEdges, changes, additions, hasDraft, busy, onUpdate,
-  onAdditionChange, onRemoveAddition,
+  resources, topologyEdges, changes, yamlSourceChanges, additions, hasDraft, busy, onUpdate,
+  onSourceYamlSave, onAdditionChange, onRemoveAddition,
 }: ApplicationTopologyFlowProps) {
   const [nodes, setNodes, onNodesChange] = useNodesState<ApplicationFlowNode>([]);
   const { fitView, screenToFlowPosition } = useReactFlow<ApplicationFlowNode, Edge>();
   const [connectionMessage, setConnectionMessage] = useState('');
   const [editingNode, setEditingNode] = useState<KubernetesApplicationTopologyNode>();
+  const [yamlEditorNode, setYamlEditorNode] = useState<KubernetesApplicationTopologyNode>();
   const [contextMenu, setContextMenu] = useState<ApplicationContextMenuState>();
+  const openSourceYamlEditor = useCallback((resource: KubernetesApplicationTopologyNode) => {
+    if (changes[resource.id] && !window.confirm('此资源已有表单字段修改。继续编辑源 YAML 后，保存的 YAML 会替代这些表单修改。继续吗？')) return;
+    setYamlEditorNode(resource);
+  }, [changes]);
   const allResources = useMemo(() => [...resources, ...additions.map(addition => ({
     id: addition.id,
     kind: addition.kind,
@@ -516,10 +615,15 @@ function ApplicationTopologyFlowCanvas({
     servicePort: addition.servicePort,
     targetPort: addition.targetPort,
     serviceProtocol: addition.serviceProtocol,
+    servicePorts: addition.kind === 'Service' ? [{
+      name: 'http', port: addition.servicePort ?? 80,
+      targetPort: addition.targetPort ?? '80', protocol: addition.serviceProtocol ?? 'TCP',
+    }] : [],
     state: 'PENDING' as const,
+    sourceYaml: addition.sourceYaml ?? additionSourceYaml(addition),
   }))], [resources, additions]);
   const visibleResources = useMemo(
-    () => allResources.filter(resource => resource.kind === 'Service' || resource.kind === 'Deployment'),
+    () => allResources.filter(resource => ['Service', 'Deployment', 'ServiceAccount'].includes(resource.kind)),
     [allResources],
   );
   const edges = useMemo<Edge[]>(() => {
@@ -571,22 +675,33 @@ function ApplicationTopologyFlowCanvas({
         .map((resource, index) => [resource.id, index]));
       const deploymentIndex = new Map(visibleResources.filter(resource => resource.kind === 'Deployment')
         .map((resource, index) => [resource.id, index]));
+      const accountIndex = new Map(visibleResources.filter(resource => resource.kind === 'ServiceAccount')
+        .map((resource, index) => [resource.id, index]));
       const pendingPositions = new Map(additions.map(addition => [addition.id, addition.position]));
       return visibleResources.map(resource => ({
         id: resource.id,
         type: 'application' as const,
         position: previousPositions.get(resource.id)
           ?? pendingPositions.get(resource.id)
-          ?? applicationFlowNodePosition(resource, serviceIndex.get(resource.id) ?? deploymentIndex.get(resource.id) ?? 0),
+          ?? applicationFlowNodePosition(resource, resource.kind === 'Service'
+            ? serviceIndex.get(resource.id) ?? 0 : resource.kind === 'Deployment'
+              ? deploymentIndex.get(resource.id) ?? 0 : accountIndex.get(resource.id) ?? 0),
         data: {
-          resource,
+          resource: { ...resource,
+            sourceYaml: yamlSourceChanges[resource.id] ?? resource.sourceYaml },
           changes: changes[resource.id] ?? {},
           controlsDisabled: busy || hasDraft,
+          sourceYamlEdited: resource.id.startsWith('pending:')
+            ? Boolean(additions.find(addition => addition.id === resource.id)?.sourceYaml)
+            : yamlSourceChanges[resource.id] !== undefined
+              && yamlSourceChanges[resource.id] !== resource.sourceYaml,
+          onEditSourceYaml: openSourceYamlEditor,
         },
         draggable: !busy && !hasDraft,
       }));
     });
-  }, [visibleResources, additions, changes, busy, hasDraft, setNodes]);
+  }, [visibleResources, additions, changes, yamlSourceChanges, busy, hasDraft,
+    openSourceYamlEditor, setNodes]);
 
   useEffect(() => {
     if (!nodes.length) return;
@@ -688,8 +803,11 @@ function ApplicationTopologyFlowCanvas({
         <TopologyContextMenuHeading>{contextMenu.connectedTo
           ? `${contextMenu.resource.name} → ${contextMenu.connectedTo}`
           : `${contextMenu.resource.kind === 'Service' ? 'Service' : '工作负载'} · ${contextMenu.resource.name}`}</TopologyContextMenuHeading>
-        <TopologyContextMenuItem onClick={() => { setEditingNode(contextMenu.resource); setContextMenu(undefined); }}>
+        {contextMenu.resource.kind !== 'ServiceAccount' && <TopologyContextMenuItem onClick={() => { setEditingNode(contextMenu.resource); setContextMenu(undefined); }}>
           {contextMenu.resource.kind === 'Service' ? '编辑端口与连接' : '编辑副本与镜像'}
+        </TopologyContextMenuItem>}
+        <TopologyContextMenuItem onClick={() => { openSourceYamlEditor(contextMenu.resource!); setContextMenu(undefined); }}>
+          编辑此卡片源 YAML
         </TopologyContextMenuItem>
         {!contextMenu.connectedTo && contextMenu.resource.id.startsWith('pending:') && <TopologyContextMenuItem className="danger" onClick={() => {
           onRemoveAddition(contextMenu.resource!.id);
@@ -710,7 +828,52 @@ function ApplicationTopologyFlowCanvas({
       onClose={() => setEditingNode(undefined)}
       onSave={value => { onUpdate(editingNode, value); setEditingNode(undefined); }}
     />}
+    {yamlEditorNode && <ApplicationSourceYamlDialog
+      node={yamlEditorNode}
+      disabled={busy || hasDraft}
+      onClose={() => setYamlEditorNode(undefined)}
+      onSave={sourceYaml => {
+        if (yamlEditorNode.id.startsWith('pending:')) {
+          const addition = additions.find(item => item.id === yamlEditorNode.id);
+          if (addition) onAdditionChange({ ...addition, sourceYaml });
+        } else {
+          onSourceYamlSave(yamlEditorNode, sourceYaml);
+        }
+        setYamlEditorNode(undefined);
+      }}
+    />}
   </>;
+}
+
+function ApplicationSourceYamlDialog({
+  node, disabled, onClose, onSave,
+}: {
+  node: KubernetesApplicationTopologyNode;
+  disabled: boolean;
+  onClose: () => void;
+  onSave: (sourceYaml: string) => void;
+}) {
+  const [sourceYaml, setSourceYaml] = useState(node.sourceYaml);
+  const [error, setError] = useState('');
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!sourceYaml.trim() || sourceYaml.length > 262_144) {
+      setError('本项 YAML 必须为 1–262144 个字符。');
+      return;
+    }
+    onSave(sourceYaml);
+  };
+  return <div className="modal-backdrop"><section className="modal application-yaml-dialog" role="dialog" aria-modal="true" aria-labelledby="application-yaml-title">
+    <div className="card-title"><div><span className="eyebrow">RESOURCE SOURCE YAML</span><h2 id="application-yaml-title">{node.kind} · {node.name}</h2><p>该资源必须保持 kind 和名称；保存后先生成版本差异，不会立即修改集群。</p></div><button className="icon-button" aria-label="关闭 YAML 编辑器" onClick={onClose}>×</button></div>
+    <form onSubmit={submit}>
+      <label className="application-yaml-label" htmlFor="application-source-yaml">源 YAML</label>
+      <textarea id="application-source-yaml" className="application-source-yaml" spellCheck={false}
+        autoCapitalize="off" autoCorrect="off" maxLength={262_144} rows={22}
+        value={sourceYaml} onChange={event => { setSourceYaml(event.target.value); setError(''); }} />
+      {error && <div className="alert error" role="alert">{error}</div>}
+      <div className="form-actions"><button type="button" className="secondary" onClick={onClose}>取消</button><button className="primary" disabled={disabled}>保存到拓扑草稿</button></div>
+    </form>
+  </section></div>;
 }
 
 function ApplicationNodeSettingsDialog({

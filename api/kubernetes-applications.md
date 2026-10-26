@@ -24,7 +24,7 @@ Kubernetes YAML 仅接收 Deployment、Service 和 ServiceAccount，至少包含
 
 `GET /api/v1/kubernetes/applications/{applicationId}` 返回当前应用、由当前版本清单生成的拓扑和清单。`GET .../versions` 返回不可变版本历史。
 
-拓扑版本草稿请求必须包含当前 `baseVersion` 和修改项或新增资源；每个应用同时只允许一个待确认草稿。应用页和网络拓扑页使用共享可拖拽画布与贝塞尔曲线连线；空白处右键可新增 Deployment 或 ClusterIP Service，拖动 Service 输出端到 Deployment 输入端修改 selector，右键卡片可编辑 Deployment 副本数（0–20）和镜像，或编辑 Service 首个端口、目标端口与协议。新增和修改都会先生成 YAML diff，确认部署前不写集群。后端从存储的清单解析资源并生成受限 YAML，只接受带有效名称和配置的 Deployment、Service；不接受任意 YAML、删除已有资源，也不写入 Secret、Namespace、集群级资源或自定义资源。新 Service 必须连接到应用内 Deployment；名称已被 Namespace 中其他资源占用时拒绝部署。部署一个草稿后，其他基于旧版本的草稿会标记为 `FAILED` 并提示已过期。
+拓扑版本草稿请求必须包含当前 `baseVersion` 和修改项或新增资源；每个应用同时只允许一个待确认草稿。应用拓扑卡片完整显示资源名和 Service 全部端口信息，长名称和详情自动换行。Service、Deployment 与 ServiceAccount 卡片都可打开独立源 YAML 编辑器；`yamlEdits` 仅允许替换同 kind/name 的现有受支持资源，`yamlAdditions` 只允许新增 Deployment 或 ClusterIP Service。单项 YAML 最多 256 KiB，本次源 YAML 总量最多 256 KiB。后端解析并重新校验资源，强制恢复目标 Namespace 和应用所有权标签，拒绝更换资源身份或导入不支持的 kind。应用页和网络拓扑页使用共享可拖拽画布与贝塞尔曲线连线；空白处右键可新增 Deployment 或 ClusterIP Service，拖动 Service 输出端到 Deployment 输入端修改 selector，表单可编辑 Deployment 副本数（0–20）和镜像，或编辑 Service 首个端口、目标端口与协议。新增和修改都会先生成 YAML diff，确认部署前不写集群。后端不接受任意资源 YAML，不删除已有资源，也不写入 Secret、Namespace、集群级资源或自定义资源。新 Service 必须匹配应用内 Deployment；名称已被 Namespace 中其他资源占用时拒绝部署。部署一个草稿后，其他基于旧版本的草稿会标记为 `FAILED` 并提示已过期。
 
 创建草稿只持久化候选版本，不操作集群。返回版本历史中的 `manifestDiff` 按 Kubernetes kind/name 展示变更资源。部署接口仅接受状态为 `DRAFT` 且 `baseVersion` 仍等于当前版本的草稿；部署前逐资源检查 `nanpanel.io/application-id` 所有权标记和 Kubernetes ResourceVersion。多资源更新不是集群原子事务，失败时会尝试恢复前一份清单，并将最终状态记录为 `FAILED` 或 `PARTIAL`。
 
