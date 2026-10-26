@@ -214,9 +214,43 @@ main:has(.applications-page)>footer{display:none}
 .application-network-topology{position:absolute;inset:0;z-index:1;display:flex;min-height:0;flex-direction:column;overflow:auto;padding:8px 2px 16px;overscroll-behavior:contain;visibility:hidden;pointer-events:none}
 .application-network-topology.visible{visibility:visible;pointer-events:auto}
 .application-network-note{margin:0 0 10px;padding:9px 12px;border:1px solid #e3eaf4;border-radius:7px;background:#f8fafd;color:#708198;font-size:10px;line-height:1.65;overflow-wrap:anywhere}
+.application-network-runtime{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 10px;padding:10px 12px;border:1px solid #dce5f0;border-radius:8px;background:#fff}
+.application-network-runtime-status{display:grid;gap:3px;min-width:0;color:#60728a;font-size:10px;line-height:1.5;overflow-wrap:anywhere}
+.application-network-runtime-status strong{color:#30445f;font-size:11px}
+.application-network-runtime-actions{display:flex;flex:0 0 auto;flex-wrap:wrap;gap:6px}
+.application-network-runtime-actions button{padding:6px 9px;font-size:10px}
+@media(max-width:760px){.application-network-runtime{align-items:flex-start;flex-direction:column}.application-network-runtime-actions{width:100%}}
 .application-network-topology .page-heading{margin-bottom:10px}
-.application-network-topology .topology{height:min(56vh,580px);min-height:390px}
-@media(max-width:620px){.application-network-topology{padding:4px 0 12px}.application-network-topology .topology{height:450px;min-height:390px}}
+.application-network-card{display:flex;min-height:0;height:100%;flex-direction:column;gap:8px}
+.application-network-card .application-section-heading{flex:0 0 auto}
+.application-network-card .application-section-heading>button{flex:0 0 auto}
+.application-network-canvas{position:relative;min-height:420px;flex:1 1 0;overflow:hidden;border:1px solid #e6ebf2;border-radius:8px;background-color:#fcfdff;background-image:radial-gradient(#e2e9f2 .7px,transparent .7px);background-size:16px 16px}
+.application-network-canvas>.topology-canvas-shell,.application-network-canvas .react-flow{width:100%;height:100%}
+.application-network-canvas .react-flow__node-application{width:340px!important;min-width:0!important;padding:0!important;border:0!important;border-radius:0!important;background:transparent!important;box-shadow:none!important;color:inherit!important}
+.application-network-canvas .react-flow__node-application-device{width:340px!important;min-width:0!important;padding:0!important;border:0!important;border-radius:0!important;background:transparent!important;box-shadow:none!important;color:inherit!important}
+.application-network-canvas .react-flow__edge-path{stroke:#91addc;stroke-width:2}
+.application-network-device{position:relative;width:340px;min-height:132px;padding:12px 14px;border:1px solid #d7e1ee;border-left:3px solid #6589bd;border-radius:9px;background:#fff;box-shadow:0 4px 14px #243a5710}
+.application-network-device.selected{border-color:#86a9e8;box-shadow:0 5px 18px #477dd91c}
+.application-network-device-heading{display:flex;flex-direction:column;gap:3px;margin-bottom:7px}
+.application-network-device-heading>span{color:#50719f;font-size:8px;font-weight:800;letter-spacing:.08em}
+.application-network-device-heading>small,.application-network-device-footer>small{color:#7b8da3;font-size:9px;line-height:1.45;overflow-wrap:anywhere;white-space:normal}
+.application-network-device>strong{display:block;overflow-wrap:anywhere;color:#405773;font-size:12px;line-height:1.4;word-break:break-word;white-space:normal}
+.application-network-device-ports{position:relative;margin-top:7px}
+.application-network-port{position:absolute;display:flex;max-width:50%;align-items:center;gap:8px;color:#60738c;font-size:8px;line-height:1.4}
+.application-network-port.input{left:0;padding-left:8px}
+.application-network-port.output{right:0;justify-content:flex-end;padding-right:8px;text-align:right}
+.application-network-port span{overflow-wrap:anywhere;white-space:normal}
+.application-network-port .react-flow__handle{width:9px;height:9px;border:2px solid #fff;background:#5f91db;box-shadow:0 0 0 1px #8aa8d0}
+.application-network-port.input .react-flow__handle{left:-6px}
+.application-network-port.output .react-flow__handle{right:-6px;background:#55ad82;box-shadow:0 0 0 1px #78b99a}
+.application-network-device-description{margin:6px 0 0;color:#7b8da3;font-size:9px;line-height:1.45;overflow-wrap:anywhere;white-space:normal}
+.application-network-device-footer{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px}
+.application-network-message{flex:0 0 auto;color:#6b7f98;font-size:10px;line-height:1.5;overflow-wrap:anywhere}
+.application-network-canvas .application-network-handle{width:9px;height:9px;border:2px solid #fff;background:#5984c1;box-shadow:0 0 0 1px #8aa8d0}
+.application-network-canvas .application-network-handle.network-in{top:0;background:#5f91db}
+.application-network-canvas .application-network-handle.network-out{bottom:0;background:#55ad82}
+.application-network-topology .application-topology-footnote{flex:0 0 auto}
+@media(max-width:620px){.application-network-topology{padding:4px 0 12px}.application-network-canvas{height:450px;min-height:390px;flex:none}.application-network-device,.application-network-canvas .react-flow__node-application,.application-network-canvas .react-flow__node-application-device{width:300px!important}.application-network-device{min-height:120px;padding:10px}}
 
 @media(max-width:1150px){main:has(.applications-page){padding-right:24px;padding-left:24px}}
 @media(max-width:900px){.application-layout{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(86px,.2fr) minmax(0,1fr)}.application-list-panel{display:flex;min-height:0;flex-direction:column;overflow:hidden}.application-list{min-height:0;overflow-x:auto;overscroll-behavior:contain}.application-list-footer{display:none}.application-content{overflow:hidden}}

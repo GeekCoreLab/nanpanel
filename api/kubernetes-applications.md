@@ -24,13 +24,19 @@ Kubernetes YAML 仅接收 Deployment、Service 和 ServiceAccount，至少包含
 
 `GET /api/v1/kubernetes/applications/{applicationId}` 返回当前应用、由当前版本清单生成的拓扑和清单。`GET .../versions` 返回不可变版本历史。
 
-拓扑版本草稿请求必须包含当前 `baseVersion` 和修改项或新增资源；每个应用同时只允许一个待确认草稿。应用拓扑卡片完整显示资源名和 Service 全部端口信息，长名称和详情自动换行。Service、Deployment 与 ServiceAccount 卡片都可打开独立源 YAML 编辑器；`yamlEdits` 仅允许替换同 kind/name 的现有受支持资源，`yamlAdditions` 只允许新增 Deployment 或 ClusterIP Service。单项 YAML 最多 256 KiB，本次源 YAML 总量最多 256 KiB。后端解析并重新校验资源，强制恢复目标 Namespace 和应用所有权标签，拒绝更换资源身份或导入不支持的 kind。应用页还提供“虚拟网络设备”工作区，复用 Core 当前唯一的共享 NetworkGraph 草稿与 Revision（不是按应用隔离），可编辑多端口 SWITCH、MERGE、SPLIT、FORWARDER、LOAD_BALANCER、MIRROR、FIREWALL、ROUTER、PACKET_TAP 等节点 YAML；这些设备图不会自动接入该应用的 Kubernetes Pod/Service 流量。网络节点保存后仍需显式运行声明了对应能力的 Provider；内建 Linux netns Provider 当前只执行文档所列的 root-level SWITCH、ROUTER、FIREWALL 与 PACKET_TAP。网络节点 YAML 规范和执行边界见 [NetworkGraph 与拓扑 Revision API](topology.md)。
+拓扑版本草稿请求必须包含当前 `baseVersion` 和修改项或新增资源；每个应用同时只允许一个待确认草稿。应用拓扑卡片完整显示资源名和 Service 全部端口信息，长名称和详情自动换行。Service、Deployment 与 ServiceAccount 卡片都可打开独立源 YAML 编辑器；`yamlEdits` 仅允许替换同 kind/name 的现有受支持资源，`yamlAdditions` 只允许新增 Deployment 或 ClusterIP Service。单项 YAML 最多 256 KiB，本次源 YAML 总量最多 256 KiB。后端解析并重新校验资源，强制恢复目标 Namespace 和应用所有权标签，拒绝更换资源身份或导入不支持的 kind。
+
+每个应用另有独立的“虚拟网络设备”工作区，不再复用共享 NetworkGraph。它将应用 Deployment、Service、ServiceAccount 与虚拟设备显示在同一画布；Deployment 网卡可连接设备端口，虚拟设备支持 SWITCH、MERGE、SPLIT、FORWARDER、LOAD_BALANCER、MIRROR、FIREWALL、ROUTER、PACKET_TAP 与 CUSTOM，每个设备卡均可编辑源 YAML。应用设备图使用独立 ETag 与不可变 Revision；保存会校验设备图、链路、设备端口和当前应用 Deployment 接入关系。
+
+保存拓扑仍只表示期望状态。运行时现已提供单节点 K3s 的显式 Apply、Verify 和 Compensate：保留默认 CNI，通过 Multus bridge 次级网卡、隔离 netns Helper、专属 bridge/veth、精确 CIDR 路由和宿主输出过滤接入虚拟拓扑；选中的 ClusterIP Service 使用 NaNPanel 管理的 EndpointSlice 指向次级 Pod IP。Apply 前会校验近期 Node/Agent/Helper 健康状态、Resource UID、Multus NAD API、Service 选择范围和目标端口；Apply 需要近期重新验证身份，操作保留 Kubernetes 原配置和 CIDR 预留，补偿时先恢复 Deployment/Service，再等待 Pod 离开次级网络后清理宿主资源。集群必须预先安装 Multus 并授予访问 Node、Pod、Deployment、Service、NetworkAttachmentDefinition 和 EndpointSlice 所需权限，NaNPanel 不会安装或修改 CNI。当前 Apply 只支持一个已映射且 Ready 的 K3s Node；仅执行隔离 netns Provider 支持的 SWITCH、ROUTER、FIREWALL、PACKET_TAP 和 L2 Ethernet 链路，Pod attachment 必须连接 Linux Bridge SWITCH，Service targetPort 必须为数字。其余虚拟设备仍可编辑并保存，但 Apply 会拒绝不支持的设备。跨节点优先按应用分配 VNI 使用 VXLAN；多节点/VXLAN 尚未实现。控制面发布不会自动 Apply 应用网络拓扑；真实 Pod/Service 包路径、默认 CNI 健康和宿主隔离仍需在隔离集群验收。详见 [ADR-016](../docs/adr/ADR-016-application-virtual-network-data-plane.md)。
 
 应用资源画布使用可拖拽节点与贝塞尔曲线连线；空白处右键可新增 Deployment 或 ClusterIP Service，拖动 Service 输出端到 Deployment 输入端修改 selector，表单可编辑 Deployment 副本数（0–20）和镜像，或编辑 Service 首个端口、目标端口与协议。新增和修改都会先生成 YAML diff，确认部署前不写集群。后端不接受任意资源 YAML，不删除已有资源，也不写入 Secret、Namespace、集群级资源或自定义资源。新 Service 必须匹配应用内 Deployment；名称已被 Namespace 中其他资源占用时拒绝部署。部署一个草稿后，其他基于旧版本的草稿会标记为 `FAILED` 并提示已过期。
 
 创建草稿只持久化候选版本，不操作集群。返回版本历史中的 `manifestDiff` 按 Kubernetes kind/name 展示变更资源。部署接口仅接受状态为 `DRAFT` 且 `baseVersion` 仍等于当前版本的草稿；部署前逐资源检查 `nanpanel.io/application-id` 所有权标记和 Kubernetes ResourceVersion。多资源更新不是集群原子事务，失败时会尝试恢复前一份清单，并将最终状态记录为 `FAILED` 或 `PARTIAL`。
 
 应用所需的集群权限限制在被选 Namespace：读取对应资源、创建首版资源和版本新增的 Deployment / Service，以及读取和更新该应用已登记的 Deployment、Service、ServiceAccount。不需要集群级写权限。应用资源同时登记 Kubernetes UID；同名资源被删除并重建后，旧应用不会自动接管新 UID。
+
+启用网络运行时后，还需要读取 Node、列出应用 Pod、创建/读取/更新/删除被应用标签托管的 NetworkAttachmentDefinition 与 EndpointSlice，并更新该应用已登记的 Deployment 和 Service。所需命名空间资源权限不会授予集群级写权限。
 
 ## 路由
 
@@ -41,6 +47,13 @@ Kubernetes YAML 仅接收 Deployment、Service 和 ServiceAccount，至少包含
 | POST | `/api/v1/kubernetes/applications` | 创建并部署图形化配置或导入清单 |
 | POST | `/api/v1/kubernetes/applications/bookinfo` | 创建并部署 Bookinfo 初始版本 |
 | GET | `/api/v1/kubernetes/applications/{applicationId}` | 获取应用拓扑和当前版本 YAML |
+| GET/PUT | `/api/v1/kubernetes/applications/{applicationId}/network-topology` | 读取或按 If-Match 保存该应用独立的虚拟设备图 |
+| GET | `/api/v1/kubernetes/applications/{applicationId}/network-topology/runtime` | 获取运行时 Apply/Verify/Compensate 状态 |
+| POST | `/api/v1/kubernetes/applications/{applicationId}/network-topology/runtime/apply` | 显式接入真实 Pod/Service 流量 |
+| POST | `/api/v1/kubernetes/applications/{applicationId}/network-topology/runtime/verify` | 显式验证 Helper、Pod 网卡和 EndpointSlice |
+| POST | `/api/v1/kubernetes/applications/{applicationId}/network-topology/runtime/compensate` | 恢复运行前资源与主机网络配置 |
+| GET | `/api/v1/kubernetes/applications/{applicationId}/network-topology/revisions` | 查询应用虚拟拓扑 Revision 摘要 |
+| GET | `/api/v1/kubernetes/applications/{applicationId}/network-topology/revisions/{revisionId}` | 读取不可变应用虚拟拓扑 Revision |
 | GET | `/api/v1/kubernetes/applications/{applicationId}/versions` | 获取版本历史和差异 |
 | POST | `/api/v1/kubernetes/applications/{applicationId}/versions` | 生成待确认版本草稿，不写入集群 |
 | POST | `/api/v1/kubernetes/applications/{applicationId}/versions/{version}/deploy` | 显式确认部署指定草稿 |

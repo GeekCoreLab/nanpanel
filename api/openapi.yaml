@@ -1106,6 +1106,232 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+  /api/v1/kubernetes/applications/{applicationId}/network-topology:
+    parameters:
+    - name: applicationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    get:
+      tags: [KubernetesApplications]
+      operationId: getKubernetesApplicationNetworkTopology
+      summary: 读取应用独立的虚拟设备拓扑
+      description: 返回按应用隔离的期望设备图、连接、Deployment 接入点和强 ETag。保存图不会安装 CNI、修改 Pod 或执行 Provider。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 应用网络图及其 generation。
+          headers:
+            ETag: { schema: { type: string }, description: 保存时必须原样使用。 }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationNetworkTopology' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [KubernetesApplications]
+      operationId: replaceKubernetesApplicationNetworkTopology
+      summary: 保存应用虚拟设备拓扑 Revision
+      description: 通过 If-Match 乐观并发保存根级虚拟设备、设备连接及到已登记 Deployment 的逻辑接入。只保存期望状态，不配置 Pod 数据面。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      parameters:
+      - name: If-Match
+        in: header
+        required: true
+        schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/KubernetesApplicationNetworkTopologyWrite' }
+      responses:
+        '200':
+          description: Revision 已持久化。
+          headers:
+            ETag: { schema: { type: string }, description: 下一次保存必须使用的新 ETag。 }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationNetworkTopology' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '412':
+          description: 应用网络图已由其他请求修改。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '422':
+          description: 设备图、连接或 Deployment 接入点不符合约束。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+  /api/v1/kubernetes/applications/{applicationId}/network-topology/revisions:
+    parameters:
+    - name: applicationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    get:
+      tags: [KubernetesApplications]
+      operationId: listKubernetesApplicationNetworkTopologyRevisions
+      summary: 查询应用虚拟设备拓扑历史
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      parameters:
+      - name: limit
+        in: query
+        schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        '200':
+          description: 不可变拓扑 Revision 摘要。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationNetworkTopologyRevisionList' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/kubernetes/applications/{applicationId}/network-topology/runtime:
+    parameters:
+    - name: applicationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    get:
+      tags: [KubernetesApplications]
+      operationId: getKubernetesApplicationNetworkRuntime
+      summary: 查询应用虚拟网络运行时状态
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 已提交的 Helper、Multus、Pod 与 Service EndpointSlice 运行状态。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationNetworkRuntime' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/kubernetes/applications/{applicationId}/network-topology/runtime/apply:
+    parameters:
+    - name: applicationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    post:
+      tags: [KubernetesApplications]
+      operationId: applyKubernetesApplicationNetworkRuntime
+      summary: 显式接入应用真实 Pod 流量
+      description: 仅支持一个已映射 Ready 的 K3s Node；保留默认 CNI，通过 Multus bridge 网络、隔离 netns Helper 和应用管理的 EndpointSlice 接入真实 Pod 流量。要求近期重新验证身份。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/KubernetesApplicationNetworkRuntimeAction' }
+      responses:
+        '202':
+          description: Apply 已提交，轮询运行时状态直到 APPLIED 或失败。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationNetworkRuntime' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: 单节点、资源所有权或运行时状态前置条件未满足。 }
+        '422': { description: Multus、设备类型、Service 或网络配置不受支持。 }
+  /api/v1/kubernetes/applications/{applicationId}/network-topology/runtime/verify:
+    parameters:
+    - name: applicationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    post:
+      tags: [KubernetesApplications]
+      operationId: verifyKubernetesApplicationNetworkRuntime
+      summary: 验证应用虚拟网络数据面
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/KubernetesApplicationNetworkRuntimeAction' }
+      responses:
+        '202':
+          description: Verify 已提交。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationNetworkRuntime' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: 当前运行时状态不能验证。 }
+  /api/v1/kubernetes/applications/{applicationId}/network-topology/runtime/compensate:
+    parameters:
+    - name: applicationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    post:
+      tags: [KubernetesApplications]
+      operationId: compensateKubernetesApplicationNetworkRuntime
+      summary: 恢复应用网络运行前配置
+      description: 恢复 Deployment 次级网络注解、节点调度和 Service selector；等待 Pod 离开次级网络后再由 Helper 删除宿主网络资源。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/KubernetesApplicationNetworkRuntimeAction' }
+      responses:
+        '202':
+          description: 补偿已开始，轮询运行时状态直到 COMPENSATED 或 PARTIAL。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationNetworkRuntime' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: 当前运行时状态不能补偿。 }
+  /api/v1/kubernetes/applications/{applicationId}/network-topology/revisions/{revisionId}:
+    parameters:
+    - name: applicationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    - name: revisionId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    get:
+      tags: [KubernetesApplications]
+      operationId: getKubernetesApplicationNetworkTopologyRevision
+      summary: 读取应用虚拟设备拓扑历史 Revision
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 历史期望图，不会回滚当前 Revision。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationNetworkTopology' }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /api/v1/kubernetes/applications/{applicationId}/versions:
     parameters:
     - name: applicationId
@@ -6081,6 +6307,105 @@ components:
         manifestYaml:
           type: string
           description: 当前或新建草稿的标准化 Namespace 资源清单。
+    KubernetesApplicationNetworkTopologyWrite:
+      type: object
+      additionalProperties: false
+      required: [nodes, links, attachments]
+      properties:
+        nodes:
+          type: array
+          maxItems: 100
+          items: { $ref: '#/components/schemas/TopologyNode' }
+        links:
+          type: array
+          maxItems: 800
+          items: { $ref: '#/components/schemas/TopologyLink' }
+        attachments:
+          type: array
+          maxItems: 256
+          items: { $ref: '#/components/schemas/KubernetesApplicationNetworkAttachment' }
+    KubernetesApplicationNetworkAttachment:
+      type: object
+      additionalProperties: false
+      required: [id, resourceId, nodeId, devicePort, direction]
+      properties:
+        id: { type: string, format: uuid }
+        resourceId:
+          type: string
+          maxLength: 128
+          pattern: '^Deployment/[a-z0-9]([a-z0-9.-]*[a-z0-9])?$'
+          description: 当前应用已登记的 Deployment 标识。
+        nodeId: { type: string, format: uuid }
+        devicePort:
+          type: string
+          pattern: '^(in|out)-([1-9]|1[0-6])$'
+        direction:
+          type: string
+          enum: [RESOURCE_TO_DEVICE, DEVICE_TO_RESOURCE]
+    KubernetesApplicationNetworkTopology:
+      type: object
+      additionalProperties: false
+      required: [revisionId, generation, nodes, links, attachments, updatedAt, updatedBy]
+      properties:
+        revisionId: { type: [string, 'null'], format: uuid }
+        generation: { type: integer, format: int64, minimum: 0 }
+        nodes:
+          type: array
+          maxItems: 100
+          items: { $ref: '#/components/schemas/TopologyNode' }
+        links:
+          type: array
+          maxItems: 800
+          items: { $ref: '#/components/schemas/TopologyLink' }
+        attachments:
+          type: array
+          maxItems: 256
+          items: { $ref: '#/components/schemas/KubernetesApplicationNetworkAttachment' }
+        updatedAt: { type: [string, 'null'], format: date-time }
+        updatedBy: { type: [string, 'null'], format: uuid }
+    KubernetesApplicationNetworkTopologyRevisionList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items: { $ref: '#/components/schemas/KubernetesApplicationNetworkTopologyRevision' }
+    KubernetesApplicationNetworkTopologyRevision:
+      type: object
+      additionalProperties: false
+      required: [revisionId, generation, nodeCount, linkCount, updatedAt, updatedBy]
+      properties:
+        revisionId: { type: string, format: uuid }
+        generation: { type: integer, format: int64, minimum: 1 }
+        nodeCount: { type: integer, minimum: 0, maximum: 100 }
+        linkCount: { type: integer, minimum: 0, maximum: 1056 }
+        updatedAt: { type: string, format: date-time }
+        updatedBy: { type: [string, 'null'], format: uuid }
+    KubernetesApplicationNetworkRuntimeAction:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 500 }
+    KubernetesApplicationNetworkRuntime:
+      type: object
+      additionalProperties: false
+      required: [applicationId, revisionId, generation, clusterNodeUid, hostId, state, detail, helperOperationId, updatedAt, appliedAt]
+      properties:
+        applicationId: { type: string, format: uuid }
+        revisionId: { type: string, format: uuid }
+        generation: { type: integer, format: int64, minimum: 1 }
+        clusterNodeUid: { type: string, maxLength: 128 }
+        hostId: { type: string, format: uuid }
+        state:
+          type: string
+          enum: [APPLYING, APPLIED, VERIFYING, VERIFY_FAILED, COMPENSATING, COMPENSATED, FAILED, PARTIAL]
+        detail: { type: [string, 'null'], maxLength: 1000 }
+        helperOperationId: { type: [string, 'null'], format: uuid }
+        updatedAt: { type: string, format: date-time }
+        appliedAt: { type: [string, 'null'], format: date-time }
     KubernetesApplicationTopology:
       type: object
       additionalProperties: false

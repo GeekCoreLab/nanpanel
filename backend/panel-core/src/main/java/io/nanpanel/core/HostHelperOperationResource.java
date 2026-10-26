@@ -592,7 +592,8 @@ public class HostHelperOperationResource {
     JsonNode action = payload == null ? null : payload.get("action");
     JsonNode nodes = payload == null ? null : payload.get("nodes");
     JsonNode links = payload == null ? null : payload.get("links");
-    if (payload == null || !payload.isObject() || payload.size() != 6
+    JsonNode attachments = payload == null ? null : payload.get("attachments");
+    if (payload == null || !payload.isObject() || payload.size() != 7
         || topologyId == null || !topologyId.isTextual() || !target.equals(topologyId.asText())
         || revisionId == null || !revisionId.isTextual() || !UUID_TEXT.matcher(revisionId.asText()).matches()
         || generation == null || !generation.isIntegralNumber() || !generation.canConvertToLong()
@@ -600,17 +601,42 @@ public class HostHelperOperationResource {
         || !Set.of("APPLY", "VERIFY", "COMPENSATE").contains(action.asText())
         || nodes == null || !nodes.isArray() || nodes.isEmpty() || nodes.size() > 16
         || links == null || !links.isArray() || links.size() > 64
+        || attachments == null || !attachments.isArray() || attachments.isEmpty()
+        || attachments.size() > 64
         || compactJson(payload).getBytes(StandardCharsets.UTF_8).length > 48 * 1024) {
       throw fail(422, "VALIDATION_FAILED", "隔离拓扑网络操作参数无效");
     }
     var nodeIds = new java.util.HashSet<String>();
+    var nodeKinds = new java.util.HashMap<String, String>();
+    var nodeBackends = new java.util.HashMap<String, String>();
     for (JsonNode node : nodes) {
       JsonNode id = node == null ? null : node.get("id");
       JsonNode kind = node == null ? null : node.get("kind");
-      if (!objectWithKeys(node, Set.of("id", "kind")) || id == null || !id.isTextual()
-          || !UUID_TEXT.matcher(id.asText()).matches() || kind == null || !kind.isTextual()
-          || !"SWITCH".equals(kind.asText()) || !nodeIds.add(id.asText())) {
-        throw fail(422, "VALIDATION_FAILED", "首个 Linux Bridge Provider 仅接受唯一 SWITCH 节点");
+      Set<String> fields = node != null && node.isObject() ? fieldSet(node) : Set.of();
+      if (node == null || !node.isObject() || !Set.of("id", "kind", "switchBackend", "firewallPolicy",
+          "routerConfiguration").containsAll(fields)
+          || !fields.containsAll(Set.of("id", "kind"))
+          || id == null || !id.isTextual() || !UUID_TEXT.matcher(id.asText()).matches()
+          || kind == null || !kind.isTextual()
+          || !Set.of("SWITCH", "PACKET_TAP", "FIREWALL", "ROUTER").contains(kind.asText())
+          || !nodeIds.add(id.asText())) {
+        throw fail(422, "VALIDATION_FAILED", "隔离 netns Provider 仅接受唯一 SWITCH、ROUTER、FIREWALL 和 PACKET_TAP 设备");
+      }
+      nodeKinds.put(id.asText(), kind.asText());
+      if (node.path("switchBackend").isTextual()) {
+        nodeBackends.put(id.asText(), node.path("switchBackend").asText());
+      }
+      boolean hasFirewall = !node.path("firewallPolicy").isMissingNode()
+          && !node.path("firewallPolicy").isNull();
+      boolean hasRouter = !node.path("routerConfiguration").isMissingNode()
+          && !node.path("routerConfiguration").isNull();
+      if (("FIREWALL".equals(kind.asText()) != hasFirewall)
+          || ("ROUTER".equals(kind.asText()) != hasRouter)
+          || (!"SWITCH".equals(kind.asText()) && !node.path("switchBackend").isNull()
+              && !node.path("switchBackend").isMissingNode())
+          || ("SWITCH".equals(kind.asText()) && !node.path("switchBackend").isNull()
+              && !Set.of("BRIDGE", "OPENVSWITCH").contains(node.path("switchBackend").asText()))) {
+        throw fail(422, "VALIDATION_FAILED", "虚拟设备类型与设备配置字段不匹配");
       }
     }
     var linkIds = new java.util.HashSet<String>();
@@ -635,6 +661,42 @@ public class HostHelperOperationResource {
           || !occupiedPorts.add(targetNode + ":" + targetPort)) {
         throw fail(422, "VALIDATION_FAILED", "Linux Bridge 链路必须连接唯一 L2 Ethernet switch 端口");
       }
+    }
+    var attachmentIds = new java.util.HashSet<String>();
+    var cidrs = new java.util.HashSet<String>();
+    for (JsonNode attachment : attachments) {
+      if (!objectWithKeys(attachment, Set.of("id", "nodeId", "devicePort", "networkCidr"))) {
+        throw fail(422, "VALIDATION_FAILED", "隔离拓扑工作负载接入字段无效");
+      }
+      String id = attachment.path("id").asText();
+      String nodeId = attachment.path("nodeId").asText();
+      String port = attachment.path("devicePort").asText();
+      String cidr = attachment.path("networkCidr").asText();
+      if (!UUID_TEXT.matcher(id).matches() || !attachmentIds.add(id)
+          || !"SWITCH".equals(nodeKinds.get(nodeId))
+          || "OPENVSWITCH".equals(nodeBackends.get(nodeId))
+          || (!port.matches("in-([1-9]|1[0-6])") && !port.matches("out-([1-9]|1[0-6])"))
+          || linkIds.contains(id) || !occupiedPorts.add(nodeId + ":" + port)
+          || !validAttachmentCidr(cidr) || !cidrs.add(cidr)) {
+        throw fail(422, "VALIDATION_FAILED", "工作负载接入必须是唯一 Linux Bridge SWITCH 端口和隔离 /24 网段");
+      }
+    }
+  }
+
+  private Set<String> fieldSet(JsonNode value) {
+    var fields = new java.util.HashSet<String>();
+    value.fieldNames().forEachRemaining(fields::add);
+    return fields;
+  }
+
+  private boolean validAttachmentCidr(String value) {
+    var matcher = java.util.regex.Pattern.compile("^198\\.(18|19)\\.(0|[1-9][0-9]{0,2})\\.0/24$")
+        .matcher(value);
+    if (!matcher.matches()) return false;
+    try {
+      return Integer.parseInt(matcher.group(2)) <= 255;
+    } catch (NumberFormatException invalid) {
+      return false;
     }
   }
 

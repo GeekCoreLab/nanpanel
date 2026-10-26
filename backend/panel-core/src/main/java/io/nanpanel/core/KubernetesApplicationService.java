@@ -600,6 +600,13 @@ public class KubernetesApplicationService {
 
   public ApplicationDetail deployVersion(String actor, String remoteAddress, UUID applicationId,
       int versionNumber) {
+    boolean networkRuntimeActive = store.transaction(connection -> !query(connection,
+        "SELECT application_id FROM kubernetes_application_network_runtime WHERE application_id=? "
+            + "AND state IN ('APPLYING','APPLIED','VERIFYING','VERIFY_FAILED','COMPENSATING','FAILED','PARTIAL')",
+        applicationId).isEmpty());
+    if (networkRuntimeActive) throw new ApplicationException(409,
+        "APPLICATION_NETWORK_RUNTIME_ACTIVE",
+        "请先补偿恢复应用网络运行时后再部署应用版本");
     AppRow app = app(applicationId);
     StoredVersion desiredVersion = version(applicationId, versionNumber);
     if (desiredVersion == null) throw new ApplicationException(404,
@@ -615,6 +622,14 @@ public class KubernetesApplicationService {
         "KUBERNETES_APPLICATION_VERSION_MISSING", "找不到当前应用版本清单");
     Instant now = Instant.now();
     store.transaction(connection -> {
+      query(connection, "SELECT id FROM kubernetes_application WHERE id=? FOR UPDATE", applicationId);
+      if (!query(connection,
+          "SELECT application_id FROM kubernetes_application_network_runtime WHERE application_id=? "
+              + "AND state IN ('APPLYING','APPLIED','VERIFYING','VERIFY_FAILED','COMPENSATING','FAILED','PARTIAL') FOR UPDATE",
+          applicationId).isEmpty()) {
+        throw new ApplicationException(409, "APPLICATION_NETWORK_RUNTIME_ACTIVE",
+            "请先补偿恢复应用网络运行时后再部署应用版本");
+      }
       int claimed = update(connection,
           "UPDATE kubernetes_application_version SET state='APPLYING',error_message=NULL "
               + "WHERE application_id=? AND version=? AND base_version=? AND state='DRAFT'",

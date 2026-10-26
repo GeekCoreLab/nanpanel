@@ -36,6 +36,17 @@ struct TopologyRequest {
     generation: u64,
     nodes: Vec<TopologyNode>,
     links: Vec<TopologyLink>,
+    #[serde(default)]
+    attachments: Vec<TopologyAttachment>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct TopologyAttachment {
+    id: Uuid,
+    node_id: Uuid,
+    device_port: String,
+    network_cidr: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -154,6 +165,18 @@ struct CompiledTopology {
     routers: Vec<Router>,
     packet_taps: Vec<PacketTap>,
     firewalls: Vec<Firewall>,
+    attachments: Vec<CompiledAttachment>,
+}
+
+#[derive(Debug)]
+struct CompiledAttachment {
+    id: Uuid,
+    node_id: Uuid,
+    device_port: String,
+    network_cidr: String,
+    host_bridge: String,
+    host_interface: String,
+    namespace_interface: String,
 }
 
 impl CompiledTopology {
@@ -402,6 +425,60 @@ fn compile(target: &str, request: TopologyRequest) -> Result<CompiledTopology, S
         }
     }
 
+    if request.attachments.len() > 64 {
+        return Err("DENIED: topology exceeds its workload attachment limit".to_owned());
+    }
+    let mut attachment_ids = HashSet::new();
+    let mut attachment_subnets = HashSet::new();
+    let mut compiled_attachments = Vec::with_capacity(request.attachments.len());
+    for attachment in &request.attachments {
+        let Some(kind) = node_kinds.get(&attachment.node_id) else {
+            return Err(
+                "DENIED: workload attachment references an unknown virtual device".to_owned(),
+            );
+        };
+        let subnet = parse_ipv4_cidr(&attachment.network_cidr)
+            .ok_or_else(|| "DENIED: workload attachment CIDR is invalid".to_owned())?;
+        let reserved_start = u32::from(Ipv4Addr::new(198, 18, 0, 0));
+        let reserved_end = u32::from(Ipv4Addr::new(198, 19, 255, 255));
+        let last = subnet.network | !prefix_mask(subnet.prefix);
+        if !subnet.canonical
+            || subnet.prefix != 24
+            || subnet.network < reserved_start
+            || last > reserved_end
+            || !attachment_subnets.insert(attachment.network_cidr.as_str())
+        {
+            return Err(
+                "DENIED: workload networks must be unique canonical /24 CIDRs inside 198.18.0.0/15"
+                    .to_owned(),
+            );
+        }
+        if !matches!(*kind, "SWITCH")
+            || ovs_switches.contains(&attachment.node_id)
+            || (!valid_port(&attachment.device_port, "in-")
+                && !valid_port(&attachment.device_port, "out-"))
+            || !attachment_ids.insert(attachment.id)
+            || link_ids.contains(&attachment.id)
+            || !used_ports.insert((attachment.node_id, attachment.device_port.as_str()))
+        {
+            return Err(
+                "DENIED: workload attachments must use unique ports on Linux Bridge SWITCH devices"
+                    .to_owned(),
+            );
+        }
+        let revision = request.revision_id.simple().to_string();
+        let attachment_id = attachment.id.simple().to_string();
+        compiled_attachments.push(CompiledAttachment {
+            id: attachment.id,
+            node_id: attachment.node_id,
+            device_port: attachment.device_port.clone(),
+            network_cidr: attachment.network_cidr.clone(),
+            host_bridge: format!("npa{}{}", &revision[..4], &attachment_id[..8]),
+            host_interface: format!("npah{}{}", &revision[..3], &attachment_id[..6]),
+            namespace_interface: format!("npan{}{}", &revision[..3], &attachment_id[..6]),
+        });
+    }
+
     let mut nodes = request.nodes.iter().collect::<Vec<_>>();
     nodes.sort_by_key(|node| node.id);
     let bridges = nodes
@@ -480,6 +557,7 @@ fn compile(target: &str, request: TopologyRequest) -> Result<CompiledTopology, S
         routers,
         packet_taps,
         firewalls,
+        attachments: compiled_attachments,
     })
 }
 
@@ -1279,6 +1357,8 @@ async fn apply(topology: &CompiledTopology) -> Result<String, String> {
         };
     }
 
+    preflight_host_attachments(topology, &ip).await?;
+
     cleanup_ovs(topology).await?;
 
     run_fixed_command(
@@ -1293,6 +1373,11 @@ async fn apply(topology: &CompiledTopology) -> Result<String, String> {
     .await?;
     let result = apply_created(topology, &ip).await;
     if let Err(error) = result {
+        if let Err(cleanup_error) = cleanup_host_attachments(topology, &ip).await {
+            return Err(format!(
+                "{error}; host attachment cleanup failed: {cleanup_error}"
+            ));
+        }
         if let Err(cleanup_error) = cleanup_ovs(topology).await {
             return Err(format!("{error}; OVS cleanup failed: {cleanup_error}"));
         }
@@ -1468,6 +1553,8 @@ async fn apply_created(topology: &CompiledTopology, ip: &Path) -> Result<String,
         }
     }
 
+    apply_host_attachments(topology, ip).await?;
+
     if !topology.packet_taps.is_empty() {
         let tc = tc_binary()?;
         for tap in &topology.packet_taps {
@@ -1577,6 +1664,680 @@ async fn apply_created(topology: &CompiledTopology, ip: &Path) -> Result<String,
     configure_routers(topology).await?;
 
     verify(topology).await
+}
+
+fn host_attachment_owner(topology: &CompiledTopology, attachment: &CompiledAttachment) -> String {
+    format!(
+        "nanpanel:{}:{}:{}:{}",
+        topology.request.topology_id,
+        topology.request.revision_id,
+        topology.request.generation,
+        attachment.id
+    )
+}
+
+fn host_attachment_filter_table(topology: &CompiledTopology) -> String {
+    format!(
+        "npa{}",
+        &topology.request.revision_id.simple().to_string()[..8]
+    )
+}
+
+async fn preflight_host_attachments(topology: &CompiledTopology, ip: &Path) -> Result<(), String> {
+    if topology.attachments.is_empty() {
+        return Ok(());
+    }
+    let route_output = run_fixed_command(
+        ip,
+        &[
+            "-j".to_owned(),
+            "route".to_owned(),
+            "show".to_owned(),
+            "table".to_owned(),
+            "main".to_owned(),
+        ],
+        NETWORK_TIMEOUT,
+    )
+    .await?;
+    let routes = serde_json::from_str::<Vec<Value>>(&route_output)
+        .map_err(|_| "UNCERTAIN: host route inventory is invalid".to_owned())?;
+    for attachment in &topology.attachments {
+        let subnet = parse_ipv4_cidr(&attachment.network_cidr)
+            .ok_or_else(|| "DENIED: workload attachment CIDR is invalid".to_owned())?;
+        let subnet_last = subnet.network | !prefix_mask(subnet.prefix);
+        if routes.iter().any(|route| {
+            let Some(destination) = route.get("dst").and_then(Value::as_str) else {
+                return false;
+            };
+            if destination == "default" {
+                return false;
+            }
+            parse_ipv4_cidr(destination).is_some_and(|existing| {
+                let existing_last = existing.network | !prefix_mask(existing.prefix);
+                subnet.network <= existing_last && existing.network <= subnet_last
+            })
+        }) {
+            return Err(format!(
+                "DENIED: workload network {} overlaps an existing host route",
+                attachment.network_cidr
+            ));
+        }
+    }
+    let link_output = run_fixed_command(
+        ip,
+        &["-j".to_owned(), "link".to_owned(), "show".to_owned()],
+        NETWORK_TIMEOUT,
+    )
+    .await?;
+    let links = serde_json::from_str::<Vec<Value>>(&link_output)
+        .map_err(|_| "UNCERTAIN: host link inventory is invalid".to_owned())?;
+    if topology.attachments.iter().any(|attachment| {
+        [&attachment.host_bridge, &attachment.host_interface]
+            .iter()
+            .any(|name| {
+                links
+                    .iter()
+                    .any(|link| link.get("ifname").and_then(Value::as_str) == Some(name.as_str()))
+            })
+    }) {
+        return Err("DENIED: a generated host attachment interface already exists".to_owned());
+    }
+    let nft = nft_binary()?;
+    let table_output = run_fixed_command(
+        &nft,
+        &["-j".to_owned(), "list".to_owned(), "tables".to_owned()],
+        NETWORK_TIMEOUT,
+    )
+    .await?;
+    let tables = serde_json::from_str::<Value>(&table_output)
+        .map_err(|_| "UNCERTAIN: host nftables inventory is invalid".to_owned())?;
+    let table = host_attachment_filter_table(topology);
+    if tables
+        .get("nftables")
+        .and_then(Value::as_array)
+        .is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry.pointer("/table/name").and_then(Value::as_str) == Some(table.as_str())
+            })
+        })
+    {
+        return Err("DENIED: generated host traffic-filter table already exists".to_owned());
+    }
+    Ok(())
+}
+
+async fn apply_host_attachments(topology: &CompiledTopology, ip: &Path) -> Result<(), String> {
+    if topology.attachments.is_empty() {
+        return Ok(());
+    }
+    add_host_attachment_filter(topology).await?;
+    for attachment in &topology.attachments {
+        run_fixed_command(
+            ip,
+            &[
+                "link".to_owned(),
+                "add".to_owned(),
+                attachment.host_bridge.clone(),
+                "type".to_owned(),
+                "bridge".to_owned(),
+            ],
+            NETWORK_TIMEOUT,
+        )
+        .await?;
+        if let Err(error) = run_fixed_command(
+            ip,
+            &[
+                "link".to_owned(),
+                "set".to_owned(),
+                "dev".to_owned(),
+                attachment.host_bridge.clone(),
+                "alias".to_owned(),
+                format!("{}:bridge", host_attachment_owner(topology, attachment)),
+            ],
+            NETWORK_TIMEOUT,
+        )
+        .await
+        {
+            let _ = run_fixed_command(
+                ip,
+                &[
+                    "link".to_owned(),
+                    "del".to_owned(),
+                    attachment.host_bridge.clone(),
+                ],
+                NETWORK_TIMEOUT,
+            )
+            .await;
+            return Err(error);
+        }
+        run_fixed_command(
+            ip,
+            &[
+                "link".to_owned(),
+                "set".to_owned(),
+                "dev".to_owned(),
+                attachment.host_bridge.clone(),
+                "up".to_owned(),
+            ],
+            NETWORK_TIMEOUT,
+        )
+        .await?;
+        run_fixed_command(
+            ip,
+            &[
+                "link".to_owned(),
+                "add".to_owned(),
+                attachment.host_interface.clone(),
+                "type".to_owned(),
+                "veth".to_owned(),
+                "peer".to_owned(),
+                "name".to_owned(),
+                attachment.namespace_interface.clone(),
+            ],
+            NETWORK_TIMEOUT,
+        )
+        .await?;
+        if let Err(error) = run_fixed_command(
+            ip,
+            &[
+                "link".to_owned(),
+                "set".to_owned(),
+                "dev".to_owned(),
+                attachment.host_interface.clone(),
+                "alias".to_owned(),
+                format!("{}:host-veth", host_attachment_owner(topology, attachment)),
+            ],
+            NETWORK_TIMEOUT,
+        )
+        .await
+        {
+            let _ = run_fixed_command(
+                ip,
+                &[
+                    "link".to_owned(),
+                    "del".to_owned(),
+                    attachment.host_interface.clone(),
+                ],
+                NETWORK_TIMEOUT,
+            )
+            .await;
+            return Err(error);
+        }
+        run_fixed_command(
+            ip,
+            &[
+                "link".to_owned(),
+                "set".to_owned(),
+                "dev".to_owned(),
+                attachment.host_interface.clone(),
+                "master".to_owned(),
+                attachment.host_bridge.clone(),
+            ],
+            NETWORK_TIMEOUT,
+        )
+        .await?;
+        run_fixed_command(
+            ip,
+            &[
+                "link".to_owned(),
+                "set".to_owned(),
+                "dev".to_owned(),
+                attachment.host_interface.clone(),
+                "up".to_owned(),
+            ],
+            NETWORK_TIMEOUT,
+        )
+        .await?;
+        run_fixed_command(
+            ip,
+            &[
+                "link".to_owned(),
+                "set".to_owned(),
+                "dev".to_owned(),
+                attachment.namespace_interface.clone(),
+                "netns".to_owned(),
+                topology.namespace.clone(),
+            ],
+            NETWORK_TIMEOUT,
+        )
+        .await?;
+        let node_bridge = topology
+            .bridges
+            .get(&attachment.node_id)
+            .ok_or_else(|| "DENIED: workload attachment switch bridge is missing".to_owned())?;
+        in_namespace(
+            ip,
+            &topology.namespace,
+            &[
+                "link".to_owned(),
+                "set".to_owned(),
+                "dev".to_owned(),
+                attachment.namespace_interface.clone(),
+                "alias".to_owned(),
+                format!(
+                    "{}:netns-veth:{}",
+                    host_attachment_owner(topology, attachment),
+                    attachment.device_port
+                ),
+            ],
+        )
+        .await?;
+        in_namespace(
+            ip,
+            &topology.namespace,
+            &[
+                "link".to_owned(),
+                "set".to_owned(),
+                "dev".to_owned(),
+                attachment.namespace_interface.clone(),
+                "master".to_owned(),
+                node_bridge.clone(),
+            ],
+        )
+        .await?;
+        in_namespace(
+            ip,
+            &topology.namespace,
+            &[
+                "link".to_owned(),
+                "set".to_owned(),
+                "dev".to_owned(),
+                attachment.namespace_interface.clone(),
+                "up".to_owned(),
+            ],
+        )
+        .await?;
+        run_fixed_command(
+            ip,
+            &[
+                "route".to_owned(),
+                "add".to_owned(),
+                attachment.network_cidr.clone(),
+                "dev".to_owned(),
+                attachment.host_bridge.clone(),
+                "proto".to_owned(),
+                "99".to_owned(),
+                "scope".to_owned(),
+                "link".to_owned(),
+            ],
+            NETWORK_TIMEOUT,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn add_host_attachment_filter(topology: &CompiledTopology) -> Result<(), String> {
+    let nft = nft_binary()?;
+    let table = host_attachment_filter_table(topology);
+    run_fixed_command(
+        &nft,
+        &[
+            "add".to_owned(),
+            "table".to_owned(),
+            "inet".to_owned(),
+            table.clone(),
+        ],
+        NETWORK_TIMEOUT,
+    )
+    .await?;
+    let owner = format!(
+        "nanpanel:{}:{}:{}",
+        topology.request.topology_id, topology.request.revision_id, topology.request.generation
+    );
+    if let Err(error) = run_fixed_command(
+        &nft,
+        &[
+            "add".to_owned(),
+            "chain".to_owned(),
+            "inet".to_owned(),
+            table.clone(),
+            "output".to_owned(),
+            format!(
+                "{{ type filter hook output priority -150; policy accept; comment \"{owner}\"; }}"
+            ),
+        ],
+        NETWORK_TIMEOUT,
+    )
+    .await
+    {
+        let _ = run_fixed_command(
+            &nft,
+            &[
+                "delete".to_owned(),
+                "table".to_owned(),
+                "inet".to_owned(),
+                table,
+            ],
+            NETWORK_TIMEOUT,
+        )
+        .await;
+        return Err(error);
+    }
+    for attachment in &topology.attachments {
+        run_fixed_command(
+            &nft,
+            &[
+                "add".to_owned(),
+                "rule".to_owned(),
+                "inet".to_owned(),
+                table.clone(),
+                "output".to_owned(),
+                "ip".to_owned(),
+                "daddr".to_owned(),
+                attachment.network_cidr.clone(),
+                "counter".to_owned(),
+                "drop".to_owned(),
+                "comment".to_owned(),
+                host_attachment_owner(topology, attachment),
+            ],
+            NETWORK_TIMEOUT,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn verify_host_attachments(topology: &CompiledTopology, ip: &Path) -> Result<(), String> {
+    if topology.attachments.is_empty() {
+        return Ok(());
+    }
+    let link_output = run_fixed_command(
+        ip,
+        &[
+            "-j".to_owned(),
+            "-d".to_owned(),
+            "link".to_owned(),
+            "show".to_owned(),
+        ],
+        NETWORK_TIMEOUT,
+    )
+    .await?;
+    let host_links = serde_json::from_str::<Vec<Value>>(&link_output)
+        .map_err(|_| "UNCERTAIN: host attachment link output is invalid".to_owned())?;
+    for attachment in &topology.attachments {
+        let bridge_owner = format!("{}:bridge", host_attachment_owner(topology, attachment));
+        let host_owner = format!("{}:host-veth", host_attachment_owner(topology, attachment));
+        let bridge_exists = host_links.iter().any(|link| {
+            link.get("ifname").and_then(Value::as_str) == Some(attachment.host_bridge.as_str())
+                && link.pointer("/linkinfo/info_kind").and_then(Value::as_str) == Some("bridge")
+                && link_alias(link) == Some(bridge_owner.as_str())
+        });
+        let veth_exists = host_links.iter().any(|link| {
+            link.get("ifname").and_then(Value::as_str) == Some(attachment.host_interface.as_str())
+                && link.pointer("/linkinfo/info_kind").and_then(Value::as_str) == Some("veth")
+                && link_alias(link) == Some(host_owner.as_str())
+                && link.get("master").and_then(Value::as_str)
+                    == Some(attachment.host_bridge.as_str())
+        });
+        if !bridge_exists || !veth_exists {
+            return Err(format!(
+                "FAILED: workload bridge {} is missing or has drifted",
+                attachment.id
+            ));
+        }
+        let route_output = run_fixed_command(
+            ip,
+            &[
+                "-j".to_owned(),
+                "route".to_owned(),
+                "show".to_owned(),
+                "table".to_owned(),
+                "main".to_owned(),
+                "exact".to_owned(),
+                attachment.network_cidr.clone(),
+            ],
+            NETWORK_TIMEOUT,
+        )
+        .await?;
+        let routes = serde_json::from_str::<Vec<Value>>(&route_output)
+            .map_err(|_| "UNCERTAIN: workload route output is invalid".to_owned())?;
+        if !routes.iter().any(|route| {
+            route.get("dst").and_then(Value::as_str) == Some(attachment.network_cidr.as_str())
+                && route.get("dev").and_then(Value::as_str) == Some(attachment.host_bridge.as_str())
+                && route.get("protocol").is_some_and(|protocol| {
+                    protocol.as_str() == Some("99") || protocol.as_u64() == Some(99)
+                })
+        }) {
+            return Err(format!(
+                "FAILED: workload route {} is missing or has drifted",
+                attachment.network_cidr
+            ));
+        }
+        let namespace_output = in_namespace(
+            ip,
+            &topology.namespace,
+            &[
+                "-j".to_owned(),
+                "-d".to_owned(),
+                "link".to_owned(),
+                "show".to_owned(),
+                "dev".to_owned(),
+                attachment.namespace_interface.clone(),
+            ],
+        )
+        .await?;
+        let namespace_links = serde_json::from_str::<Vec<Value>>(&namespace_output)
+            .map_err(|_| "UNCERTAIN: workload namespace link output is invalid".to_owned())?;
+        let expected_alias = format!(
+            "{}:netns-veth:{}",
+            host_attachment_owner(topology, attachment),
+            attachment.device_port
+        );
+        if !namespace_links.iter().any(|link| {
+            link.get("ifname").and_then(Value::as_str)
+                == Some(attachment.namespace_interface.as_str())
+                && link_alias(link) == Some(expected_alias.as_str())
+                && link.get("master").and_then(Value::as_str)
+                    == topology
+                        .bridges
+                        .get(&attachment.node_id)
+                        .map(String::as_str)
+        }) {
+            return Err(format!(
+                "FAILED: workload device attachment {} is missing or has drifted",
+                attachment.id
+            ));
+        }
+    }
+    let nft = nft_binary()?;
+    let output = run_fixed_command(
+        &nft,
+        &[
+            "list".to_owned(),
+            "table".to_owned(),
+            "inet".to_owned(),
+            host_attachment_filter_table(topology),
+        ],
+        NETWORK_TIMEOUT,
+    )
+    .await?;
+    let owner = format!(
+        "nanpanel:{}:{}:{}",
+        topology.request.topology_id, topology.request.revision_id, topology.request.generation
+    );
+    if !output.contains(&owner)
+        || topology.attachments.iter().any(|attachment| {
+            !output.contains(&attachment.network_cidr)
+                || !output.contains(&host_attachment_owner(topology, attachment))
+        })
+    {
+        return Err("FAILED: host workload isolation filter is missing or has drifted".to_owned());
+    }
+    Ok(())
+}
+
+async fn cleanup_host_attachments(topology: &CompiledTopology, ip: &Path) -> Result<(), String> {
+    if topology.attachments.is_empty() {
+        return Ok(());
+    }
+    let link_output = run_fixed_command(
+        ip,
+        &[
+            "-j".to_owned(),
+            "-d".to_owned(),
+            "link".to_owned(),
+            "show".to_owned(),
+        ],
+        NETWORK_TIMEOUT,
+    )
+    .await?;
+    let links = serde_json::from_str::<Vec<Value>>(&link_output)
+        .map_err(|_| "UNCERTAIN: host attachment link output is invalid".to_owned())?;
+    for attachment in &topology.attachments {
+        if let Some(link) = links.iter().find(|link| {
+            link.get("ifname").and_then(Value::as_str) == Some(attachment.host_bridge.as_str())
+        }) {
+            let expected = format!("{}:bridge", host_attachment_owner(topology, attachment));
+            if link.pointer("/linkinfo/info_kind").and_then(Value::as_str) != Some("bridge")
+                || link_alias(link) != Some(expected.as_str())
+            {
+                return Err("DENIED: refusing to remove a host bridge without this topology's ownership marker".to_owned());
+            }
+        }
+        if let Some(link) = links.iter().find(|link| {
+            link.get("ifname").and_then(Value::as_str) == Some(attachment.host_interface.as_str())
+        }) {
+            let expected = format!("{}:host-veth", host_attachment_owner(topology, attachment));
+            if link.pointer("/linkinfo/info_kind").and_then(Value::as_str) != Some("veth")
+                || link_alias(link) != Some(expected.as_str())
+            {
+                return Err("DENIED: refusing to remove a host veth without this topology's ownership marker".to_owned());
+            }
+        }
+    }
+    let nft = nft_binary()?;
+    let table = host_attachment_filter_table(topology);
+    let tables_output = run_fixed_command(
+        &nft,
+        &["-j".to_owned(), "list".to_owned(), "tables".to_owned()],
+        NETWORK_TIMEOUT,
+    )
+    .await?;
+    let tables = serde_json::from_str::<Value>(&tables_output)
+        .map_err(|_| "UNCERTAIN: host nftables inventory is invalid".to_owned())?;
+    let exists = tables
+        .get("nftables")
+        .and_then(Value::as_array)
+        .is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry.pointer("/table/name").and_then(Value::as_str) == Some(table.as_str())
+            })
+        });
+    if exists {
+        let output = run_fixed_command(
+            &nft,
+            &[
+                "list".to_owned(),
+                "table".to_owned(),
+                "inet".to_owned(),
+                table.clone(),
+            ],
+            NETWORK_TIMEOUT,
+        )
+        .await?;
+        let owner = format!(
+            "nanpanel:{}:{}:{}",
+            topology.request.topology_id, topology.request.revision_id, topology.request.generation
+        );
+        let foreign_rule = output.lines().any(|line| {
+            line.contains(" comment ")
+                && !line.contains(&owner)
+                && !topology
+                    .attachments
+                    .iter()
+                    .any(|attachment| line.contains(&host_attachment_owner(topology, attachment)))
+        });
+        if !output.contains(&owner) || foreign_rule {
+            return Err("DENIED: refusing to remove a host nftables table without this topology's ownership markers".to_owned());
+        }
+        run_fixed_command(
+            &nft,
+            &[
+                "delete".to_owned(),
+                "table".to_owned(),
+                "inet".to_owned(),
+                table,
+            ],
+            NETWORK_TIMEOUT,
+        )
+        .await?;
+    }
+    for attachment in &topology.attachments {
+        let route_output = run_fixed_command(
+            ip,
+            &[
+                "-j".to_owned(),
+                "route".to_owned(),
+                "show".to_owned(),
+                "table".to_owned(),
+                "main".to_owned(),
+                "exact".to_owned(),
+                attachment.network_cidr.clone(),
+            ],
+            NETWORK_TIMEOUT,
+        )
+        .await?;
+        let routes = serde_json::from_str::<Vec<Value>>(&route_output)
+            .map_err(|_| "UNCERTAIN: workload route output is invalid".to_owned())?;
+        if let Some(route) = routes.iter().find(|route| {
+            route.get("dst").and_then(Value::as_str) == Some(attachment.network_cidr.as_str())
+        }) {
+            if route.get("dev").and_then(Value::as_str) != Some(attachment.host_bridge.as_str())
+                || !route.get("protocol").is_some_and(|protocol| {
+                    protocol.as_str() == Some("99") || protocol.as_u64() == Some(99)
+                })
+            {
+                return Err(
+                    "DENIED: refusing to remove a workload route not owned by this topology"
+                        .to_owned(),
+                );
+            }
+            run_fixed_command(
+                ip,
+                &[
+                    "route".to_owned(),
+                    "del".to_owned(),
+                    attachment.network_cidr.clone(),
+                    "dev".to_owned(),
+                    attachment.host_bridge.clone(),
+                    "proto".to_owned(),
+                    "99".to_owned(),
+                ],
+                NETWORK_TIMEOUT,
+            )
+            .await?;
+        }
+        if links.iter().any(|link| {
+            link.get("ifname").and_then(Value::as_str) == Some(attachment.host_interface.as_str())
+        }) {
+            run_fixed_command(
+                ip,
+                &[
+                    "link".to_owned(),
+                    "del".to_owned(),
+                    attachment.host_interface.clone(),
+                ],
+                NETWORK_TIMEOUT,
+            )
+            .await?;
+        }
+        if links.iter().any(|link| {
+            link.get("ifname").and_then(Value::as_str) == Some(attachment.host_bridge.as_str())
+        }) {
+            run_fixed_command(
+                ip,
+                &[
+                    "link".to_owned(),
+                    "del".to_owned(),
+                    attachment.host_bridge.clone(),
+                ],
+                NETWORK_TIMEOUT,
+            )
+            .await?;
+        }
+    }
+    Ok(())
 }
 
 async fn configure_routers(topology: &CompiledTopology) -> Result<(), String> {
@@ -1817,6 +2578,7 @@ async fn verify(topology: &CompiledTopology) -> Result<String, String> {
             }
         }
     }
+    verify_host_attachments(topology, &ip).await?;
     if !topology.packet_taps.is_empty() {
         let tc = tc_binary()?;
         for tap in &topology.packet_taps {
@@ -2317,6 +3079,7 @@ async fn compensate(topology: &CompiledTopology) -> Result<String, String> {
                 .to_owned(),
         );
     }
+    cleanup_host_attachments(topology, &ip).await?;
     cleanup_ovs(topology).await?;
     if exists {
         run_fixed_command(

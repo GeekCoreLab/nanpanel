@@ -5,6 +5,9 @@ import {
   type Connection, type Edge, type Node, type NodeProps,
 } from '@xyflow/react';
 import { api, isMock } from './lib/api';
+import { createUuid } from './lib/uuid.ts';
+import { parseDocument, stringify as stringifyYaml } from 'yaml';
+import { connectionError, createTopologyNode, draftError, nodePresets, validNodeShape } from './lib/topology-model';
 import type {
   KubernetesApplication,
   KubernetesApplicationCreateRequest,
@@ -13,14 +16,20 @@ import type {
   KubernetesApplicationPreview,
   KubernetesApplicationTopologyNode,
   KubernetesApplicationTopologyAddition,
+  KubernetesApplicationNetworkTopology,
+  KubernetesApplicationNetworkTopologyWrite,
+  KubernetesApplicationNetworkRuntime,
   KubernetesApplicationVersion,
   KubernetesApplicationVersionDraftRequest,
   KubernetesApplicationVersionList,
   KubernetesClusterList,
   KubernetesClusterSummary,
   KubernetesTopologyNamespaceSnapshot,
+  TopologyDraftWrite,
+  TopologyLink,
+  TopologyNode,
+  TopologyNodeKind,
 } from './lib/types';
-import Topology from './Topology';
 import { TopologyCanvas } from './topology/TopologyCanvas';
 import { TopologyContextMenu, TopologyContextMenuHeading, TopologyContextMenuItem } from './topology/TopologyContextMenu';
 import './applications.css';
@@ -464,8 +473,15 @@ export default function Applications({ notify }: { notify: (message: string) => 
             {!versions.length ? <div className="application-empty-history">暂无版本记录</div> : <div className="application-version-list">{versions.map(version => <VersionCard key={version.version} version={version} busy={busy === `deploy-${version.version}`} onDeploy={() => void deployDraft(version)} />)}</div>}
           </section> : null}
           <div className={`application-network-topology ${view === 'network' ? 'visible' : ''}`} aria-hidden={view !== 'network'}>
-            <p className="application-network-note">此工作区复用 Core 共享的 NetworkGraph 草稿与 Revision，不按当前应用拆分。保存拓扑后，还需在“网络接入”中显式执行具备能力声明的 Provider；该图不会自动接入此应用的 Kubernetes Pod/Service 流量。</p>
-            <Topology />
+            <ApplicationNetworkTopologyCanvas
+              key={`network-${detail.application.id}`}
+              applicationId={detail.application.id}
+              resources={nodeList}
+              topologyEdges={detail.topology.edges}
+              yamlSourceChanges={yamlSourceChanges}
+              busy={busy !== ''}
+              onResourceYamlSave={saveResourceYaml}
+            />
           </div>
           </div>
         </>}
@@ -515,6 +531,7 @@ type ApplicationFlowNodeData = {
   changes: Editable;
   controlsDisabled: boolean;
   sourceYamlEdited: boolean;
+  networkMode?: boolean;
   onEditSourceYaml: (resource: KubernetesApplicationTopologyNode) => void;
 };
 type ApplicationFlowNode = Node<ApplicationFlowNodeData, 'application'>;
@@ -555,6 +572,10 @@ function ApplicationFlowNodeCard({ data, selected }: NodeProps<ApplicationFlowNo
   return <article className={`application-flow-node ${resource.kind.toLowerCase()} ${selected ? 'selected' : ''}`}>
     {deployment && <Handle id="deployment-input" type="target" position={Position.Left} className="application-flow-handle deployment-input" isConnectable={!controlsDisabled} />}
     {service && <Handle id="service-output" type="source" position={Position.Right} className="application-flow-handle service-output" isConnectable={!controlsDisabled} />}
+    {deployment && data.networkMode && <>
+      <Handle id="network-in-1" type="target" position={Position.Top} className="application-network-handle network-in" isConnectable={!controlsDisabled} />
+      <Handle id="network-out-1" type="source" position={Position.Bottom} className="application-network-handle network-out" isConnectable={!controlsDisabled} />
+    </>}
     <div className="application-flow-node-heading">
       <span className={`node-type ${resource.kind.toLowerCase()}`}>{title}</span>
       <AppState value={resource.state} />
@@ -851,6 +872,521 @@ function ApplicationTopologyFlowCanvas({
       }}
     />}
   </>;
+}
+
+type ApplicationDeviceFlowNodeData = {
+  model: TopologyNode;
+  disabled: boolean;
+  onEditYaml: (node: TopologyNode) => void;
+};
+type ApplicationDeviceFlowNode = Node<ApplicationDeviceFlowNodeData, 'application-device'>;
+type ApplicationNetworkFlowNode = ApplicationFlowNode | ApplicationDeviceFlowNode;
+type NetworkMenu = { x: number; y: number; point?: { x: number; y: number }; nodeId?: string; edgeId?: string };
+type NetworkDraft = KubernetesApplicationNetworkTopologyWrite;
+
+const virtualApplicationKinds = (Object.keys(nodePresets) as TopologyNodeKind[])
+  .filter(kind => !['GATEWAY', 'HOST', 'SERVICE', 'FOLDER'].includes(kind));
+const topologyYamlFields = [
+  'kind', 'name', 'description', 'position', 'inputCount', 'outputCount', 'ports',
+  'parentId', 'assetId', 'clusterId', 'ipAddress', 'providerId', 'switchBackend',
+  'firewallPolicy', 'routerConfiguration',
+];
+
+function topologyNodeYaml(node: TopologyNode) {
+  return stringifyYaml({
+    apiVersion: 'topology.nanpanel.io/v1alpha1',
+    kind: 'TopologyNode',
+    metadata: { id: node.id },
+    spec: Object.fromEntries(topologyYamlFields.map(field => [
+      field, (node as unknown as Record<string, unknown>)[field] ?? null,
+    ])),
+  }, { indent: 2, lineWidth: 0 });
+}
+
+function ApplicationDeviceCard({ data, selected }: NodeProps<ApplicationDeviceFlowNode>) {
+  const { model, disabled } = data;
+  const portHeight = Math.max(model.inputCount, model.outputCount, 1) * 25 + 12;
+  return <article className={`application-network-device ${selected ? 'selected' : ''}`}>
+    <div className="application-network-device-heading"><span>{model.kind}</span><small>{nodePresets[model.kind].description}</small></div>
+    <strong title={model.name}>{model.name}</strong>
+    <div className="application-network-device-ports" style={{ height: portHeight }}>
+      {model.ports.filter(port => port.direction === 'INPUT').map((port, index) => <div key={port.id} className="application-network-port input" style={{ top: 8 + index * 25 }}>
+        <Handle id={port.id} type="target" position={Position.Left} isConnectable={!disabled} />
+        <span>{port.id} · {port.layer}/{port.protocols.join(', ')}</span>
+      </div>)}
+      {model.ports.filter(port => port.direction === 'OUTPUT').map((port, index) => <div key={port.id} className="application-network-port output" style={{ top: 8 + index * 25 }}>
+        <span>{port.id} · {port.layer}/{port.protocols.join(', ')}</span>
+        <Handle id={port.id} type="source" position={Position.Right} isConnectable={!disabled} />
+      </div>)}
+    </div>
+    {model.description && <p className="application-network-device-description">{model.description}</p>}
+    <div className="application-network-device-footer"><small>{model.providerId ? `Provider ${model.providerId}` : '期望虚拟设备'}</small>
+      <button type="button" className="application-yaml-button nodrag" disabled={disabled}
+        onClick={event => { event.stopPropagation(); data.onEditYaml(model); }}>编辑源 YAML</button></div>
+  </article>;
+}
+
+const applicationNetworkNodeTypes = {
+  application: ApplicationFlowNodeCard,
+  'application-device': ApplicationDeviceCard,
+};
+
+function ApplicationNetworkTopologyCanvas({
+  applicationId, resources, topologyEdges, yamlSourceChanges, busy, onResourceYamlSave,
+}: {
+  applicationId: string;
+  resources: KubernetesApplicationTopologyNode[];
+  topologyEdges: KubernetesApplicationDetail['topology']['edges'];
+  yamlSourceChanges: Record<string, string>;
+  busy: boolean;
+  onResourceYamlSave: (node: KubernetesApplicationTopologyNode, yaml: string) => void;
+}) {
+  const [draft, setDraft] = useState<NetworkDraft>({ nodes: [], links: [], attachments: [] });
+  const [etag, setEtag] = useState('');
+  const [nodes, setNodes, updateNodes] = useNodesState<ApplicationNetworkFlowNode>([]);
+  const { fitView, screenToFlowPosition } = useReactFlow<ApplicationNetworkFlowNode, Edge>();
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  const [menu, setMenu] = useState<NetworkMenu>();
+  const [yamlNode, setYamlNode] = useState<TopologyNode>();
+  const [resourceYamlNode, setResourceYamlNode] = useState<KubernetesApplicationTopologyNode>();
+  const [yamlError, setYamlError] = useState('');
+  const [yamlSource, setYamlSource] = useState('');
+  const [runtime, setRuntime] = useState<KubernetesApplicationNetworkRuntime | null>(null);
+  const [runtimeBusy, setRuntimeBusy] = useState('');
+
+  const refreshRuntime = useCallback(async () => {
+    try {
+      const result = await api<KubernetesApplicationNetworkRuntime>(
+        `/kubernetes/applications/${encodeURIComponent(applicationId)}/network-topology/runtime`,
+        'GET', undefined, {}, true,
+      );
+      setRuntime(result.data);
+    } catch (cause) {
+      if ((cause as { status?: number }).status === 404) setRuntime(null);
+      else setError((cause as Error).message);
+    }
+  }, [applicationId]);
+
+  useEffect(() => {
+    let current = true;
+    setLoading(true);
+    setError('');
+    void refreshRuntime();
+    void api<KubernetesApplicationNetworkTopology>(
+      `/kubernetes/applications/${encodeURIComponent(applicationId)}/network-topology`,
+      'GET', undefined, {}, true,
+    ).then(result => {
+      if (!current) return;
+      setDraft({ nodes: result.data.nodes, links: result.data.links,
+        attachments: result.data.attachments });
+      setEtag(result.etag ?? '');
+      setDirty(false);
+    }).catch(cause => { if (current) setError((cause as Error).message); })
+      .finally(() => { if (current) setLoading(false); });
+    return () => { current = false; };
+  }, [applicationId, refreshRuntime]);
+
+  useEffect(() => {
+    if (!runtime || !['APPLYING', 'VERIFYING', 'COMPENSATING'].includes(runtime.state)) return;
+    const timer = window.setInterval(() => void refreshRuntime(), 3000);
+    return () => window.clearInterval(timer);
+  }, [runtime?.state, refreshRuntime]);
+
+  const runRuntimeAction = async (action: 'apply' | 'verify' | 'compensate') => {
+    const labels = { apply: 'Apply', verify: 'Verify', compensate: 'Compensate' };
+    const reason = window.prompt(`请输入${labels[action]}原因（最多 500 字）`);
+    if (!reason?.trim()) return;
+    setRuntimeBusy(action);
+    setError('');
+    setMessage('');
+    try {
+      const result = await api<KubernetesApplicationNetworkRuntime>(
+        `/kubernetes/applications/${encodeURIComponent(applicationId)}/network-topology/runtime/${action}`,
+        'POST', { reason: reason.trim() }, {}, true,
+      );
+      setRuntime(result.data);
+      setMessage(`${labels[action]} 已提交；运行时状态会自动刷新。`);
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setRuntimeBusy('');
+    }
+  };
+
+  const visibleResources = useMemo(() => resources.filter(resource =>
+    ['Service', 'Deployment', 'ServiceAccount'].includes(resource.kind)), [resources]);
+  const selectorEdges = useMemo<Edge[]>(() => topologyEdges.map(edge => ({
+    id: edge.id, source: edge.source, target: edge.target,
+    sourceHandle: 'service-output', targetHandle: 'deployment-input',
+    type: 'nanpanelBezier', markerEnd: { type: MarkerType.ArrowClosed, color: '#91addc' },
+    style: { stroke: '#91addc', strokeWidth: 2 }, selectable: false, deletable: false,
+  })), [topologyEdges]);
+  const nodeIds = useMemo(() => new Set(draft.nodes.map(node => node.id)), [draft.nodes]);
+
+  useEffect(() => {
+    const serviceIndex = new Map(visibleResources.filter(resource => resource.kind === 'Service')
+      .map((resource, index) => [resource.id, index]));
+    const deploymentIndex = new Map(visibleResources.filter(resource => resource.kind === 'Deployment')
+      .map((resource, index) => [resource.id, index]));
+    const accountIndex = new Map(visibleResources.filter(resource => resource.kind === 'ServiceAccount')
+      .map((resource, index) => [resource.id, index]));
+    const applicationNodes: ApplicationFlowNode[] = visibleResources.map(resource => ({
+      id: resource.id,
+      type: 'application',
+      position: applicationFlowNodePosition(resource, resource.kind === 'Service'
+        ? serviceIndex.get(resource.id) ?? 0 : resource.kind === 'Deployment'
+          ? deploymentIndex.get(resource.id) ?? 0 : accountIndex.get(resource.id) ?? 0),
+      data: {
+        resource: { ...resource, sourceYaml: yamlSourceChanges[resource.id] ?? resource.sourceYaml },
+        changes: {}, controlsDisabled: saving || busy, networkMode: true,
+        sourceYamlEdited: yamlSourceChanges[resource.id] !== undefined
+          && yamlSourceChanges[resource.id] !== resource.sourceYaml,
+        onEditSourceYaml: setResourceYamlNode,
+      },
+      draggable: !saving && !busy,
+    }));
+    const deviceNodes: ApplicationDeviceFlowNode[] = draft.nodes.map(model => ({
+      id: model.id, type: 'application-device', position: model.position,
+      data: { model, disabled: saving || busy, onEditYaml: node => {
+        setYamlNode(node);
+        setYamlSource(topologyNodeYaml(node));
+        setYamlError('');
+      } },
+      draggable: !saving && !busy,
+    }));
+    setNodes([...applicationNodes, ...deviceNodes]);
+  }, [visibleResources, draft.nodes, yamlSourceChanges, saving, busy, setNodes]);
+
+  useEffect(() => {
+    if (!nodes.length) return;
+    const frame = requestAnimationFrame(() => { void fitView({ padding: 0.12, duration: 160 }); });
+    return () => cancelAnimationFrame(frame);
+  }, [applicationId, loading, nodes.length, fitView]);
+
+  const deviceEdges: Edge[] = draft.links.map(link => ({
+    id: link.id, source: link.sourceNodeId, sourceHandle: link.sourcePort,
+    target: link.targetNodeId, targetHandle: link.targetPort, type: 'nanpanelBezier',
+    markerEnd: { type: MarkerType.ArrowClosed, color: '#4a86ed' },
+    data: { layer: link.layer, protocol: link.protocol, state: 'PENDING' },
+  }));
+  const attachmentEdges: Edge[] = draft.attachments.flatMap(attachment => {
+    if (!nodeIds.has(attachment.nodeId)) return [];
+    const workload = visibleResources.find(resource => resource.id === attachment.resourceId
+      && resource.kind === 'Deployment');
+    if (!workload) return [];
+    const resourceToDevice = attachment.direction === 'RESOURCE_TO_DEVICE';
+    return [{
+      id: attachment.id,
+      source: resourceToDevice ? attachment.resourceId : attachment.nodeId,
+      sourceHandle: resourceToDevice ? 'network-out-1' : attachment.devicePort,
+      target: resourceToDevice ? attachment.nodeId : attachment.resourceId,
+      targetHandle: resourceToDevice ? attachment.devicePort : 'network-in-1',
+      type: 'nanpanelBezier',
+      markerEnd: { type: MarkerType.ArrowClosed, color: '#55a883' },
+      style: { stroke: '#55a883', strokeWidth: 2.2 },
+      data: { applicationAttachment: true },
+    }];
+  });
+  const edges = [...selectorEdges, ...deviceEdges, ...attachmentEdges];
+
+  const onFlowNodesChange = (changes: Parameters<typeof updateNodes>[0]) => {
+    updateNodes(changes);
+    const positions = new Map(changes.flatMap(change => change.type === 'position' && change.position
+      ? [[change.id, change.position] as const] : []));
+    if (!positions.size) return;
+    setDraft(current => ({ ...current, nodes: current.nodes.map(node => ({
+      ...node, position: positions.get(node.id) ?? node.position,
+    })) }));
+    setDirty(true);
+  };
+
+  function makeDeviceLink(connection: Connection | Edge): TopologyLink | null {
+    const source = draft.nodes.find(node => node.id === connection.source);
+    const target = draft.nodes.find(node => node.id === connection.target);
+    const sourcePort = source?.ports.find(port => port.id === connection.sourceHandle);
+    const targetPort = target?.ports.find(port => port.id === connection.targetHandle);
+    if (!source || !target || !sourcePort || !targetPort) return null;
+    const order = ['ETHERNET', 'IP', 'TCP', 'UDP', 'SCTP', 'HTTP', 'HTTPS'] as const;
+    const protocol = order.find(value => sourcePort.layer === targetPort.layer
+      && sourcePort.protocols.includes(value) && targetPort.protocols.includes(value));
+    if (!protocol) return null;
+    return { id: createUuid(), sourceNodeId: source.id, sourcePort: sourcePort.id,
+      targetNodeId: target.id, targetPort: targetPort.id, layer: sourcePort.layer,
+      protocol, status: 'UNVERIFIED' };
+  }
+
+  function validConnection(connection: Connection | Edge) {
+    const source = nodes.find(node => node.id === connection.source);
+    const target = nodes.find(node => node.id === connection.target);
+    if (!source || !target || saving || busy) return false;
+    if (source.type === 'application-device' && target.type === 'application-device') {
+      const candidate = makeDeviceLink(connection);
+      return !!candidate && draft.links.length < 800
+        && !connectionError(draft.nodes, draft.links, candidate);
+    }
+    const application = source.type === 'application' ? source
+      : target.type === 'application' ? target : undefined;
+    const device = source.type === 'application-device' ? source
+      : target.type === 'application-device' ? target : undefined;
+    if (!application || !device || application.data.resource.kind !== 'Deployment') return false;
+    const resourceToDevice = source.type === 'application';
+    const correctHandle = resourceToDevice
+      ? connection.sourceHandle === 'network-out-1'
+      : connection.targetHandle === 'network-in-1';
+    const devicePortId = resourceToDevice ? connection.targetHandle : connection.sourceHandle;
+    const expected = resourceToDevice ? 'INPUT' : 'OUTPUT';
+    const port = device.data.model.ports.find(item => item.id === devicePortId);
+    if (!correctHandle || !port || port.direction !== expected) return false;
+    return !draft.attachments.some(attachment => attachment.resourceId === application.id
+      || attachment.nodeId === device.id && attachment.devicePort === devicePortId);
+  }
+
+  function connect(connection: Connection) {
+    const source = nodes.find(node => node.id === connection.source);
+    const target = nodes.find(node => node.id === connection.target);
+    if (!source || !target) return;
+    if (source.type === 'application-device' && target.type === 'application-device') {
+      const link = makeDeviceLink(connection);
+      if (!link) return;
+      const invalid = connectionError(draft.nodes, draft.links, link);
+      if (invalid) { setMessage(invalid); return; }
+      setDraft(current => ({ ...current, links: [...current.links, link] }));
+      setDirty(true);
+      setMessage('已添加虚拟设备链路；保存后仍需配置实际数据面接入。');
+      return;
+    }
+    const application = source.type === 'application' ? source
+      : target.type === 'application' ? target : undefined;
+    const device = source.type === 'application-device' ? source
+      : target.type === 'application-device' ? target : undefined;
+    if (!application || !device || application.data.resource.kind !== 'Deployment') return;
+    const resourceToDevice = source.type === 'application';
+    const portId = resourceToDevice ? connection.targetHandle : connection.sourceHandle;
+    const attachment = {
+      id: createUuid(), resourceId: application.id, nodeId: device.id,
+      devicePort: portId ?? '',
+      direction: resourceToDevice ? 'RESOURCE_TO_DEVICE' as const : 'DEVICE_TO_RESOURCE' as const,
+    };
+    setDraft(current => ({ ...current, attachments: [...current.attachments, attachment] }));
+    setDirty(true);
+    setMessage(`已将 ${application.data.resource.name} 接入虚拟设备；保存关系不会自动改动 Pod 网络。`);
+  }
+
+  function addDevice(kind: TopologyNodeKind) {
+    if (saving || busy) return;
+    const used = new Set(draft.nodes.filter(node => node.kind === kind).map(node => node.name));
+    const prefix = nodePresets[kind].name;
+    let index = 1;
+    while (used.has(`${prefix} ${index}`)) index++;
+    const point = menu?.point ?? screenToFlowPosition({
+      x: window.innerWidth / 2, y: window.innerHeight / 2,
+    });
+    const model = createTopologyNode(kind, point);
+    model.name = `${prefix} ${index}`;
+    setDraft(current => ({ ...current, nodes: [...current.nodes, model] }));
+    setDirty(true);
+    setMenu(undefined);
+  }
+
+  function removeDevice(nodeId: string) {
+    setDraft(current => ({
+      ...current,
+      nodes: current.nodes.filter(node => node.id !== nodeId),
+      links: current.links.filter(link => link.sourceNodeId !== nodeId && link.targetNodeId !== nodeId),
+      attachments: current.attachments.filter(attachment => attachment.nodeId !== nodeId),
+    }));
+    setDirty(true);
+    setMenu(undefined);
+  }
+
+  function removeEdge(edgeId: string) {
+    setDraft(current => ({ ...current,
+      links: current.links.filter(link => link.id !== edgeId),
+      attachments: current.attachments.filter(attachment => attachment.id !== edgeId),
+    }));
+    setDirty(true);
+    setMenu(undefined);
+  }
+
+  function saveDeviceYaml(sourceYaml: string) {
+    if (!yamlNode) return;
+    try {
+      const document = parseDocument(sourceYaml, { uniqueKeys: true });
+      if (document.errors.length) throw new Error(document.errors[0].message);
+      const parsed: unknown = document.toJS({ maxAliasCount: 16 });
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('YAML 根节点必须是对象。');
+      const object = parsed as Record<string, unknown>;
+      const hasExact = (value: unknown, keys: string[]) => !!value && typeof value === 'object'
+        && !Array.isArray(value) && Object.keys(value).length === keys.length
+        && keys.every(key => Object.hasOwn(value, key));
+      const metadata = object.metadata;
+      const spec = object.spec;
+      if (!hasExact(object, ['apiVersion', 'kind', 'metadata', 'spec'])
+          || object.apiVersion !== 'topology.nanpanel.io/v1alpha1'
+          || object.kind !== 'TopologyNode' || !hasExact(metadata, ['id'])
+          || (metadata as Record<string, unknown>).id !== yamlNode.id
+          || !hasExact(spec, topologyYamlFields)) {
+        throw new Error('文档必须是有效 TopologyNode YAML，并保持 metadata.id 与所有 spec 字段。');
+      }
+      const updated = { ...yamlNode, ...(spec as Partial<TopologyNode>),
+        id: yamlNode.id, kind: yamlNode.kind, parentId: null, assetId: null, clusterId: null };
+      if (!validNodeShape(updated)) throw new Error('节点 kind 与端口数量不符合约束。');
+      const candidate: TopologyDraftWrite = {
+        nodes: draft.nodes.map(node => node.id === updated.id ? updated : node),
+        links: draft.links,
+      };
+      const invalid = draftError(candidate);
+      if (invalid) throw new Error(`修改会使当前虚拟拓扑无效：${invalid}`);
+      if (draft.attachments.some(attachment => attachment.nodeId === updated.id
+          && !updated.ports.some(port => port.id === attachment.devicePort))) {
+        throw new Error('不能移除已连接工作负载的设备端口。');
+      }
+      setDraft(current => ({ ...current, nodes: current.nodes.map(node =>
+        node.id === updated.id ? updated : node) }));
+      setDirty(true);
+      setYamlNode(undefined);
+      setYamlError('');
+    } catch (cause) {
+      setYamlError((cause as Error).message);
+    }
+  }
+
+  async function saveTopology() {
+    if (!dirty || saving || busy || !etag) return;
+    setSaving(true);
+    setError('');
+    setMessage('');
+    try {
+      const payload: NetworkDraft = { ...draft,
+        nodes: draft.nodes.map(node => ({ ...node,
+          position: nodes.find(flowNode => flowNode.id === node.id)?.position ?? node.position,
+        })) };
+      const result = await api<KubernetesApplicationNetworkTopology>(
+        `/kubernetes/applications/${encodeURIComponent(applicationId)}/network-topology`,
+        'PUT', payload, { 'If-Match': etag }, true,
+      );
+      setDraft({ nodes: result.data.nodes, links: result.data.links,
+        attachments: result.data.attachments });
+      setEtag(result.etag ?? '');
+      setDirty(false);
+      setMessage(`应用网络拓扑 Revision ${result.data.generation} 已保存。`);
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return <section className="application-network-card">
+    <div className="application-section-heading"><div><span className="eyebrow">APPLICATION NETWORK GRAPH</span><h3>应用资源与虚拟设备</h3><p>Deployment 接入点和设备链路按应用独立保存；目标运行路径保留默认 CNI，单节点使用隔离 veth/bridge，跨节点使用按应用隔离的 VXLAN VNI。</p></div>
+      <button className="primary" disabled={!dirty || saving || busy || loading || isMock} onClick={() => void saveTopology()}>{saving ? '保存中…' : `保存应用拓扑${dirty ? ' *' : ''}`}</button></div>
+    <div className="application-network-note" role="note">运行时仅在显式 Apply 后接入真实流量：单个已映射 Ready 的 K3s Node、Multus bridge 次级网卡、隔离 netns Helper、宿主路由过滤和 Service EndpointSlice 同步。集群需预装 Multus 并授予所需 RBAC；当前单节点路径不启用 VXLAN，跨节点 VNI/underlay 仍需后续 Provider。</div>
+    <div className="application-network-runtime" aria-label="应用虚拟网络运行时">
+      <div className="application-network-runtime-status">
+        <strong>{runtime ? `运行时：${runtime.state}` : '运行时：未接入'}</strong>
+        <span>{runtime?.detail ?? '保存拓扑不会修改集群；Apply、Verify 和 Compensate 均需显式操作。'}</span>
+      </div>
+      <div className="application-network-runtime-actions">
+        {(!runtime || runtime.state === 'COMPENSATED') && <button className="primary" disabled={saving || busy || loading || dirty || runtimeBusy !== '' || isMock}
+          onClick={() => void runRuntimeAction('apply')}>{runtimeBusy === 'apply' ? '提交中…' : 'Apply 真实流量'}</button>}
+        {runtime && ['APPLIED', 'VERIFY_FAILED'].includes(runtime.state) && <button className="secondary" disabled={runtimeBusy !== '' || busy || isMock}
+          onClick={() => void runRuntimeAction('verify')}>{runtimeBusy === 'verify' ? '验证中…' : 'Verify'}</button>}
+        {runtime && ['APPLIED', 'VERIFY_FAILED', 'PARTIAL', 'FAILED'].includes(runtime.state) && <button className="danger" disabled={runtimeBusy !== '' || busy || isMock}
+          onClick={() => void runRuntimeAction('compensate')}>{runtimeBusy === 'compensate' ? '补偿中…' : 'Compensate 恢复'}</button>}
+        <button className="secondary" disabled={runtimeBusy !== ''} onClick={() => void refreshRuntime()}>刷新状态</button>
+      </div>
+    </div>
+    {loading && <div className="application-muted">正在读取应用网络拓扑…</div>}
+    <div className="application-network-canvas">
+      <TopologyCanvas<ApplicationNetworkFlowNode, Edge>
+        nodes={nodes} edges={edges} nodeTypes={applicationNetworkNodeTypes}
+        onNodesChange={onFlowNodesChange} onConnect={connect}
+        onCanvasContextMenu={event => {
+          if (saving || busy) return;
+          setMenu({ x: event.clientX, y: event.clientY,
+            point: screenToFlowPosition({ x: event.clientX, y: event.clientY }) });
+        }}
+        onNodeContextMenu={(event, node) => {
+          event.preventDefault();
+          if (!saving && !busy && node.type === 'application-device') {
+            setMenu({ x: event.clientX, y: event.clientY, nodeId: node.id });
+          }
+        }}
+        onEdgeContextMenu={(event, edge) => {
+          event.preventDefault();
+          if (!saving && !busy && !selectorEdges.some(item => item.id === edge.id)) {
+            setMenu({ x: event.clientX, y: event.clientY, edgeId: edge.id });
+          }
+        }}
+        isValidConnection={validConnection} connectionMode={ConnectionMode.Strict}
+        onConnectEnd={(_, state) => {
+          if (state.toHandle && !state.isValid) setMessage('虚拟设备只连接兼容端口；Deployment 使用顶部/底部网卡端口接入。');
+        }}
+        nodesDraggable={!saving && !busy} nodesConnectable={!saving && !busy}
+        elementsSelectable deleteKeyCode={null} minZoom={0.25} maxZoom={1.8}
+        noWheelClassName="nowheel" fitView
+      />
+    </div>
+    <div className="application-topology-footnote">右键空白处添加 SWITCH、ROUTER、FIREWALL、Packet Tap、MERGE、SPLIT、FORWARDER、LOAD_BALANCER、MIRROR 或 CUSTOM。Deployment 网卡端口可连接虚拟设备；虚拟设备卡片可编辑源 YAML。</div>
+    {error && <div className="alert error" role="alert">{error}</div>}
+    {message && <div className="application-network-message" role="status">{message}</div>}
+    {menu && <TopologyContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}>
+      {menu.nodeId ? <>
+        <TopologyContextMenuHeading>{draft.nodes.find(node => node.id === menu.nodeId)?.name ?? '虚拟设备'}</TopologyContextMenuHeading>
+        <TopologyContextMenuItem onClick={() => {
+          const node = draft.nodes.find(item => item.id === menu.nodeId);
+          if (node) { setYamlNode(node); setYamlSource(topologyNodeYaml(node)); setYamlError(''); }
+          setMenu(undefined);
+        }}>编辑源 YAML</TopologyContextMenuItem>
+        <TopologyContextMenuItem className="danger" onClick={() => removeDevice(menu.nodeId!)}>删除设备及接入链路</TopologyContextMenuItem>
+      </> : menu.edgeId ? <>
+        <TopologyContextMenuHeading>应用网络链路</TopologyContextMenuHeading>
+        <TopologyContextMenuItem className="danger" onClick={() => removeEdge(menu.edgeId!)}>删除连接</TopologyContextMenuItem>
+      </> : <>
+        <TopologyContextMenuHeading>添加虚拟网络设备</TopologyContextMenuHeading>
+        {virtualApplicationKinds.map(kind => <TopologyContextMenuItem key={kind} onClick={() => addDevice(kind)}>
+          <span>{nodePresets[kind].name}</span><small>{nodePresets[kind].inputs} 入 / {nodePresets[kind].outputs} 出</small>
+        </TopologyContextMenuItem>)}
+      </>}
+    </TopologyContextMenu>}
+    {yamlNode && <ApplicationVirtualDeviceYamlDialog node={yamlNode} sourceYaml={yamlSource}
+      error={yamlError} disabled={saving || busy} onChange={setYamlSource}
+      onClose={() => setYamlNode(undefined)} onSave={saveDeviceYaml} />}
+    {resourceYamlNode && <ApplicationSourceYamlDialog node={resourceYamlNode}
+      disabled={saving || busy} onClose={() => setResourceYamlNode(undefined)}
+      onSave={sourceYaml => {
+        onResourceYamlSave(resourceYamlNode, sourceYaml);
+        setResourceYamlNode(undefined);
+      }} />}
+  </section>;
+}
+
+function ApplicationVirtualDeviceYamlDialog({
+  node, sourceYaml, error, disabled, onChange, onClose, onSave,
+}: {
+  node: TopologyNode;
+  sourceYaml: string;
+  error: string;
+  disabled: boolean;
+  onChange: (value: string) => void;
+  onClose: () => void;
+  onSave: (value: string) => void;
+}) {
+  return <div className="modal-backdrop"><section className="modal topology-node-yaml-dialog" role="dialog" aria-modal="true" aria-labelledby="application-network-yaml-title">
+    <div className="card-title"><div><span className="eyebrow">APPLICATION TOPOLOGY SOURCE YAML</span><h2 id="application-network-yaml-title">{node.kind} · {node.name}</h2><p>保存只更新当前应用的虚拟拓扑草稿，不会立即配置 Pod 网络。</p></div><button type="button" className="icon-button" aria-label="关闭 YAML 编辑器" onClick={onClose}>×</button></div>
+    <form onSubmit={event => { event.preventDefault(); onSave(sourceYaml); }}>
+      <label className="topology-node-yaml-label" htmlFor="application-network-node-yaml">源 YAML</label>
+      <textarea id="application-network-node-yaml" className="topology-node-source-yaml" spellCheck={false}
+        autoCapitalize="off" autoCorrect="off" maxLength={262_144} rows={22}
+        value={sourceYaml} onChange={event => onChange(event.target.value)} />
+      {error && <div className="alert error" role="alert">{error}</div>}
+      <div className="form-actions"><button type="button" className="secondary" onClick={onClose}>取消</button><button className="primary" disabled={disabled}>保存到应用拓扑草稿</button></div>
+    </form>
+  </section></div>;
 }
 
 function ApplicationSourceYamlDialog({

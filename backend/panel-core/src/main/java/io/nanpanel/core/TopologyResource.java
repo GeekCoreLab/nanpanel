@@ -286,6 +286,23 @@ public class TopologyResource {
     }
   }
 
+  DraftWrite parseApplicationDraft(JsonNode body) {
+    return parse(body);
+  }
+
+  String applicationDraftError(DraftWrite value) {
+    if (value.nodes().stream().anyMatch(node -> !Set.of("ROUTER", "FIREWALL", "SWITCH",
+        "MERGE", "SPLIT", "FORWARDER", "LOAD_BALANCER", "MIRROR", "PACKET_TAP",
+        "CUSTOM").contains(node.kind()) || node.parentId() != null || node.assetId() != null
+            || node.clusterId() != null)) {
+      return "应用网络拓扑只允许根级虚拟设备节点";
+    }
+    String invalid = hierarchyError(value);
+    if (invalid != null) return invalid;
+    invalid = NetworkGraphValidator.error(graph(value));
+    return invalid == null ? providerError(value) : invalid;
+  }
+
   private DraftWrite normalize(DraftWrite input) {
     if (input.nodes() == null || input.links() == null) {
       throw fail(422, "INVALID_TOPOLOGY", "拓扑必须包含 nodes 与 links");

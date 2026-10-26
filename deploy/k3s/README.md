@@ -67,6 +67,18 @@ enabled for this test cluster;
 the periodic service inventory remains limited to the configured
 `nanpanel-mesh` namespace. The separate Istio fixture Role remains
 namespace-scoped for its isolated tests.
+
+### Application network runtime permissions
+
+The single-node Multus runtime needs additional write verbs in each application
+Namespace. `application-network-runtime-role.yaml` is an opt-in Role and
+RoleBinding for the `nanpanel-core` ServiceAccount. It grants only Pod/Service/
+Deployment access and NetworkAttachmentDefinition/EndpointSlice lifecycle in
+the Namespace selected for the application. It is intentionally not included
+in `deploy.sh`; the existing `k3s-1` deployment remains read-only. Apply the
+template only to an explicitly selected isolated test Namespace after Multus
+has been installed there. The role cannot install CNI components or modify
+cluster-scoped resources.
 The first-run administrator password is printed once; sign in as `admin`,
 change it, then remove the one-time bootstrap secret:
 

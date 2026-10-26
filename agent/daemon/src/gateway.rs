@@ -687,6 +687,17 @@ struct NetworkTopologyPayload {
     generation: u64,
     nodes: Vec<NetworkTopologyNode>,
     links: Vec<NetworkTopologyLink>,
+    #[serde(default)]
+    attachments: Vec<NetworkTopologyAttachment>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct NetworkTopologyAttachment {
+    id: String,
+    node_id: String,
+    device_port: String,
+    network_cidr: String,
 }
 
 #[derive(Deserialize)]
@@ -1081,6 +1092,44 @@ fn valid_network_topology_payload(payload: NetworkTopologyPayload) -> bool {
         valid
     });
     if !links_valid {
+        return false;
+    }
+    let mut attachment_ids = std::collections::HashSet::new();
+    let mut attachment_networks = std::collections::HashSet::new();
+    if payload.attachments.len() > 64
+        || payload.attachments.iter().any(|attachment| {
+            let Some(node) = payload
+                .nodes
+                .iter()
+                .find(|node| node.id == attachment.node_id)
+            else {
+                return true;
+            };
+            let Some((network, prefix)) = ipv4_cidr(&attachment.network_cidr) else {
+                return true;
+            };
+            let address = attachment
+                .network_cidr
+                .split_once('/')
+                .and_then(|(address, _)| ipv4(address));
+            let start = u32::from(std::net::Ipv4Addr::new(198, 18, 0, 0));
+            let end = u32::from(std::net::Ipv4Addr::new(198, 19, 255, 255));
+            let valid = valid_topology_uuid(&attachment.id)
+                && attachment_ids.insert(attachment.id.as_str())
+                && !link_ids.contains(attachment.id.as_str())
+                && node.kind == "SWITCH"
+                && node.switch_backend.as_deref() != Some("OPENVSWITCH")
+                && (valid_topology_port(&attachment.device_port, "in-")
+                    || valid_topology_port(&attachment.device_port, "out-"))
+                && ports.insert((attachment.node_id.as_str(), attachment.device_port.as_str()))
+                && prefix == 24
+                && address == Some(network)
+                && network >= start
+                && network + 255 <= end
+                && attachment_networks.insert(attachment.network_cidr.as_str());
+            !valid
+        })
+    {
         return false;
     }
     payload.nodes.iter().all(|node| match node.kind.as_str() {
