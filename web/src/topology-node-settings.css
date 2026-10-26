@@ -8,6 +8,20 @@
   overflow-wrap: anywhere;
 }
 
+.device-title > div { min-width: 0; }
+.device-title strong,
+.device-title small { overflow-wrap: anywhere; word-break: break-word; white-space: normal; }
+.device-yaml-footer { display: flex; justify-content: flex-end; padding: 0 12px 10px; }
+.device-yaml-button { min-height: 27px; padding: 4px 9px; border: 1px solid #d8e2ef; border-radius: 6px; background: #f8fafd; color: #44658e; font-size: 10px; }
+.device-yaml-button:hover:not(:disabled) { border-color: #9eb7d8; background: #eff5fc; }
+.topology-node-yaml-dialog { display: flex; width: min(960px, calc(100vw - 32px)); max-height: min(92vh, 920px); flex-direction: column; overflow: hidden; }
+.topology-node-yaml-dialog form { display: flex; min-height: 0; flex: 1; flex-direction: column; gap: 10px; }
+.topology-node-yaml-dialog .card-title { flex: 0 0 auto; }
+.topology-node-yaml-label { color: #536882; font-size: 12px; font-weight: 650; }
+.topology-node-source-yaml { width: 100%; min-height: 0; flex: 1; resize: vertical; padding: 12px; border: 1px solid #dce4ee; border-radius: 7px; background: #101a29; color: #e6edf6; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; tab-size: 2; }
+.topology-node-source-yaml:focus { border-color: #6d98cf; outline: 2px solid #75a0d533; }
+.topology-node-yaml-dialog .form-actions { flex: 0 0 auto; }
+
 .topology-node-settings {
   max-height: min(90vh, 720px);
   overflow: auto;

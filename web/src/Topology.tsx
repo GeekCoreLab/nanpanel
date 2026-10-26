@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
 import type { WheelEvent as ReactWheelEvent } from 'react';
 import { createPortal } from 'react-dom';
+import { parseDocument, stringify as stringifyYaml } from 'yaml';
 import {
   ReactFlowProvider, Handle, Position, ConnectionMode,
   MarkerType, useNodesState, useEdgesState, useReactFlow, useUpdateNodeInternals,
@@ -44,6 +45,7 @@ type DeviceNode = Node<{
   onGatewayAssetSelect?: (nodeId: string, host: Host | null) => void;
   onGatewayAssetLoadMore?: (nodeId: string) => void;
   onFolderClusterSelect?: (nodeId: string, clusterId: string | null) => void;
+  onEditSourceYaml?: (node: TopologyNode) => void;
 }, 'device'>;
 type P0RouteEvidence = { status: 'VERIFIED'; route: string; httpStatus: number; responseBody: string; configSha256: string; diff: string; verifiedAt: string };
 const virtualKinds: TopologyNodeKind[] = ['SWITCH', 'FIREWALL', 'PACKET_TAP', 'MERGE', 'SPLIT', 'FORWARDER', 'LOAD_BALANCER', 'MIRROR', 'CUSTOM'];
@@ -54,8 +56,36 @@ const linkStateLabels = { PENDING: '待部署', VERIFIED: '已验证', ERROR: '�
 const estimatedNodeHeight = (node: Pick<TopologyNode, 'kind' | 'inputCount' | 'outputCount'>) => {
   const portRows = Math.max(node.inputCount, node.outputCount, 1) * 26 + 16;
   const controls = node.kind === 'GATEWAY' ? 80 : node.kind === 'ROUTER' ? 64 : node.kind === 'FOLDER' ? 52 : 0;
-  return 96 + portRows + controls;
+  return 132 + portRows + controls;
 };
+
+const topologyNodeYamlApiVersion = 'topology.nanpanel.io/v1alpha1';
+const topologyNodeYamlFields = [
+  'kind', 'name', 'description', 'position', 'inputCount', 'outputCount', 'ports',
+  'parentId', 'assetId', 'clusterId', 'ipAddress', 'providerId', 'switchBackend',
+  'firewallPolicy', 'routerConfiguration',
+];
+
+function topologyNodeSourceYaml(node: TopologyNode) {
+  return stringifyYaml({
+    apiVersion: topologyNodeYamlApiVersion,
+    kind: 'TopologyNode',
+    metadata: { id: node.id },
+    spec: Object.fromEntries(topologyNodeYamlFields.map(field => [
+      field,
+      (node as unknown as Record<string, unknown>)[field] ?? null,
+    ])),
+  }, { indent: 2, lineWidth: 0 });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function hasExactKeys(value: unknown, keys: string[]): value is Record<string, unknown> {
+  return isRecord(value) && Object.keys(value).length === keys.length
+    && keys.every(key => Object.hasOwn(value, key));
+}
 
 function p0RouteError(graph: TopologyDraftWrite): string | null {
   if (graph.nodes.length !== 3 || graph.links.length !== 2) return 'P0 实验要求一条 Gateway → NAT Host → Service 路径';
@@ -133,8 +163,35 @@ function Device({ data, selected }: NodeProps<DeviceNode>) {
       {Array.from({ length: node.inputCount }, (_, i) => { const port = node.ports.find(value => value.id === `in-${i + 1}`); return <div className="device-port port-in" key={`in-${i + 1}`} style={{ top: 12 + i * 26 }}><Handle id={`in-${i + 1}`} type="target" position={Position.Left} aria-label={`${node.name} 入口 ${i + 1}`} /><span>{node.kind === 'FOLDER' && i === 0 ? 'Ingress 接入' : `入口 ${i + 1}`} · {port?.layer ?? 'L4'}/{port?.protocols.join(',') ?? 'TCP'}</span></div>; })}
       {Array.from({ length: node.outputCount }, (_, i) => { const port = node.ports.find(value => value.id === `out-${i + 1}`); return <div className="device-port port-out" key={`out-${i + 1}`} style={{ top: 12 + i * 26 }}><span>{node.kind === 'FOLDER' && i === 0 ? '集群服务' : `出口 ${i + 1}`} · {port?.layer ?? 'L4'}/{port?.protocols.join(',') ?? 'TCP'}</span><Handle id={`out-${i + 1}`} type="source" position={Position.Right} aria-label={`${node.name} 出口 ${i + 1}`} /></div>; })}
     </div>{node.description && <p className="device-description">{node.description}</p>}<div className="device-status">{node.kind === 'FOLDER' ? '双击打开层级视图' : node.providerId ? `Provider ${node.providerId} · 尚未部署` : node.assetId ? `资产 ${data.asset?.hostname ?? node.assetId}` : '期望节点 · 未部署'}</div>
+    <div className="device-yaml-footer"><button type="button" className="device-yaml-button nodrag" disabled={!!data.observedOnly}
+      title={data.observedOnly ? 'Agent 观测节点为只读' : '编辑该节点的源 YAML'}
+      onClick={event => { event.stopPropagation(); data.onEditSourceYaml?.(node); }}>编辑源 YAML</button></div>
   </div>;
 }
+
+function TopologyNodeSourceYamlDialog({
+  node, disabled, error, onClose, onSave,
+}: {
+  node: TopologyNode;
+  disabled: boolean;
+  error: string;
+  onClose: () => void;
+  onSave: (sourceYaml: string) => void;
+}) {
+  const [sourceYaml, setSourceYaml] = useState(() => topologyNodeSourceYaml(node));
+  return <div className="modal-backdrop"><section className="modal topology-node-yaml-dialog" role="dialog" aria-modal="true" aria-labelledby="topology-node-yaml-title">
+    <div className="card-title"><div><span className="eyebrow">TOPOLOGY NODE SOURCE YAML</span><h2 id="topology-node-yaml-title">{node.kind} · {node.name}</h2><p>id 与 kind 固定；保存只更新拓扑草稿，不会立即应用到隔离 netns。</p></div><button type="button" className="icon-button" aria-label="关闭 YAML 编辑器" onClick={onClose}>×</button></div>
+    <form onSubmit={event => { event.preventDefault(); onSave(sourceYaml); }}>
+      <label className="topology-node-yaml-label" htmlFor="topology-node-source-yaml">源 YAML</label>
+      <textarea id="topology-node-source-yaml" className="topology-node-source-yaml" spellCheck={false}
+        autoCapitalize="off" autoCorrect="off" maxLength={262_144} rows={22}
+        value={sourceYaml} onChange={event => setSourceYaml(event.target.value)} />
+      {error && <div className="alert error" role="alert">{error}</div>}
+      <div className="form-actions"><button type="button" className="secondary" onClick={onClose}>取消</button><button className="primary" disabled={disabled}>保存到拓扑草稿</button></div>
+    </form>
+  </section></div>;
+}
+
 const nodeTypes = { device: Device };
 type Menu = { x: number; y: number; point: { x: number; y: number }; nodeId?: string; edgeId?: string };
 type SwitchBackend = 'BRIDGE' | 'OPENVSWITCH';
@@ -174,6 +231,7 @@ function Editor() {
   const [revisionError, setRevisionError] = useState('');
   const [menu, setMenu] = useState<Menu>(); const canvasRef = useRef<HTMLElement>(null);
   const [nodeSettings, setNodeSettings] = useState<NodeSettings>(); const [nodeSettingsError, setNodeSettingsError] = useState('');
+  const [sourceYamlNode, setSourceYamlNode] = useState<TopologyNode>(); const [sourceYamlError, setSourceYamlError] = useState('');
   const [networkProviders, setNetworkProviders] = useState<NetworkProvider[]>([]);
   const [networkProvidersError, setNetworkProvidersError] = useState('');
   const observedRouterSignatureRef = useRef('');
@@ -406,6 +464,61 @@ function Editor() {
     const routes = nodeSettings.routerConfiguration.routes.map((route, row) => row === index ? { ...route, ...patch } : route);
     setNodeSettings({ ...nodeSettings, routerConfiguration: { ...nodeSettings.routerConfiguration, routes } });
   }
+  function openSourceYamlEditor(node: TopologyNode) {
+    setSourceYamlNode(node);
+    setSourceYamlError('');
+    setMenu(undefined);
+  }
+  function saveSourceYaml(sourceYaml: string) {
+    const original = sourceYamlNode;
+    if (!original) return;
+    if (!sourceYaml.trim() || sourceYaml.length > 262_144) {
+      setSourceYamlError('本项 YAML 必须为 1–262144 个字符。');
+      return;
+    }
+    try {
+      const document = parseDocument(sourceYaml, { uniqueKeys: true });
+      if (document.errors.length) throw new Error(document.errors[0].message);
+      const parsed: unknown = document.toJS({ maxAliasCount: 16 });
+      const specKeys = topologyNodeYamlFields;
+      if (!hasExactKeys(parsed, ['apiVersion', 'kind', 'metadata', 'spec'])) {
+        throw new Error('文档必须符合 topology.nanpanel.io/v1alpha1 TopologyNode 格式，并保持 metadata.id 与全部 spec 字段。');
+      }
+      const metadata = parsed.metadata;
+      const parsedSpec = parsed.spec;
+      if (parsed.apiVersion !== topologyNodeYamlApiVersion || parsed.kind !== 'TopologyNode'
+          || !hasExactKeys(metadata, ['id']) || metadata.id !== original.id
+          || !hasExactKeys(parsedSpec, specKeys)) {
+        throw new Error('文档必须符合 topology.nanpanel.io/v1alpha1 TopologyNode 格式，并保持 metadata.id 与全部 spec 字段。');
+      }
+      const spec = parsedSpec as unknown as Partial<TopologyNode>;
+      if (spec.kind !== original.kind) throw new Error('源 YAML 不能更改节点 kind。');
+      const updated: TopologyNode = { ...original, ...spec, id: original.id, kind: original.kind };
+      const currentDraft = draft();
+      const candidate = {
+        ...currentDraft,
+        nodes: currentDraft.nodes.map(node => node.id === updated.id ? updated : node),
+      };
+      const invalid = draftError(candidate);
+      if (invalid) throw new Error(`节点 YAML 会使当前拓扑无效：${invalid}`);
+      const providerUsesOvs = candidate.nodes.some(node => node.providerId === 'linux-netns'
+        && node.kind === 'SWITCH' && node.switchBackend === 'OPENVSWITCH');
+      if (providerUsesOvs && candidate.nodes.some(node => node.providerId === 'linux-netns'
+          && ['FIREWALL', 'PACKET_TAP'].includes(node.kind))) {
+        throw new Error('Open vSwitch 切片当前不能与同一 linux-netns Provider 下的 Firewall 或 Packet Tap 共存。');
+      }
+      setNodes(current => current.map(node => node.id === updated.id
+        ? { ...node, position: updated.position, data: { ...node.data, model: updated } }
+        : node));
+      setSourceYamlNode(undefined);
+      setSourceYamlError('');
+      setDirty(true);
+      setRouteEvidence(undefined);
+      setMessage(`已将 ${updated.name} 的 YAML 解析为拓扑草稿；保存草稿后才会创建新 Revision`);
+    } catch (cause) {
+      setSourceYamlError((cause as Error).message);
+    }
+  }
   function openNodeSettings(node: TopologyNode) {
     const firstPort = node.ports[0];
     setNodeSettings({ nodeId: node.id, name: node.name, description: node.description ?? '', layer: firstPort?.layer ?? 'L4', protocols: [...(firstPort?.protocols ?? ['TCP'])], providerId: node.providerId ?? '', switchBackend: node.switchBackend ?? 'BRIDGE', firewallPolicy: { defaultAction: node.firewallPolicy?.defaultAction ?? 'DROP', rules: (node.firewallPolicy?.rules ?? []).map(rule => ({ ...rule })) }, routerConfiguration: { interfaces: (node.routerConfiguration?.interfaces ?? []).map(iface => ({ ...iface })), routes: (node.routerConfiguration?.routes ?? []).map(route => ({ ...route })) } });
@@ -499,6 +612,7 @@ function Editor() {
   }
   const activeNodes = nodes.filter(node => (node.data.model.parentId ?? null) === folderId);
   const activeDisplayNodes = activeNodes.map(node => {
+    const onEditSourceYaml = (model: TopologyNode) => openSourceYamlEditor({ ...model, position: node.position });
     if (node.data.model.kind === 'GATEWAY') {
       return {
         ...node,
@@ -517,16 +631,17 @@ function Editor() {
           onGatewayAssetClose: (id: string) => setGatewayAssetOpen(current => ({ ...current, [id]: false })),
           onGatewayAssetSelect: selectGatewayAsset,
           onGatewayAssetLoadMore: loadMoreGatewayHostAssets,
+          onEditSourceYaml,
         },
       };
     }
     if (node.data.model.kind === 'FOLDER') {
-      return { ...node, data: { ...node.data, clusterChoices: kubernetesClusters, onFolderClusterSelect: selectFolderCluster } };
+      return { ...node, data: { ...node.data, clusterChoices: kubernetesClusters, onFolderClusterSelect: selectFolderCluster, onEditSourceYaml } };
     }
     if (node.data.model.kind === 'ROUTER') {
-      return { ...node, data: { ...node.data, onRouterAddressChange: selectRouterAddress } };
+      return { ...node, data: { ...node.data, onRouterAddressChange: selectRouterAddress, onEditSourceYaml } };
     }
-    return node;
+    return { ...node, data: { ...node.data, onEditSourceYaml } };
   });
   const activeEdges = edges.filter(edge => {
     const source = nodes.find(node => node.id === edge.source)?.data.model;
@@ -902,6 +1017,8 @@ function Editor() {
         <div className="form-actions"><button type="button" className="secondary" onClick={() => setNodeSettings(undefined)}>取消</button><button className="primary">保存节点设置</button></div>
       </form>
     </section></div>}
+    {sourceYamlNode && <TopologyNodeSourceYamlDialog key={sourceYamlNode.id} node={sourceYamlNode} disabled={busy}
+      error={sourceYamlError} onClose={() => { setSourceYamlNode(undefined); setSourceYamlError(''); }} onSave={saveSourceYaml} />}
     {revisionHistoryOpen && <div className="modal-backdrop"><section className="modal topology-revision-dialog" role="dialog" aria-modal="true" aria-labelledby="topology-revision-title">
       <div className="card-title"><div><span className="eyebrow">IMMUTABLE TOPOLOGY REVISIONS</span><h2 id="topology-revision-title">版本比较与回放</h2><p>回放只载入为当前未保存草稿；需要再次保存创建新 Revision，且不会应用网络规则。</p></div><button className="icon-button" aria-label="关闭版本比较" onClick={() => setRevisionHistoryOpen(false)}>×</button></div>
       {revisionError && <div className="alert error" role="alert">{revisionError}</div>}

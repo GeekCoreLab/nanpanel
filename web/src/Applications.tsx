@@ -20,11 +20,12 @@ import type {
   KubernetesClusterSummary,
   KubernetesTopologyNamespaceSnapshot,
 } from './lib/types';
+import Topology from './Topology';
 import { TopologyCanvas } from './topology/TopologyCanvas';
 import { TopologyContextMenu, TopologyContextMenuHeading, TopologyContextMenuItem } from './topology/TopologyContextMenu';
 import './applications.css';
 
-type View = 'topology' | 'versions';
+type View = 'topology' | 'network' | 'versions';
 type Editable = { replicas?: number; image?: string; targetDeployment?: string; servicePort?: number; targetPort?: string; serviceProtocol?: 'TCP' | 'UDP' | 'SCTP' };
 type PendingApplicationNode = KubernetesApplicationTopologyAddition & {
   id: string;
@@ -429,9 +430,11 @@ export default function Applications({ notify }: { notify: (message: string) => 
           </div>
           <div className="application-tabs" role="tablist" aria-label="应用管理视图">
             <button role="tab" aria-selected={view === 'topology'} className={view === 'topology' ? 'active' : ''} onClick={() => setView('topology')}>⌘ 拓扑与配置</button>
+            <button role="tab" aria-selected={view === 'network'} className={view === 'network' ? 'active' : ''} onClick={() => setView('network')}>⇄ 虚拟网络设备</button>
             <button role="tab" aria-selected={view === 'versions'} className={view === 'versions' ? 'active' : ''} onClick={() => setView('versions')}>◷ 版本历史 <span>{versions.length}</span></button>
-            <div className="application-tab-actions"><button className="secondary" onClick={() => void loadApplication(detail.application.id)}>刷新拓扑</button>{view === 'topology' && <button className="primary" disabled={(!Object.keys(changes).length && !hasYamlChanges && !additions.length) || additions.some(addition => addition.kind === 'Service' && !addition.targetDeployment && !addition.sourceYaml) || hasDraft || busy !== ''} title={additions.some(addition => addition.kind === 'Service' && !addition.targetDeployment && !addition.sourceYaml) ? '请将新增 Service 连到 Deployment 后再生成差异' : undefined} onClick={() => void createDraft()}>{busy === 'draft' ? '生成差异中…' : '生成版本差异 →'}</button>}</div>
+            <div className="application-tab-actions">{view !== 'network' && <button className="secondary" onClick={() => void loadApplication(detail.application.id)}>刷新应用资源</button>}{view === 'topology' && <button className="primary" disabled={(!Object.keys(changes).length && !hasYamlChanges && !additions.length) || additions.some(addition => addition.kind === 'Service' && !addition.targetDeployment && !addition.sourceYaml) || hasDraft || busy !== ''} title={additions.some(addition => addition.kind === 'Service' && !addition.targetDeployment && !addition.sourceYaml) ? '请将新增 Service 连到 Deployment 后再生成差异' : undefined} onClick={() => void createDraft()}>{busy === 'draft' ? '生成差异中…' : '生成版本差异 →'}</button>}</div>
           </div>
+          <div className="application-view-content">
           {view === 'topology' ? <>
             {hasDraft && <div className="application-draft-banner"><span>◈</span><div><strong>v{currentDraft?.version} 有待确认差异</strong><small>检查版本历史中的 YAML diff，确认后部署；拓扑编辑会先锁定到该草稿。</small></div><button className="link" onClick={() => setView('versions')}>查看 diff →</button></div>}
             <section className="application-topology-card">
@@ -456,10 +459,15 @@ export default function Applications({ notify }: { notify: (message: string) => 
               {additions.some(addition => addition.kind === 'Service' && !addition.targetDeployment) && <div className="alert" role="status">新增 Service 尚未连接到 Deployment；拖动 Service 绿色端口到 Deployment 蓝色端口后即可生成差异。</div>}
               <div className="application-topology-footnote">空白处右键添加 Deployment 或 Service；拖动节点调整布局，拖动 Service 绿色端口到 Deployment 蓝色端口可连接/重接服务。每张资源卡都可编辑独立源 YAML；变更先生成版本 diff，只有显式确认部署才会写入集群。</div>
             </section>
-          </> : <section className="application-versions-card">
+          </> : view === 'versions' ? <section className="application-versions-card">
             <div className="application-section-heading"><div><span className="eyebrow">IMMUTABLE MANIFEST HISTORY</span><h3>版本历史</h3><p>草稿不会修改集群；只有状态为“待确认”的版本可提交部署。</p></div></div>
             {!versions.length ? <div className="application-empty-history">暂无版本记录</div> : <div className="application-version-list">{versions.map(version => <VersionCard key={version.version} version={version} busy={busy === `deploy-${version.version}`} onDeploy={() => void deployDraft(version)} />)}</div>}
-          </section>}
+          </section> : null}
+          <div className={`application-network-topology ${view === 'network' ? 'visible' : ''}`} aria-hidden={view !== 'network'}>
+            <p className="application-network-note">此工作区复用 Core 共享的 NetworkGraph 草稿与 Revision，不按当前应用拆分。保存拓扑后，还需在“网络接入”中显式执行具备能力声明的 Provider；该图不会自动接入此应用的 Kubernetes Pod/Service 流量。</p>
+            <Topology />
+          </div>
+          </div>
         </>}
       </section>
     </div>

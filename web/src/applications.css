@@ -31,7 +31,7 @@
 .application-empty-small>span{color:#536982;font-size:11px;font-weight:600}
 .application-empty-small small{color:#8996a9;font-size:9px;line-height:1.7}
 .application-empty-small .link{margin-top:4px}
-.application-content{padding:19px;overflow:hidden}
+.application-content{position:relative;padding:19px;overflow:hidden}
 .application-blank{display:flex;min-height:565px;align-items:center;justify-content:center;flex-direction:column;text-align:center}
 .application-blank-icon{display:grid;place-items:center;width:64px;height:64px;margin-bottom:14px;border-radius:16px;background:#edf4ff;color:#5485df;font-size:29px}
 .application-blank h2{margin:0;color:#3a506d;font-size:17px}
@@ -166,6 +166,7 @@ main:has(.applications-page)>footer{display:none}
 .application-content{display:flex;height:100%;min-height:0;flex-direction:column;overflow:hidden}
 .application-blank{min-height:0;flex:1}
 .application-detail-heading,.application-metrics,.application-tabs,.application-draft-banner{flex-shrink:0}
+.application-view-content{position:relative;display:flex;min-height:0;flex:1;flex-direction:column;overflow:hidden}
 .application-topology-card,.application-versions-card{display:flex;min-height:0;flex:1;flex-direction:column;margin-top:9px}
 .application-topology-card>.application-section-heading,.application-versions-card>.application-section-heading{flex:0 0 auto}
 .application-topology-canvas{position:relative;min-width:0;max-width:none;min-height:0;height:auto;flex:1 1 0;overflow:hidden;background-color:#fcfdff;background-image:radial-gradient(#e2e9f2 .7px,transparent .7px);background-size:16px 16px}
@@ -210,6 +211,12 @@ main:has(.applications-page)>footer{display:none}
 .application-account-row,.application-topology-footnote{flex:0 0 auto}
 .application-versions-card{overflow:hidden}
 .application-version-list{min-height:0;overflow-y:auto;overscroll-behavior:contain}
+.application-network-topology{position:absolute;inset:0;z-index:1;display:flex;min-height:0;flex-direction:column;overflow:auto;padding:8px 2px 16px;overscroll-behavior:contain;visibility:hidden;pointer-events:none}
+.application-network-topology.visible{visibility:visible;pointer-events:auto}
+.application-network-note{margin:0 0 10px;padding:9px 12px;border:1px solid #e3eaf4;border-radius:7px;background:#f8fafd;color:#708198;font-size:10px;line-height:1.65;overflow-wrap:anywhere}
+.application-network-topology .page-heading{margin-bottom:10px}
+.application-network-topology .topology{height:min(56vh,580px);min-height:390px}
+@media(max-width:620px){.application-network-topology{padding:4px 0 12px}.application-network-topology .topology{height:450px;min-height:390px}}
 
 @media(max-width:1150px){main:has(.applications-page){padding-right:24px;padding-left:24px}}
 @media(max-width:900px){.application-layout{grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(86px,.2fr) minmax(0,1fr)}.application-list-panel{display:flex;min-height:0;flex-direction:column;overflow:hidden}.application-list{min-height:0;overflow-x:auto;overscroll-behavior:contain}.application-list-footer{display:none}.application-content{overflow:hidden}}
