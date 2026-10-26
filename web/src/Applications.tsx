@@ -121,6 +121,7 @@ export default function Applications({ notify }: { notify: (message: string) => 
   const [additions, setAdditions] = useState<PendingApplicationNode[]>([]);
   const [view, setView] = useState<View>('topology');
   const [runtimeDeployment, setRuntimeDeployment] = useState('');
+  const closeRuntimeDeployment = useCallback(() => setRuntimeDeployment(''), []);
   const [drawer, setDrawer] = useState<ApplicationDrawer>(null);
   const [toolbarMenuOpen, setToolbarMenuOpen] = useState(false);
   const [wizard, setWizard] = useState(false);
@@ -466,14 +467,19 @@ export default function Applications({ notify }: { notify: (message: string) => 
           </div>
         </div>
         <div className="application-view-content">
-          {runtimeDeployment && <ApplicationDeploymentDetail applicationId={detail.application.id}
-            applicationName={detail.application.displayName} deploymentName={runtimeDeployment}
-            namespace={detail.application.namespace} onBack={() => setRuntimeDeployment('')} />}
+          {runtimeDeployment && <div className="application-runtime-backdrop" onMouseDown={event => {
+            if (event.target === event.currentTarget) closeRuntimeDeployment();
+          }}>
+            <ApplicationDeploymentDetail key={`${detail.application.id}-${runtimeDeployment}`}
+              applicationId={detail.application.id} applicationName={detail.application.displayName}
+              deploymentName={runtimeDeployment} namespace={detail.application.namespace}
+              onBack={closeRuntimeDeployment} />
+          </div>}
           {view === 'versions' && <section className="application-versions-card">
             <div className="application-section-heading"><div><span className="eyebrow">IMMUTABLE MANIFEST HISTORY</span><h3>版本历史</h3><p>草稿不会修改集群；只有状态为“待确认”的版本可提交部署。</p></div></div>
             {!versions.length ? <div className="application-empty-history">暂无版本记录</div> : <div className="application-version-list">{versions.map(version => <VersionCard key={version.version} version={version} busy={busy === `deploy-${version.version}`} onDeploy={() => void deployDraft(version)} />)}</div>}
           </section>}
-          <div className={`application-network-topology ${view === 'topology' && !runtimeDeployment ? 'visible' : ''}`}
+          <div className={`application-network-topology ${view === 'topology' ? 'visible' : ''}`}
             aria-hidden={view !== 'topology' || Boolean(runtimeDeployment)}>
             <ReactFlowProvider>
               <ApplicationNetworkTopologyCanvas
@@ -601,6 +607,8 @@ export default function Applications({ notify }: { notify: (message: string) => 
 function ApplicationDeploymentDetail({ applicationId, applicationName, deploymentName, namespace,
   onBack }: { applicationId: string; applicationName: string; deploymentName: string;
   namespace: string; onBack: () => void }) {
+  const dialogRef = useRef<HTMLElement>(null);
+  const onBackRef = useRef(onBack);
   const [runtime, setRuntime] = useState<RuntimeDeploymentView>();
   const [podUid, setPodUid] = useState('');
   const [containerName, setContainerName] = useState('');
@@ -614,6 +622,24 @@ function ApplicationDeploymentDetail({ applicationId, applicationName, deploymen
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const currentPod = runtime?.pods.find(pod => pod.uid === podUid);
+
+  useEffect(() => { onBackRef.current = onBack; }, [onBack]);
+
+  useEffect(() => {
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    dialogRef.current?.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        onBackRef.current();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      if (previouslyFocused?.isConnected) previouslyFocused.focus();
+    };
+  }, []);
 
   const refreshRuntime = useCallback(async () => {
     const result = await api<RuntimeDeploymentView>(
@@ -681,9 +707,10 @@ function ApplicationDeploymentDetail({ applicationId, applicationName, deploymen
     }
   };
 
-  return <section className="application-runtime-detail" aria-label="Deployment 运行时详情">
+  return <section ref={dialogRef} className="application-runtime-detail" role="dialog" aria-modal="true"
+    aria-labelledby="application-runtime-dialog-title" tabIndex={-1}>
     <header className="application-runtime-heading">
-      <div><span className="eyebrow">APPLICATION RUNTIME</span><h2>{deploymentName}</h2>
+      <div><span className="eyebrow">APPLICATION RUNTIME</span><h2 id="application-runtime-dialog-title">{deploymentName}</h2>
         <p>{applicationName}<i>·</i>{namespace}<i>·</i>Deployment 详情</p></div>
       <div className="application-runtime-heading-actions">
         {runtime && <AppState value={runtime.state} />}
@@ -691,7 +718,7 @@ function ApplicationDeploymentDetail({ applicationId, applicationName, deploymen
           setLoading(true); void refreshRuntime().catch(cause => setError((cause as Error).message))
             .finally(() => setLoading(false));
         }} disabled={loading}>↻ 刷新</button>
-        <button type="button" className="secondary" onClick={onBack}>返回拓扑</button>
+        <button type="button" className="secondary" onClick={onBack}>关闭详情</button>
       </div>
     </header>
     <div className="application-runtime-layout">
