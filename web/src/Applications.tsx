@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { Terminal } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
 import {
   Background, ConnectionMode, Controls, Handle, MarkerType, MiniMap, Position, ReactFlowProvider,
   useNodesState, useReactFlow,
@@ -12,8 +14,12 @@ import type {
   KubernetesApplication,
   KubernetesApplicationCreateRequest,
   KubernetesApplicationDetail,
+  KubernetesApplicationExecTicket,
   KubernetesApplicationList,
   KubernetesApplicationPreview,
+  KubernetesApplicationRuntimeDeployment,
+  KubernetesApplicationRuntimeEventList,
+  KubernetesApplicationRuntimeLog,
   KubernetesApplicationTopologyNode,
   KubernetesApplicationTopologyAddition,
   KubernetesApplicationNetworkTopology,
@@ -36,6 +42,10 @@ import './applications.css';
 
 type View = 'topology' | 'versions';
 type ApplicationDrawer = 'applications' | 'info' | null;
+type RuntimeDeploymentView = KubernetesApplicationRuntimeDeployment;
+type RuntimeEventList = KubernetesApplicationRuntimeEventList;
+type RuntimeLog = KubernetesApplicationRuntimeLog;
+type ApplicationExecTicket = KubernetesApplicationExecTicket;
 type Editable = { replicas?: number; image?: string; targetDeployment?: string; servicePort?: number; targetPort?: string; serviceProtocol?: 'TCP' | 'UDP' | 'SCTP' };
 type PendingApplicationNode = KubernetesApplicationTopologyAddition & {
   id: string;
@@ -110,6 +120,7 @@ export default function Applications({ notify }: { notify: (message: string) => 
   const [yamlSourceChanges, setYamlSourceChanges] = useState<Record<string, string>>({});
   const [additions, setAdditions] = useState<PendingApplicationNode[]>([]);
   const [view, setView] = useState<View>('topology');
+  const [runtimeDeployment, setRuntimeDeployment] = useState('');
   const [drawer, setDrawer] = useState<ApplicationDrawer>(null);
   const [toolbarMenuOpen, setToolbarMenuOpen] = useState(false);
   const [wizard, setWizard] = useState(false);
@@ -422,17 +433,20 @@ export default function Applications({ notify }: { notify: (message: string) => 
           <div className="application-toolbar-context">
             <button type="button" className="application-float-button" aria-label="打开应用列表" title="应用列表"
               aria-expanded={drawer === 'applications'} onClick={() => setDrawer('applications')}>☷<span>应用</span></button>
-            <span className="application-current-name" title={detail.application.displayName}>{detail.application.displayName}</span>
+            {runtimeDeployment && <button type="button" className="application-float-button" aria-label="返回应用拓扑"
+              title="返回拓扑" onClick={() => setRuntimeDeployment('')}>←<span>拓扑</span></button>}
+            <span className="application-current-name" title={runtimeDeployment || detail.application.displayName}>
+              {runtimeDeployment || detail.application.displayName}</span>
             <button type="button" className="application-float-button icon-only" aria-label="应用信息" title="应用信息"
               aria-expanded={drawer === 'info'} onClick={() => setDrawer('info')}>ⓘ</button>
           </div>
           <div className="application-toolbar-actions">
-            <button type="button" className={`application-float-button ${view === 'versions' ? 'active' : ''}`}
+            {!runtimeDeployment && <button type="button" className={`application-float-button ${view === 'versions' ? 'active' : ''}`}
               aria-label={view === 'topology' ? '打开版本历史' : '返回拓扑设置'}
               onClick={() => { setView(current => current === 'topology' ? 'versions' : 'topology'); setToolbarMenuOpen(false); }}>
               {view === 'topology' ? '◷' : '⌘'}<span>{view === 'topology' ? `版本 ${versions.length}` : '拓扑'}</span>
-            </button>
-            <div className="application-toolbar-menu-wrap">
+            </button>}
+            {!runtimeDeployment && <div className="application-toolbar-menu-wrap">
               <button type="button" className="application-float-button icon-only" aria-label="更多应用操作" title="更多操作"
                 aria-haspopup="menu" aria-expanded={toolbarMenuOpen} onClick={() => setToolbarMenuOpen(open => !open)}>⋯</button>
               {toolbarMenuOpen && <div className="application-toolbar-menu" role="menu">
@@ -448,15 +462,19 @@ export default function Applications({ notify }: { notify: (message: string) => 
                   {busy === 'draft' ? '生成差异中…' : '生成版本差异'}
                 </button>}
               </div>}
-            </div>
+            </div>}
           </div>
         </div>
         <div className="application-view-content">
+          {runtimeDeployment && <ApplicationDeploymentDetail applicationId={detail.application.id}
+            applicationName={detail.application.displayName} deploymentName={runtimeDeployment}
+            namespace={detail.application.namespace} onBack={() => setRuntimeDeployment('')} />}
           {view === 'versions' && <section className="application-versions-card">
             <div className="application-section-heading"><div><span className="eyebrow">IMMUTABLE MANIFEST HISTORY</span><h3>版本历史</h3><p>草稿不会修改集群；只有状态为“待确认”的版本可提交部署。</p></div></div>
             {!versions.length ? <div className="application-empty-history">暂无版本记录</div> : <div className="application-version-list">{versions.map(version => <VersionCard key={version.version} version={version} busy={busy === `deploy-${version.version}`} onDeploy={() => void deployDraft(version)} />)}</div>}
           </section>}
-          <div className={`application-network-topology ${view === 'topology' ? 'visible' : ''}`} aria-hidden={view !== 'topology'}>
+          <div className={`application-network-topology ${view === 'topology' && !runtimeDeployment ? 'visible' : ''}`}
+            aria-hidden={view !== 'topology' || Boolean(runtimeDeployment)}>
             <ReactFlowProvider>
               <ApplicationNetworkTopologyCanvas
                 key={`application-topology-${detail.application.id}`}
@@ -471,6 +489,7 @@ export default function Applications({ notify }: { notify: (message: string) => 
                 busy={busy !== ''}
                 onResourceYamlSave={saveResourceYaml}
                 onResourceUpdate={updateNode}
+                onOpenDeployment={resource => setRuntimeDeployment(resource.name)}
                 onAdditionChange={addition => setAdditions(current => current.some(item => item.id === addition.id)
                   ? current.map(item => item.id === addition.id ? addition : item) : [...current, addition])}
                 onRemoveAddition={removePendingNode}
@@ -513,7 +532,8 @@ export default function Applications({ notify }: { notify: (message: string) => 
           {!loading && items.length === 0 && !error && <div className="application-empty-small"><b>◇</b><span>还没有应用</span><small>使用图形化向导或导入容器清单创建应用。</small><button className="link" onClick={() => { beginCreate(); setDrawer(null); }}>创建第一个应用 →</button></div>}
           <div className="application-list">
             {items.map(item => <button key={item.id} className={`application-list-item ${selectedId === item.id ? 'active' : ''}`} onClick={() => {
-              setSelectedId(item.id); setView('topology'); setDrawer(null); setToolbarMenuOpen(false);
+              setSelectedId(item.id); setView('topology'); setRuntimeDeployment('');
+              setDrawer(null); setToolbarMenuOpen(false);
             }}>
               <span className="application-symbol">▦</span><span className="application-list-copy"><strong>{item.displayName}</strong><small>{item.clusterName} · {item.namespace}</small><small>版本 v{item.currentVersion} · {item.templateId}</small></span><AppState value={item.state} />
             </button>)}
@@ -533,7 +553,9 @@ export default function Applications({ notify }: { notify: (message: string) => 
             <div><strong>{accounts.length}</strong><span>ServiceAccounts</span></div>
             <div><strong>{versions.filter(item => item.state === 'DEPLOYED').length}</strong><span>已部署版本</span></div>
           </div>
-          <button type="button" className="secondary application-info-history" onClick={() => { setView('versions'); setDrawer(null); }}>查看版本历史 · {versions.length} →</button>
+          <button type="button" className="secondary application-info-history" onClick={() => {
+            setRuntimeDeployment(''); setView('versions'); setDrawer(null);
+          }}>查看版本历史 · {versions.length} →</button>
         </>}
       </aside>
     </div>}
@@ -576,6 +598,242 @@ export default function Applications({ notify }: { notify: (message: string) => 
   </div>;
 }
 
+function ApplicationDeploymentDetail({ applicationId, applicationName, deploymentName, namespace,
+  onBack }: { applicationId: string; applicationName: string; deploymentName: string;
+  namespace: string; onBack: () => void }) {
+  const [runtime, setRuntime] = useState<RuntimeDeploymentView>();
+  const [podUid, setPodUid] = useState('');
+  const [containerName, setContainerName] = useState('');
+  const [tab, setTab] = useState<'overview' | 'events' | 'logs' | 'exec'>('overview');
+  const [events, setEvents] = useState<RuntimeEventList['items']>([]);
+  const [logs, setLogs] = useState<RuntimeLog>();
+  const [execTicket, setExecTicket] = useState<ApplicationExecTicket>();
+  const [execReason, setExecReason] = useState('');
+  const [refreshToken, setRefreshToken] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+  const currentPod = runtime?.pods.find(pod => pod.uid === podUid);
+
+  const refreshRuntime = useCallback(async () => {
+    const result = await api<RuntimeDeploymentView>(
+      `/kubernetes/applications/${encodeURIComponent(applicationId)}/deployments/${encodeURIComponent(deploymentName)}/runtime`,
+      'GET', undefined, {}, true,
+    );
+    setRuntime(result.data);
+    setPodUid(current => result.data.pods.some(pod => pod.uid === current)
+      ? current : result.data.pods[0]?.uid ?? '');
+  }, [applicationId, deploymentName]);
+
+  useEffect(() => {
+    let current = true;
+    setLoading(true);
+    setError('');
+    void refreshRuntime().catch(cause => {
+      if (current) setError((cause as Error).message);
+    }).finally(() => { if (current) setLoading(false); });
+    const timer = window.setInterval(() => {
+      void refreshRuntime().catch(cause => { if (current) setError((cause as Error).message); });
+    }, 10_000);
+    return () => { current = false; window.clearInterval(timer); };
+  }, [refreshRuntime]);
+
+  useEffect(() => {
+    if (!currentPod) { setContainerName(''); return; }
+    setContainerName(current => currentPod.containers.some(container => container.name === current)
+      ? current : currentPod.containers[0]?.name ?? '');
+  }, [currentPod?.uid, currentPod?.containers]);
+
+  useEffect(() => {
+    if (!currentPod || !['events', 'logs'].includes(tab)) return;
+    let current = true;
+    setBusy(tab);
+    setError('');
+    if (tab === 'events') setEvents([]);
+    else setLogs(undefined);
+    const path = `/kubernetes/applications/${encodeURIComponent(applicationId)}/deployments/${encodeURIComponent(deploymentName)}/pods/${encodeURIComponent(currentPod.uid)}`;
+    const request = tab === 'events'
+      ? api<RuntimeEventList>(`${path}/events`, 'GET', undefined, {}, true)
+          .then(result => { if (current) setEvents(result.data.items); })
+      : containerName
+        ? api<RuntimeLog>(`${path}/logs?container=${encodeURIComponent(containerName)}&tailLines=300`, 'GET', undefined, {}, true)
+            .then(result => { if (current) setLogs(result.data); })
+        : Promise.resolve();
+    void request.catch(cause => { if (current) setError((cause as Error).message); })
+      .finally(() => { if (current) setBusy(''); });
+    return () => { current = false; };
+  }, [applicationId, deploymentName, currentPod?.uid, containerName, tab, refreshToken]);
+
+  const startExec = async () => {
+    if (!currentPod || !containerName) return;
+    setBusy('exec');
+    setError('');
+    try {
+      const path = `/kubernetes/applications/${encodeURIComponent(applicationId)}/deployments/${encodeURIComponent(deploymentName)}/pods/${encodeURIComponent(currentPod.uid)}/exec-tickets`;
+      const result = await api<ApplicationExecTicket>(path, 'POST', {
+        container: containerName, reason: execReason.trim(),
+      }, {}, true);
+      setExecTicket(result.data);
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  return <section className="application-runtime-detail" aria-label="Deployment 运行时详情">
+    <header className="application-runtime-heading">
+      <div><span className="eyebrow">APPLICATION RUNTIME</span><h2>{deploymentName}</h2>
+        <p>{applicationName}<i>·</i>{namespace}<i>·</i>Deployment 详情</p></div>
+      <div className="application-runtime-heading-actions">
+        {runtime && <AppState value={runtime.state} />}
+        <button type="button" className="secondary" onClick={() => {
+          setLoading(true); void refreshRuntime().catch(cause => setError((cause as Error).message))
+            .finally(() => setLoading(false));
+        }} disabled={loading}>↻ 刷新</button>
+        <button type="button" className="secondary" onClick={onBack}>返回拓扑</button>
+      </div>
+    </header>
+    <div className="application-runtime-layout">
+      <aside className="application-runtime-pods">
+        <div className="application-runtime-pods-heading"><strong>Pod</strong><span>{runtime?.pods.length ?? 0}</span></div>
+        {loading && <p className="application-muted">正在读取 Pod…</p>}
+        {!loading && runtime?.pods.length === 0 && <p className="application-runtime-empty">当前 Deployment 没有运行中的 Pod。</p>}
+        {runtime?.pods.map(pod => <button key={pod.uid} type="button"
+          className={`application-runtime-pod ${pod.uid === podUid ? 'active' : ''}`}
+          onClick={() => { setPodUid(pod.uid); setExecTicket(undefined); }}>
+          <strong title={pod.name}>{pod.name}</strong><span>{pod.phase || 'Unknown'}</span>
+          <small>{pod.containers.filter(container => container.ready).length}/{pod.containers.length} 容器就绪</small>
+        </button>)}
+      </aside>
+      <div className="application-runtime-main">
+        <div className="application-runtime-summary">
+          <div><small>Pod</small><strong title={currentPod?.name}>{currentPod?.name ?? '—'}</strong></div>
+          <div><small>运行阶段</small><strong>{currentPod?.phase ?? '—'}</strong></div>
+          <div><small>节点</small><strong title={currentPod?.nodeName ?? ''}>{currentPod?.nodeName ?? '—'}</strong></div>
+          <label><small>容器</small><select value={containerName} disabled={!currentPod?.containers.length}
+            onChange={event => { setContainerName(event.target.value); setExecTicket(undefined); }}>
+            {currentPod?.containers.map(container => <option key={container.name} value={container.name}>{container.name}</option>)}
+          </select></label>
+        </div>
+        <nav className="application-runtime-tabs" aria-label="Deployment 运行时功能">
+          {([['overview', '概览'], ['events', '事件'], ['logs', '日志'], ['exec', '控制台 Exec']] as const).map(([id, label]) =>
+            <button key={id} type="button" className={tab === id ? 'active' : ''}
+              aria-current={tab === id ? 'page' : undefined} onClick={() => setTab(id)}>{label}</button>)}
+        </nav>
+        {error && <div className="application-runtime-error" role="alert">{error}</div>}
+        {tab === 'overview' && <div className="application-runtime-containers">
+          <div className="application-runtime-content-heading"><div><h3>容器状态</h3><p>只显示此应用 Deployment 所拥有的 Pod。</p></div></div>
+          {!currentPod && <p className="application-runtime-empty">选择一个 Pod 查看状态。</p>}
+          {currentPod?.containers.map(container => <article className="application-runtime-container" key={container.name}>
+            <span className={`application-runtime-indicator ${container.ready ? 'ready' : ''}`} />
+            <div><strong>{container.name}</strong><small>{container.image}</small></div>
+            <span>{container.state}{container.ready ? ' · Ready' : ''}</span>
+          </article>)}
+        </div>}
+        {tab === 'events' && <div className="application-runtime-events">
+          <div className="application-runtime-content-heading"><div><h3>Pod 事件</h3><p>仅查询当前 Pod UID 对应的 Kubernetes Events。</p></div>
+            <button className="secondary" disabled={!currentPod || busy === 'events'} onClick={() => {
+              if (currentPod) setRefreshToken(value => value + 1);
+            }}>{busy === 'events' ? '读取中…' : '刷新'}</button></div>
+          {!busy && !events.length && <p className="application-runtime-empty">暂无事件。</p>}
+          {events.map((event, index) => <article className="application-runtime-event" key={`${event.timestamp}-${event.reason}-${index}`}>
+            <span className={event.type === 'Warning' ? 'warning' : ''}>{event.type || 'Normal'}</span>
+            <div><strong>{event.reason || 'Event'}</strong><p>{event.message || '—'}</p>
+              <small>{event.source || 'kubelet'}{event.count > 1 ? ` · ${event.count} 次` : ''}</small></div>
+            <time>{event.timestamp ? new Date(event.timestamp).toLocaleString() : '—'}</time>
+          </article>)}
+        </div>}
+        {tab === 'logs' && <div className="application-runtime-logs">
+          <div className="application-runtime-content-heading"><div><h3>容器日志</h3><p>最近 300 行；日志可能包含应用自身输出的敏感内容。</p></div>
+            <button className="secondary" disabled={!currentPod || !containerName || busy === 'logs'} onClick={() => {
+              if (currentPod) setRefreshToken(value => value + 1);
+            }}>{busy === 'logs' ? '读取中…' : '刷新日志'}</button></div>
+          {logs?.content ? <pre className="application-runtime-log-output">{logs.content}</pre>
+            : <p className="application-runtime-empty">{busy === 'logs' ? '正在读取日志…' : '暂无日志或容器尚未启动。'}</p>}
+        </div>}
+        {tab === 'exec' && <div className="application-runtime-exec">
+          <div className="application-runtime-content-heading"><div><h3>交互式容器 Shell</h3>
+            <p>连接目标为所选 Pod 的 {containerName || '容器'}，仅启动容器内的 sh。</p></div>
+            {!execTicket && <button className="primary" disabled={!currentPod || !containerName
+              || !execReason.trim() || busy === 'exec'}
+              onClick={() => void startExec()}>{busy === 'exec' ? '正在连接…' : '连接容器'}</button>}
+            {execTicket && <button className="secondary" onClick={() => setExecTicket(undefined)}>断开</button>}
+          </div>
+          {execTicket ? <ApplicationExecConsole ticket={execTicket} onEnded={() => setExecTicket(undefined)} />
+            : <div className="application-runtime-exec-empty">
+              <label>Exec 操作原因<textarea maxLength={500} rows={3} value={execReason}
+                onChange={event => setExecReason(event.target.value)}
+                placeholder="说明本次进入容器的排查或维护目的" /></label>
+              <p>申请、开始和结束会记录在审计日志中；终端输入与输出不会落盘。授权票据 30 秒内有效且只能使用一次。</p>
+            </div>}
+        </div>}
+      </div>
+    </div>
+  </section>;
+}
+
+function ApplicationExecConsole({ ticket, onEnded }: {
+  ticket: ApplicationExecTicket; onEnded: () => void }) {
+  const element = useRef<HTMLDivElement>(null);
+  const onEndedRef = useRef(onEnded);
+  onEndedRef.current = onEnded;
+  useEffect(() => {
+    if (!element.current) return;
+    const terminal = new Terminal({ cursorBlink: true, convertEol: true,
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 13,
+      theme: { background: '#07111f', foreground: '#dbeafe', cursor: '#83b8ff' } });
+    const fit = new FitAddon();
+    terminal.loadAddon(fit);
+    terminal.open(element.current);
+    fit.fit();
+    terminal.focus();
+    const address = new URL(`/api/v1${ticket.websocketPath}`, window.location.href);
+    address.protocol = address.protocol === 'https:' ? 'wss:' : 'ws:';
+    const connection = new WebSocket(address.toString());
+    connection.addEventListener('open', () => connection.send(JSON.stringify({ type: 'auth',
+      ticket: ticket.ticket, columns: terminal.cols, rows: terminal.rows })));
+    connection.addEventListener('message', message => {
+      try {
+        const event = JSON.parse(String(message.data)) as { type?: string; data?: string; message?: string };
+        if (event.type === 'ready') terminal.write('\r\n\x1b[32mConnected to container shell\x1b[0m\r\n');
+        else if (event.type === 'output' && event.data) {
+          const bytes = Uint8Array.from(atob(event.data), character => character.charCodeAt(0));
+          terminal.write(bytes);
+        } else if (event.type === 'error') terminal.write(`\r\n\x1b[31m${event.message || 'Exec failed'}\x1b[0m\r\n`);
+      } catch {
+        terminal.write('\r\nInvalid terminal response.\r\n');
+      }
+    });
+    connection.addEventListener('close', () => {
+      terminal.write('\r\n\x1b[90mConnection closed\x1b[0m\r\n');
+      onEndedRef.current();
+    });
+    connection.addEventListener('error', () => terminal.write('\r\n\x1b[31mWebSocket connection failed\x1b[0m\r\n'));
+    const input = terminal.onData(data => {
+      if (connection.readyState === WebSocket.OPEN) connection.send(JSON.stringify({ type: 'input', data }));
+    });
+    const resize = terminal.onResize(size => {
+      if (connection.readyState === WebSocket.OPEN) connection.send(JSON.stringify({
+        type: 'resize', columns: size.cols, rows: size.rows }));
+    });
+    const fitOnResize = () => {
+      fit.fit();
+      if (connection.readyState === WebSocket.OPEN) connection.send(JSON.stringify({
+        type: 'resize', columns: terminal.cols, rows: terminal.rows }));
+    };
+    window.addEventListener('resize', fitOnResize);
+    return () => {
+      window.removeEventListener('resize', fitOnResize);
+      input.dispose(); resize.dispose();
+      if (connection.readyState === WebSocket.OPEN) connection.send(JSON.stringify({ type: 'close' }));
+      connection.close();
+      terminal.dispose();
+    };
+  }, [ticket]);
+  return <div className="application-exec-console" ref={element} aria-label="容器交互式终端" />;
+}
+
 type ApplicationFlowNodeData = {
   resource: KubernetesApplicationTopologyNode;
   changes: Editable;
@@ -605,7 +863,8 @@ function ApplicationFlowNodeCard({ data, selected }: NodeProps<ApplicationFlowNo
     const displayedProtocol = index === 0 ? changes.serviceProtocol ?? port.protocol : port.protocol;
     return `${port.name ? `${port.name}: ` : ''}${displayedPort}/${displayedProtocol} → ${displayedTarget}`;
   }).join(' · ');
-  return <article className={`application-flow-node ${resource.kind.toLowerCase()} ${selected ? 'selected' : ''}`}>
+  return <article className={`application-flow-node ${resource.kind.toLowerCase()} ${selected ? 'selected' : ''}`}
+    title={deployment ? '单击查看此 Deployment 的 Pod、事件、日志与 Exec' : undefined}>
     {deployment && <Handle id="deployment-input" type="target" position={Position.Left} className="application-flow-handle deployment-input" isConnectable={!controlsDisabled} />}
     {service && <Handle id="service-output" type="source" position={Position.Right} className="application-flow-handle service-output" isConnectable={!controlsDisabled} />}
     {deployment && data.networkMode && <>
@@ -628,6 +887,7 @@ function ApplicationFlowNodeCard({ data, selected }: NodeProps<ApplicationFlowNo
       <small>ServiceAccount Token 自动挂载已关闭</small>
     </>}
     <div className="application-flow-node-footer">
+      {deployment && <small className="application-node-runtime-hint">单击查看事件、日志与 Exec</small>}
       {data.sourceYamlEdited && <small className="application-yaml-pending">YAML 待生成版本差异</small>}
       <button type="button" className="application-yaml-button nodrag" disabled={controlsDisabled}
         onClick={event => { event.stopPropagation(); data.onEditSourceYaml(resource); }}>编辑源 YAML</button>
@@ -803,7 +1063,7 @@ function layoutApplicationTopology(nodes: TopologyLayoutNode[], edges: Edge[]) {
 function ApplicationNetworkTopologyCanvas({
   applicationId, resources, topologyEdges, yamlSourceChanges, changes, additions, hasDraft,
   currentDraft, busy, onResourceYamlSave, onResourceUpdate, onAdditionChange, onRemoveAddition,
-  onShowVersions,
+  onShowVersions, onOpenDeployment,
 }: {
   applicationId: string;
   resources: KubernetesApplicationTopologyNode[];
@@ -816,6 +1076,7 @@ function ApplicationNetworkTopologyCanvas({
   busy: boolean;
   onResourceYamlSave: (node: KubernetesApplicationTopologyNode, yaml: string) => void;
   onResourceUpdate: (node: KubernetesApplicationTopologyNode, value: Editable) => void;
+  onOpenDeployment: (node: KubernetesApplicationTopologyNode) => void;
   onAdditionChange: (addition: PendingApplicationNode) => void;
   onRemoveAddition: (id: string) => void;
   onShowVersions: () => void;
@@ -1346,6 +1607,12 @@ function ApplicationNetworkTopologyCanvas({
       <TopologyCanvas<ApplicationNetworkFlowNode, Edge>
         nodes={nodes} edges={edges} nodeTypes={applicationNetworkNodeTypes}
         onNodesChange={onFlowNodesChange} onConnect={connect}
+        onNodeClick={(_, node) => {
+          if (node.type === 'application' && node.data.resource.kind === 'Deployment'
+              && !node.data.resource.id.startsWith('pending:')) {
+            onOpenDeployment(node.data.resource);
+          }
+        }}
         onCanvasContextMenu={event => {
           if (saving || busy) return;
           setMenu({ x: event.clientX, y: event.clientY,

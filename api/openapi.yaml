@@ -1106,6 +1106,153 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
+  /api/v1/kubernetes/applications/{applicationId}/deployments/{deploymentName}/runtime:
+    parameters:
+    - name: applicationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    - name: deploymentName
+      in: path
+      required: true
+      schema: { type: string, maxLength: 63 }
+    get:
+      tags: [KubernetesApplications]
+      operationId: getKubernetesApplicationDeploymentRuntime
+      summary: 查询应用 Deployment 所拥有的 Pod 与容器状态
+      description: 服务端校验已登记 Deployment UID，并沿 ReplicaSet 所有者关系返回 Pod；客户端不能指定集群或 Namespace。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: Deployment 运行时与当前 Pod 列表。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationRuntimeDeployment' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Kubernetes RBAC 不允许读取运行时资源。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/kubernetes/applications/{applicationId}/deployments/{deploymentName}/pods/{podUid}/events:
+    parameters:
+    - name: applicationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    - name: deploymentName
+      in: path
+      required: true
+      schema: { type: string, maxLength: 63 }
+    - name: podUid
+      in: path
+      required: true
+      schema: { type: string, maxLength: 128 }
+    get:
+      tags: [KubernetesApplications]
+      operationId: getKubernetesApplicationPodEvents
+      summary: 查询应用 Pod 事件
+      description: 只返回 involvedObject UID 与经应用 Deployment 所有权校验的目标 Pod 匹配的事件，最多 200 条。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 目标 Pod 的事件，按时间倒序。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationRuntimeEventList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/kubernetes/applications/{applicationId}/deployments/{deploymentName}/pods/{podUid}/logs:
+    parameters:
+    - name: applicationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    - name: deploymentName
+      in: path
+      required: true
+      schema: { type: string, maxLength: 63 }
+    - name: podUid
+      in: path
+      required: true
+      schema: { type: string, maxLength: 128 }
+    - name: container
+      in: query
+      required: true
+      schema: { type: string, maxLength: 253 }
+    - name: tailLines
+      in: query
+      required: false
+      schema: { type: integer, minimum: 1, maximum: 1000, default: 300 }
+    get:
+      tags: [KubernetesApplications]
+      operationId: getKubernetesApplicationPodLogs
+      summary: 查询应用容器日志
+      description: 容器必须属于已校验的 Pod；最多返回最近 1000 行且正文限制为 120000 个字符。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 有界容器日志快照。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationRuntimeLog' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/kubernetes/applications/{applicationId}/deployments/{deploymentName}/pods/{podUid}/exec-tickets:
+    parameters:
+    - name: applicationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    - name: deploymentName
+      in: path
+      required: true
+      schema: { type: string, maxLength: 63 }
+    - name: podUid
+      in: path
+      required: true
+      schema: { type: string, maxLength: 128 }
+    post:
+      tags: [KubernetesApplications]
+      operationId: createKubernetesApplicationExecTicket
+      summary: 为目标应用容器创建一次性 Exec WebSocket 票据
+      description: 操作原因、申请、开始和结束会写入审计事件；终端输入/输出不会落盘。票据 30 秒内有效且只能消费一次。后端再次验证 Pod 所有权，只启动容器内 sh -i；不接受客户端命令参数。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/KubernetesApplicationExecTicketRequest' }
+      responses:
+        '201':
+          description: 短时 Exec 连接票据；响应禁止缓存。
+          headers:
+            Cache-Control:
+              schema: { type: string, const: no-store }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationExecTicket' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Kubernetes RBAC 不允许对 Pod 执行命令。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429':
+          description: 活跃 Exec 票据达到上限。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
   /api/v1/kubernetes/applications/{applicationId}/network-topology:
     parameters:
     - name: applicationId
@@ -6307,6 +6454,88 @@ components:
         manifestYaml:
           type: string
           description: 当前或新建草稿的标准化 Namespace 资源清单。
+    KubernetesApplicationRuntimeDeployment:
+      type: object
+      additionalProperties: false
+      required: [name, namespace, state, pods]
+      properties:
+        name: { type: string }
+        namespace: { type: string }
+        state: { type: string, enum: [READY, PROGRESSING, FAILED, MISSING] }
+        pods:
+          type: array
+          items: { $ref: '#/components/schemas/KubernetesApplicationRuntimePod' }
+    KubernetesApplicationRuntimePod:
+      type: object
+      additionalProperties: false
+      required: [name, uid, phase, nodeName, startedAt, containers]
+      properties:
+        name: { type: string }
+        uid: { type: string }
+        phase: { type: [string, 'null'], enum: [Pending, Running, Succeeded, Failed, Unknown, null] }
+        nodeName: { type: [string, 'null'] }
+        startedAt: { type: [string, 'null'], format: date-time }
+        containers:
+          type: array
+          items: { $ref: '#/components/schemas/KubernetesApplicationRuntimeContainer' }
+    KubernetesApplicationRuntimeContainer:
+      type: object
+      additionalProperties: false
+      required: [name, image, ready, state]
+      properties:
+        name: { type: string }
+        image: { type: [string, 'null'] }
+        ready: { type: boolean }
+        state: { type: string }
+    KubernetesApplicationRuntimeEventList:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items: { $ref: '#/components/schemas/KubernetesApplicationRuntimeEvent' }
+    KubernetesApplicationRuntimeEvent:
+      type: object
+      additionalProperties: false
+      required: [type, reason, message, count, timestamp, source]
+      properties:
+        type: { type: [string, 'null'], enum: [Normal, Warning, null] }
+        reason: { type: [string, 'null'] }
+        message: { type: [string, 'null'], maxLength: 4000 }
+        count: { type: integer, minimum: 0 }
+        timestamp: { type: [string, 'null'], format: date-time }
+        source: { type: [string, 'null'] }
+    KubernetesApplicationRuntimeLog:
+      type: object
+      additionalProperties: false
+      required: [podName, container, tailLines, content]
+      properties:
+        podName: { type: string }
+        container: { type: string }
+        tailLines: { type: integer, minimum: 1, maximum: 1000 }
+        content: { type: [string, 'null'], maxLength: 120000 }
+    KubernetesApplicationExecTicketRequest:
+      type: object
+      additionalProperties: false
+      required: [container, reason]
+      properties:
+        container: { type: string, maxLength: 253 }
+        columns: { type: integer, minimum: 20, maximum: 500, default: 120 }
+        rows: { type: integer, minimum: 5, maximum: 200, default: 36 }
+        reason: { type: string, minLength: 1, maxLength: 500 }
+    KubernetesApplicationExecTicket:
+      type: object
+      additionalProperties: false
+      required: [sessionId, ticket, expiresAt, websocketPath, columns, rows]
+      properties:
+        sessionId: { type: string, format: uuid }
+        ticket: { type: string, format: password, minLength: 40, maxLength: 64 }
+        expiresAt: { type: string, format: date-time }
+        websocketPath: { type: string }
+        columns: { type: integer, minimum: 20, maximum: 500 }
+        rows: { type: integer, minimum: 5, maximum: 200 }
     KubernetesApplicationNetworkTopologyWrite:
       type: object
       additionalProperties: false

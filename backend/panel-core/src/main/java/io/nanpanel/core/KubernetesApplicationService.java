@@ -7,22 +7,27 @@ import static io.nanpanel.core.AuthStore.update;
 import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.IntOrString;
 import io.fabric8.kubernetes.api.model.ObjectMetaBuilder;
+import io.fabric8.kubernetes.api.model.Pod;
 import io.fabric8.kubernetes.api.model.Service;
 import io.fabric8.kubernetes.api.model.ServiceBuilder;
 import io.fabric8.kubernetes.api.model.ServiceAccount;
 import io.fabric8.kubernetes.api.model.ServicePort;
 import io.fabric8.kubernetes.api.model.apps.Deployment;
 import io.fabric8.kubernetes.api.model.apps.DeploymentBuilder;
+import io.fabric8.kubernetes.api.model.apps.ReplicaSet;
 import io.fabric8.kubernetes.client.KubernetesClient;
 import io.fabric8.kubernetes.client.KubernetesClientException;
+import io.fabric8.kubernetes.client.dsl.ExecWatch;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
 import java.security.MessageDigest;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -32,6 +37,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.Base64;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.regex.Pattern;
 import org.jboss.logging.Logger;
 
@@ -45,6 +53,11 @@ public class KubernetesApplicationService {
   private static final int MAX_APPLICATIONS = 200;
   private static final int MAX_REPLICAS = 20;
   private static final int MAX_RESOURCE_YAML_LENGTH = 262_144;
+  private static final int MAX_RUNTIME_LOG_LINES = 1000;
+  private static final int MAX_RUNTIME_LOG_CHARS = 120_000;
+  private static final int MAX_PENDING_EXEC_TICKETS = 1000;
+  private static final Duration EXEC_TICKET_TTL = Duration.ofSeconds(30);
+  private static final SecureRandom EXEC_RANDOM = new SecureRandom();
   private static final Map<String, Integer> BOOKINFO_RESOURCE_COUNTS = Map.of(
       "ServiceAccount", 4,
       "Service", 4,
@@ -322,6 +335,24 @@ public class KubernetesApplicationService {
   public record VersionView(int version, int baseVersion, String state, String manifestSha256,
       String manifestDiff, String errorMessage, Instant createdAt, Instant deployedAt) {}
   public record VersionList(List<VersionView> items) {}
+  public record RuntimeContainer(String name, String image, boolean ready, String state) {}
+  public record RuntimePod(String name, String uid, String phase, String nodeName,
+      Instant startedAt, List<RuntimeContainer> containers) {}
+  public record RuntimeDeployment(String name, String namespace, String state,
+      List<RuntimePod> pods) {}
+  public record RuntimeEvent(String type, String reason, String message, int count,
+      String timestamp, String source) {}
+  public record RuntimeEventList(List<RuntimeEvent> items) {}
+  public record RuntimeLog(String podName, String container, int tailLines, String content) {}
+  public record ExecTicket(UUID sessionId, String ticket, Instant expiresAt,
+      String websocketPath) {}
+  public record ExecTarget(UUID applicationId, String deploymentName, String namespace,
+      UUID clusterId, String podName, String podUid, String container) {}
+  public record ExecGrant(ExecTarget target, String actorId, String remoteAddress) {}
+
+  private record PendingExec(ExecTarget target, String tokenHash, String actorId,
+      String remoteAddress, Instant expiresAt) {}
+  private final ConcurrentMap<UUID, PendingExec> pendingExecs = new ConcurrentHashMap<>();
 
   private record AppRow(UUID id, UUID clusterId, String clusterName, String namespace,
       String name, String displayName, String templateId, int currentVersion, String state,
@@ -329,6 +360,7 @@ public class KubernetesApplicationService {
   private record StoredVersion(int version, int baseVersion, String manifestYaml,
       String manifestSha256, String manifestDiff, String state, String errorMessage,
       Instant createdAt, Instant deployedAt) {}
+  private record DeploymentScope(AppRow application, Deployment deployment, List<Pod> pods) {}
 
   public ApplicationList list() {
     List<Map<String, Object>> rows = store.transaction(connection -> query(connection,
@@ -362,6 +394,351 @@ public class KubernetesApplicationService {
     } catch (RuntimeException failure) {
       throw apiFailure(failure);
     }
+  }
+
+  public RuntimeDeployment runtime(UUID applicationId, String deploymentName) {
+    AppRow application = app(applicationId);
+    try (KubernetesClient client = clusters.openClientForOperations(application.clusterId())) {
+      DeploymentScope scope = deploymentScope(client, application, deploymentName);
+      if (scope.deployment() == null) {
+        return new RuntimeDeployment(deploymentName, application.namespace(), "MISSING", List.of());
+      }
+      Deployment deployment = scope.deployment();
+      Integer desired = deployment.getSpec() == null ? null : deployment.getSpec().getReplicas();
+      int ready = deployment.getStatus() == null || deployment.getStatus().getReadyReplicas() == null
+          ? 0 : deployment.getStatus().getReadyReplicas();
+      int replicas = desired == null ? 1 : desired;
+      String state = deploymentFailed(deployment) ? "FAILED"
+          : ready >= replicas ? "READY" : "PROGRESSING";
+      return new RuntimeDeployment(deploymentName, application.namespace(), state,
+          scope.pods().stream().map(KubernetesApplicationService::runtimePod).toList());
+    } catch (KubernetesClusterRegistryService.ClusterNotFoundException
+        | KubernetesClusterRegistryService.ClusterCredentialRejectedException
+        | KubernetesClusterRegistryService.ClusterPermissionDeniedException
+        | KubernetesClusterRegistryService.ClusterApiUnavailableException failure) {
+      throw failure;
+    } catch (RuntimeException failure) {
+      throw apiFailure(failure);
+    }
+  }
+
+  public RuntimeEventList runtimeEvents(UUID applicationId, String deploymentName, String podUid) {
+    AppRow application = app(applicationId);
+    try (KubernetesClient client = clusters.openClientForOperations(application.clusterId())) {
+      Pod pod = ownedPod(client, application, deploymentName, podUid);
+      List<RuntimeEvent> events = client.v1().events().inNamespace(application.namespace())
+          .withField("involvedObject.uid", podUid).list().getItems().stream()
+          .filter(event -> event.getInvolvedObject() != null
+              && podUid.equals(event.getInvolvedObject().getUid()))
+          .sorted(Comparator.comparing(KubernetesApplicationService::eventTimestamp,
+              Comparator.nullsLast(Comparator.reverseOrder())))
+          .limit(200)
+          .map(event -> new RuntimeEvent(event.getType(), event.getReason(),
+              truncate(event.getMessage(), 4000), event.getSeries() != null
+                  && event.getSeries().getCount() != null ? event.getSeries().getCount()
+                      : event.getCount() == null ? 1 : event.getCount(),
+              eventTimestamp(event), event.getSource() == null ? event.getReportingComponent()
+                  : event.getSource().getComponent()))
+          .toList();
+      return new RuntimeEventList(events);
+    } catch (KubernetesClusterRegistryService.ClusterNotFoundException
+        | KubernetesClusterRegistryService.ClusterCredentialRejectedException
+        | KubernetesClusterRegistryService.ClusterPermissionDeniedException
+        | KubernetesClusterRegistryService.ClusterApiUnavailableException failure) {
+      throw failure;
+    } catch (RuntimeException failure) {
+      throw apiFailure(failure);
+    }
+  }
+
+  public RuntimeLog runtimeLog(UUID applicationId, String deploymentName, String podUid,
+      String containerName, Integer requestedLines) {
+    int lines = requestedLines == null ? 300 : requestedLines;
+    if (lines < 1 || lines > MAX_RUNTIME_LOG_LINES) {
+      throw new ApplicationException(422, "KUBERNETES_APPLICATION_INVALID",
+          "日志行数必须在 1–1000 之间");
+    }
+    if (containerName == null || containerName.isBlank() || containerName.length() > 253) {
+      throw new ApplicationException(422, "KUBERNETES_APPLICATION_INVALID", "容器名称无效");
+    }
+    AppRow application = app(applicationId);
+    try (KubernetesClient client = clusters.openClientForOperations(application.clusterId())) {
+      Pod pod = ownedPod(client, application, deploymentName, podUid);
+      requireContainer(pod, containerName);
+      String content = client.pods().inNamespace(application.namespace())
+          .withName(pod.getMetadata().getName()).inContainer(containerName)
+          .tailingLines(lines).getLog();
+      return new RuntimeLog(pod.getMetadata().getName(), containerName, lines,
+          tail(content, MAX_RUNTIME_LOG_CHARS));
+    } catch (KubernetesClusterRegistryService.ClusterNotFoundException
+        | KubernetesClusterRegistryService.ClusterCredentialRejectedException
+        | KubernetesClusterRegistryService.ClusterPermissionDeniedException
+        | KubernetesClusterRegistryService.ClusterApiUnavailableException failure) {
+      throw failure;
+    } catch (RuntimeException failure) {
+      throw apiFailure(failure);
+    }
+  }
+
+  public ExecTarget validateExecTarget(UUID applicationId, String deploymentName,
+      String podUid, String containerName) {
+    AppRow application = app(applicationId);
+    try (KubernetesClient client = clusters.openClientForOperations(application.clusterId())) {
+      Pod pod = ownedPod(client, application, deploymentName, podUid);
+      requireContainer(pod, containerName);
+      return new ExecTarget(applicationId, deploymentName, application.namespace(),
+          application.clusterId(), pod.getMetadata().getName(), podUid, containerName);
+    } catch (KubernetesClusterRegistryService.ClusterNotFoundException
+        | KubernetesClusterRegistryService.ClusterCredentialRejectedException
+        | KubernetesClusterRegistryService.ClusterPermissionDeniedException
+        | KubernetesClusterRegistryService.ClusterApiUnavailableException failure) {
+      throw failure;
+    } catch (RuntimeException failure) {
+      throw apiFailure(failure);
+    }
+  }
+
+  public ExecTicket issueExecTicket(ExecTarget target, String actorId, String clientIp,
+      String reason) {
+    String summaryReason = reason == null ? "" : reason.trim();
+    if (summaryReason.isEmpty() || summaryReason.length() > 500
+        || summaryReason.chars().anyMatch(Character::isISOControl)) {
+      throw new ApplicationException(422, "KUBERNETES_APPLICATION_INVALID",
+          "Exec 操作原因不能为空且最多 500 字");
+    }
+    byte[] secret = new byte[32];
+    EXEC_RANDOM.nextBytes(secret);
+    String ticket = Base64.getUrlEncoder().withoutPadding().encodeToString(secret);
+    UUID sessionId = UUID.randomUUID();
+    Instant expiresAt = Instant.now().plus(EXEC_TICKET_TTL);
+    String tokenHash = sha256(ticket);
+    pendingExecs.entrySet().removeIf(entry -> !entry.getValue().expiresAt().isAfter(Instant.now()));
+    if (pendingExecs.size() >= MAX_PENDING_EXEC_TICKETS) {
+      throw new ApplicationException(429, "KUBERNETES_APPLICATION_EXEC_BUSY",
+          "Exec 请求过多，请稍后重试");
+    }
+    pendingExecs.put(sessionId, new PendingExec(target, tokenHash, actorId, clientIp, expiresAt));
+    store.transaction(connection -> {
+      audit(connection, actorId, "KUBERNETES_APPLICATION_EXEC_REQUESTED",
+          "kubernetes_application", target.applicationId().toString(), "REQUESTED", clientIp,
+          truncate(summaryReason + " · " + target.deploymentName() + "/" + target.podName()
+              + ":" + target.container(), 1000));
+      return null;
+    });
+    return new ExecTicket(sessionId, ticket, expiresAt,
+        "/kubernetes/applications/exec-sessions/" + sessionId + "/terminal");
+  }
+
+  public ExecGrant consumeExecTicket(UUID sessionId, String ticket) {
+    PendingExec pending = pendingExecs.get(sessionId);
+    if (pending == null) return null;
+    if (!pending.expiresAt().isAfter(Instant.now())) {
+      pendingExecs.remove(sessionId, pending);
+      return null;
+    }
+    if (ticket == null) return null;
+    String suppliedHash = sha256(ticket);
+    if (!MessageDigest.isEqual(pending.tokenHash().getBytes(StandardCharsets.US_ASCII),
+        suppliedHash.getBytes(StandardCharsets.US_ASCII))
+        || !pendingExecs.remove(sessionId, pending)) return null;
+    return new ExecGrant(pending.target(), pending.actorId(), pending.remoteAddress());
+  }
+
+  public ExecConnection openExec(ExecGrant grant, int columns, int rows) {
+    if (columns < 20 || columns > 500 || rows < 5 || rows > 200) {
+      throw new ApplicationException(422, "KUBERNETES_APPLICATION_INVALID", "终端尺寸无效");
+    }
+    ExecTarget target = grant.target();
+    KubernetesClient client = clusters.openClientForOperations(target.clusterId());
+    try {
+      AppRow application = app(target.applicationId());
+      if (!target.namespace().equals(application.namespace())
+          || !target.clusterId().equals(application.clusterId())) {
+        throw new ApplicationException(409, "KUBERNETES_APPLICATION_OWNERSHIP_CONFLICT",
+            "应用运行目标已变更，请重新打开详情");
+      }
+      Pod pod = ownedPod(client, application, target.deploymentName(), target.podUid());
+      if (!target.podName().equals(pod.getMetadata().getName())) {
+        throw ownershipConflict("Pod/" + target.podName());
+      }
+      requireContainer(pod, target.container());
+      ExecWatch watch = client.pods().inNamespace(application.namespace())
+          .withName(target.podName()).inContainer(target.container()).redirectingInput()
+          .withTTY().exec("sh", "-i");
+      store.transaction(connection -> {
+        audit(connection, grant.actorId(), "KUBERNETES_APPLICATION_EXEC_STARTED",
+            "kubernetes_application", target.applicationId().toString(), "STARTED",
+            grant.remoteAddress(), target.deploymentName() + "/" + target.podName()
+                + ":" + target.container());
+        return null;
+      });
+      return new ExecConnection(client, watch);
+    } catch (KubernetesClusterRegistryService.ClusterNotFoundException
+        | KubernetesClusterRegistryService.ClusterCredentialRejectedException
+        | KubernetesClusterRegistryService.ClusterPermissionDeniedException
+        | KubernetesClusterRegistryService.ClusterApiUnavailableException failure) {
+      client.close();
+      throw failure;
+    } catch (RuntimeException failure) {
+      client.close();
+      throw apiFailure(failure);
+    }
+  }
+
+  public void finishExec(ExecGrant grant, String status) {
+    store.transaction(connection -> {
+      audit(connection, grant.actorId(), "KUBERNETES_APPLICATION_EXEC_FINISHED",
+          "kubernetes_application", grant.target().applicationId().toString(), status,
+          grant.remoteAddress(), grant.target().deploymentName() + "/"
+              + grant.target().podName() + ":" + grant.target().container());
+      return null;
+    });
+  }
+
+  public static final class ExecConnection implements AutoCloseable {
+    private final KubernetesClient client;
+    private final ExecWatch watch;
+
+    ExecConnection(KubernetesClient client, ExecWatch watch) {
+      this.client = client;
+      this.watch = watch;
+    }
+
+    public ExecWatch watch() { return watch; }
+
+    @Override
+    public void close() {
+      try {
+        watch.close();
+      } finally {
+        client.close();
+      }
+    }
+  }
+
+  private DeploymentScope deploymentScope(KubernetesClient client, AppRow application,
+      String deploymentName) {
+    if (!validResourceName(deploymentName)) {
+      throw new ApplicationException(404, "KUBERNETES_APPLICATION_RESOURCE_NOT_FOUND",
+          "应用 Deployment 不存在");
+    }
+    StoredVersion current = application.currentVersion() == 0 ? null
+        : version(application.id(), application.currentVersion());
+    if (current == null || current.manifestYaml().isBlank()) {
+      throw new ApplicationException(409, "KUBERNETES_APPLICATION_NOT_DEPLOYED",
+          "应用尚无已部署版本");
+    }
+    List<HasMetadata> declared = parse(client, current.manifestYaml());
+    Deployment expected = declared.stream().filter(Deployment.class::isInstance)
+        .map(Deployment.class::cast)
+        .filter(item -> deploymentName.equals(item.getMetadata().getName())).findFirst()
+        .orElseThrow(() -> new ApplicationException(404,
+            "KUBERNETES_APPLICATION_RESOURCE_NOT_FOUND", "Deployment 不属于此应用"));
+    String expectedUid = resourceUids(application.id()).get(resourceId(expected));
+    if (expectedUid == null) throw ownershipConflict(resourceId(expected));
+    Deployment live = client.apps().deployments().inNamespace(application.namespace())
+        .withName(deploymentName).get();
+    if (live == null) return new DeploymentScope(application, null, List.of());
+    requireOwned(live, application.id(), expectedUid);
+
+    Map<String, String> selector = live.getSpec() == null || live.getSpec().getSelector() == null
+        ? Map.of() : live.getSpec().getSelector().getMatchLabels();
+    if (selector == null || selector.isEmpty()) {
+      throw ownershipConflict(resourceId(live));
+    }
+    List<ReplicaSet> replicaSets = client.apps().replicaSets().inNamespace(application.namespace())
+        .withLabels(selector).list().getItems().stream()
+        .filter(replicaSet -> hasOwner(replicaSet, "Deployment", live.getMetadata().getUid()))
+        .toList();
+    Set<String> replicaSetUids = replicaSets.stream().map(item -> item.getMetadata().getUid())
+        .filter(java.util.Objects::nonNull).collect(java.util.stream.Collectors.toSet());
+    List<Pod> pods = replicaSetUids.isEmpty() ? List.of()
+        : client.pods().inNamespace(application.namespace()).withLabels(selector).list().getItems()
+            .stream().filter(pod -> pod.getMetadata() != null
+                && hasOwner(pod, "ReplicaSet", replicaSetUids))
+            .sorted(Comparator.comparing(pod -> pod.getMetadata().getName()))
+            .toList();
+    return new DeploymentScope(application, live, pods);
+  }
+
+  private Pod ownedPod(KubernetesClient client, AppRow application, String deploymentName,
+      String podUid) {
+    if (podUid == null || podUid.isBlank() || podUid.length() > 128) {
+      throw new ApplicationException(404, "KUBERNETES_APPLICATION_POD_NOT_FOUND",
+          "应用 Pod 不存在");
+    }
+    return deploymentScope(client, application, deploymentName).pods().stream()
+        .filter(pod -> podUid.equals(pod.getMetadata().getUid())).findFirst()
+        .orElseThrow(() -> new ApplicationException(404,
+            "KUBERNETES_APPLICATION_POD_NOT_FOUND", "Pod 已退出或不属于此 Deployment"));
+  }
+
+  private static RuntimePod runtimePod(Pod pod) {
+    Map<String, io.fabric8.kubernetes.api.model.ContainerStatus> statuses =
+        pod.getStatus() == null || pod.getStatus().getContainerStatuses() == null ? Map.of()
+            : pod.getStatus().getContainerStatuses().stream().filter(java.util.Objects::nonNull)
+                .collect(java.util.stream.Collectors.toMap(
+                    io.fabric8.kubernetes.api.model.ContainerStatus::getName,
+                    status -> status, (first, ignored) -> first));
+    List<RuntimeContainer> containers = pod.getSpec() == null || pod.getSpec().getContainers() == null
+        ? List.of() : pod.getSpec().getContainers().stream().map(container -> {
+          var status = statuses.get(container.getName());
+          String state = "WAITING";
+          if (status != null && status.getState() != null) {
+            if (status.getState().getRunning() != null) state = "RUNNING";
+            else if (status.getState().getTerminated() != null) state = "TERMINATED";
+            else if (status.getState().getWaiting() != null) {
+              state = status.getState().getWaiting().getReason() == null ? "WAITING"
+                  : status.getState().getWaiting().getReason();
+            }
+          }
+          return new RuntimeContainer(container.getName(), container.getImage(),
+              status != null && Boolean.TRUE.equals(status.getReady()), state);
+        }).toList();
+    Instant startedAt = null;
+    if (pod.getStatus() != null && pod.getStatus().getStartTime() != null) {
+      try {
+        startedAt = java.time.OffsetDateTime.parse(pod.getStatus().getStartTime()).toInstant();
+      } catch (java.time.format.DateTimeParseException ignored) {
+        // Older Kubernetes versions can return a timestamp format without an offset.
+      }
+    }
+    return new RuntimePod(pod.getMetadata().getName(), pod.getMetadata().getUid(),
+        pod.getStatus() == null ? "UNKNOWN" : pod.getStatus().getPhase(),
+        pod.getSpec() == null ? null : pod.getSpec().getNodeName(), startedAt, containers);
+  }
+
+  private static boolean hasOwner(HasMetadata resource, String kind, String ownerUid) {
+    return ownerUid != null && resource.getMetadata() != null
+        && resource.getMetadata().getOwnerReferences() != null
+        && resource.getMetadata().getOwnerReferences().stream().filter(java.util.Objects::nonNull)
+            .anyMatch(owner -> kind.equals(owner.getKind()) && ownerUid.equals(owner.getUid()));
+  }
+
+  private static boolean hasOwner(HasMetadata resource, String kind, Set<String> ownerUids) {
+    return resource.getMetadata() != null && resource.getMetadata().getOwnerReferences() != null
+        && resource.getMetadata().getOwnerReferences().stream().filter(java.util.Objects::nonNull)
+            .anyMatch(owner -> kind.equals(owner.getKind()) && ownerUids.contains(owner.getUid()));
+  }
+
+  private static void requireContainer(Pod pod, String containerName) {
+    if (containerName == null || pod.getSpec() == null || pod.getSpec().getContainers() == null
+        || pod.getSpec().getContainers().stream().noneMatch(container ->
+            containerName.equals(container.getName()))) {
+      throw new ApplicationException(404, "KUBERNETES_APPLICATION_CONTAINER_NOT_FOUND",
+          "容器不属于此 Pod");
+    }
+  }
+
+  private static String eventTimestamp(io.fabric8.kubernetes.api.model.Event event) {
+    if (event.getEventTime() != null) return event.getEventTime().toString();
+    if (event.getLastTimestamp() != null) return event.getLastTimestamp();
+    return event.getMetadata() == null ? null : event.getMetadata().getCreationTimestamp();
+  }
+
+  private static String tail(String value, int maxChars) {
+    if (value == null || value.length() <= maxChars) return value;
+    return value.substring(value.length() - maxChars);
   }
 
   public VersionList versions(UUID applicationId) {

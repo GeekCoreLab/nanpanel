@@ -430,3 +430,63 @@ main:has(.applications-page)>footer{display:none}
   .application-info-metrics>div{min-height:58px}
 }
 @media(prefers-reduced-motion:reduce){.application-page-drawer,.application-network-drawer{animation:none}}
+.application-flow-node.deployment{cursor:pointer}
+.application-flow-node.deployment:hover{border-color:#86a9e7;box-shadow:0 5px 18px #315b9820}
+.application-flow-node-footer .application-node-runtime-hint{margin:0;color:#7d8da3;font-size:8px}
+.application-runtime-detail{display:flex;min-height:0;height:100%;flex-direction:column;overflow:hidden;border:1px solid #e7edf5;border-radius:9px;background:#fff}
+.application-runtime-heading{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:16px 19px;border-bottom:1px solid #e9edf4;background:#fbfcfe}
+.application-runtime-heading .eyebrow{font-size:8px;letter-spacing:1.3px}
+.application-runtime-heading h2{margin:4px 0 0;color:#344b68;font-size:16px;font-weight:600}
+.application-runtime-heading p{display:flex;gap:8px;margin:5px 0 0;color:#8794a6;font-size:9px}
+.application-runtime-heading p i{font-style:normal;color:#b0bac8}
+.application-runtime-heading-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}
+.application-runtime-layout{display:grid;grid-template-columns:235px minmax(0,1fr);min-height:0;flex:1}
+.application-runtime-pods{min-width:0;overflow:auto;border-right:1px solid #e9edf4;background:#fcfdff}
+.application-runtime-pods-heading{display:flex;align-items:center;justify-content:space-between;padding:14px 13px 9px;color:#536a86;font-size:10px}
+.application-runtime-pods-heading span{display:grid;place-items:center;min-width:20px;height:19px;padding:0 5px;border-radius:10px;background:#edf2f8;color:#8090a4;font-size:8px}
+.application-runtime-pod{display:grid;gap:5px;width:calc(100% - 14px);margin:3px 7px;padding:10px;border:1px solid transparent;border-radius:7px;background:transparent;text-align:left;cursor:pointer}
+.application-runtime-pod:hover{background:#f4f7fc}
+.application-runtime-pod.active{border-color:#d9e5f8;background:#edf4ff}
+.application-runtime-pod strong{overflow:hidden;color:#485f7c;font-size:9px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}
+.application-runtime-pod span{color:#5684d5;font-size:8px}
+.application-runtime-pod small{color:#8996a9;font-size:8px}
+.application-runtime-main{display:flex;min-width:0;min-height:0;flex-direction:column;overflow:hidden}
+.application-runtime-summary{display:grid;grid-template-columns:minmax(130px,1.3fr) repeat(2,minmax(80px,.7fr)) minmax(125px,.9fr);gap:10px;padding:13px 16px;border-bottom:1px solid #edf1f6}
+.application-runtime-summary>div,.application-runtime-summary>label{display:grid;min-width:0;gap:5px}
+.application-runtime-summary small{color:#8794a6;font-size:8px}
+.application-runtime-summary strong{overflow:hidden;color:#465d7a;font-size:9px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}
+.application-runtime-summary select{width:100%;height:27px;padding:0 7px;border:1px solid #e0e7f0;border-radius:5px;background:#fff;color:#4c607a;font-size:9px}
+.application-runtime-tabs{display:flex;gap:4px;padding:0 13px;border-bottom:1px solid #e9edf4}
+.application-runtime-tabs button{height:38px;padding:0 12px;border:0;border-bottom:2px solid transparent;background:transparent;color:#7d8da3;font-size:9px;cursor:pointer}
+.application-runtime-tabs button:hover,.application-runtime-tabs button.active{border-bottom-color:#5788e3;color:#3974df}
+.application-runtime-containers,.application-runtime-events,.application-runtime-logs,.application-runtime-exec{min-height:0;flex:1;overflow:auto;padding:14px 16px}
+.application-runtime-content-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:11px}
+.application-runtime-content-heading h3{margin:0;color:#455c79;font-size:11px;font-weight:600}
+.application-runtime-content-heading p{margin:4px 0 0;color:#8996a8;font-size:8px;line-height:1.6}
+.application-runtime-content-heading button{flex-shrink:0}
+.application-runtime-container{display:flex;align-items:center;gap:10px;padding:11px 12px;border:1px solid #e9eef5;border-radius:6px;background:#fcfdff}
+.application-runtime-container+.application-runtime-container{margin-top:7px}
+.application-runtime-indicator{width:7px;height:7px;flex:0 0 7px;border-radius:50%;background:#d9a245}
+.application-runtime-indicator.ready{background:#39aa83;box-shadow:0 0 0 3px #39aa8318}
+.application-runtime-container>div{display:grid;min-width:0;flex:1;gap:4px}
+.application-runtime-container strong{color:#4d627d;font-size:9px}
+.application-runtime-container small{overflow:hidden;color:#8996a9;font-size:8px;text-overflow:ellipsis;white-space:nowrap}
+.application-runtime-container>span:last-child{color:#72839a;font-size:8px}
+.application-runtime-event{display:grid;grid-template-columns:58px minmax(0,1fr) auto;gap:11px;padding:11px 2px;border-bottom:1px solid #edf1f6}
+.application-runtime-event>span{align-self:start;padding:4px 6px;border-radius:4px;background:#edf6f2;color:#418d74;text-align:center;font-size:8px}
+.application-runtime-event>span.warning{background:#fff4e5;color:#bd8336}
+.application-runtime-event>div{min-width:0}
+.application-runtime-event strong{color:#4a607d;font-size:9px}
+.application-runtime-event p{margin:4px 0;color:#687b93;font-size:9px;line-height:1.6;overflow-wrap:anywhere}
+.application-runtime-event small,.application-runtime-event time{color:#939fb0;font-size:8px}
+.application-runtime-event time{white-space:nowrap}
+.application-runtime-log-output{max-height:calc(100% - 54px);min-height:260px;margin:0;padding:13px;overflow:auto;border:1px solid #1b2b40;border-radius:6px;background:#07111f;color:#dbeafe;font:10px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere}
+.application-runtime-exec-empty,.application-runtime-empty{padding:25px 12px;color:#8996a9;text-align:center;font-size:9px;line-height:1.7}
+.application-runtime-exec-empty label{display:grid;max-width:520px;gap:7px;margin:0 auto;color:#536982;text-align:left;font-weight:600}
+.application-runtime-exec-empty textarea{width:100%;resize:vertical;padding:8px 10px;border:1px solid #dce5ef;border-radius:6px;background:#fff;color:#4a5e78;font:inherit;font-size:9px;line-height:1.6}
+.application-runtime-exec-empty p{margin:10px 0 0;color:#8996a9;font-size:8px;font-weight:400}
+.application-exec-console{height:min(55vh,510px);min-height:270px;padding:9px;border:1px solid #1b2b40;border-radius:6px;background:#07111f;overflow:hidden}
+.application-exec-console .xterm{height:100%}
+.application-runtime-error{margin:10px 16px 0;padding:9px 11px;border:1px solid #f0d3cc;border-radius:6px;background:#fff8f6;color:#b86c5c;font-size:9px;line-height:1.6}
+@media(max-width:850px){.application-runtime-layout{grid-template-columns:180px minmax(0,1fr)}.application-runtime-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:620px){.application-runtime-heading{align-items:flex-start;flex-direction:column}.application-runtime-heading-actions{width:100%;flex-wrap:wrap}.application-runtime-layout{grid-template-columns:1fr;grid-template-rows:minmax(90px,25%) minmax(0,1fr)}.application-runtime-pods{border-right:0;border-bottom:1px solid #e9edf4}.application-runtime-pod{display:inline-grid;width:calc(50% - 14px);vertical-align:top}.application-runtime-event{grid-template-columns:48px minmax(0,1fr)}.application-runtime-event time{grid-column:2}.application-runtime-tabs{overflow:auto}.application-runtime-tabs button{padding:0 9px;white-space:nowrap}}
