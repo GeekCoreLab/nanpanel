@@ -472,7 +472,7 @@ export default function Applications({ notify }: { notify: (message: string) => 
             <div className="application-section-heading"><div><span className="eyebrow">IMMUTABLE MANIFEST HISTORY</span><h3>版本历史</h3><p>草稿不会修改集群；只有状态为“待确认”的版本可提交部署。</p></div></div>
             {!versions.length ? <div className="application-empty-history">暂无版本记录</div> : <div className="application-version-list">{versions.map(version => <VersionCard key={version.version} version={version} busy={busy === `deploy-${version.version}`} onDeploy={() => void deployDraft(version)} />)}</div>}
           </section> : null}
-          <div className={`application-network-topology ${view === 'network' ? 'visible' : ''}`} aria-hidden={view !== 'network'}>
+          {view === 'network' && <div className="application-network-topology visible">
             <ReactFlowProvider>
               <ApplicationNetworkTopologyCanvas
                 key={`network-${detail.application.id}`}
@@ -484,7 +484,7 @@ export default function Applications({ notify }: { notify: (message: string) => 
                 onResourceYamlSave={saveResourceYaml}
               />
             </ReactFlowProvider>
-          </div>
+          </div>}
           </div>
         </>}
       </section>
@@ -1060,7 +1060,13 @@ function ApplicationNetworkTopologyCanvas({
       } },
       draggable: !saving && !busy,
     }));
-    setNodes([...applicationNodes, ...deviceNodes]);
+    setNodes(current => {
+      const previousPositions = new Map(current.map(node => [node.id, node.position]));
+      return [...applicationNodes, ...deviceNodes].map(node => ({
+        ...node,
+        position: previousPositions.get(node.id) ?? node.position,
+      }));
+    });
   }, [visibleResources, draft.nodes, yamlSourceChanges, saving, busy, setNodes]);
 
   useEffect(() => {
@@ -1097,7 +1103,8 @@ function ApplicationNetworkTopologyCanvas({
 
   const onFlowNodesChange = (changes: Parameters<typeof updateNodes>[0]) => {
     updateNodes(changes);
-    const positions = new Map(changes.flatMap(change => change.type === 'position' && change.position
+    const positions = new Map(changes.flatMap(change => change.type === 'position'
+      && change.position && change.dragging === false
       ? [[change.id, change.position] as const] : []));
     if (!positions.size) return;
     setDraft(current => ({ ...current, nodes: current.nodes.map(node => ({
