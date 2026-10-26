@@ -616,7 +616,6 @@ function ApplicationDeploymentDetail({ applicationId, applicationName, deploymen
   const [events, setEvents] = useState<RuntimeEventList['items']>([]);
   const [logs, setLogs] = useState<RuntimeLog>();
   const [execTicket, setExecTicket] = useState<ApplicationExecTicket>();
-  const [execReason, setExecReason] = useState('');
   const [refreshToken, setRefreshToken] = useState(0);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState('');
@@ -696,9 +695,7 @@ function ApplicationDeploymentDetail({ applicationId, applicationName, deploymen
     setError('');
     try {
       const path = `/kubernetes/applications/${encodeURIComponent(applicationId)}/deployments/${encodeURIComponent(deploymentName)}/pods/${encodeURIComponent(currentPod.uid)}/exec-tickets`;
-      const result = await api<ApplicationExecTicket>(path, 'POST', {
-        container: containerName, reason: execReason.trim(),
-      }, {}, true);
+      const result = await api<ApplicationExecTicket>(path, 'POST', { container: containerName }, {}, true);
       setExecTicket(result.data);
     } catch (cause) {
       setError((cause as Error).message);
@@ -783,15 +780,12 @@ function ApplicationDeploymentDetail({ applicationId, applicationName, deploymen
           <div className="application-runtime-content-heading"><div><h3>交互式容器 Shell</h3>
             <p>连接目标为所选 Pod 的 {containerName || '容器'}，仅启动容器内的 sh。</p></div>
             {!execTicket && <button className="primary" disabled={!currentPod || !containerName
-              || !execReason.trim() || busy === 'exec'}
+              || busy === 'exec'}
               onClick={() => void startExec()}>{busy === 'exec' ? '正在连接…' : '连接容器'}</button>}
             {execTicket && <button className="secondary" onClick={() => setExecTicket(undefined)}>断开</button>}
           </div>
           {execTicket ? <ApplicationExecConsole ticket={execTicket} onEnded={() => setExecTicket(undefined)} />
             : <div className="application-runtime-exec-empty">
-              <label>Exec 操作原因<textarea maxLength={500} rows={3} value={execReason}
-                onChange={event => setExecReason(event.target.value)}
-                placeholder="说明本次进入容器的排查或维护目的" /></label>
               <p>申请、开始和结束会记录在审计日志中；终端输入与输出不会落盘。授权票据 30 秒内有效且只能使用一次。</p>
             </div>}
         </div>}
@@ -1170,15 +1164,19 @@ function ApplicationNetworkTopologyCanvas({
 
   const runRuntimeAction = async (action: 'apply' | 'verify' | 'compensate') => {
     const labels = { apply: 'Apply', verify: 'Verify', compensate: 'Compensate' };
-    const reason = window.prompt(`请输入${labels[action]}原因（最多 500 字）`);
-    if (!reason?.trim()) return;
+    const confirmation = action === 'apply'
+      ? '将按已保存的拓扑接入该应用的真实 Pod 流量。继续？'
+      : action === 'compensate'
+        ? '将恢复运行前的 Service 与 Deployment 网络配置，并断开当前虚拟网络接入。继续？'
+        : '';
+    if (confirmation && !window.confirm(confirmation)) return;
     setRuntimeBusy(action);
     setError('');
     setMessage('');
     try {
       const result = await api<KubernetesApplicationNetworkRuntime>(
         `/kubernetes/applications/${encodeURIComponent(applicationId)}/network-topology/runtime/${action}`,
-        'POST', { reason: reason.trim() }, {}, true,
+        'POST', {}, {}, true,
       );
       setRuntime(result.data);
       setMessage(`${labels[action]} 已提交；运行时状态会自动刷新。`);

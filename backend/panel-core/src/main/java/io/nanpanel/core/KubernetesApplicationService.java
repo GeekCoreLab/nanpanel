@@ -498,14 +498,7 @@ public class KubernetesApplicationService {
     }
   }
 
-  public ExecTicket issueExecTicket(ExecTarget target, String actorId, String clientIp,
-      String reason) {
-    String summaryReason = reason == null ? "" : reason.trim();
-    if (summaryReason.isEmpty() || summaryReason.length() > 500
-        || summaryReason.chars().anyMatch(Character::isISOControl)) {
-      throw new ApplicationException(422, "KUBERNETES_APPLICATION_INVALID",
-          "Exec 操作原因不能为空且最多 500 字");
-    }
+  public ExecTicket issueExecTicket(ExecTarget target, String actorId, String clientIp) {
     byte[] secret = new byte[32];
     EXEC_RANDOM.nextBytes(secret);
     String ticket = Base64.getUrlEncoder().withoutPadding().encodeToString(secret);
@@ -521,7 +514,7 @@ public class KubernetesApplicationService {
     store.transaction(connection -> {
       audit(connection, actorId, "KUBERNETES_APPLICATION_EXEC_REQUESTED",
           "kubernetes_application", target.applicationId().toString(), "REQUESTED", clientIp,
-          truncate(summaryReason + " · " + target.deploymentName() + "/" + target.podName()
+          truncate("创建 Deployment Exec 交互会话 · " + target.deploymentName() + "/" + target.podName()
               + ":" + target.container(), 1000));
       return null;
     });

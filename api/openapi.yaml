@@ -1223,7 +1223,7 @@ paths:
       tags: [KubernetesApplications]
       operationId: createKubernetesApplicationExecTicket
       summary: 为目标应用容器创建一次性 Exec WebSocket 票据
-      description: 操作原因、申请、开始和结束会写入审计事件；终端输入/输出不会落盘。票据 30 秒内有效且只能消费一次。后端再次验证 Pod 所有权，只启动容器内 sh -i；不接受客户端命令参数。
+      description: 申请、开始和结束会写入审计事件；终端输入/输出不会落盘。票据 30 秒内有效且只能消费一次。后端再次验证 Pod 所有权，只启动容器内 sh -i；不接受客户端命令参数。
       x-implementation-status: implemented
       security:
       - cookieAuth: []
@@ -6519,12 +6519,11 @@ components:
     KubernetesApplicationExecTicketRequest:
       type: object
       additionalProperties: false
-      required: [container, reason]
+      required: [container]
       properties:
         container: { type: string, maxLength: 253 }
         columns: { type: integer, minimum: 20, maximum: 500, default: 120 }
         rows: { type: integer, minimum: 5, maximum: 200, default: 36 }
-        reason: { type: string, minLength: 1, maxLength: 500 }
     KubernetesApplicationExecTicket:
       type: object
       additionalProperties: false
@@ -6615,9 +6614,6 @@ components:
     KubernetesApplicationNetworkRuntimeAction:
       type: object
       additionalProperties: false
-      required: [reason]
-      properties:
-        reason: { type: string, minLength: 1, maxLength: 500 }
     KubernetesApplicationNetworkRuntime:
       type: object
       additionalProperties: false

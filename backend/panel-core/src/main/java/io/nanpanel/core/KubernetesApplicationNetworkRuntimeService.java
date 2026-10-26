@@ -57,6 +57,7 @@ public class KubernetesApplicationNetworkRuntimeService {
   @Inject HostHelperOperationResource helperOperations;
   @Inject ObjectMapper mapper;
 
+  // Retain the optional reason field for older clients; server-side action names drive audits.
   public record RuntimeActionRequest(String reason) {}
   public record RuntimeView(String applicationId, String revisionId, long generation,
       String clusterNodeUid, String hostId, String state, String detail,
@@ -79,7 +80,7 @@ public class KubernetesApplicationNetworkRuntimeService {
 
   public RuntimeView apply(String actor, String remoteAddress, UUID applicationId,
       RuntimeActionRequest input) {
-    String reason = validateReason(input);
+    String reason = "Apply 应用虚拟网络";
     clearCompletedRuntime(applicationId);
     App app = app(applicationId);
     Map<String, Object> topology = topology(applicationId);
@@ -121,7 +122,7 @@ public class KubernetesApplicationNetworkRuntimeService {
 
   public RuntimeView verify(String actor, String remoteAddress, UUID applicationId,
       RuntimeActionRequest input) {
-    String reason = optionalReason(input, "验证应用虚拟网络");
+    String reason = "Verify 应用虚拟网络";
     Map<String, Object> runtime = activeRuntime(applicationId);
     if (!Set.of("APPLIED", "VERIFY_FAILED").contains(String.valueOf(runtime.get("state")))) {
       throw fail(409, "APPLICATION_NETWORK_RUNTIME_STATE_CONFLICT",
@@ -154,7 +155,7 @@ public class KubernetesApplicationNetworkRuntimeService {
 
   public RuntimeView compensate(String actor, String remoteAddress, UUID applicationId,
       RuntimeActionRequest input) {
-    String reason = validateReason(input);
+    String reason = "Compensate 应用虚拟网络";
     Map<String, Object> runtime = activeRuntime(applicationId);
     String state = String.valueOf(runtime.get("state"));
     if (!Set.of("APPLIED", "VERIFY_FAILED", "PARTIAL", "FAILED").contains(state)) {
@@ -1203,20 +1204,6 @@ public class KubernetesApplicationNetworkRuntimeService {
         row.get("helper_operation_id") == null ? null : String.valueOf(row.get("helper_operation_id")),
         Instant.ofEpochMilli(number(row, "updated_at")), row.get("applied_at") == null ? null
             : Instant.ofEpochMilli(number(row, "applied_at")));
-  }
-
-  private String validateReason(RuntimeActionRequest input) {
-    if (input == null || input.reason() == null || input.reason().isBlank()
-        || input.reason().trim().length() > 500
-        || input.reason().chars().anyMatch(Character::isISOControl)) {
-      throw fail(422, "VALIDATION_FAILED", "Apply 或 Compensate 必须提供不超过 500 字的操作原因");
-    }
-    return input.reason().trim();
-  }
-
-  private String optionalReason(RuntimeActionRequest input, String fallback) {
-    if (input == null || input.reason() == null || input.reason().isBlank()) return fallback;
-    return validateReason(input);
   }
 
   private void patchDeployment(KubernetesClient client, String namespace, String name,

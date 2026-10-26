@@ -25,6 +25,7 @@ public class KubernetesApplicationRuntimeResource {
   @Context jakarta.ws.rs.container.ContainerRequestContext request;
   @Context io.vertx.core.http.HttpServerRequest http;
 
+  // Retain the optional reason field for older clients; audits use server-generated context.
   public record ExecRequest(String container, Integer columns, Integer rows, String reason) {}
 
   @GET
@@ -61,18 +62,15 @@ public class KubernetesApplicationRuntimeResource {
       ExecRequest input) {
     Map<String, Object> session = authenticated();
     String container = input == null ? null : input.container();
-    String reason = input == null || input.reason() == null ? "" : input.reason().trim();
     int columns = input == null || input.columns() == null ? 120 : input.columns();
     int rows = input == null || input.rows() == null ? 36 : input.rows();
-    if (columns < 20 || columns > 500 || rows < 5 || rows > 200
-        || reason.isEmpty() || reason.length() > 500
-        || reason.chars().anyMatch(Character::isISOControl)) {
-      throw fail(422, "VALIDATION_FAILED", "Exec 操作原因或终端尺寸无效");
+    if (columns < 20 || columns > 500 || rows < 5 || rows > 200) {
+      throw fail(422, "VALIDATION_FAILED", "Exec 终端尺寸无效");
     }
     return execute(() -> {
       var target = applications.validateExecTarget(uuid(appValue), deploymentName, podUid, container);
       var ticket = applications.issueExecTicket(target,
-          String.valueOf(session.get("user_id")), clientIp(), reason);
+          String.valueOf(session.get("user_id")), clientIp());
       return Response.status(Response.Status.CREATED).entity(Map.of(
           "sessionId", ticket.sessionId().toString(), "ticket", ticket.ticket(),
           "expiresAt", ticket.expiresAt().toString(), "websocketPath", ticket.websocketPath(),
