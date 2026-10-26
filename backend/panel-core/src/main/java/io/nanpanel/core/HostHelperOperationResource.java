@@ -593,7 +593,13 @@ public class HostHelperOperationResource {
     JsonNode nodes = payload == null ? null : payload.get("nodes");
     JsonNode links = payload == null ? null : payload.get("links");
     JsonNode attachments = payload == null ? null : payload.get("attachments");
-    if (payload == null || !payload.isObject() || payload.size() != 7
+    Set<String> payloadFields = payload != null && payload.isObject() ? fieldSet(payload) : Set.of();
+    Set<String> requiredPayloadFields = Set.of("action", "topologyId", "revisionId", "generation",
+        "nodes", "links");
+    Set<String> allowedPayloadFields = Set.of("action", "topologyId", "revisionId", "generation",
+        "nodes", "links", "attachments");
+    if (payload == null || !payload.isObject() || !allowedPayloadFields.containsAll(payloadFields)
+        || !payloadFields.containsAll(requiredPayloadFields)
         || topologyId == null || !topologyId.isTextual() || !target.equals(topologyId.asText())
         || revisionId == null || !revisionId.isTextual() || !UUID_TEXT.matcher(revisionId.asText()).matches()
         || generation == null || !generation.isIntegralNumber() || !generation.canConvertToLong()
@@ -601,8 +607,7 @@ public class HostHelperOperationResource {
         || !Set.of("APPLY", "VERIFY", "COMPENSATE").contains(action.asText())
         || nodes == null || !nodes.isArray() || nodes.isEmpty() || nodes.size() > 16
         || links == null || !links.isArray() || links.size() > 64
-        || attachments == null || !attachments.isArray() || attachments.isEmpty()
-        || attachments.size() > 64
+        || (attachments != null && (!attachments.isArray() || attachments.size() > 64))
         || compactJson(payload).getBytes(StandardCharsets.UTF_8).length > 48 * 1024) {
       throw fail(422, "VALIDATION_FAILED", "隔离拓扑网络操作参数无效");
     }
@@ -664,7 +669,8 @@ public class HostHelperOperationResource {
     }
     var attachmentIds = new java.util.HashSet<String>();
     var cidrs = new java.util.HashSet<String>();
-    for (JsonNode attachment : attachments) {
+    Iterable<JsonNode> attachmentValues = attachments == null ? List.of() : attachments;
+    for (JsonNode attachment : attachmentValues) {
       if (!objectWithKeys(attachment, Set.of("id", "nodeId", "devicePort", "networkCidr"))) {
         throw fail(422, "VALIDATION_FAILED", "隔离拓扑工作负载接入字段无效");
       }
