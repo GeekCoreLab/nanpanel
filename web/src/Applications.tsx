@@ -473,15 +473,17 @@ export default function Applications({ notify }: { notify: (message: string) => 
             {!versions.length ? <div className="application-empty-history">暂无版本记录</div> : <div className="application-version-list">{versions.map(version => <VersionCard key={version.version} version={version} busy={busy === `deploy-${version.version}`} onDeploy={() => void deployDraft(version)} />)}</div>}
           </section> : null}
           <div className={`application-network-topology ${view === 'network' ? 'visible' : ''}`} aria-hidden={view !== 'network'}>
-            <ApplicationNetworkTopologyCanvas
-              key={`network-${detail.application.id}`}
-              applicationId={detail.application.id}
-              resources={nodeList}
-              topologyEdges={detail.topology.edges}
-              yamlSourceChanges={yamlSourceChanges}
-              busy={busy !== ''}
-              onResourceYamlSave={saveResourceYaml}
-            />
+            <ReactFlowProvider>
+              <ApplicationNetworkTopologyCanvas
+                key={`network-${detail.application.id}`}
+                applicationId={detail.application.id}
+                resources={nodeList}
+                topologyEdges={detail.topology.edges}
+                yamlSourceChanges={yamlSourceChanges}
+                busy={busy !== ''}
+                onResourceYamlSave={saveResourceYaml}
+              />
+            </ReactFlowProvider>
           </div>
           </div>
         </>}
