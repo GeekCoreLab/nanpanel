@@ -15,6 +15,7 @@ import type {
   KubernetesApplicationCreateRequest,
   KubernetesApplicationDetail,
   KubernetesApplicationExecTicket,
+  KubernetesApplicationExecTicketRequest,
   KubernetesApplicationList,
   KubernetesApplicationPreview,
   KubernetesApplicationRuntimeDeployment,
@@ -690,13 +691,13 @@ function ApplicationDeploymentDetail({ applicationId, applicationName, deploymen
     return () => { current = false; };
   }, [applicationId, deploymentName, currentPod?.uid, containerName, tab, refreshToken]);
 
-  const startExec = async () => {
-    if (!currentPod || !containerName) return;
+  const startExec = async (mode: KubernetesApplicationExecTicketRequest['mode']) => {
+    if (!currentPod?.containers.some(container => container.name === 'reviews')) return;
     setBusy('exec');
     setError('');
     try {
       const path = `/kubernetes/applications/${encodeURIComponent(applicationId)}/deployments/${encodeURIComponent(deploymentName)}/pods/${encodeURIComponent(currentPod.uid)}/exec-tickets`;
-      const result = await api<ApplicationExecTicket>(path, 'POST', { container: containerName }, {}, true);
+      const result = await api<ApplicationExecTicket>(path, 'POST', { container: 'reviews', mode }, {}, true);
       setExecTicket(result.data);
     } catch (cause) {
       setError((cause as Error).message);
@@ -779,15 +780,19 @@ function ApplicationDeploymentDetail({ applicationId, applicationName, deploymen
         </div>}
         {tab === 'exec' && <div className="application-runtime-exec">
           <div className="application-runtime-content-heading"><div><h3>交互式容器 Shell</h3>
-            <p>连接目标为所选 Pod 的 {containerName || '容器'}，仅启动容器内的 sh。</p></div>
-            {!execTicket && <button className="primary" disabled={!currentPod || !containerName
-              || busy === 'exec'}
-              onClick={() => void startExec()}>{busy === 'exec' ? '正在连接…' : '连接容器'}</button>}
+            <p>目标为所选 Pod 的 reviews 容器；新终端仅启动容器内的 sh。</p></div>
             {execTicket && <button className="secondary" onClick={() => setExecTicket(undefined)}>断开</button>}
           </div>
           {execTicket ? <ApplicationExecConsole ticket={execTicket} onEnded={() => setExecTicket(undefined)} />
-            : <div className="application-runtime-exec-empty">
-              <p>申请、开始和结束会记录在审计日志中；终端输入与输出不会落盘。授权票据 30 秒内有效且只能使用一次。</p>
+            : <div className="application-runtime-exec-options">
+              {!currentPod?.containers.some(container => container.name === 'reviews')
+                ? <p className="application-runtime-empty">所选 Pod 不包含 reviews 容器。</p>
+                : <>
+                  <button type="button" className="secondary" disabled={busy === 'exec'}
+                    onClick={() => void startExec('ATTACH')}>附加到容器现有终端</button>
+                  <button type="button" className="primary" disabled={busy === 'exec'}
+                    onClick={() => void startExec('NEW_SHELL')}>{busy === 'exec' ? '正在连接…' : '连接新终端'}</button>
+                </>}
             </div>}
         </div>}
       </div>

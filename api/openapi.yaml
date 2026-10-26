@@ -6542,9 +6542,10 @@ components:
     KubernetesApplicationExecTicketRequest:
       type: object
       additionalProperties: false
-      required: [container]
+      required: [container, mode]
       properties:
         container: { type: string, maxLength: 253 }
+        mode: { type: string, enum: [ATTACH, NEW_SHELL] }
         columns: { type: integer, minimum: 20, maximum: 500, default: 120 }
         rows: { type: integer, minimum: 5, maximum: 200, default: 36 }
     KubernetesApplicationExecTicket:

@@ -7,6 +7,7 @@ import static io.nanpanel.core.AuthStore.update;
 import io.fabric8.kubernetes.api.model.HasMetadata;
 import io.fabric8.kubernetes.api.model.IntOrString;
 import io.fabric8.kubernetes.api.model.ObjectMetaBuilder;
+import io.fabric8.kubernetes.api.model.Container;
 import io.fabric8.kubernetes.api.model.Pod;
 import io.fabric8.kubernetes.api.model.Service;
 import io.fabric8.kubernetes.api.model.ServiceBuilder;
@@ -344,14 +345,19 @@ public class KubernetesApplicationService {
       String timestamp, String source) {}
   public record RuntimeEventList(List<RuntimeEvent> items) {}
   public record RuntimeLog(String podName, String container, int tailLines, String content) {}
+  public enum ExecMode { ATTACH, NEW_SHELL }
   public record ExecTicket(UUID sessionId, String ticket, Instant expiresAt,
       String websocketPath) {}
   public record ExecTarget(UUID applicationId, String deploymentName, String namespace,
       UUID clusterId, String podName, String podUid, String container) {}
-  public record ExecGrant(ExecTarget target, String actorId, String remoteAddress) {}
+  public record ExecGrant(ExecTarget target, String actorId, String remoteAddress, ExecMode mode) {
+    public ExecGrant(ExecTarget target, String actorId, String remoteAddress) {
+      this(target, actorId, remoteAddress, ExecMode.NEW_SHELL);
+    }
+  }
 
   private record PendingExec(ExecTarget target, String tokenHash, String actorId,
-      String remoteAddress, Instant expiresAt) {}
+      String remoteAddress, ExecMode mode, Instant expiresAt) {}
   private final ConcurrentMap<UUID, PendingExec> pendingExecs = new ConcurrentHashMap<>();
 
   private record AppRow(UUID id, UUID clusterId, String clusterName, String namespace,
@@ -482,10 +488,17 @@ public class KubernetesApplicationService {
 
   public ExecTarget validateExecTarget(UUID applicationId, String deploymentName,
       String podUid, String containerName) {
+    return validateExecTarget(applicationId, deploymentName, podUid, containerName,
+        ExecMode.NEW_SHELL);
+  }
+
+  public ExecTarget validateExecTarget(UUID applicationId, String deploymentName,
+      String podUid, String containerName, ExecMode mode) {
     AppRow application = app(applicationId);
     try (KubernetesClient client = clusters.openClientForOperations(application.clusterId())) {
       Pod pod = ownedPod(client, application, deploymentName, podUid);
       requireContainer(pod, containerName);
+      if (mode == ExecMode.ATTACH) requireAttachableTerminal(pod, containerName);
       return new ExecTarget(applicationId, deploymentName, application.namespace(),
           application.clusterId(), pod.getMetadata().getName(), podUid, containerName);
     } catch (KubernetesClusterRegistryService.ClusterNotFoundException
@@ -499,6 +512,11 @@ public class KubernetesApplicationService {
   }
 
   public ExecTicket issueExecTicket(ExecTarget target, String actorId, String clientIp) {
+    return issueExecTicket(target, ExecMode.NEW_SHELL, actorId, clientIp);
+  }
+
+  public ExecTicket issueExecTicket(ExecTarget target, ExecMode mode,
+      String actorId, String clientIp) {
     byte[] secret = new byte[32];
     EXEC_RANDOM.nextBytes(secret);
     String ticket = Base64.getUrlEncoder().withoutPadding().encodeToString(secret);
@@ -510,11 +528,11 @@ public class KubernetesApplicationService {
       throw new ApplicationException(429, "KUBERNETES_APPLICATION_EXEC_BUSY",
           "Exec 请求过多，请稍后重试");
     }
-    pendingExecs.put(sessionId, new PendingExec(target, tokenHash, actorId, clientIp, expiresAt));
+    pendingExecs.put(sessionId, new PendingExec(target, tokenHash, actorId, clientIp, mode, expiresAt));
     store.transaction(connection -> {
       audit(connection, actorId, "KUBERNETES_APPLICATION_EXEC_REQUESTED",
           "kubernetes_application", target.applicationId().toString(), "REQUESTED", clientIp,
-          truncate("创建 Deployment Exec 交互会话 · " + target.deploymentName() + "/" + target.podName()
+          truncate("创建 Deployment Exec " + mode + " 会话 · " + target.deploymentName() + "/" + target.podName()
               + ":" + target.container(), 1000));
       return null;
     });
@@ -534,7 +552,7 @@ public class KubernetesApplicationService {
     if (!MessageDigest.isEqual(pending.tokenHash().getBytes(StandardCharsets.US_ASCII),
         suppliedHash.getBytes(StandardCharsets.US_ASCII))
         || !pendingExecs.remove(sessionId, pending)) return null;
-    return new ExecGrant(pending.target(), pending.actorId(), pending.remoteAddress());
+    return new ExecGrant(pending.target(), pending.actorId(), pending.remoteAddress(), pending.mode());
   }
 
   public ExecConnection openExec(ExecGrant grant, int columns, int rows) {
@@ -555,13 +573,16 @@ public class KubernetesApplicationService {
         throw ownershipConflict("Pod/" + target.podName());
       }
       requireContainer(pod, target.container());
-      ExecWatch watch = client.pods().inNamespace(application.namespace())
+      if (grant.mode() == ExecMode.ATTACH) requireAttachableTerminal(pod, target.container());
+      var operation = client.pods().inNamespace(application.namespace())
           .withName(target.podName()).inContainer(target.container()).redirectingInput()
-          .withTTY().exec("sh", "-i");
+          .redirectingOutput().withTTY();
+      ExecWatch watch = grant.mode() == ExecMode.ATTACH
+          ? operation.attach() : operation.exec("sh", "-i");
       store.transaction(connection -> {
         audit(connection, grant.actorId(), "KUBERNETES_APPLICATION_EXEC_STARTED",
             "kubernetes_application", target.applicationId().toString(), "STARTED",
-            grant.remoteAddress(), target.deploymentName() + "/" + target.podName()
+            grant.remoteAddress(), grant.mode() + " · " + target.deploymentName() + "/" + target.podName()
                 + ":" + target.container());
         return null;
       });
@@ -582,7 +603,7 @@ public class KubernetesApplicationService {
     store.transaction(connection -> {
       audit(connection, grant.actorId(), "KUBERNETES_APPLICATION_EXEC_FINISHED",
           "kubernetes_application", grant.target().applicationId().toString(), status,
-          grant.remoteAddress(), grant.target().deploymentName() + "/"
+          grant.remoteAddress(), grant.mode() + " · " + grant.target().deploymentName() + "/"
               + grant.target().podName() + ":" + grant.target().container());
       return null;
     });
@@ -720,6 +741,16 @@ public class KubernetesApplicationService {
             containerName.equals(container.getName()))) {
       throw new ApplicationException(404, "KUBERNETES_APPLICATION_CONTAINER_NOT_FOUND",
           "容器不属于此 Pod");
+    }
+  }
+
+  private static void requireAttachableTerminal(Pod pod, String containerName) {
+    Container container = pod.getSpec().getContainers().stream()
+        .filter(candidate -> containerName.equals(candidate.getName())).findFirst().orElse(null);
+    if (container == null || !Boolean.TRUE.equals(container.getStdin())
+        || !Boolean.TRUE.equals(container.getTty())) {
+      throw new ApplicationException(409, "KUBERNETES_APPLICATION_EXEC_ATTACH_UNSUPPORTED",
+          "reviews 容器未以 stdin 和 TTY 启动，无法附加现有终端；请选择新建终端");
     }
   }
 
