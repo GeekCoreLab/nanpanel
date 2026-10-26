@@ -640,6 +640,7 @@ public class HostHelperOperationResource {
           || (!"SWITCH".equals(kind.asText()) && !node.path("switchBackend").isNull()
               && !node.path("switchBackend").isMissingNode())
           || ("SWITCH".equals(kind.asText()) && !node.path("switchBackend").isNull()
+              && !node.path("switchBackend").isMissingNode()
               && !Set.of("BRIDGE", "OPENVSWITCH").contains(node.path("switchBackend").asText()))) {
         throw fail(422, "VALIDATION_FAILED", "虚拟设备类型与设备配置字段不匹配");
       }
