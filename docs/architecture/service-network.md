@@ -15,6 +15,80 @@ or replace NetBird. A host-side workload may reach a Kubernetes Service through
 an authorized overlay or an explicit Gateway route; that cross-boundary path is
 separate from in-mesh mTLS.
 
+## Visual application traffic intent
+
+The application canvas distinguishes three relationships:
+
+| Relationship | Meaning | Example |
+| --- | --- | --- |
+| Resource binding | Kubernetes resource ownership or selector | Service selects a Deployment |
+| Network link | L2/L3 reachability between device ports | Pod attachment to a virtual switch |
+| Traffic flow | Application caller and destination route | Caller reaches a stable Service through a weighted backend policy |
+
+A Service-to-Deployment selector line does not declare an application call, and
+a virtual network wire does not choose a request's backend. A traffic flow
+starts from a stable Service identity and port, can optionally name a caller
+workload, and can pass through a `LOAD_BALANCER` whose outputs target logical
+backend Services. Each output has a relative weight. Kubernetes
+Service/EndpointSlice discovery supplies the Ready Pod endpoints for each
+backend group, so the graph does not enumerate Pods. Separate Services identify
+separate release groups when they need independent weights.
+
+Deployments are full-duplex workloads. A Deployment may receive traffic through
+one Service and initiate calls to other Services through separate flows. The
+response path belongs to the original connection and does not need a reverse
+edge. This keeps the app's server role separate from its client role.
+
+For example, an orders Service can be the stable entry, with a weighted route
+to version-specific Services. Each orders Deployment can then initiate a
+separate call to the inventory Service:
+
+```mermaid
+flowchart LR
+    Client[Caller workload] --> Orders[orders Service]
+    Orders --> LB[LOAD_BALANCER 80:20]
+    LB --> V1Service[orders-v1 Service] --> V1[orders-v1 Deployment]
+    LB --> V2Service[orders-v2 Service] --> V2[orders-v2 Deployment]
+    V1 --> InventoryService[inventory Service]
+    V2 --> InventoryService
+    InventoryService --> Inventory[inventory Deployment]
+```
+
+The graph is declarative until a compatible route Provider binds it to a real
+interception point and reports Apply/Verify state. A provider may use an
+in-mesh proxy for east-west calls or a Gateway for ingress; supported
+protocols and matches are provider capabilities. Direct Pod-IP traffic stays
+outside a Service route unless a provider explicitly intercepts it. Multus and
+the virtual L2/L3 graph can provide reachability or inspection, but do not infer
+call relationships or execute relative backend weights. See [ADR-017](../adr/ADR-017-application-service-traffic-steering.md).
+
+### Capturing a selected link
+
+An operator should be able to start a temporary packet capture from a
+supported canvas link, inspect its state, stop it, and download the resulting
+PCAPNG file. This is a link action, not a new permanent route or a change to
+forwarding. The capture record must identify the topology revision, selected
+link, observation point and directions, filters, time bounds, and any
+truncation. Sessions need duration and size bounds, an authorized operator,
+and bounded artifact retention; exact defaults are still open.
+
+The current Linux `PACKET_TAP` mirrors traffic from both business sides to its
+monitor port with `tc mirred`, but it does not write a packet-capture file or
+manage a capture session. A future recorder Provider must attach to that
+mirror (or another verified packet source), report the coverage it actually
+provides, and clean up temporary resources when capture stops. A logical
+Service traffic-flow edge can offer capture only if its route Provider exposes
+a real packet source. Request counters and proxy logs are observations, not
+packet captures. A packet capture sees payload as it exists at that point;
+traffic captured before TLS termination remains encrypted. Unsupported links
+must show capture as unavailable rather than implying that a capture ran.
+
+No throughput, latency, or traffic-split accuracy target is claimed before an
+isolated data-plane experiment. Initial live acceptance must use an isolated
+Kubernetes namespace and cluster, verify backend distribution and endpoint
+updates, and verify compensation. Saving a graph or publishing control-plane
+software does not install a mesh, Gateway, or CNI.
+
 The test environment uses Istio 1.31.1 with K3s 1.33.5 in the isolated
 `nanpanel-mesh` namespace. `PeerAuthentication` is STRICT and an
 `AuthorizationPolicy` permits one named service account to call a fixture

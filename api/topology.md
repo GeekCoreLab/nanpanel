@@ -6,6 +6,8 @@ The Core persists one shared workspace graph as immutable Revisions. Saving a de
 
 Nodes keep editor coordinates and explicit typed ports. A port has an ID, direction (`INPUT` or `OUTPUT`), layer (`L2`, `L3`, `L4`, `L7`) and supported protocols. Supported protocol values are `ETHERNET`, `IP`, `TCP`, `UDP`, `SCTP`, `HTTP` and `HTTPS`; they must match the declared layer. A link declares its layer and protocol, and both endpoint ports must support them.
 
+For `SWITCH`, matching `in-N` and `out-N` declarations represent the input and output sides of physical interface `N`. The editor renders each pair as one interface with a target and source handle, so a neighboring link may use the interface in either direction. The two declarations must have identical layer and protocol capabilities, and the paired physical interface can be used by only one topology link or workload attachment at a time. Other device kinds retain separate input and output interfaces.
+
 Every editable node card also opens a source YAML view using `apiVersion: topology.nanpanel.io/v1alpha1`, `kind: TopologyNode`, `metadata.id`, and a `spec` containing the node fields (`kind`, `name`, `description`, `position`, `inputCount`, `outputCount`, `ports`, `parentId`, `assetId`, `clusterId`, `ipAddress`, `providerId`, `switchBackend`, `firewallPolicy`, `routerConfiguration`, and `loadBalancerConfiguration`). The editor keeps `metadata.id` and `spec.kind` fixed, rejects unknown or missing fields, and validates the parsed node against the complete current graph before updating the unsaved draft. Save the graph separately to create a Revision; YAML edits do not apply a Provider. YAML formatting and comments are regenerated from the normalized graph fields when reopened.
 
 A `LOAD_BALANCER` may store one 0–100 relative weight per output port in `loadBalancerConfiguration.outputWeights`. The editor shows each output's normalized share (`weight / sum(weights)`) beside its port; for example, weights 100 and 100 show 50% each, while weights 100 and 0 show 100% and 0%. If every weight is zero, every output share is 0%. These values record desired distribution intent and do not imply a Provider has executed or verified load balancing.
@@ -33,7 +35,7 @@ A plan names the execution Host and expected Host generation. Core checks the sa
 | `ROUTER` | 1 / 1 | 1–16 / 1–16 |
 | `FIREWALL` | 1 / 1 | 1–16 / 1–16 |
 | `SERVICE` | 1 / 0 | 1–16 / 0 |
-| `SWITCH` | 4 / 4 | 2–16 / 2–16 |
+| `SWITCH` | 4 paired bidirectional interfaces (4 / 4 declarations) | 2–16 paired interfaces |
 | `MERGE` | 3 / 1 | 2–16 / 1 |
 | `SPLIT` | 1 / 3 | 1 / 2–16 |
 | `FORWARDER` | 3 / 3 | 2–16 / 2–16 |

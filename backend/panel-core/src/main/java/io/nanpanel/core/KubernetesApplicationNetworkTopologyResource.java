@@ -281,8 +281,8 @@ public class KubernetesApplicationNetworkTopologyResource {
     draft.nodes().forEach(node -> nodes.put(node.id(), node));
     draft.links().forEach(link -> {
       ids.add(link.id());
-      occupiedPorts.add(link.sourceNodeId() + ":" + link.sourcePort());
-      occupiedPorts.add(link.targetNodeId() + ":" + link.targetPort());
+      occupiedPorts.add(physicalPortKey(nodes.get(link.sourceNodeId()), link.sourcePort()));
+      occupiedPorts.add(physicalPortKey(nodes.get(link.targetNodeId()), link.targetPort()));
     });
     Set<String> resources = store.transaction(connection -> query(connection,
         "SELECT 'Deployment/' || resource_name AS resource_id "
@@ -308,11 +308,19 @@ public class KubernetesApplicationNetworkTopologyResource {
           port.id().equals(attachment.devicePort())
               && expectedDirection.equals(port.direction()));
       if (!portExists) return "工作负载接入的方向与设备端口方向不匹配";
-      if (!occupiedPorts.add(node.id() + ":" + attachment.devicePort())) {
+      if (!occupiedPorts.add(physicalPortKey(node, attachment.devicePort()))) {
         return "每个设备端口只能连接一条拓扑链路或一个应用工作负载";
       }
     }
     return null;
+  }
+
+  private String physicalPortKey(TopologyResource.NodeView node, String portId) {
+    if (node != null && "SWITCH".equals(node.kind())
+        && (portId.startsWith("in-") || portId.startsWith("out-"))) {
+      return node.id() + ":interface-" + portId.substring(portId.indexOf('-') + 1);
+    }
+    return (node == null ? "" : node.id()) + ":" + portId;
   }
 
   private boolean isCanonicalUuid(String value) {

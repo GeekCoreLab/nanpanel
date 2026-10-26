@@ -12,3 +12,4 @@ web/dist/
 .DS_Store
 
 web/artifacts/
+tests/p5/artifacts/*.png

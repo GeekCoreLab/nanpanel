@@ -9,7 +9,7 @@ import {
 import { api, isMock } from './lib/api';
 import { createUuid } from './lib/uuid.ts';
 import { parseDocument, stringify as stringifyYaml } from 'yaml';
-import { connectionError, createTopologyNode, draftError, nodePresets, validNodeShape } from './lib/topology-model';
+import { connectionError, createTopologyNode, draftError, nodePresets, topologyPhysicalPortKey, validNodeShape } from './lib/topology-model';
 import type {
   KubernetesApplication,
   KubernetesApplicationCreateRequest,
@@ -1007,6 +1007,7 @@ function ApplicationDeviceCard({ data, selected }: NodeProps<ApplicationDeviceFl
   const { model, disabled } = data;
   const [weightInputs, setWeightInputs] = useState<Record<string, string>>({});
   const loadBalancer = model.kind === 'LOAD_BALANCER';
+  const duplexSwitch = model.kind === 'SWITCH' && model.inputCount === model.outputCount;
   const outputRowHeight = loadBalancer ? 46 : 25;
   const portHeight = Math.max(model.inputCount * 25, model.outputCount * outputRowHeight, 1) + 12;
   const outputWeight = (portId: string) => model.loadBalancerConfiguration?.outputWeights
@@ -1021,11 +1022,21 @@ function ApplicationDeviceCard({ data, selected }: NodeProps<ApplicationDeviceFl
     <div className="application-network-device-heading"><span>{model.kind}</span><small>{nodePresets[model.kind].description}</small></div>
     <strong title={model.name}>{model.name}</strong>
     <div className="application-network-device-ports" style={{ height: portHeight }}>
-      {model.ports.filter(port => port.direction === 'INPUT').map((port, index) => <div key={port.id} className="application-network-port input" style={{ top: 8 + index * 25 }}>
-        <Handle id={port.id} type="target" position={Position.Left} isConnectable={!disabled} />
-        <span>{port.id} · {port.layer}/{port.protocols.join(', ')}</span>
-      </div>)}
-      {model.ports.filter(port => port.direction === 'OUTPUT').map((port, index) => <div key={port.id}
+      {duplexSwitch
+        ? model.ports.filter(port => port.direction === 'INPUT').map((port, index) => {
+          const output = model.ports.find(candidate => candidate.id === `out-${index + 1}`);
+          return <div key={`switch-interface-${index + 1}`} className="application-network-port duplex" style={{ top: 8 + index * 25 }}>
+            <Handle id={port.id} type="target" position={Position.Left} className="duplex-input" isConnectable={!disabled} />
+            <span>接口 {index + 1} · {port.layer}/{port.protocols.join(', ')}</span>
+            {output && <Handle id={output.id} type="source" position={Position.Right} className="duplex-output" isConnectable={!disabled} />}
+          </div>;
+        })
+        : <>
+          {model.ports.filter(port => port.direction === 'INPUT').map((port, index) => <div key={port.id} className="application-network-port input" style={{ top: 8 + index * 25 }}>
+            <Handle id={port.id} type="target" position={Position.Left} isConnectable={!disabled} />
+            <span>{port.id} · {port.layer}/{port.protocols.join(', ')}</span>
+          </div>)}
+          {model.ports.filter(port => port.direction === 'OUTPUT').map((port, index) => <div key={port.id}
         className={`application-network-port output ${loadBalancer ? 'load-balancer-output' : ''}`}
         style={{ top: 8 + index * outputRowHeight }}>
         {loadBalancer ? <>
@@ -1055,7 +1066,8 @@ function ApplicationDeviceCard({ data, selected }: NodeProps<ApplicationDeviceFl
           </div>
         </> : <span>{port.id} · {port.layer}/{port.protocols.join(', ')}</span>}
         <Handle id={port.id} type="source" position={Position.Right} isConnectable={!disabled} />
-      </div>)}
+          </div>)}
+        </>}
     </div>
     {model.description && <p className="application-network-device-description">{model.description}</p>}
     {loadBalancer && <p className="application-network-device-description">出口实际分配按权重归一化；全部权重为 0 时不分配流量。</p>}
@@ -1543,6 +1555,13 @@ function ApplicationNetworkTopologyCanvas({
       protocol, status: 'UNVERIFIED' };
   }
 
+  function attachmentUsesPort(nodeId: string, portId: string) {
+    const key = topologyPhysicalPortKey(draft.nodes.find(node => node.id === nodeId), portId);
+    return draft.attachments.some(attachment => topologyPhysicalPortKey(
+      draft.nodes.find(node => node.id === attachment.nodeId), attachment.devicePort,
+    ) === key);
+  }
+
   function validConnection(connection: Connection | Edge) {
     const source = nodes.find(node => node.id === connection.source);
     const target = nodes.find(node => node.id === connection.target);
@@ -1554,7 +1573,9 @@ function ApplicationNetworkTopologyCanvas({
     if (source.type === 'application-device' && target.type === 'application-device') {
       const candidate = makeDeviceLink(connection);
       return !!candidate && draft.links.length < 800
-        && !connectionError(draft.nodes, draft.links, candidate);
+        && !connectionError(draft.nodes, draft.links, candidate)
+        && !attachmentUsesPort(candidate.sourceNodeId, candidate.sourcePort)
+        && !attachmentUsesPort(candidate.targetNodeId, candidate.targetPort);
     }
     const application = source.type === 'application' ? source
       : target.type === 'application' ? target : undefined;
@@ -1568,9 +1589,14 @@ function ApplicationNetworkTopologyCanvas({
     const devicePortId = resourceToDevice ? connection.targetHandle : connection.sourceHandle;
     const expected = resourceToDevice ? 'INPUT' : 'OUTPUT';
     const port = device.data.model.ports.find(item => item.id === devicePortId);
-    if (!correctHandle || !port || port.direction !== expected) return false;
-    return !draft.attachments.some(attachment => attachment.resourceId === application.id
-      || attachment.nodeId === device.id && attachment.devicePort === devicePortId);
+    if (!correctHandle || typeof devicePortId !== 'string' || !port || port.direction !== expected) return false;
+    return !draft.attachments.some(attachment => attachment.resourceId === application.id)
+      && !draft.links.some(link => topologyPhysicalPortKey(
+        draft.nodes.find(node => node.id === link.sourceNodeId), link.sourcePort,
+      ) === topologyPhysicalPortKey(device.data.model, devicePortId)
+        || topologyPhysicalPortKey(draft.nodes.find(node => node.id === link.targetNodeId), link.targetPort)
+          === topologyPhysicalPortKey(device.data.model, devicePortId))
+      && !attachmentUsesPort(device.id, devicePortId);
   }
 
   function connect(connection: Connection) {

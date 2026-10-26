@@ -29,6 +29,10 @@ recorded in
 The 2026-10-22 P4 regression recheck reran Maven, Web, and Rust checks against
 the current `main` checkout; results and the remaining live-acceptance limits
 are in [`runs/2026-10-22-p4-regression-recheck.md`](runs/2026-10-22-p4-regression-recheck.md).
+On 2026-10-23, revision `65687945b59975199475ca9860b933ab3402bfbf` was
+published and deployed to the single-node `k3s-1`; Core/Web rollout, retained
+PostgreSQL PVC, real Istio flows, and zero topology writes are recorded in
+[`runs/2026-10-23-k3s-1-p4-release-recheck.md`](runs/2026-10-23-k3s-1-p4-release-recheck.md).
 
 ## Current source boundary
 

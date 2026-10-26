@@ -408,6 +408,12 @@ fn compile(target: &str, request: TopologyRequest) -> Result<CompiledTopology, S
     let mut link_ids = HashSet::new();
     let mut used_ports = HashSet::new();
     for link in &request.links {
+        let Some(source_kind) = node_kinds.get(&link.source_node_id).copied() else {
+            return Err("DENIED: Linux netns wire references an unknown source device".to_owned());
+        };
+        let Some(target_kind) = node_kinds.get(&link.target_node_id).copied() else {
+            return Err("DENIED: Linux netns wire references an unknown target device".to_owned());
+        };
         if !link_ids.insert(link.id)
             || link.source_node_id == link.target_node_id
             || !node_ids.contains(&link.source_node_id)
@@ -415,8 +421,14 @@ fn compile(target: &str, request: TopologyRequest) -> Result<CompiledTopology, S
             || !valid_port(&link.source_port, "out-")
             || !valid_port(&link.target_port, "in-")
             || !supported_link(link, &node_kinds)
-            || !used_ports.insert((link.source_node_id, link.source_port.as_str()))
-            || !used_ports.insert((link.target_node_id, link.target_port.as_str()))
+            || !used_ports.insert((
+                link.source_node_id,
+                physical_port_key(source_kind, &link.source_port),
+            ))
+            || !used_ports.insert((
+                link.target_node_id,
+                physical_port_key(target_kind, &link.target_port),
+            ))
         {
             return Err(
                 "DENIED: Linux netns wires must be unique supported L2 Ethernet device ports"
@@ -459,7 +471,10 @@ fn compile(target: &str, request: TopologyRequest) -> Result<CompiledTopology, S
                 && !valid_port(&attachment.device_port, "out-"))
             || !attachment_ids.insert(attachment.id)
             || link_ids.contains(&attachment.id)
-            || !used_ports.insert((attachment.node_id, attachment.device_port.as_str()))
+            || !used_ports.insert((
+                attachment.node_id,
+                physical_port_key(kind, &attachment.device_port),
+            ))
         {
             return Err(
                 "DENIED: workload attachments must use unique ports on Linux Bridge SWITCH devices"
@@ -861,6 +876,17 @@ fn valid_port(value: &str, prefix: &str) -> bool {
             .parse::<u8>()
             .is_ok_and(|parsed| (1..=16).contains(&parsed) && parsed.to_string() == number)
     })
+}
+
+fn physical_port_key(kind: &str, port: &str) -> String {
+    if kind == "SWITCH" {
+        return port
+            .strip_prefix("in-")
+            .or_else(|| port.strip_prefix("out-"))
+            .map(|index| format!("interface-{index}"))
+            .unwrap_or_else(|| port.to_owned());
+    }
+    port.to_owned()
 }
 
 fn trusted_binary(path: &Path) -> bool {

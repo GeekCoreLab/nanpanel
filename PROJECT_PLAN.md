@@ -485,6 +485,8 @@ hybrid-infrastructure-platform/
 
 2026-10-22 在当前 `main` 复跑 P4 自动化回归：Maven、Web 与 Rust 检查全部通过；目标单节点服务网络只读浏览器复验仍显示真实 Istio Service/Endpoint/Envoy 数据，报告见[P4 回归复验](tests/p4/runs/2026-10-22-p4-regression-recheck.md)和[路由/Istio UI 实测](tests/p4/runs/2026-10-22-k3s-route-istio-ui-live.md)。这些复验不替代下列未完成的生产持久化、生命周期或 KubeEdge 验收。
 
+2026-10-23 将 `main` commit `65687945b59975199475ca9860b933ab3402bfbf` 的 Core/Web 镜像部署到唯一目标 `k3s-1`；Actions、immutable GHCR image、滚动状态和真实 Istio UI/API 数据复验通过，拓扑写入为 0。详见[部署与 Istio UI 复验](tests/p4/runs/2026-10-23-k3s-1-p4-release-recheck.md)。本次仍按用户选择跳过实时 `k3s.preflight`，不代表 P4 的多节点、生产拓扑持久化、KubeEdge 或安装/升级恢复验收完成。
+
 - [x] 拓扑文件夹支持多层编辑（本机浏览器场景已覆盖）。
 - [x] 在目标 K3s 环境读取 Namespace、Ingress 路由、Service、Pod 及容器端口/状态；见 [真实 K3s API 与拓扑视图验收](tests/p4/runs/2026-10-21-k3s-target-api-smoke.md)。
 - [x] 服务网络只显示真实 Kubernetes 与 Istio 数据：Service/EndpointSlice、Envoy sidecar 就绪状态、Envoy 请求计数/HTTP 响应/mTLS 标签；Mock 模式不生成网络数据，服务和端点按需展开。已部署并完成 `k3s-1` UI/API 实测，2026-10-23 部署最新 Core/Web 镜像后再次从目标真实 Core API 显示 2 个 Service、2/2 Ready Endpoint、3/3 sidecar 和 HTTP 200/403 mTLS 流量。提交 `d69b2b4` 的 Web 镜像增加页面可见时 30 秒快照轮询和分别标识过期清单/遥测；提交 `fbf151f` 将拓扑、Istio 服务网络和 Provider 配置拆成独立工作区，分栏显示 Service 清单与 Istio 实际流量，Endpoint 按需展开。目标只读浏览器验收确认拓扑写入为 0。见 [Istio 服务网络实测](tests/p4/runs/2026-10-22-k3s-route-istio-ui-live.md#post-release-ui-and-discovery-recheck-at-2026-10-23-0030-utc)、[部署后路由与 Istio UI 复验](tests/p4/runs/2026-10-22-k3s-route-istio-ui-live.md)、[拓扑与 Istio 新鲜度 UI 部署](tests/p4/runs/2026-10-22-topology-istio-freshness-deployment.md)和[本地路由保存 UI 回归](tests/p4/runs/2026-10-22-topology-route-save-ui.md)。

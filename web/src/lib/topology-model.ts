@@ -106,7 +106,7 @@ export const nodePresets: Record<TopologyNodeKind, { name: string; inputs: numbe
   FIREWALL: { name: '虚拟防火墙', inputs: 1, outputs: 1, description: '在隔离 Linux bridge 上按端口、协议与目标端口过滤帧' },
   PACKET_TAP: { name: 'Packet Tap', inputs: 1, outputs: 2, description: '将入站数据包复制到多个观测出口' },
   SERVICE: { name: 'K3s Service', inputs: 1, outputs: 0, description: '服务终点' },
-  SWITCH: { name: '虚拟交换机', inputs: 4, outputs: 4, description: '多端口逻辑互联' },
+  SWITCH: { name: '虚拟交换机', inputs: 4, outputs: 4, description: '所有 L2 接口均支持输入和输出连接' },
   MERGE: { name: '多合一转发器', inputs: 3, outputs: 1, description: '多个入口汇聚至一个出口' },
   SPLIT: { name: '一分多转发器', inputs: 1, outputs: 3, description: '一个入口分发至多个出口' },
   FORWARDER: { name: '多进多出转发器', inputs: 3, outputs: 3, description: '所有入口的流量都会被发送给所有出口' },
@@ -136,6 +136,15 @@ export function validNodeShape(node: TopologyNode): boolean {
   const uniformPortCapability = !!firstPort && node.ports.every(port => port.layer === firstPort.layer
     && [...port.protocols].sort().join(',') === firstProtocols);
   const outputPorts = node.ports.filter(port => port.direction === 'OUTPUT').map(port => port.id);
+  const pairedSwitchPorts = node.kind === 'SWITCH'
+    ? Array.from({ length: Math.min(i, o) }, (_, index) => [
+      node.ports.find(port => port.id === `in-${index + 1}`),
+      node.ports.find(port => port.id === `out-${index + 1}`),
+    ] as const)
+    : [];
+  const validSwitchPortPairs = pairedSwitchPorts.every(([input, output]) => !!input && !!output
+    && input.layer === output.layer
+    && [...input.protocols].sort().join(',') === [...output.protocols].sort().join(','));
   const loadBalancerConfiguration = node.loadBalancerConfiguration;
   const validLoadBalancerConfiguration = loadBalancerConfiguration == null
     ? true
@@ -146,7 +155,7 @@ export function validNodeShape(node: TopologyNode): boolean {
         weight.outputPort === outputPort && Number.isInteger(weight.weight)
           && weight.weight >= 0 && weight.weight <= 100))
       && new Set(loadBalancerConfiguration.outputWeights.map(weight => weight.outputPort)).size === outputPorts.length;
-  if (!validLoadBalancerConfiguration) return false;
+  if (!validLoadBalancerConfiguration || !validSwitchPortPairs) return false;
   switch (node.kind) {
     case 'GATEWAY': return i === 0 && o >= 1;
     case 'SERVICE': return i >= 1 && o === 0;
@@ -159,10 +168,18 @@ export function validNodeShape(node: TopologyNode): boolean {
     case 'LOAD_BALANCER': return i >= 1 && o >= 2;
     case 'MIRROR': return i === 1 && o >= 2;
     case 'CUSTOM': return i >= 1 && o >= 1;
-    case 'SWITCH': case 'FORWARDER': return i >= 2 && o >= 2;
+    case 'SWITCH': return i >= 2 && o >= 2 && i === o;
+    case 'FORWARDER': return i >= 2 && o >= 2;
     case 'FOLDER': return i >= 1 && o >= 1;
     default: return false;
   }
+}
+
+/** Treat matching switch input/output declarations as the same physical interface. */
+export function topologyPhysicalPortKey(node: Pick<TopologyNode, 'id' | 'kind'> | undefined, portId: string): string {
+  const switchPort = /^(?:in|out)-([1-9]|1[0-6])$/.exec(portId);
+  const physicalPortId = node?.kind === 'SWITCH' && switchPort ? `interface-${switchPort[1]}` : portId;
+  return `${node?.id ?? ''}:${physicalPortId}`;
 }
 
 /** A provider is selectable only when it declares the device, port, and full safe lifecycle. */
@@ -190,7 +207,12 @@ export function connectionError(nodes: TopologyNode[], links: TopologyLink[], ca
   if (!['L2', 'L3', 'L4', 'L7'].includes(candidate.layer) || !protocolLayer[candidate.layer]?.includes(candidate.protocol) || sourcePort?.layer !== candidate.layer || targetPort?.layer !== candidate.layer
     || !sourcePort.protocols.includes(candidate.protocol) || !targetPort.protocols.includes(candidate.protocol)) return '连接的网络层与协议必须同时受两端口支持';
   if ([source, target].some(node => node.kind === 'LOAD_BALANCER') && !['L4', 'L7'].includes(candidate.layer)) return '流量分配器只支持 L4/L7 流量接口，不能连接 L2/L3 端口';
-  if (links.some(l => (l.sourceNodeId === source.id && l.sourcePort === candidate.sourcePort) || (l.targetNodeId === target.id && l.targetPort === candidate.targetPort))) return '端口已被占用，请增加端口或添加转发节点';
+  const occupiedPorts = new Set(links.flatMap(link => [
+    topologyPhysicalPortKey(nodes.find(node => node.id === link.sourceNodeId), link.sourcePort),
+    topologyPhysicalPortKey(nodes.find(node => node.id === link.targetNodeId), link.targetPort),
+  ]));
+  if (occupiedPorts.has(topologyPhysicalPortKey(source, candidate.sourcePort))
+    || occupiedPorts.has(topologyPhysicalPortKey(target, candidate.targetPort))) return '接口已被占用，请增加接口或添加转发节点';
   const visited = new Set<string>();
   const reaches = (id: string): boolean => { if (id === source.id) return true; if (visited.has(id)) return false; visited.add(id); return links.filter(l => l.sourceNodeId === id).some(l => reaches(l.targetNodeId)); };
   return reaches(target.id) ? '该连接将形成转发环路' : null;

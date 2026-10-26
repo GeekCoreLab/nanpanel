@@ -120,8 +120,8 @@ public final class NetworkGraphValidator {
                     && link.layer() != Layer.L4 && link.layer() != Layer.L7) {
                 return "流量分配器只支持 L4/L7 流量接口";
             }
-            if (!occupied.add(source.id() + ":" + sourcePort.id())
-                    || !occupied.add(target.id() + ":" + targetPort.id())) {
+            if (!occupied.add(physicalPortKey(source, sourcePort))
+                    || !occupied.add(physicalPortKey(target, targetPort))) {
                 return "每个端口只能连接一条链路";
             }
             outgoing.computeIfAbsent(source.id(), ignored -> new HashSet<>()).add(target.id());
@@ -149,10 +149,37 @@ public final class NetworkGraphValidator {
             case "LOAD_BALANCER" -> inputs >= 1 && inputs <= 16 && outputs >= 2 && outputs <= 16;
             case "MIRROR", "PACKET_TAP" -> inputs == 1 && outputs >= 2 && outputs <= 16;
             case "CUSTOM" -> inputs >= 1 && inputs <= 16 && outputs >= 1 && outputs <= 16;
-            case "SWITCH", "FORWARDER" -> inputs >= 2 && inputs <= 16 && outputs >= 2 && outputs <= 16;
+            case "SWITCH" -> inputs >= 2 && inputs <= 16 && inputs == outputs && outputs <= 16
+                    && switchPortPairsMatch(node);
+            case "FORWARDER" -> inputs >= 2 && inputs <= 16 && outputs >= 2 && outputs <= 16;
             default -> false;
         };
         return valid ? null : "节点种类或端口数量不符合约束";
+    }
+
+    private static boolean switchPortPairsMatch(Node node) {
+        Map<String, Port> ports = new HashMap<>();
+        for (Port port : node.ports()) {
+            if (port == null || port.id() == null || ports.putIfAbsent(port.id(), port) != null) return false;
+        }
+        long inputs = ports.values().stream().filter(port -> port.direction() == Direction.INPUT).count();
+        long outputs = ports.values().stream().filter(port -> port.direction() == Direction.OUTPUT).count();
+        for (int index = 1; index <= Math.min(inputs, outputs); index++) {
+            Port input = ports.get("in-" + index);
+            Port output = ports.get("out-" + index);
+            if (input == null || output == null || input.layer() != output.layer()
+                    || !input.protocols().equals(output.protocols())) return false;
+        }
+        return true;
+    }
+
+    private static String physicalPortKey(Node node, Port port) {
+        if ("SWITCH".equals(node.kind())) {
+            String portId = port.id();
+            String index = portId.startsWith("in-") ? portId.substring(3) : portId.substring(4);
+            return node.id() + ":interface-" + index;
+        }
+        return node.id() + ":" + port.id();
     }
 
     private static boolean protocolMatches(Layer layer, Protocol protocol) {

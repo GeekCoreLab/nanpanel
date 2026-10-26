@@ -134,12 +134,12 @@ function Device({ data, selected }: NodeProps<DeviceNode>) {
     event.stopPropagation();
     event.nativeEvent.stopImmediatePropagation();
   };
-  const height = Math.max(node.inputCount, node.outputCount, 1) * 26 + 16;
+  const height = (node.kind === 'LOAD_BALANCER' ? node.inputCount + node.outputCount : Math.max(node.inputCount, node.outputCount, 1)) * 26 + 16;
   const gatewayChoices = [...(data.gatewayAssetChoices ?? [])];
   const search = data.gatewayAssetSearch?.trim().toLocaleLowerCase() ?? '';
   const filteredGatewayChoices = gatewayChoices.filter(host => !search || host.hostname.toLocaleLowerCase().includes(search));
   const gatewayListId = `gateway-asset-options-${node.id}`;
-  return <div className={`topology-device ${node.kind === 'FOLDER' ? 'is-folder' : ''} ${data.observedOnly ? 'is-observed' : ''} ${selected ? 'is-selected' : ''}`}>
+  return <div className={`topology-device ${node.kind === 'FOLDER' ? 'is-folder' : ''} ${node.kind === 'LOAD_BALANCER' ? 'is-load-balancer' : ''} ${data.observedOnly ? 'is-observed' : ''} ${selected ? 'is-selected' : ''}`}>
     <div className="device-title"><span className="device-symbol">{node.kind === 'FOLDER' ? '▰' : node.kind === 'SWITCH' ? '▦' : virtualKinds.includes(node.kind) ? '⇄' : '▤'}</span><div><strong>{node.name}</strong><small>{data.observedOnly ? 'Agent 自动发现 · 只读观测' : node.assetId ? `主机资产 · ${data.asset?.status ?? '读取中'}` : nodePresets[node.kind].description}</small></div></div>
     {node.kind === 'FOLDER' && <div className="folder-cluster-control nodrag"><label htmlFor={`folder-cluster-${node.id}`}>关联 Kubernetes 集群</label><select id={`folder-cluster-${node.id}`} className="nodrag nowheel" aria-label={`${node.name}关联 Kubernetes 集群`} value={node.clusterId ?? ''} onChange={event => data.onFolderClusterSelect?.(node.id, event.target.value || null)}><option value="">使用默认集群</option>{(data.clusterChoices ?? []).map(cluster => <option value={cluster.id} key={cluster.id}>{cluster.name} · {cluster.healthStatus === 'HEALTHY' ? '健康' : '不可用'}</option>)}</select></div>}
     {node.kind === 'ROUTER' && (data.observedOnly
@@ -160,8 +160,20 @@ function Device({ data, selected }: NodeProps<DeviceNode>) {
       </div>, document.body)}
     </div>}
     <div className="device-ports" style={{ height }}>
-      {Array.from({ length: node.inputCount }, (_, i) => { const port = node.ports.find(value => value.id === `in-${i + 1}`); return <div className="device-port port-in" key={`in-${i + 1}`} style={{ top: 12 + i * 26 }}><Handle id={`in-${i + 1}`} type="target" position={Position.Left} aria-label={`${node.name} 入口 ${i + 1}`} /><span>{node.kind === 'FOLDER' && i === 0 ? 'Ingress 接入' : `入口 ${i + 1}`} · {port?.layer ?? 'L4'}/{port?.protocols.join(',') ?? 'TCP'}</span></div>; })}
-      {Array.from({ length: node.outputCount }, (_, i) => { const port = node.ports.find(value => value.id === `out-${i + 1}`); return <div className="device-port port-out" key={`out-${i + 1}`} style={{ top: 12 + i * 26 }}><span>{node.kind === 'FOLDER' && i === 0 ? '集群服务' : `出口 ${i + 1}`} · {port?.layer ?? 'L4'}/{port?.protocols.join(',') ?? 'TCP'}</span><Handle id={`out-${i + 1}`} type="source" position={Position.Right} aria-label={`${node.name} 出口 ${i + 1}`} /></div>; })}
+      {node.kind === 'SWITCH' && node.inputCount === node.outputCount
+        ? Array.from({ length: node.inputCount }, (_, i) => {
+          const index = i + 1;
+          const port = node.ports.find(value => value.id === `in-${index}`);
+          return <div className="device-port port-duplex" key={`switch-port-${index}`} style={{ top: 12 + i * 26 }}>
+            <Handle id={`in-${index}`} type="target" position={Position.Left} className="duplex-input" aria-label={`${node.name} 接口 ${index} 输入`} />
+            <span>接口 {index} · {port?.layer ?? 'L2'}/{port?.protocols.join(',') ?? 'ETHERNET'}</span>
+            <Handle id={`out-${index}`} type="source" position={Position.Right} className="duplex-output" aria-label={`${node.name} 接口 ${index} 输出`} />
+          </div>;
+        })
+        : <>
+          {Array.from({ length: node.inputCount }, (_, i) => { const port = node.ports.find(value => value.id === `in-${i + 1}`); return <div className="device-port port-in" key={`in-${i + 1}`} style={{ top: 12 + (node.kind === 'LOAD_BALANCER' ? node.outputCount + i : i) * 26 }}><Handle id={`in-${i + 1}`} type="target" position={Position.Left} aria-label={`${node.name} 入口 ${i + 1}`} /><span>{node.kind === 'FOLDER' && i === 0 ? 'Ingress 接入' : `入口 ${i + 1}`} · {port?.layer ?? 'L4'}/{port?.protocols.join(',') ?? 'TCP'}</span></div>; })}
+          {Array.from({ length: node.outputCount }, (_, i) => { const port = node.ports.find(value => value.id === `out-${i + 1}`); return <div className="device-port port-out" key={`out-${i + 1}`} style={{ top: 12 + i * 26 }}><span>{node.kind === 'FOLDER' && i === 0 ? '集群服务' : `出口 ${i + 1}`} · {port?.layer ?? 'L4'}/{port?.protocols.join(',') ?? 'TCP'}</span><Handle id={`out-${i + 1}`} type="source" position={Position.Right} aria-label={`${node.name} 出口 ${i + 1}`} /></div>; })}
+        </>}
     </div>{node.description && <p className="device-description">{node.description}</p>}<div className="device-status">{node.kind === 'FOLDER' ? '双击打开层级视图' : node.providerId ? `Provider ${node.providerId} · 尚未部署` : node.assetId ? `资产 ${data.asset?.hostname ?? node.assetId}` : '期望节点 · 未部署'}</div>
     <div className="device-yaml-footer"><button type="button" className="device-yaml-button nodrag" disabled={!!data.observedOnly}
       title={data.observedOnly ? 'Agent 观测节点为只读' : '编辑该节点的源 YAML'}
@@ -793,7 +805,27 @@ function Editor() {
     }
     setNodes(current => current.filter(node => !removeIds.has(node.id))); setEdges(current => current.filter(edge => !removeIds.has(edge.source) && !removeIds.has(edge.target))); setDirty(true); setRouteEvidence(undefined); setMenu(undefined); setMessage(removeIds.size > 1 ? '文件夹及全部子级节点和连接已删除' : '节点及关联连接已删除');
   }
-  function portChangeCandidate(node: TopologyNode, direction: 'inputCount' | 'outputCount', delta: number): TopologyNode | null {
+  function portChangeCandidate(node: TopologyNode, direction: 'inputCount' | 'outputCount' | 'interfaces', delta: number): TopologyNode | null {
+    if (direction === 'interfaces') {
+      if (node.kind !== 'SWITCH' || node.inputCount !== node.outputCount) return null;
+      const nextCount = node.inputCount + delta;
+      if (nextCount < 2 || nextCount > 16) return null;
+      const inputId = `in-${delta > 0 ? nextCount : node.inputCount}`;
+      const outputId = `out-${delta > 0 ? nextCount : node.outputCount}`;
+      if (delta < 0 && edges.some(edge =>
+        (edge.source === node.id && [inputId, outputId].includes(edge.sourceHandle ?? ''))
+        || (edge.target === node.id && [inputId, outputId].includes(edge.targetHandle ?? '')))) return null;
+      const inputReference = node.ports.find(port => port.direction === 'INPUT');
+      const outputReference = node.ports.find(port => port.direction === 'OUTPUT');
+      if (!inputReference || !outputReference) return null;
+      const addedInput = { id: inputId, direction: 'INPUT' as const, layer: inputReference.layer, protocols: inputReference.protocols };
+      const addedOutput = { id: outputId, direction: 'OUTPUT' as const, layer: outputReference.layer, protocols: outputReference.protocols };
+      const ports = delta > 0
+        ? [...node.ports.filter(port => port.direction === 'INPUT'), addedInput, ...node.ports.filter(port => port.direction === 'OUTPUT'), addedOutput]
+        : node.ports.filter(port => port.id !== inputId && port.id !== outputId);
+      const model = { ...node, inputCount: nextCount, outputCount: nextCount, ports };
+      return validNodeShape(model) ? model : null;
+    }
     const input = direction === 'inputCount';
     const portId = `${input ? 'in' : 'out'}-${input ? node.inputCount : node.outputCount}`;
     if (delta < 0 && edges.some(e => input ? e.target === node.id && e.targetHandle === portId : e.source === node.id && e.sourceHandle === portId)) return null;
@@ -809,7 +841,22 @@ function Editor() {
     const model = { ...node, [direction]: nextCount, ports };
     return validNodeShape(model) ? model : null;
   }
-  function changePorts(node: TopologyNode, direction: 'inputCount' | 'outputCount', delta: number) {
+  function changePorts(node: TopologyNode, direction: 'inputCount' | 'outputCount' | 'interfaces', delta: number) {
+    if (direction === 'interfaces') {
+      const index = delta > 0 ? node.inputCount + 1 : node.inputCount;
+      const portIds = [`in-${index}`, `out-${index}`];
+      const connected = edges.some(edge =>
+        (edge.source === node.id && portIds.includes(edge.sourceHandle ?? ''))
+        || (edge.target === node.id && portIds.includes(edge.targetHandle ?? '')));
+      const model = portChangeCandidate(node, direction, delta);
+      if (!model) {
+        if (delta < 0 && connected) setError('最后一个双向接口仍有连接，请先删除关联连线');
+        return;
+      }
+      setNodes(current => current.map(n => n.id === node.id ? { ...n, data: { model } } : n));
+      setDirty(true); setRouteEvidence(undefined); setMenu(undefined); setMessage('双向接口数量已更新');
+      return;
+    }
     const input = direction === 'inputCount';
     const portId = `${input ? 'in' : 'out'}-${input ? node.inputCount : node.outputCount}`;
     const model = portChangeCandidate(node, direction, delta);
@@ -952,17 +999,19 @@ function Editor() {
     {(workspace === 'topology' || !!folderId || isP0Lab) && <div className="topology-caption"><span>全拓扑 {nodes.filter(node => !node.data.observedOnly).length} 个配置节点 · Agent 自动发现 {autoRouterNodes.length} 个 Router；期望连接 {edges.length} 条 · 当前层 {activeNodes.filter(node => !node.data.observedOnly).length} 个节点 · {activeEdges.length} 条期望连接 · {dirty ? '有未保存的修改' : '草稿未修改'}</span><span role="status">{message || (busy ? '正在读取草稿…' : '')}</span></div>}
     {menu && <TopologyContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}>
       {contextNode ? <>
-        <TopologyContextMenuHeading>{contextNode.name} · {contextNode.inputCount} 入 / {contextNode.outputCount} 出</TopologyContextMenuHeading>
+        <TopologyContextMenuHeading>{contextNode.name} · {contextNode.kind === 'SWITCH' && contextNode.inputCount === contextNode.outputCount ? `${contextNode.inputCount} 个双向接口` : `${contextNode.inputCount} 入 / ${contextNode.outputCount} 出`}</TopologyContextMenuHeading>
         {contextNode.kind === 'FOLDER' && <TopologyContextMenuItem onClick={() => enterFolder(contextNode.id)}>打开层级视图</TopologyContextMenuItem>}
         <TopologyContextMenuItem onClick={() => openNodeSettings(contextNode)}>编辑节点信息</TopologyContextMenuItem>
-        {(['inputCount', 'outputCount'] as const).map(direction => <TopologyContextMenuGroup key={direction}>{[1, -1].map(delta => <TopologyContextMenuItem key={delta} disabled={!portChangeCandidate(contextNode, direction, delta)} closeOnSelect={false} onClick={() => changePorts(contextNode, direction, delta)}>{delta > 0 ? '增加' : '减少'}{direction === 'inputCount' ? '入口' : '出口'}</TopologyContextMenuItem>)}</TopologyContextMenuGroup>)}
+        {contextNode.kind === 'SWITCH' && contextNode.inputCount === contextNode.outputCount
+          ? <TopologyContextMenuGroup>{[1, -1].map(delta => <TopologyContextMenuItem key={delta} disabled={!portChangeCandidate(contextNode, 'interfaces', delta)} closeOnSelect={false} onClick={() => changePorts(contextNode, 'interfaces', delta)}>{delta > 0 ? '增加' : '减少'}双向接口</TopologyContextMenuItem>)}</TopologyContextMenuGroup>
+          : (['inputCount', 'outputCount'] as const).map(direction => <TopologyContextMenuGroup key={direction}>{[1, -1].map(delta => <TopologyContextMenuItem key={delta} disabled={!portChangeCandidate(contextNode, direction, delta)} closeOnSelect={false} onClick={() => changePorts(contextNode, direction, delta)}>{delta > 0 ? '增加' : '减少'}{direction === 'inputCount' ? '入口' : '出口'}</TopologyContextMenuItem>)}</TopologyContextMenuGroup>)}
         <TopologyContextMenuItem className="danger" onClick={() => removeNode(contextNode.id)}>删除节点及关联连接</TopologyContextMenuItem>
       </> : menu.edgeId ? <>
         <TopologyContextMenuHeading>期望连接 · {linkStateLabels[(contextEdge?.data?.state ?? 'PENDING') as keyof typeof linkStateLabels]} · {contextEdge?.data?.layer as string}/{(contextEdge?.data?.protocol ?? 'TCP') as string}</TopologyContextMenuHeading>
         <TopologyContextMenuItem className="danger" onClick={() => { setEdges(current => current.filter(e => e.id !== menu.edgeId)); setDirty(true); setRouteEvidence(undefined); setMenu(undefined); }}>删除连接</TopologyContextMenuItem>
       </> : <>
         <TopologyContextMenuHeading>添加节点</TopologyContextMenuHeading>
-        {(Object.keys(nodePresets) as TopologyNodeKind[]).map(kind => <TopologyContextMenuItem key={kind} onClick={() => addNode(kind)}><span>{nodePresets[kind].name}</span><small>{nodePresets[kind].inputs} 入 / {nodePresets[kind].outputs} 出</small></TopologyContextMenuItem>)}
+        {(Object.keys(nodePresets) as TopologyNodeKind[]).map(kind => <TopologyContextMenuItem key={kind} onClick={() => addNode(kind)}><span>{nodePresets[kind].name}</span><small>{kind === 'SWITCH' ? `${nodePresets[kind].inputs} 个双向接口` : `${nodePresets[kind].inputs} 入 / ${nodePresets[kind].outputs} 出`}</small></TopologyContextMenuItem>)}
       </>}
     </TopologyContextMenu>}
     {nodeSettings && <div className="modal-backdrop"><section className="modal topology-node-settings" role="dialog" aria-modal="true" aria-labelledby="topology-node-settings-title">

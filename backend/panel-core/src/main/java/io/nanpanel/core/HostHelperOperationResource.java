@@ -663,8 +663,8 @@ public class HostHelperOperationResource {
           || !targetPort.matches("in-([1-9]|1[0-6])")
           || !"L2".equals(link.path("layer").asText())
           || !"ETHERNET".equals(link.path("protocol").asText())
-          || !occupiedPorts.add(sourceNode + ":" + sourcePort)
-          || !occupiedPorts.add(targetNode + ":" + targetPort)) {
+          || !occupiedPorts.add(physicalPortKey(sourceNode, sourcePort, nodeKinds))
+          || !occupiedPorts.add(physicalPortKey(targetNode, targetPort, nodeKinds))) {
         throw fail(422, "VALIDATION_FAILED", "Linux Bridge 链路必须连接唯一 L2 Ethernet switch 端口");
       }
     }
@@ -683,7 +683,7 @@ public class HostHelperOperationResource {
           || !"SWITCH".equals(nodeKinds.get(nodeId))
           || "OPENVSWITCH".equals(nodeBackends.get(nodeId))
           || (!port.matches("in-([1-9]|1[0-6])") && !port.matches("out-([1-9]|1[0-6])"))
-          || linkIds.contains(id) || !occupiedPorts.add(nodeId + ":" + port)
+          || linkIds.contains(id) || !occupiedPorts.add(physicalPortKey(nodeId, port, nodeKinds))
           || !validAttachmentCidr(cidr) || !cidrs.add(cidr)) {
         throw fail(422, "VALIDATION_FAILED", "工作负载接入必须是唯一 Linux Bridge SWITCH 端口和隔离 /24 网段");
       }
@@ -694,6 +694,14 @@ public class HostHelperOperationResource {
     var fields = new java.util.HashSet<String>();
     value.fieldNames().forEachRemaining(fields::add);
     return fields;
+  }
+
+  private String physicalPortKey(String nodeId, String port, Map<String, String> nodeKinds) {
+    if ("SWITCH".equals(nodeKinds.get(nodeId))
+        && (port.matches("in-([1-9]|1[0-6])") || port.matches("out-([1-9]|1[0-6])"))) {
+      return nodeId + ":interface-" + port.substring(port.indexOf('-') + 1);
+    }
+    return nodeId + ":" + port;
   }
 
   private boolean validAttachmentCidr(String value) {

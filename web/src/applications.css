@@ -242,10 +242,13 @@ main:has(.applications-page)>footer{display:none}
 .application-network-port{position:absolute;display:flex;max-width:50%;align-items:center;gap:8px;color:#60738c;font-size:8px;line-height:1.4}
 .application-network-port.input{left:0;padding-left:8px}
 .application-network-port.output{right:0;justify-content:flex-end;padding-right:8px;text-align:right}
+.application-network-port.duplex{left:0;right:0;max-width:none;justify-content:space-between;padding:0 8px;text-align:center}
 .application-network-port span{overflow-wrap:anywhere;white-space:normal}
 .application-network-port .react-flow__handle{width:9px;height:9px;border:2px solid #fff;background:#5f91db;box-shadow:0 0 0 1px #8aa8d0}
 .application-network-port.input .react-flow__handle{left:-6px}
 .application-network-port.output .react-flow__handle{right:-6px;background:#55ad82;box-shadow:0 0 0 1px #78b99a}
+.application-network-port.duplex .duplex-input{left:-6px;background:#5f91db}
+.application-network-port.duplex .duplex-output{right:-6px;background:#55ad82;box-shadow:0 0 0 1px #78b99a}
 .application-network-device-description{margin:6px 0 0;color:#7b8da3;font-size:9px;line-height:1.45;overflow-wrap:anywhere;white-space:normal}
 .application-network-device-footer{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:8px}
 .application-network-message{flex:0 0 auto;color:#6b7f98;font-size:10px;line-height:1.5;overflow-wrap:anywhere}
