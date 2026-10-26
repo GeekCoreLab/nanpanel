@@ -33,10 +33,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
+import org.jboss.logging.Logger;
 
 /** Namespace-scoped applications backed by immutable, YAML-derived versions. */
 @ApplicationScoped
 public class KubernetesApplicationService {
+  private static final Logger LOG = Logger.getLogger(KubernetesApplicationService.class);
   private static final String TEMPLATE_BOOKINFO = "bookinfo";
   private static final String MANAGED_BY = "app.kubernetes.io/managed-by";
   private static final String APPLICATION_ID = "nanpanel.io/application-id";
@@ -1296,6 +1298,24 @@ public class KubernetesApplicationService {
     List<TopologyEdge> edges = new ArrayList<>();
     List<Deployment> deployments = resources.stream().filter(Deployment.class::isInstance)
         .map(Deployment.class::cast).toList();
+    Map<String, Deployment> observedDeployments = new HashMap<>();
+    boolean deploymentListAvailable = false;
+    try {
+      var response = client.apps().deployments().inNamespace(namespace)
+          .withLabel(APPLICATION_ID, applicationId.toString()).list();
+      if (response == null || response.getItems() == null) {
+        throw new IllegalStateException("Kubernetes Deployment list response is incomplete");
+      }
+      for (Deployment observed : response.getItems()) {
+        if (observed.getMetadata() != null && observed.getMetadata().getName() != null) {
+          observedDeployments.put(observed.getMetadata().getName(), observed);
+        }
+      }
+      deploymentListAvailable = true;
+    } catch (RuntimeException failure) {
+      LOG.debugf("Kubernetes application Deployment list failed for %s (%s); using named reads",
+          applicationId, failure.getClass().getSimpleName());
+    }
     for (HasMetadata item : resources) {
       if (item instanceof Deployment deployment) {
         String id = resourceId(item);
@@ -1307,8 +1327,11 @@ public class KubernetesApplicationService {
         String state = pending ? "PENDING" : "UNKNOWN";
         if (!pending) {
           try {
-            Deployment live = (Deployment) fetch(client, "Deployment", namespace,
-                deployment.getMetadata().getName());
+            String name = deployment.getMetadata().getName();
+            Deployment live = deploymentListAvailable ? observedDeployments.get(name) : null;
+            if (!deploymentListAvailable || live == null) {
+              live = (Deployment) fetch(client, "Deployment", namespace, name);
+            }
             if (live == null) state = "MISSING";
             else {
               requireOwned(live, applicationId, expectedUid);
@@ -1322,6 +1345,11 @@ public class KubernetesApplicationService {
             throw conflict;
           } catch (RuntimeException failure) {
             state = "UNAVAILABLE";
+            String reason = failure instanceof KubernetesClientException clientFailure
+                ? "Kubernetes API HTTP " + clientFailure.getCode()
+                : failure.getClass().getSimpleName();
+            LOG.warnf("Unable to observe Kubernetes application Deployment %s/%s (%s)",
+                namespace, deployment.getMetadata().getName(), reason);
           }
         }
         String image = deployment.getSpec().getTemplate().getSpec().getContainers().stream()
