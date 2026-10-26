@@ -34,6 +34,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -327,8 +328,10 @@ public class KubernetesApplicationService {
   public record TopologyNode(String id, String kind, String name, Integer replicas,
       Integer readyReplicas, String image, String targetDeployment, Integer servicePort,
       String targetPort, String serviceProtocol, List<TopologyServicePort> servicePorts,
-      String state, String sourceYaml) {}
-  public record TopologyServicePort(String name, int port, String targetPort, String protocol) {}
+      String state, String sourceYaml, String serviceType,
+      List<String> serviceExternalAddresses) {}
+  public record TopologyServicePort(String name, int port, String targetPort, String protocol,
+      Integer nodePort) {}
   public record TopologyEdge(String id, String source, String target) {}
   public record Topology(List<TopologyNode> nodes, List<TopologyEdge> edges) {}
   public record ApplicationDetail(ApplicationView application, Topology topology,
@@ -1336,20 +1339,23 @@ public class KubernetesApplicationService {
         || spec.getPorts() == null || spec.getPorts().isEmpty()) {
       throw invalid("Service 必须包含 selector 和至少一个端口");
     }
-    if (spec.getType() != null && !"ClusterIP".equals(spec.getType())) {
-      throw invalid("导入的 Service 只支持 ClusterIP 类型");
+    String serviceType = spec.getType() == null ? "ClusterIP" : spec.getType();
+    if (!Set.of("ClusterIP", "NodePort", "LoadBalancer").contains(serviceType)) {
+      throw invalid("Service 只支持 ClusterIP、NodePort 或 LoadBalancer 类型");
     }
     if (spec.getExternalName() != null || spec.getExternalIPs() != null
         && !spec.getExternalIPs().isEmpty()) {
       throw invalid("不支持 ExternalName 或 externalIPs Service");
     }
-    spec.setType("ClusterIP");
+    spec.setType(serviceType);
     spec.setClusterIP(null);
     spec.setClusterIPs(null);
     spec.setIpFamilies(null);
     spec.setIpFamilyPolicy(null);
-    spec.setHealthCheckNodePort(null);
-    spec.getPorts().forEach(port -> port.setNodePort(null));
+    if (!"NodePort".equals(serviceType) && !"LoadBalancer".equals(serviceType)) {
+      spec.getPorts().forEach(port -> port.setNodePort(null));
+    }
+    if (!"LoadBalancer".equals(serviceType)) spec.setHealthCheckNodePort(null);
   }
 
   private static void validateApplicationResources(List<HasMetadata> resources) {
@@ -1802,7 +1808,8 @@ public class KubernetesApplicationService {
             .map(container -> container.getImage()).filter(value -> value != null).findFirst().orElse(null);
         nodes.add(new TopologyNode(id, "Deployment", deployment.getMetadata().getName(),
             replicas, ready, image, deployment.getSpec().getTemplate().getMetadata().getLabels()
-                .get("app"), null, null, null, List.of(), state, serialize(List.of(deployment))));
+                .get("app"), null, null, null, List.of(), state, serialize(List.of(deployment)),
+            null, List.of()));
       } else if (item instanceof Service service) {
         String id = resourceId(item);
         String expectedUid = resourceUids.get(id);
@@ -1815,29 +1822,40 @@ public class KubernetesApplicationService {
         String targetPort = serviceTargetPort == null ? String.valueOf(firstPort.getPort())
             : String.valueOf(serviceTargetPort.getValue());
         String protocol = firstPort.getProtocol() == null ? "TCP" : firstPort.getProtocol();
-        List<TopologyServicePort> servicePorts = service.getSpec().getPorts().stream()
-            .map(port -> {
-              IntOrString targetPortValue = port.getTargetPort();
-              return new TopologyServicePort(port.getName(), port.getPort(),
-                  targetPortValue == null ? String.valueOf(port.getPort())
-                      : String.valueOf(targetPortValue.getValue()),
-                  port.getProtocol() == null ? "TCP" : port.getProtocol());
-            }).toList();
         String state = pending ? "PENDING" : "ACTIVE";
+        Service observedService = service;
         if (!pending) {
           try {
             HasMetadata live = fetch(client, "Service", namespace, service.getMetadata().getName());
             if (live == null) state = "MISSING";
-            else requireOwned(live, applicationId, expectedUid);
+            else {
+              requireOwned(live, applicationId, expectedUid);
+              if (live instanceof Service liveService) observedService = liveService;
+            }
           } catch (ApplicationException conflict) {
             throw conflict;
           } catch (RuntimeException failure) {
             state = "UNAVAILABLE";
           }
         }
+        Service serviceState = observedService;
+        List<TopologyServicePort> servicePorts = service.getSpec().getPorts().stream()
+            .map(port -> {
+              ServicePort livePort = matchingServicePort(serviceState, port);
+              ServicePort displayedPort = livePort == null ? port : livePort;
+              IntOrString serviceTarget = displayedPort.getTargetPort();
+              return new TopologyServicePort(displayedPort.getName(), displayedPort.getPort(),
+                  serviceTarget == null ? String.valueOf(displayedPort.getPort())
+                      : String.valueOf(serviceTarget.getValue()),
+                  displayedPort.getProtocol() == null ? "TCP" : displayedPort.getProtocol(),
+                  livePort == null ? null : livePort.getNodePort());
+            }).toList();
+        String serviceType = serviceState.getSpec() == null || serviceState.getSpec().getType() == null
+            ? "ClusterIP" : serviceState.getSpec().getType();
         nodes.add(new TopologyNode(id, "Service", service.getMetadata().getName(),
             null, null, null, target, firstPort.getPort(), targetPort, protocol,
-            servicePorts, state, serialize(List.of(service))));
+            servicePorts, state, serialize(List.of(service)), serviceType,
+            serviceExternalAddresses(serviceState)));
         for (Deployment deployment : deployments) {
           Map<String, String> labels = deployment.getSpec().getTemplate().getMetadata().getLabels();
           if (matches(service.getSpec().getSelector(), labels)) {
@@ -1860,12 +1878,48 @@ public class KubernetesApplicationService {
         }
         nodes.add(new TopologyNode(id, "ServiceAccount", account.getMetadata().getName(),
             null, null, null, null, null, null, null, List.of(), state,
-            serialize(List.of(account))));
+            serialize(List.of(account)), null, List.of()));
       }
     }
     nodes.sort(Comparator.comparing(TopologyNode::kind).thenComparing(TopologyNode::name));
     edges.sort(Comparator.comparing(TopologyEdge::source).thenComparing(TopologyEdge::target));
     return new Topology(List.copyOf(nodes), List.copyOf(edges));
+  }
+
+  private static ServicePort matchingServicePort(Service service, ServicePort sourcePort) {
+    if (service.getSpec() == null || service.getSpec().getPorts() == null) return null;
+    return service.getSpec().getPorts().stream().filter(java.util.Objects::nonNull)
+        .filter(port -> (sourcePort.getName() != null
+                && sourcePort.getName().equals(port.getName()))
+            || (sourcePort.getPort() == port.getPort()
+                && effectiveServiceProtocol(sourcePort).equals(effectiveServiceProtocol(port))))
+        .findFirst().orElse(null);
+  }
+
+  private static String effectiveServiceProtocol(ServicePort port) {
+    return port.getProtocol() == null ? "TCP" : port.getProtocol();
+  }
+
+  private static List<String> serviceExternalAddresses(Service service) {
+    Set<String> addresses = new LinkedHashSet<>();
+    if (service.getStatus() != null && service.getStatus().getLoadBalancer() != null
+        && service.getStatus().getLoadBalancer().getIngress() != null) {
+      service.getStatus().getLoadBalancer().getIngress().stream()
+          .filter(java.util.Objects::nonNull)
+          .map(ingress -> ingress.getIp() == null || ingress.getIp().isBlank()
+              ? ingress.getHostname() : ingress.getIp())
+          .filter(address -> address != null && !address.isBlank())
+          .map(String::trim).forEach(addresses::add);
+    }
+    if (service.getSpec() != null) {
+      if (service.getSpec().getExternalIPs() != null) {
+        service.getSpec().getExternalIPs().stream().filter(java.util.Objects::nonNull)
+            .map(String::trim).filter(address -> !address.isEmpty()).forEach(addresses::add);
+      }
+      String externalName = service.getSpec().getExternalName();
+      if (externalName != null && !externalName.isBlank()) addresses.add(externalName.trim());
+    }
+    return List.copyOf(addresses);
   }
 
   private static boolean deploymentFailed(Deployment deployment) {

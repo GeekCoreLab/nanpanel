@@ -886,17 +886,44 @@ function deploymentTarget(resource: KubernetesApplicationTopologyNode) {
   return resource.targetDeployment ?? deploymentTargetName(resource.name);
 }
 
+function applicationServiceAccessUrl(resource: KubernetesApplicationTopologyNode) {
+  const tcpPorts = resource.servicePorts.filter(port => port.protocol === 'TCP');
+  const port = tcpPorts.find(candidate => candidate.port === 443
+      || /^https(?:-|$)/i.test(candidate.name ?? ''))
+    ?? tcpPorts.find(candidate => candidate.port === 80
+      || /^http(?:-|$)/i.test(candidate.name ?? ''))
+    ?? tcpPorts[0];
+  if (!port) return undefined;
+
+  const externalAddress = resource.serviceExternalAddresses?.find(address => address.trim());
+  const nodePortAccess = !externalAddress && resource.serviceType === 'NodePort';
+  const host = externalAddress ?? (nodePortAccess ? window.location.hostname : '');
+  const exposedPort = nodePortAccess ? port.nodePort : port.port;
+  if (!host || !exposedPort) return undefined;
+
+  const secure = port.port === 443 || /^https(?:-|$)/i.test(port.name ?? '');
+  const normalizedHost = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+  try {
+    const url = new URL(`${secure ? 'https' : 'http'}://${normalizedHost}:${exposedPort}/`);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.toString() : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function ApplicationFlowNodeCard({ data, selected }: NodeProps<ApplicationFlowNode>) {
   const { resource, changes, controlsDisabled } = data;
   const deployment = resource.kind === 'Deployment';
   const service = resource.kind === 'Service';
   const account = resource.kind === 'ServiceAccount';
+  const serviceAccessUrl = service ? applicationServiceAccessUrl(resource) : undefined;
   const title = deployment ? 'DEPLOYMENT' : service ? 'SERVICE' : 'SERVICE ACCOUNT';
   const servicePortSummary = resource.servicePorts.map((port, index) => {
     const displayedPort = index === 0 ? changes.servicePort ?? port.port : port.port;
     const displayedTarget = index === 0 ? changes.targetPort ?? port.targetPort : port.targetPort;
     const displayedProtocol = index === 0 ? changes.serviceProtocol ?? port.protocol : port.protocol;
-    return `${port.name ? `${port.name}: ` : ''}${displayedPort}/${displayedProtocol} → ${displayedTarget}`;
+    const nodePort = port.nodePort ? ` · NodePort ${port.nodePort}` : '';
+    return `${port.name ? `${port.name}: ` : ''}${displayedPort}/${displayedProtocol} → ${displayedTarget}${nodePort}`;
   }).join(' · ');
   return <article className={`application-flow-node ${resource.kind.toLowerCase()} ${selected ? 'selected' : ''}`}
     title={deployment ? '单击查看此 Deployment 的 Pod、事件、日志与 Exec' : undefined}>
@@ -915,7 +942,7 @@ function ApplicationFlowNodeCard({ data, selected }: NodeProps<ApplicationFlowNo
       <small>{resource.readyReplicas ?? 0}/{changes.replicas ?? resource.replicas ?? 0} Ready</small>
       <small className="application-node-image">{changes.image ?? resource.image ?? '未声明镜像'}</small>
     </> : service ? <>
-      <small>ClusterIP · {servicePortSummary || `${resource.servicePort ?? '—'}/${resource.serviceProtocol ?? 'TCP'} → ${resource.targetPort ?? '—'}`}</small>
+      <small>{resource.serviceType ?? 'ClusterIP'} · {servicePortSummary || `${resource.servicePort ?? '—'}/${resource.serviceProtocol ?? 'TCP'} → ${resource.targetPort ?? '—'}`}</small>
       <small>后端：{changes.targetDeployment ?? resource.targetDeployment ?? '通过拓扑连线指定'}</small>
     </> : <>
       <small>应用级身份资源</small>
@@ -924,6 +951,13 @@ function ApplicationFlowNodeCard({ data, selected }: NodeProps<ApplicationFlowNo
     <div className="application-flow-node-footer">
       {deployment && <small className="application-node-runtime-hint">单击查看事件、日志与 Exec</small>}
       {data.sourceYamlEdited && <small className="application-yaml-pending">YAML 待生成版本差异</small>}
+      {service && (serviceAccessUrl
+        ? <a className="application-service-access nodrag" href={serviceAccessUrl}
+            target="_blank" rel="noopener noreferrer" title={serviceAccessUrl}
+            onClick={event => event.stopPropagation()}>↗ 一键访问</a>
+        : <small className="application-service-access-unavailable" title="Service 尚未配置外部地址">
+            暂无外部地址
+          </small>)}
       <button type="button" className="application-yaml-button nodrag" disabled={controlsDisabled}
         onClick={event => { event.stopPropagation(); data.onEditSourceYaml(resource); }}>编辑源 YAML</button>
     </div>
