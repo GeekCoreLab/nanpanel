@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import {
-  ConnectionMode, Handle, MarkerType, Position, ReactFlowProvider,
+  Background, ConnectionMode, Controls, Handle, MarkerType, MiniMap, Position, ReactFlowProvider,
   useNodesState, useReactFlow,
   type Connection, type Edge, type Node, type NodeProps,
 } from '@xyflow/react';
@@ -35,6 +35,7 @@ import { TopologyContextMenu, TopologyContextMenuHeading, TopologyContextMenuIte
 import './applications.css';
 
 type View = 'topology' | 'versions';
+type ApplicationDrawer = 'applications' | 'info' | null;
 type Editable = { replicas?: number; image?: string; targetDeployment?: string; servicePort?: number; targetPort?: string; serviceProtocol?: 'TCP' | 'UDP' | 'SCTP' };
 type PendingApplicationNode = KubernetesApplicationTopologyAddition & {
   id: string;
@@ -109,6 +110,8 @@ export default function Applications({ notify }: { notify: (message: string) => 
   const [yamlSourceChanges, setYamlSourceChanges] = useState<Record<string, string>>({});
   const [additions, setAdditions] = useState<PendingApplicationNode[]>([]);
   const [view, setView] = useState<View>('topology');
+  const [drawer, setDrawer] = useState<ApplicationDrawer>(null);
+  const [toolbarMenuOpen, setToolbarMenuOpen] = useState(false);
   const [wizard, setWizard] = useState(false);
   const [wizardStep, setWizardStep] = useState(1);
   const [loading, setLoading] = useState(!isMock);
@@ -411,38 +414,44 @@ export default function Applications({ notify }: { notify: (message: string) => 
   }
 
   return <div className="applications-page">
-    {error && <div className="alert error" role="alert">{error}</div>}
-    {isMock && <div className="alert">Mock 演示环境没有真实集群应用接口。此页面在 Live API 模式下连接已登记集群。</div>}
+    {error && <div className="application-page-alert alert error" role="alert">{error}</div>}
+    {isMock && <div className="application-page-alert alert" role="status">Mock 演示环境没有真实集群应用接口。此页面在 Live API 模式下连接已登记集群。</div>}
     <div className="application-layout">
-      <aside className="application-list-panel">
-        <div className="application-list-heading"><div><span className="eyebrow">APPLICATIONS</span><strong>应用列表</strong></div><div className="application-list-heading-actions"><button type="button" className="secondary" title="刷新应用列表" aria-label="刷新应用列表" onClick={() => void loadList()} disabled={loading}>↻</button><button type="button" className="primary" onClick={beginCreate} disabled={isMock}>＋ 创建</button><span className="application-count">{items.length}</span></div></div>
-        {loading && <p className="application-muted">正在读取应用…</p>}
-        {!loading && items.length === 0 && !error && <div className="application-empty-small"><b>◇</b><span>还没有应用</span><small>使用图形化向导或导入容器清单创建应用。</small><button className="link" onClick={beginCreate}>创建第一个应用 →</button></div>}
-        <div className="application-list">
-          {items.map(item => <button key={item.id} className={`application-list-item ${selectedId === item.id ? 'active' : ''}`} onClick={() => { setSelectedId(item.id); setView('topology'); }}>
-            <span className="application-symbol">▦</span><span className="application-list-copy"><strong>{item.displayName}</strong><small>{item.clusterName} · {item.namespace}</small><small>版本 v{item.currentVersion} · {item.templateId}</small></span><AppState value={item.state} />
-          </button>)}
+      {selectedApp && detail ? <section className="application-content">
+        <div className="application-workspace-toolbar">
+          <div className="application-toolbar-context">
+            <button type="button" className="application-float-button" aria-label="打开应用列表" title="应用列表"
+              aria-expanded={drawer === 'applications'} onClick={() => setDrawer('applications')}>☷<span>应用</span></button>
+            <span className="application-current-name" title={detail.application.displayName}>{detail.application.displayName}</span>
+            <button type="button" className="application-float-button icon-only" aria-label="应用信息" title="应用信息"
+              aria-expanded={drawer === 'info'} onClick={() => setDrawer('info')}>ⓘ</button>
+          </div>
+          <div className="application-toolbar-actions">
+            <button type="button" className={`application-float-button ${view === 'versions' ? 'active' : ''}`}
+              aria-label={view === 'topology' ? '打开版本历史' : '返回拓扑设置'}
+              onClick={() => { setView(current => current === 'topology' ? 'versions' : 'topology'); setToolbarMenuOpen(false); }}>
+              {view === 'topology' ? '◷' : '⌘'}<span>{view === 'topology' ? `版本 ${versions.length}` : '拓扑'}</span>
+            </button>
+            <div className="application-toolbar-menu-wrap">
+              <button type="button" className="application-float-button icon-only" aria-label="更多应用操作" title="更多操作"
+                aria-haspopup="menu" aria-expanded={toolbarMenuOpen} onClick={() => setToolbarMenuOpen(open => !open)}>⋯</button>
+              {toolbarMenuOpen && <div className="application-toolbar-menu" role="menu">
+                <button type="button" role="menuitem" disabled={loading || busy !== ''}
+                  onClick={() => { void loadApplication(detail.application.id); setToolbarMenuOpen(false); }}>刷新应用资源</button>
+                {view === 'topology' && <button type="button" role="menuitem"
+                  disabled={(!Object.keys(changes).length && !hasYamlChanges && !additions.length)
+                    || additions.some(addition => addition.kind === 'Service' && !addition.targetDeployment && !addition.sourceYaml)
+                    || hasDraft || busy !== ''}
+                  title={additions.some(addition => addition.kind === 'Service' && !addition.targetDeployment && !addition.sourceYaml)
+                    ? '请将新增 Service 连到 Deployment 后再生成差异' : undefined}
+                  onClick={() => { void createDraft(); setToolbarMenuOpen(false); }}>
+                  {busy === 'draft' ? '生成差异中…' : '生成版本差异'}
+                </button>}
+              </div>}
+            </div>
+          </div>
         </div>
-        <div className="application-list-footer"><span className="application-live-dot" />已接入的应用清单</div>
-      </aside>
-      <section className="application-content">
-        {!selectedApp || !detail ? <div className="application-blank"><div className="application-blank-icon">▦</div><h2>{items.length ? '选择一个应用' : '开始管理 Kubernetes 应用'}</h2><p>应用拓扑根据部署 YAML 自动生成。创建版本后检查资源 diff，再手动确认部署。</p><button className="primary" onClick={beginCreate} disabled={isMock}>＋ 创建应用</button></div> : <>
-          <div className="application-detail-heading">
-            <div className="application-detail-title"><span className="application-title-icon">▦</span><div><div className="application-title-line"><h2>{detail.application.displayName}</h2><AppState value={detail.application.state} /></div><p><span className="mono">{detail.application.clusterName}</span><i>›</i><span>{detail.application.namespace}</span><i>›</i><span>{detail.application.templateId}</span></p></div></div>
-            <div className="application-version-chip"><small>当前版本</small><strong>v{detail.application.currentVersion}</strong></div>
-          </div>
-          <div className="application-metrics">
-            <div><span>工作负载</span><strong>{deployments.length}</strong><small>Deployments</small></div>
-            <div><span>服务</span><strong>{services.length}</strong><small>Services</small></div>
-            <div><span>ServiceAccount</span><strong>{accounts.length}</strong><small>Namespace 范围</small></div>
-            <div><span>版本历史</span><strong>{versions.filter(item => item.state === 'DEPLOYED').length}</strong><small>已部署版本</small></div>
-          </div>
-          <div className="application-tabs" role="tablist" aria-label="应用管理视图">
-            <button role="tab" aria-selected={view === 'topology'} className={view === 'topology' ? 'active' : ''} onClick={() => setView('topology')}>⌘ 拓扑设置</button>
-            <button role="tab" aria-selected={view === 'versions'} className={view === 'versions' ? 'active' : ''} onClick={() => setView('versions')}>◷ 版本历史 <span>{versions.length}</span></button>
-            <div className="application-tab-actions"><button className="secondary" onClick={() => void loadApplication(detail.application.id)}>刷新应用资源</button>{view === 'topology' && <button className="primary" disabled={(!Object.keys(changes).length && !hasYamlChanges && !additions.length) || additions.some(addition => addition.kind === 'Service' && !addition.targetDeployment && !addition.sourceYaml) || hasDraft || busy !== ''} title={additions.some(addition => addition.kind === 'Service' && !addition.targetDeployment && !addition.sourceYaml) ? '请将新增 Service 连到 Deployment 后再生成差异' : undefined} onClick={() => void createDraft()}>{busy === 'draft' ? '生成差异中…' : '生成版本差异 →'}</button>}</div>
-          </div>
-          <div className="application-view-content">
+        <div className="application-view-content">
           {view === 'versions' && <section className="application-versions-card">
             <div className="application-section-heading"><div><span className="eyebrow">IMMUTABLE MANIFEST HISTORY</span><h3>版本历史</h3><p>草稿不会修改集群；只有状态为“待确认”的版本可提交部署。</p></div></div>
             {!versions.length ? <div className="application-empty-history">暂无版本记录</div> : <div className="application-version-list">{versions.map(version => <VersionCard key={version.version} version={version} busy={busy === `deploy-${version.version}`} onDeploy={() => void deployDraft(version)} />)}</div>}
@@ -469,10 +478,65 @@ export default function Applications({ notify }: { notify: (message: string) => 
               />
             </ReactFlowProvider>
           </div>
+        </div>
+      </section> : <section className="application-content application-empty-workspace">
+        <div className="application-workspace-toolbar">
+          <div className="application-toolbar-context">
+            <button type="button" className="application-float-button" aria-label="打开应用列表" title="应用列表"
+              aria-expanded={drawer === 'applications'} onClick={() => setDrawer('applications')}>☷<span>应用</span></button>
+            <span className="application-current-name">NaNPanel 应用拓扑</span>
           </div>
-        </>}
-      </section>
+          <button type="button" className="application-float-button" onClick={beginCreate} disabled={isMock}>＋<span>创建应用</span></button>
+        </div>
+        <div className="application-blank"><div className="application-blank-icon">▦</div><h2>{loading ? '正在读取应用…' : items.length ? '选择一个应用' : '开始管理 Kubernetes 应用'}</h2><p>应用拓扑根据部署 YAML 自动生成。创建版本后检查资源 diff，再手动确认部署。</p><button className="primary" onClick={beginCreate} disabled={isMock}>＋ 创建应用</button></div>
+      </section>}
     </div>
+    {drawer && <div className="application-drawer-backdrop" onMouseDown={event => {
+      if (event.target === event.currentTarget) setDrawer(null);
+    }}>
+      <aside className={`application-page-drawer ${drawer === 'applications' ? 'from-left' : 'from-right'}`}
+        role="dialog" aria-modal="true" aria-labelledby="application-drawer-title">
+        <div className="application-drawer-heading">
+          <div><span className="eyebrow">{drawer === 'applications' ? 'APPLICATIONS' : 'APPLICATION INFO'}</span>
+            <h2 id="application-drawer-title">{drawer === 'applications' ? '应用列表' : '应用信息'}</h2></div>
+          <button type="button" className="application-float-button icon-only" aria-label="关闭侧边栏" onClick={() => setDrawer(null)}>×</button>
+        </div>
+        {drawer === 'applications' ? <>
+          <div className="application-list-heading">
+            <strong>{items.length} 个已登记应用</strong>
+            <div className="application-list-heading-actions">
+              <button type="button" className="secondary" title="刷新应用列表" aria-label="刷新应用列表" onClick={() => void loadList()} disabled={loading}>↻</button>
+              <button type="button" className="primary" onClick={() => { beginCreate(); setDrawer(null); }} disabled={isMock}>＋ 创建</button>
+            </div>
+          </div>
+          {loading && <p className="application-muted">正在读取应用…</p>}
+          {!loading && items.length === 0 && !error && <div className="application-empty-small"><b>◇</b><span>还没有应用</span><small>使用图形化向导或导入容器清单创建应用。</small><button className="link" onClick={() => { beginCreate(); setDrawer(null); }}>创建第一个应用 →</button></div>}
+          <div className="application-list">
+            {items.map(item => <button key={item.id} className={`application-list-item ${selectedId === item.id ? 'active' : ''}`} onClick={() => {
+              setSelectedId(item.id); setView('topology'); setDrawer(null); setToolbarMenuOpen(false);
+            }}>
+              <span className="application-symbol">▦</span><span className="application-list-copy"><strong>{item.displayName}</strong><small>{item.clusterName} · {item.namespace}</small><small>版本 v{item.currentVersion} · {item.templateId}</small></span><AppState value={item.state} />
+            </button>)}
+          </div>
+          <div className="application-list-footer"><span className="application-live-dot" />已接入的应用清单</div>
+        </> : detail && <>
+          <div className="application-info-title"><span className="application-title-icon">▦</span><div><h3>{detail.application.displayName}</h3><AppState value={detail.application.state} /></div></div>
+          <dl className="application-info-list">
+            <div><dt>目标集群</dt><dd>{detail.application.clusterName}</dd></div>
+            <div><dt>Namespace</dt><dd>{detail.application.namespace}</dd></div>
+            <div><dt>应用模板</dt><dd>{detail.application.templateId}</dd></div>
+            <div><dt>当前版本</dt><dd>v{detail.application.currentVersion}</dd></div>
+          </dl>
+          <div className="application-info-metrics">
+            <div><strong>{deployments.length}</strong><span>Deployments</span></div>
+            <div><strong>{services.length}</strong><span>Services</span></div>
+            <div><strong>{accounts.length}</strong><span>ServiceAccounts</span></div>
+            <div><strong>{versions.filter(item => item.state === 'DEPLOYED').length}</strong><span>已部署版本</span></div>
+          </div>
+          <button type="button" className="secondary application-info-history" onClick={() => { setView('versions'); setDrawer(null); }}>查看版本历史 · {versions.length} →</button>
+        </>}
+      </aside>
+    </div>}
     {wizard && <div className="modal-backdrop"><div className="modal application-wizard" role="dialog" aria-modal="true" aria-labelledby="application-create-title">
       <div className="application-wizard-header"><div><span className="eyebrow">APPLICATION · CREATE WIZARD</span><h2 id="application-create-title">创建 Kubernetes 应用</h2></div><button className="icon-button" aria-label="关闭" onClick={() => { if (!busy) setWizard(false); }}>×</button></div>
       <div className="application-wizard-steps"><span className={wizardStep === 1 ? 'active' : ''}><i>1</i>配置来源</span><b /><span className={wizardStep === 2 ? 'active' : ''}><i>2</i>预览并确认</span></div>
@@ -773,6 +837,9 @@ function ApplicationNetworkTopologyCanvas({
   const [yamlSource, setYamlSource] = useState('');
   const [runtime, setRuntime] = useState<KubernetesApplicationNetworkRuntime | null>(null);
   const [runtimeBusy, setRuntimeBusy] = useState('');
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [nodeMenuOpen, setNodeMenuOpen] = useState(false);
+  const canvasRef = useRef<HTMLDivElement>(null);
   const hasFittedInitialViewport = useRef(false);
 
   const refreshRuntime = useCallback(async () => {
@@ -998,10 +1065,41 @@ function ApplicationNetworkTopologyCanvas({
 
   useEffect(() => {
     if (loading || !nodes.length || hasFittedInitialViewport.current) return;
+    const adjacency = new Map(nodes.map(node => [node.id, new Set<string>()]));
+    for (const edge of edges) {
+      adjacency.get(edge.source)?.add(edge.target);
+      adjacency.get(edge.target)?.add(edge.source);
+    }
+    const visited = new Set<string>();
+    const components: string[][] = [];
+    for (const node of nodes) {
+      if (visited.has(node.id)) continue;
+      const component: string[] = [];
+      const queue = [node.id];
+      visited.add(node.id);
+      for (let index = 0; index < queue.length; index++) {
+        const current = queue[index];
+        component.push(current);
+        for (const neighbor of adjacency.get(current) ?? []) {
+          if (visited.has(neighbor)) continue;
+          visited.add(neighbor);
+          queue.push(neighbor);
+        }
+      }
+      components.push(component);
+    }
+    const hasDeployment = (component: string[]) => component.some(id => {
+      const node = nodes.find(item => item.id === id);
+      return node?.type === 'application' && node.data.resource.kind === 'Deployment';
+    });
+    components.sort((left, right) => Number(hasDeployment(right)) - Number(hasDeployment(left))
+      || right.length - left.length);
+    const focusIds = components[0] ?? nodes.map(node => node.id);
     let secondFrame = 0;
     const firstFrame = requestAnimationFrame(() => {
       secondFrame = requestAnimationFrame(() => {
-        void fitView({ padding: 0.14, duration: 0 });
+        void fitView({ nodes: focusIds.map(id => ({ id })), padding: 0.22,
+          minZoom: 0.72, maxZoom: 1.05, duration: 0 });
         hasFittedInitialViewport.current = true;
       });
     });
@@ -1009,7 +1107,15 @@ function ApplicationNetworkTopologyCanvas({
       cancelAnimationFrame(firstFrame);
       if (secondFrame) cancelAnimationFrame(secondFrame);
     };
-  }, [loading, nodes.length, fitView]);
+  }, [loading, nodes.length, edges.length, fitView]);
+
+  function canvasCenter() {
+    const bounds = canvasRef.current?.getBoundingClientRect();
+    return screenToFlowPosition({
+      x: bounds ? bounds.left + bounds.width / 2 : window.innerWidth / 2,
+      y: bounds ? bounds.top + bounds.height / 2 : window.innerHeight / 2,
+    });
+  }
 
   const onFlowNodesChange = (changes: Parameters<typeof updateNodes>[0]) => {
     updateNodes(changes);
@@ -1115,9 +1221,7 @@ function ApplicationNetworkTopologyCanvas({
     const prefix = nodePresets[kind].name;
     let index = 1;
     while (used.has(`${prefix} ${index}`)) index++;
-    const point = menu?.point ?? screenToFlowPosition({
-      x: window.innerWidth / 2, y: window.innerHeight / 2,
-    });
+    const point = menu?.point ?? canvasCenter();
     const model = createTopologyNode(kind, point);
     model.name = `${prefix} ${index}`;
     setDraft(current => ({ ...current, nodes: [...current.nodes, model] }));
@@ -1133,9 +1237,7 @@ function ApplicationNetworkTopologyCanvas({
     let suffix = 1;
     while (existingNames.has(`${prefix}-${suffix}`)) suffix++;
     const name = `${prefix}-${suffix}`;
-    const point = menu?.point ?? screenToFlowPosition({
-      x: window.innerWidth / 2, y: window.innerHeight / 2,
-    });
+    const point = menu?.point ?? canvasCenter();
     const deployment = visibleResources.find(resource => resource.kind === 'Deployment');
     onAdditionChange({
       id: `pending:${kind}/${name}`, kind, name,
@@ -1240,27 +1342,7 @@ function ApplicationNetworkTopologyCanvas({
   }
 
   return <section className="application-network-card">
-    <div className="application-section-heading"><div><span className="eyebrow">APPLICATION TOPOLOGY SETTINGS</span><h3>应用拓扑设置</h3><p>在同一张图中配置 Deployment、Service、ServiceAccount 与虚拟网络设备；拖动空白处右键添加节点，右键卡片编辑资源或 YAML。</p></div>
-      <button className="primary" disabled={!dirty || saving || busy || loading || isMock} onClick={() => void saveTopology()}>{saving ? '保存中…' : `保存应用拓扑${dirty ? ' *' : ''}`}</button></div>
-    {hasDraft && currentDraft && <div className="application-draft-banner"><span>◈</span><div><strong>v{currentDraft.version} 有待确认差异</strong><small>拓扑资源已锁定编辑；检查 YAML diff 并显式确认后才会部署。</small></div><button className="link" onClick={onShowVersions}>查看 diff →</button></div>}
-    <div className="application-network-note" role="note">运行时仅在显式 Apply 后接入真实流量：单个已映射 Ready 的 K3s Node、Multus bridge 次级网卡、隔离 netns Helper、宿主路由过滤和 Service EndpointSlice 同步。集群需预装 Multus 并授予所需 RBAC；当前单节点路径不启用 VXLAN，跨节点 VNI/underlay 仍需后续 Provider。</div>
-    <div className="application-network-runtime" aria-label="应用虚拟网络运行时">
-      <div className="application-network-runtime-status">
-        <strong>{runtime ? `运行时：${runtime.state}` : '运行时：未接入'}</strong>
-        <span>{runtime?.detail ?? '保存拓扑不会修改集群；Apply、Verify 和 Compensate 均需显式操作。'}</span>
-      </div>
-      <div className="application-network-runtime-actions">
-        {(!runtime || runtime.state === 'COMPENSATED') && <button className="primary" disabled={saving || busy || loading || dirty || runtimeBusy !== '' || isMock}
-          onClick={() => void runRuntimeAction('apply')}>{runtimeBusy === 'apply' ? '提交中…' : 'Apply 真实流量'}</button>}
-        {runtime && ['APPLIED', 'VERIFY_FAILED'].includes(runtime.state) && <button className="secondary" disabled={runtimeBusy !== '' || busy || isMock}
-          onClick={() => void runRuntimeAction('verify')}>{runtimeBusy === 'verify' ? '验证中…' : 'Verify'}</button>}
-        {runtime && ['APPLIED', 'VERIFY_FAILED', 'PARTIAL', 'FAILED'].includes(runtime.state) && <button className="danger" disabled={runtimeBusy !== '' || busy || isMock}
-          onClick={() => void runRuntimeAction('compensate')}>{runtimeBusy === 'compensate' ? '补偿中…' : 'Compensate 恢复'}</button>}
-        <button className="secondary" disabled={runtimeBusy !== ''} onClick={() => void refreshRuntime()}>刷新状态</button>
-      </div>
-    </div>
-    {loading && <div className="application-muted">正在读取应用网络拓扑…</div>}
-    <div className="application-network-canvas">
+    <div className="application-network-canvas" ref={canvasRef}>
       <TopologyCanvas<ApplicationNetworkFlowNode, Edge>
         nodes={nodes} edges={edges} nodeTypes={applicationNetworkNodeTypes}
         onNodesChange={onFlowNodesChange} onConnect={connect}
@@ -1296,13 +1378,68 @@ function ApplicationNetworkTopologyCanvas({
         nodesDraggable={!saving && !busy} nodesConnectable={!saving && !busy}
         elementsSelectable deleteKeyCode={null} minZoom={0.25} maxZoom={1.8}
         noWheelClassName="nowheel"
-      />
+      >
+        <Background color="#dbe3ee" gap={24} />
+        <Controls position="bottom-left" showFitView={false} showInteractive={false} />
+        <MiniMap position="bottom-right" pannable zoomable maskColor="#dfe7f2a8"
+          nodeColor={node => node.type === 'application-device' ? '#758dad' : '#5f91dc'} />
+      </TopologyCanvas>
+      <div className="application-floating-tool-stack">
+        <div className="application-node-menu-wrap">
+          <button type="button" className="application-canvas-fab primary" aria-label="添加拓扑节点" title="添加节点"
+            aria-haspopup="menu" aria-expanded={nodeMenuOpen} disabled={saving || busy}
+            onClick={() => setNodeMenuOpen(open => !open)}>＋<span>添加节点</span></button>
+          {nodeMenuOpen && <div className="application-node-flyout" role="menu" aria-label="添加拓扑节点">
+            <strong>应用资源</strong>
+            <button type="button" role="menuitem" disabled={hasDraft} onClick={() => { addResource('Deployment'); setNodeMenuOpen(false); }}>添加 Deployment</button>
+            <button type="button" role="menuitem" disabled={hasDraft} onClick={() => { addResource('Service'); setNodeMenuOpen(false); }}>添加 ClusterIP Service</button>
+            <strong>虚拟网络设备</strong>
+            {virtualApplicationKinds.map(kind => <button type="button" role="menuitem" key={kind}
+              onClick={() => { addDevice(kind); setNodeMenuOpen(false); }}>
+              {nodePresets[kind].name}<small>{nodePresets[kind].inputs} 入 / {nodePresets[kind].outputs} 出</small>
+            </button>)}
+          </div>}
+        </div>
+        <button type="button" className="application-canvas-fab" aria-label="拓扑设置与运行时" title="拓扑设置"
+          aria-expanded={settingsOpen} onClick={() => setSettingsOpen(true)}>⚙<span>拓扑设置</span></button>
+      </div>
+      {loading && <div className="application-canvas-status" role="status">正在读取拓扑…</div>}
+      {additions.some(addition => addition.kind === 'Service' && !addition.targetDeployment && !addition.sourceYaml)
+        && <div className="application-canvas-warning" role="status">新增 Service 尚未连接到 Deployment；连接 Service 与 Deployment 后即可生成差异。</div>}
+      {(error || message) && <div className={`application-canvas-notice ${error ? 'error' : ''}`}
+        role={error ? 'alert' : 'status'}>{error || message}</div>}
     </div>
-    {additions.some(addition => addition.kind === 'Service' && !addition.targetDeployment && !addition.sourceYaml)
-      && <div className="alert" role="status">新增 Service 尚未连接到 Deployment；拖动 Service 输出端口到 Deployment 输入端口后即可生成差异。</div>}
-    <div className="application-topology-footnote">Service 与 Deployment 连线用于生成资源 YAML 差异；Deployment 顶部/底部端口用于连接虚拟设备，虚拟设备之间可建立多层转发链路。拓扑与资源变更需分别保存，只有显式确认版本或 Apply 才会修改运行环境。</div>
-    {error && <div className="alert error" role="alert">{error}</div>}
-    {message && <div className="application-network-message" role="status">{message}</div>}
+    {settingsOpen && <div className="application-network-drawer-backdrop" onMouseDown={event => {
+      if (event.target === event.currentTarget) setSettingsOpen(false);
+    }}>
+      <aside className="application-network-drawer" role="dialog" aria-modal="true" aria-labelledby="application-network-drawer-title">
+        <div className="application-drawer-heading"><div><span className="eyebrow">APPLICATION TOPOLOGY SETTINGS</span>
+          <h2 id="application-network-drawer-title">拓扑与运行时</h2></div>
+          <button type="button" className="application-float-button icon-only" aria-label="关闭拓扑设置" onClick={() => setSettingsOpen(false)}>×</button>
+        </div>
+        <p className="application-network-drawer-intro">在画布中编辑 Deployment、Service、ServiceAccount 和虚拟网络设备；右键卡片可编辑资源或源 YAML。</p>
+        <button className="primary application-network-save" disabled={!dirty || saving || busy || loading || isMock}
+          onClick={() => void saveTopology()}>{saving ? '保存中…' : `保存应用拓扑${dirty ? ' *' : ''}`}</button>
+        {hasDraft && currentDraft && <div className="application-draft-banner"><span>◈</span><div><strong>v{currentDraft.version} 有待确认差异</strong><small>拓扑资源已锁定编辑；检查 YAML diff 并显式确认后才会部署。</small></div><button className="link" onClick={() => { setSettingsOpen(false); onShowVersions(); }}>查看 diff →</button></div>}
+        <div className="application-network-note" role="note">运行时仅在显式 Apply 后接入真实流量：单个已映射 Ready 的 K3s Node、Multus bridge 次级网卡、隔离 netns Helper、宿主路由过滤和 Service EndpointSlice 同步。集群需预装 Multus 并授予所需 RBAC；当前单节点路径不启用 VXLAN，跨节点 VNI/underlay 仍需后续 Provider。</div>
+        <div className="application-network-runtime" aria-label="应用虚拟网络运行时">
+          <div className="application-network-runtime-status">
+            <strong>{runtime ? `运行时：${runtime.state}` : '运行时：未接入'}</strong>
+            <span>{runtime?.detail ?? '保存拓扑不会修改集群；Apply、Verify 和 Compensate 均需显式操作。'}</span>
+          </div>
+          <div className="application-network-runtime-actions">
+            {(!runtime || runtime.state === 'COMPENSATED') && <button className="primary" disabled={saving || busy || loading || dirty || runtimeBusy !== '' || isMock}
+              onClick={() => void runRuntimeAction('apply')}>{runtimeBusy === 'apply' ? '提交中…' : 'Apply 真实流量'}</button>}
+            {runtime && ['APPLIED', 'VERIFY_FAILED'].includes(runtime.state) && <button className="secondary" disabled={runtimeBusy !== '' || busy || isMock}
+              onClick={() => void runRuntimeAction('verify')}>{runtimeBusy === 'verify' ? '验证中…' : 'Verify'}</button>}
+            {runtime && ['APPLIED', 'VERIFY_FAILED', 'PARTIAL', 'FAILED'].includes(runtime.state) && <button className="danger" disabled={runtimeBusy !== '' || busy || isMock}
+              onClick={() => void runRuntimeAction('compensate')}>{runtimeBusy === 'compensate' ? '补偿中…' : 'Compensate 恢复'}</button>}
+            <button className="secondary" disabled={runtimeBusy !== ''} onClick={() => void refreshRuntime()}>刷新状态</button>
+          </div>
+        </div>
+        <div className="application-topology-footnote">Service 与 Deployment 连线用于生成资源 YAML 差异；Deployment 顶部/底部端口用于连接虚拟设备，虚拟设备之间可建立多层转发链路。拓扑与资源变更需分别保存，只有显式确认版本或 Apply 才会修改运行环境。</div>
+      </aside>
+    </div>}
     {menu && <TopologyContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}>
       {menu.resourceId ? (() => {
         const resource = visibleResources.find(node => node.id === menu.resourceId);
