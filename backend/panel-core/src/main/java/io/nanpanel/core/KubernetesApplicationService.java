@@ -498,6 +498,7 @@ public class KubernetesApplicationService {
     try (KubernetesClient client = clusters.openClientForOperations(application.clusterId())) {
       Pod pod = ownedPod(client, application, deploymentName, podUid);
       requireContainer(pod, containerName);
+      requireRunningContainer(pod, containerName);
       if (mode == ExecMode.ATTACH) requireAttachableTerminal(pod, containerName);
       return new ExecTarget(applicationId, deploymentName, application.namespace(),
           application.clusterId(), pod.getMetadata().getName(), podUid, containerName);
@@ -529,13 +530,18 @@ public class KubernetesApplicationService {
           "Exec 请求过多，请稍后重试");
     }
     pendingExecs.put(sessionId, new PendingExec(target, tokenHash, actorId, clientIp, mode, expiresAt));
-    store.transaction(connection -> {
-      audit(connection, actorId, "KUBERNETES_APPLICATION_EXEC_REQUESTED",
-          "kubernetes_application", target.applicationId().toString(), "REQUESTED", clientIp,
-          truncate("创建 Deployment Exec " + mode + " 会话 · " + target.deploymentName() + "/" + target.podName()
-              + ":" + target.container(), 1000));
-      return null;
-    });
+    try {
+      store.transaction(connection -> {
+        audit(connection, actorId, "KUBERNETES_APPLICATION_EXEC_REQUESTED",
+            "kubernetes_application", target.applicationId().toString(), "ACCEPTED", clientIp,
+            truncate("创建 Deployment Exec " + mode + " 会话 · " + target.deploymentName() + "/" + target.podName()
+                + ":" + target.container(), 1000));
+        return null;
+      });
+    } catch (RuntimeException failure) {
+      pendingExecs.remove(sessionId);
+      throw failure;
+    }
     return new ExecTicket(sessionId, ticket, expiresAt,
         "/kubernetes/applications/exec-sessions/" + sessionId + "/terminal");
   }
@@ -561,6 +567,7 @@ public class KubernetesApplicationService {
     }
     ExecTarget target = grant.target();
     KubernetesClient client = clusters.openClientForOperations(target.clusterId());
+    ExecWatch watch = null;
     try {
       AppRow application = app(target.applicationId());
       if (!target.namespace().equals(application.namespace())
@@ -573,15 +580,16 @@ public class KubernetesApplicationService {
         throw ownershipConflict("Pod/" + target.podName());
       }
       requireContainer(pod, target.container());
+      requireRunningContainer(pod, target.container());
       if (grant.mode() == ExecMode.ATTACH) requireAttachableTerminal(pod, target.container());
       var operation = client.pods().inNamespace(application.namespace())
           .withName(target.podName()).inContainer(target.container()).redirectingInput()
           .redirectingOutput().withTTY();
-      ExecWatch watch = grant.mode() == ExecMode.ATTACH
+      watch = grant.mode() == ExecMode.ATTACH
           ? operation.attach() : operation.exec("sh", "-i");
       store.transaction(connection -> {
         audit(connection, grant.actorId(), "KUBERNETES_APPLICATION_EXEC_STARTED",
-            "kubernetes_application", target.applicationId().toString(), "STARTED",
+            "kubernetes_application", target.applicationId().toString(), "SUCCEEDED",
             grant.remoteAddress(), grant.mode() + " · " + target.deploymentName() + "/" + target.podName()
                 + ":" + target.container());
         return null;
@@ -591,9 +599,18 @@ public class KubernetesApplicationService {
         | KubernetesClusterRegistryService.ClusterCredentialRejectedException
         | KubernetesClusterRegistryService.ClusterPermissionDeniedException
         | KubernetesClusterRegistryService.ClusterApiUnavailableException failure) {
+      closeExecWatch(watch);
       client.close();
       throw failure;
+    } catch (KubernetesClientException failure) {
+      closeExecWatch(watch);
+      client.close();
+      if (failure.getCode() == 400 || failure.getCode() == 404 || failure.getCode() == 409) {
+        throw execNotRunning();
+      }
+      throw apiFailure(failure);
     } catch (RuntimeException failure) {
+      closeExecWatch(watch);
       client.close();
       throw apiFailure(failure);
     }
@@ -601,9 +618,15 @@ public class KubernetesApplicationService {
 
   public void finishExec(ExecGrant grant, String status) {
     store.transaction(connection -> {
+      String outcome = switch (status) {
+        case "FAILED" -> "FAILED";
+        case "REJECTED_CAPACITY" -> "DENIED";
+        default -> "SUCCEEDED";
+      };
       audit(connection, grant.actorId(), "KUBERNETES_APPLICATION_EXEC_FINISHED",
-          "kubernetes_application", grant.target().applicationId().toString(), status,
-          grant.remoteAddress(), grant.mode() + " · " + grant.target().deploymentName() + "/"
+          "kubernetes_application", grant.target().applicationId().toString(), outcome,
+          grant.remoteAddress(), "Exec " + status + " · " + grant.mode() + " · "
+              + grant.target().deploymentName() + "/"
               + grant.target().podName() + ":" + grant.target().container());
       return null;
     });
@@ -751,6 +774,30 @@ public class KubernetesApplicationService {
         || !Boolean.TRUE.equals(container.getTty())) {
       throw new ApplicationException(409, "KUBERNETES_APPLICATION_EXEC_ATTACH_UNSUPPORTED",
           "reviews 容器未以 stdin 和 TTY 启动，无法附加现有终端；请选择新建终端");
+    }
+  }
+
+  private static void requireRunningContainer(Pod pod, String containerName) {
+    boolean podRunning = pod.getStatus() != null && "Running".equals(pod.getStatus().getPhase());
+    boolean containerRunning = pod.getStatus() != null
+        && pod.getStatus().getContainerStatuses() != null
+        && pod.getStatus().getContainerStatuses().stream().filter(java.util.Objects::nonNull)
+            .anyMatch(status -> containerName.equals(status.getName())
+                && status.getState() != null && status.getState().getRunning() != null);
+    if (!podRunning || !containerRunning) throw execNotRunning();
+  }
+
+  private static ApplicationException execNotRunning() {
+    return new ApplicationException(409, "KUBERNETES_APPLICATION_EXEC_NOT_RUNNING",
+        "所选 Pod 或 reviews 容器尚未运行，暂时无法连接 Exec；请等待容器启动后重试");
+  }
+
+  private static void closeExecWatch(ExecWatch watch) {
+    if (watch == null) return;
+    try {
+      watch.close();
+    } catch (RuntimeException failure) {
+      LOG.debug("Could not close failed Kubernetes application exec watch", failure);
     }
   }
 

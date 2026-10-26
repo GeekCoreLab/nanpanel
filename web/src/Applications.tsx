@@ -623,6 +623,13 @@ function ApplicationDeploymentDetail({ applicationId, applicationName, deploymen
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const currentPod = runtime?.pods.find(pod => pod.uid === podUid);
+  const reviewsContainer = currentPod?.containers.find(container => container.name === 'reviews');
+  const execUnavailableReason = !currentPod ? '请先选择一个 Pod。'
+    : !reviewsContainer ? '所选 Pod 不包含 reviews 容器。'
+      : currentPod.phase !== 'Running' ? `Pod 当前阶段为 ${currentPod.phase}，运行后才能连接 Exec。`
+        : reviewsContainer.state !== 'RUNNING'
+          ? `reviews 容器当前状态为 ${reviewsContainer.state}，运行后才能连接 Exec。`
+          : '';
 
   useEffect(() => { onBackRef.current = onBack; }, [onBack]);
 
@@ -692,7 +699,8 @@ function ApplicationDeploymentDetail({ applicationId, applicationName, deploymen
   }, [applicationId, deploymentName, currentPod?.uid, containerName, tab, refreshToken]);
 
   const startExec = async (mode: KubernetesApplicationExecTicketRequest['mode']) => {
-    if (!currentPod?.containers.some(container => container.name === 'reviews')) return;
+    if (!currentPod || currentPod.phase !== 'Running' || !reviewsContainer
+      || reviewsContainer.state !== 'RUNNING') return;
     setBusy('exec');
     setError('');
     try {
@@ -785,8 +793,8 @@ function ApplicationDeploymentDetail({ applicationId, applicationName, deploymen
           </div>
           {execTicket ? <ApplicationExecConsole ticket={execTicket} onEnded={() => setExecTicket(undefined)} />
             : <div className="application-runtime-exec-options">
-              {!currentPod?.containers.some(container => container.name === 'reviews')
-                ? <p className="application-runtime-empty">所选 Pod 不包含 reviews 容器。</p>
+              {execUnavailableReason
+                ? <p className="application-runtime-empty application-runtime-exec-unavailable">{execUnavailableReason}</p>
                 : <>
                   <button type="button" className="secondary" disabled={busy === 'exec'}
                     onClick={() => void startExec('ATTACH')}>附加到容器现有终端</button>
