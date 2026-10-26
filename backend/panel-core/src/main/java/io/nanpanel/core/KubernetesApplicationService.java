@@ -1339,7 +1339,8 @@ public class KubernetesApplicationService {
               if (ready == null) ready = 0;
               int desired = live.getSpec() == null || live.getSpec().getReplicas() == null
                   ? 1 : live.getSpec().getReplicas();
-              state = ready >= desired ? "READY" : "PROGRESSING";
+              state = deploymentFailed(live) ? "FAILED"
+                  : ready >= desired ? "READY" : "PROGRESSING";
             }
           } catch (ApplicationException conflict) {
             throw conflict;
@@ -1420,6 +1421,17 @@ public class KubernetesApplicationService {
     nodes.sort(Comparator.comparing(TopologyNode::kind).thenComparing(TopologyNode::name));
     edges.sort(Comparator.comparing(TopologyEdge::source).thenComparing(TopologyEdge::target));
     return new Topology(List.copyOf(nodes), List.copyOf(edges));
+  }
+
+  private static boolean deploymentFailed(Deployment deployment) {
+    if (deployment.getStatus() == null || deployment.getStatus().getConditions() == null) return false;
+    return deployment.getStatus().getConditions().stream().filter(java.util.Objects::nonNull)
+        .anyMatch(condition ->
+            ("Progressing".equals(condition.getType())
+                && "False".equalsIgnoreCase(condition.getStatus())
+                && "ProgressDeadlineExceeded".equals(condition.getReason()))
+            || ("ReplicaFailure".equals(condition.getType())
+                && "True".equalsIgnoreCase(condition.getStatus())));
   }
 
   private static boolean matches(Map<String, String> selector, Map<String, String> labels) {

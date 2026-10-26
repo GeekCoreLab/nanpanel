@@ -52,7 +52,7 @@ const creationSources: { id: KubernetesApplicationSource; label: string; hint: s
 ];
 
 const stateLabels: Record<string, string> = {
-  DEPLOYED: '运行中', APPLYING: '部署中', FAILED: '失败', PARTIAL: '部分完成',
+  DEPLOYED: '运行中', APPLYING: '部署中', FAILED: '部署失败', PARTIAL: '部分完成',
   DRAFT: '待确认', READY: '就绪', PROGRESSING: '更新中', MISSING: '资源缺失', PENDING: '待部署',
   UNAVAILABLE: '状态未知', ACTIVE: '已配置', CONFIGURED: '已配置', UNKNOWN: '未知',
 };

@@ -6465,7 +6465,7 @@ components:
             $ref: '#/components/schemas/KubernetesApplicationTopologyServicePort'
         state:
           type: string
-          enum: [READY, PROGRESSING, MISSING, UNAVAILABLE, ACTIVE, CONFIGURED, PENDING, UNKNOWN]
+          enum: [READY, PROGRESSING, MISSING, UNAVAILABLE, ACTIVE, CONFIGURED, PENDING, UNKNOWN, FAILED]
         sourceYaml:
           type: string
           maxLength: 262144
