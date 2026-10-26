@@ -1335,7 +1335,7 @@ public class KubernetesApplicationService {
             if (live == null) state = "MISSING";
             else {
               requireOwned(live, applicationId, expectedUid);
-              ready = live.getStatus() == null ? 0 : live.getStatus().getReadyReplicas();
+              ready = live.getStatus() == null ? null : live.getStatus().getReadyReplicas();
               if (ready == null) ready = 0;
               int desired = live.getSpec() == null || live.getSpec().getReplicas() == null
                   ? 1 : live.getSpec().getReplicas();
