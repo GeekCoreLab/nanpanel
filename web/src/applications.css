@@ -163,7 +163,7 @@ main:has(.applications-page)>footer{display:none}
 .applications-page>.alert{flex:0 0 auto;margin:0 0 9px}
 .application-layout{min-height:0;flex:1;align-items:stretch;overflow:hidden}
 .application-list-panel{position:relative;height:100%;overflow-y:auto;overscroll-behavior:contain}
-.application-content{display:flex;height:100%;min-height:0;flex-direction:column;overflow:hidden}
+.application-content{position:relative;display:flex;height:100%;min-height:0;flex-direction:column;overflow:hidden}
 .application-blank{min-height:0;flex:1}
 .application-detail-heading,.application-metrics,.application-tabs,.application-draft-banner{flex-shrink:0}
 .application-view-content{position:relative;display:flex;min-height:0;flex:1;flex-direction:column;overflow:hidden}
@@ -433,8 +433,8 @@ main:has(.applications-page)>footer{display:none}
 .application-flow-node.deployment{cursor:pointer}
 .application-flow-node.deployment:hover{border-color:#86a9e7;box-shadow:0 5px 18px #315b9820}
 .application-flow-node-footer .application-node-runtime-hint{margin:0;color:#7d8da3;font-size:8px}
-.application-runtime-backdrop{position:absolute;inset:0;z-index:24;display:grid;place-items:center;overflow:hidden;padding:24px;background:#14263a66;backdrop-filter:blur(3px)}
-.application-runtime-detail{display:flex;width:min(1080px,100%);height:min(680px,100%);min-width:0;min-height:0;flex-direction:column;overflow:hidden;border:1px solid #e7edf5;border-radius:12px;background:#fff;box-shadow:0 22px 70px #10243c40;outline:none}
+.application-runtime-backdrop{position:absolute;inset:0;z-index:24;display:grid;place-items:center;overflow:hidden;padding:clamp(18px,2.4vw,36px);background:#14263a66;backdrop-filter:blur(3px)}
+.application-runtime-detail{display:flex;width:min(1480px,100%);height:min(900px,100%);min-width:0;min-height:0;flex-direction:column;overflow:hidden;border:1px solid #e7edf5;border-radius:14px;background:#fff;box-shadow:0 22px 70px #10243c40;outline:none}
 .application-runtime-heading{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:16px 19px;border-bottom:1px solid #e9edf4;background:#fbfcfe}
 .application-runtime-heading .eyebrow{font-size:8px;letter-spacing:1.3px}
 .application-runtime-heading h2{margin:4px 0 0;color:#344b68;font-size:16px;font-weight:600}
@@ -491,3 +491,51 @@ main:has(.applications-page)>footer{display:none}
 .application-runtime-error{margin:10px 16px 0;padding:9px 11px;border:1px solid #f0d3cc;border-radius:6px;background:#fff8f6;color:#b86c5c;font-size:9px;line-height:1.6}
 @media(max-width:850px){.application-runtime-layout{grid-template-columns:180px minmax(0,1fr)}.application-runtime-summary{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:620px){.application-runtime-backdrop{padding:8px}.application-runtime-detail{width:100%;height:100%;border-radius:10px}.application-runtime-heading{align-items:flex-start;flex-direction:column;padding:12px}.application-runtime-heading-actions{width:100%;flex-wrap:wrap}.application-runtime-layout{grid-template-columns:1fr;grid-template-rows:minmax(90px,25%) minmax(0,1fr)}.application-runtime-pods{border-right:0;border-bottom:1px solid #e9edf4}.application-runtime-pod{display:inline-grid;width:calc(50% - 14px);vertical-align:top}.application-runtime-event{grid-template-columns:48px minmax(0,1fr)}.application-runtime-event time{grid-column:2}.application-runtime-tabs{overflow:auto}.application-runtime-tabs button{padding:0 9px;white-space:nowrap}}
+
+/* Readable typography and controls for the full-workspace runtime dialog. */
+.application-runtime-heading{gap:20px;padding:22px 28px}
+.application-runtime-heading .eyebrow{font-size:11px;letter-spacing:1.5px}
+.application-runtime-heading h2{font-size:24px}
+.application-runtime-heading p{gap:10px;font-size:13px}
+.application-runtime-heading .application-state{font-size:12px}
+.application-runtime-heading-actions{gap:10px}
+.application-runtime-heading-actions button{min-height:40px;padding:0 15px;font-size:13px}
+.application-runtime-layout{grid-template-columns:280px minmax(0,1fr)}
+.application-runtime-pods-heading{padding:17px 16px 11px;font-size:14px}
+.application-runtime-pods-heading span{min-width:24px;height:24px;font-size:11px}
+.application-runtime-pod{gap:7px;margin:4px 9px;padding:13px;border-radius:9px}
+.application-runtime-pod strong{font-size:13px}
+.application-runtime-pod span{font-size:12px}
+.application-runtime-pod small{font-size:11px}
+.application-runtime-summary{gap:14px;padding:18px 22px}
+.application-runtime-summary>div,.application-runtime-summary>label{gap:7px}
+.application-runtime-summary small{font-size:12px}
+.application-runtime-summary strong{font-size:14px}
+.application-runtime-summary select{height:38px;padding:0 10px;font-size:13px}
+.application-runtime-tabs{gap:6px;padding:0 18px}
+.application-runtime-tabs button{height:46px;padding:0 16px;font-size:13px}
+.application-runtime-containers,.application-runtime-events,.application-runtime-logs,.application-runtime-exec{padding:20px 22px}
+.application-runtime-content-heading{gap:16px;margin-bottom:16px}
+.application-runtime-content-heading h3{font-size:16px}
+.application-runtime-content-heading p{font-size:12px}
+.application-runtime-content-heading button{min-height:36px;padding:0 12px;font-size:12px}
+.application-runtime-container{gap:13px;padding:15px 16px;border-radius:8px}
+.application-runtime-indicator{width:9px;height:9px;flex-basis:9px}
+.application-runtime-container>div{gap:6px}
+.application-runtime-container strong{font-size:14px}
+.application-runtime-container small{font-size:12px}
+.application-runtime-container>span:last-child{font-size:12px}
+.application-runtime-event{grid-template-columns:70px minmax(0,1fr) auto;gap:14px;padding:15px 3px}
+.application-runtime-event>span{padding:5px 8px;font-size:12px}
+.application-runtime-event strong{font-size:14px}
+.application-runtime-event p{margin:6px 0;font-size:13px}
+.application-runtime-event small,.application-runtime-event time{font-size:11px}
+.application-runtime-log-output{min-height:300px;padding:16px;font-size:12px;line-height:1.7}
+.application-runtime-exec-empty,.application-runtime-empty{padding:30px 16px;font-size:12px;line-height:1.8}
+.application-runtime-exec-empty label{max-width:640px;gap:9px;font-size:14px}
+.application-runtime-exec-empty textarea{padding:11px 13px;font-size:13px}
+.application-runtime-exec-empty p{margin-top:12px;font-size:11px}
+.application-exec-console{height:min(62dvh,640px);min-height:320px;padding:12px}
+.application-runtime-error{margin:12px 20px 0;padding:11px 14px;font-size:12px}
+@media(max-width:850px){.application-runtime-layout{grid-template-columns:230px minmax(0,1fr)}}
+@media(max-width:620px){.application-runtime-heading{padding:14px}.application-runtime-heading h2{font-size:20px}.application-runtime-heading p{font-size:12px}.application-runtime-heading-actions button{min-height:38px;padding:0 11px;font-size:12px}.application-runtime-layout{grid-template-columns:1fr;grid-template-rows:minmax(105px,25%) minmax(0,1fr)}.application-runtime-pods-heading{padding:11px 12px 7px}.application-runtime-pod{gap:5px;margin:2px 7px;padding:9px}.application-runtime-pod strong{font-size:12px}.application-runtime-summary{gap:9px;padding:13px}.application-runtime-summary small{font-size:11px}.application-runtime-summary strong{font-size:12px}.application-runtime-summary select{height:34px;font-size:12px}.application-runtime-tabs{padding:0 10px}.application-runtime-tabs button{height:42px;padding:0 12px;font-size:12px}.application-runtime-containers,.application-runtime-events,.application-runtime-logs,.application-runtime-exec{padding:13px}.application-runtime-content-heading h3{font-size:14px}.application-runtime-content-heading p{font-size:11px}.application-runtime-container{padding:12px}.application-runtime-container strong{font-size:13px}.application-runtime-container small,.application-runtime-container>span:last-child{font-size:11px}.application-runtime-event{grid-template-columns:56px minmax(0,1fr);gap:9px;padding:12px 2px}.application-runtime-event>span{font-size:11px}.application-runtime-event strong{font-size:12px}.application-runtime-event p{font-size:12px}.application-runtime-event small,.application-runtime-event time{font-size:10px}.application-runtime-log-output{min-height:220px;padding:11px;font-size:11px}.application-runtime-exec-empty,.application-runtime-empty{padding:20px 10px;font-size:11px}.application-runtime-exec-empty label{font-size:12px}.application-runtime-exec-empty textarea{font-size:12px}.application-runtime-exec-empty p{font-size:10px}.application-exec-console{height:min(55dvh,520px);min-height:240px;padding:9px}.application-runtime-error{margin:10px 12px 0;font-size:11px}}

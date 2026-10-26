@@ -467,14 +467,6 @@ export default function Applications({ notify }: { notify: (message: string) => 
           </div>
         </div>
         <div className="application-view-content">
-          {runtimeDeployment && <div className="application-runtime-backdrop" onMouseDown={event => {
-            if (event.target === event.currentTarget) closeRuntimeDeployment();
-          }}>
-            <ApplicationDeploymentDetail key={`${detail.application.id}-${runtimeDeployment}`}
-              applicationId={detail.application.id} applicationName={detail.application.displayName}
-              deploymentName={runtimeDeployment} namespace={detail.application.namespace}
-              onBack={closeRuntimeDeployment} />
-          </div>}
           {view === 'versions' && <section className="application-versions-card">
             <div className="application-section-heading"><div><span className="eyebrow">IMMUTABLE MANIFEST HISTORY</span><h3>版本历史</h3><p>草稿不会修改集群；只有状态为“待确认”的版本可提交部署。</p></div></div>
             {!versions.length ? <div className="application-empty-history">暂无版本记录</div> : <div className="application-version-list">{versions.map(version => <VersionCard key={version.version} version={version} busy={busy === `deploy-${version.version}`} onDeploy={() => void deployDraft(version)} />)}</div>}
@@ -504,6 +496,14 @@ export default function Applications({ notify }: { notify: (message: string) => 
             </ReactFlowProvider>
           </div>
         </div>
+        {runtimeDeployment && <div className="application-runtime-backdrop" onMouseDown={event => {
+          if (event.target === event.currentTarget) closeRuntimeDeployment();
+        }}>
+          <ApplicationDeploymentDetail key={`${detail.application.id}-${runtimeDeployment}`}
+            applicationId={detail.application.id} applicationName={detail.application.displayName}
+            deploymentName={runtimeDeployment} namespace={detail.application.namespace}
+            onBack={closeRuntimeDeployment} />
+        </div>}
       </section> : <section className="application-content application-empty-workspace">
         <div className="application-workspace-toolbar">
           <div className="application-toolbar-context">
@@ -808,7 +808,7 @@ function ApplicationExecConsole({ ticket, onEnded }: {
   useEffect(() => {
     if (!element.current) return;
     const terminal = new Terminal({ cursorBlink: true, convertEol: true,
-      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 13,
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: 15,
       theme: { background: '#07111f', foreground: '#dbeafe', cursor: '#83b8ff' } });
     const fit = new FitAddon();
     terminal.loadAddon(fit);
