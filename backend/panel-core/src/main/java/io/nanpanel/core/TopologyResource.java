@@ -66,12 +66,15 @@ public class TopologyResource {
   public record RouterStaticRouteView(String destination, String gateway, String outputPort) {}
   public record RouterConfigurationView(List<RouterInterfaceAddressView> interfaces,
                                         List<RouterStaticRouteView> routes) {}
+  public record LoadBalancerOutputWeightView(String outputPort, int weight) {}
+  public record LoadBalancerConfigurationView(List<LoadBalancerOutputWeightView> outputWeights) {}
   public record NodeView(String id, String kind, String name, Position position,
                          int inputCount, int outputCount, List<PortView> ports,
                          String parentId, String assetId, String clusterId, String ipAddress,
                          String description, String providerId, String switchBackend,
                          FirewallPolicyView firewallPolicy,
-                         RouterConfigurationView routerConfiguration) {}
+                         RouterConfigurationView routerConfiguration,
+                         LoadBalancerConfigurationView loadBalancerConfiguration) {}
   public record LinkView(String id, String sourceNodeId, String sourcePort, String targetNodeId,
                          String targetPort, String layer, String protocol, String status,
                          String state) {}
@@ -254,6 +257,10 @@ public class TopologyResource {
               && !validRouterConfigurationShape(node.get("routerConfiguration"))) {
         throw fail(422, "INVALID_TOPOLOGY", "节点坐标或端口字段无效");
       }
+      if (node.has("loadBalancerConfiguration") && !node.get("loadBalancerConfiguration").isNull()
+          && !validLoadBalancerConfigurationShape(node.get("loadBalancerConfiguration"))) {
+        throw fail(422, "INVALID_TOPOLOGY", "流量分配器出口权重结构无效");
+      }
       for (JsonNode port : node.path("ports")) {
         if (!objectWithKeys(port, Set.of("id", "direction", "layer", "protocols"))
             || !port.path("protocols").isArray() || !port.path("id").isTextual()
@@ -320,13 +327,16 @@ public class TopologyResource {
         }
         return new PortView(port.id(), port.direction(), port.layer(), List.copyOf(port.protocols()));
       }).toList();
-      return new NodeView(node.id(), node.kind(), node.name() == null ? null : node.name().strip(),
+      NodeView normalized = new NodeView(node.id(), node.kind(), node.name() == null ? null : node.name().strip(),
           node.position(), node.inputCount(), node.outputCount(), ports, node.parentId(),
           node.assetId(), node.clusterId(), node.ipAddress() == null || node.ipAddress().isBlank()
               ? null : node.ipAddress().strip(), node.description() == null || node.description().isBlank()
                   ? null : node.description().strip(), node.providerId() == null
                       || node.providerId().isBlank() ? null : node.providerId().strip(),
-          node.switchBackend(), node.firewallPolicy(), node.routerConfiguration());
+          node.switchBackend(), node.firewallPolicy(), node.routerConfiguration(),
+          node.loadBalancerConfiguration());
+      validateLoadBalancerConfiguration(normalized);
+      return normalized;
     }).toList();
     List<LinkInput> links = input.links().stream().map(link -> {
       if (link == null) {
@@ -540,7 +550,8 @@ public class TopologyResource {
   private boolean objectWithNodeKeys(JsonNode value) {
     Set<String> allowed = Set.of("id", "kind", "name", "position", "inputCount",
         "outputCount", "ports", "parentId", "assetId", "clusterId", "ipAddress",
-        "description", "providerId", "switchBackend", "firewallPolicy", "routerConfiguration");
+        "description", "providerId", "switchBackend", "firewallPolicy", "routerConfiguration",
+        "loadBalancerConfiguration");
     Set<String> required = Set.of("id", "kind", "name", "position", "inputCount",
         "outputCount", "ports");
     if (value == null || !value.isObject() || value.size() < required.size()
@@ -557,6 +568,46 @@ public class TopologyResource {
       found.add(name);
     }
     return found.containsAll(required);
+  }
+
+  private boolean validLoadBalancerConfigurationShape(JsonNode configuration) {
+    if (!objectWithKeys(configuration, Set.of("outputWeights"))
+        || !configuration.path("outputWeights").isArray()
+        || configuration.path("outputWeights").size() < 2
+        || configuration.path("outputWeights").size() > 16) {
+      return false;
+    }
+    for (JsonNode weight : configuration.path("outputWeights")) {
+      if (!objectWithKeys(weight, Set.of("outputPort", "weight"))
+          || !weight.path("outputPort").isTextual()
+          || !weight.path("weight").isIntegralNumber()
+          || weight.path("weight").intValue() < 0 || weight.path("weight").intValue() > 100) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private void validateLoadBalancerConfiguration(NodeView node) {
+    LoadBalancerConfigurationView configuration = node.loadBalancerConfiguration();
+    if (configuration == null) return;
+    if (!"LOAD_BALANCER".equals(node.kind()) || configuration.outputWeights() == null) {
+      throw fail(422, "INVALID_TOPOLOGY", "只有流量分配器可以配置出口权重");
+    }
+    Set<String> expectedOutputs = node.ports().stream()
+        .filter(port -> "OUTPUT".equals(port.direction())).map(PortView::id)
+        .collect(java.util.stream.Collectors.toSet());
+    Set<String> configuredOutputs = new HashSet<>();
+    for (LoadBalancerOutputWeightView weight : configuration.outputWeights()) {
+      if (weight == null || weight.weight() < 0 || weight.weight() > 100
+          || !expectedOutputs.contains(weight.outputPort())
+          || !configuredOutputs.add(weight.outputPort())) {
+        throw fail(422, "INVALID_TOPOLOGY", "流量分配器必须为每个出口配置唯一的 0–100 权重");
+      }
+    }
+    if (!configuredOutputs.equals(expectedOutputs)) {
+      throw fail(422, "INVALID_TOPOLOGY", "流量分配器必须为每个出口配置唯一的 0–100 权重");
+    }
   }
 
   private boolean validFirewallPolicyShape(JsonNode policy) {

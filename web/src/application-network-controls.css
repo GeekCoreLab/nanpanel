@@ -1,0 +1,105 @@
+.application-network-device-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.application-network-device-actions .application-yaml-button {
+  min-height: 25px;
+  padding: 3px 6px;
+  font-size: 9px;
+}
+
+.application-network-port.load-balancer-output {
+  right: 8px;
+  left: 8px;
+  width: auto;
+  max-width: none;
+  justify-content: flex-start;
+  gap: 6px;
+  padding: 0 10px 0 0;
+  text-align: left;
+}
+
+.application-load-balancer-port-label {
+  flex: 0 0 62px;
+  color: #496482;
+  font-size: 9px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.application-load-balancer-controls {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  grid-template-columns: minmax(60px, 1fr) 44px;
+  align-items: center;
+  gap: 6px;
+}
+
+.application-load-balancer-controls input {
+  min-width: 0;
+}
+
+.application-load-balancer-range {
+  width: 100%;
+  height: 22px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  accent-color: #4f83de;
+  box-shadow: none;
+  cursor: ew-resize;
+  touch-action: none;
+}
+
+.application-load-balancer-range:focus {
+  box-shadow: none;
+}
+
+.application-load-balancer-number {
+  width: 44px;
+  height: 24px;
+  padding: 2px 4px;
+  border-radius: 5px;
+  font-size: 10px;
+  text-align: center;
+}
+
+.application-network-device-description + .application-network-device-description {
+  margin-top: 3px;
+  color: #647b99;
+}
+
+.application-device-settings .field textarea {
+  min-height: 110px;
+}
+
+@media (max-width: 620px) {
+  .application-network-device-actions {
+    gap: 3px;
+  }
+
+  .application-network-device-actions .application-yaml-button {
+    padding: 3px 5px;
+    font-size: 8px;
+  }
+
+  .application-load-balancer-port-label {
+    flex-basis: 53px;
+    font-size: 8px;
+  }
+
+  .application-load-balancer-controls {
+    grid-template-columns: minmax(46px, 1fr) 38px;
+    gap: 4px;
+  }
+
+  .application-load-balancer-number {
+    width: 38px;
+    height: 22px;
+    font-size: 9px;
+  }
+}

@@ -117,7 +117,8 @@ export const nodePresets: Record<TopologyNodeKind, { name: string; inputs: numbe
 };
 export function createTopologyNode(kind: TopologyNodeKind, position: { x: number; y: number }): TopologyNode {
   const preset = nodePresets[kind];
-  return { id: createUuid(), kind, name: preset.name, position, inputCount: preset.inputs, outputCount: preset.outputs, ports: portsFor(kind, preset.inputs, preset.outputs), parentId: null, assetId: null, clusterId: null, ipAddress: null, providerId: null, switchBackend: kind === 'SWITCH' ? 'BRIDGE' : null, firewallPolicy: kind === 'FIREWALL' ? { defaultAction: 'DROP', rules: [] } : null, routerConfiguration: null };
+  const ports = portsFor(kind, preset.inputs, preset.outputs);
+  return { id: createUuid(), kind, name: preset.name, position, inputCount: preset.inputs, outputCount: preset.outputs, ports, parentId: null, assetId: null, clusterId: null, ipAddress: null, providerId: null, switchBackend: kind === 'SWITCH' ? 'BRIDGE' : null, firewallPolicy: kind === 'FIREWALL' ? { defaultAction: 'DROP', rules: [] } : null, routerConfiguration: null, loadBalancerConfiguration: kind === 'LOAD_BALANCER' ? { outputWeights: ports.filter(port => port.direction === 'OUTPUT').map(port => ({ outputPort: port.id, weight: 100 })) } : null };
 }
 export function initialTopology(): TopologyDraftWrite {
   return { nodes: [createTopologyNode('GATEWAY', { x: 0, y: 100 }), createTopologyNode('HOST', { x: 350, y: 180 }), createTopologyNode('SERVICE', { x: 700, y: 100 })], links: [] };
@@ -134,6 +135,18 @@ export function validNodeShape(node: TopologyNode): boolean {
   const firstProtocols = firstPort ? [...firstPort.protocols].sort().join(',') : '';
   const uniformPortCapability = !!firstPort && node.ports.every(port => port.layer === firstPort.layer
     && [...port.protocols].sort().join(',') === firstProtocols);
+  const outputPorts = node.ports.filter(port => port.direction === 'OUTPUT').map(port => port.id);
+  const loadBalancerConfiguration = node.loadBalancerConfiguration;
+  const validLoadBalancerConfiguration = loadBalancerConfiguration == null
+    ? true
+    : node.kind === 'LOAD_BALANCER'
+      && Array.isArray(loadBalancerConfiguration.outputWeights)
+      && loadBalancerConfiguration.outputWeights.length === outputPorts.length
+      && outputPorts.every(outputPort => loadBalancerConfiguration.outputWeights.some(weight =>
+        weight.outputPort === outputPort && Number.isInteger(weight.weight)
+          && weight.weight >= 0 && weight.weight <= 100))
+      && new Set(loadBalancerConfiguration.outputWeights.map(weight => weight.outputPort)).size === outputPorts.length;
+  if (!validLoadBalancerConfiguration) return false;
   switch (node.kind) {
     case 'GATEWAY': return i === 0 && o >= 1;
     case 'SERVICE': return i >= 1 && o === 0;
@@ -210,7 +223,7 @@ export function draftError(value: unknown): string | null {
   const ids = new Set<string>();
   for (const n of value.nodes) {
     const requiredNodeKeys = ['id', 'kind', 'name', 'position', 'inputCount', 'outputCount', 'ports'];
-    const optionalNodeKeys = ['parentId', 'assetId', 'clusterId', 'ipAddress', 'description', 'providerId', 'switchBackend', 'firewallPolicy', 'routerConfiguration'];
+    const optionalNodeKeys = ['parentId', 'assetId', 'clusterId', 'ipAddress', 'description', 'providerId', 'switchBackend', 'firewallPolicy', 'routerConfiguration', 'loadBalancerConfiguration'];
     if (!record(n) || requiredNodeKeys.some(key => !Object.hasOwn(n, key)) || Object.keys(n).some(key => !requiredNodeKeys.includes(key) && !optionalNodeKeys.includes(key)) || typeof n.id !== 'string' || !uuid.test(n.id) || ids.has(n.id)) return '节点 ID 必须为唯一 UUID，且不能包含未定义字段';
     ids.add(n.id);
     if (typeof n.name !== 'string' || !n.name.trim() || [...n.name].length > 100 || !record(n.position) || !keysAre(n.position, ['x', 'y']) || ![n.position.x, n.position.y].every(v => typeof v === 'number' && Number.isFinite(v) && Math.abs(v) <= 10000)) return '节点名称或坐标无效';
@@ -277,6 +290,16 @@ export function draftError(value: unknown): string | null {
           if (!subnet || gateway === null || ((gateway & maskForPrefix(subnet.prefix)) >>> 0) !== subnet.network) return 'Router 下一跳必须位于所选接口的直连网段';
         }
       }
+    }
+    if (n.loadBalancerConfiguration !== undefined && n.loadBalancerConfiguration !== null) {
+      if (!record(n.loadBalancerConfiguration) || !keysAre(n.loadBalancerConfiguration, ['outputWeights'])
+          || !Array.isArray(n.loadBalancerConfiguration.outputWeights)
+          || n.loadBalancerConfiguration.outputWeights.some(weight => !record(weight)
+            || !keysAre(weight, ['outputPort', 'weight']) || typeof weight.outputPort !== 'string'
+            || !Number.isInteger(weight.weight) || Number(weight.weight) < 0 || Number(weight.weight) > 100)) {
+        return '流量分配器出口权重必须是 0–100 的整数';
+      }
+      if (n.kind !== 'LOAD_BALANCER') return '只有流量分配器可以配置出口权重';
     }
     if (parentId === n.id) return '文件夹不能包含自身';
   }

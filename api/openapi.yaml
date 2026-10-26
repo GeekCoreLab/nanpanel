@@ -5630,6 +5630,24 @@ components:
           type: array
           maxItems: 64
           items: {$ref: '#/components/schemas/RouterStaticRoute'}
+    LoadBalancerOutputWeight:
+      type: object
+      additionalProperties: false
+      required: [outputPort, weight]
+      properties:
+        outputPort: {type: string, pattern: '^out-([1-9]|1[0-6])$'}
+        weight: {type: integer, minimum: 0, maximum: 100}
+    LoadBalancerConfiguration:
+      type: object
+      additionalProperties: false
+      required: [outputWeights]
+      description: Desired relative output weights for a LOAD_BALANCER. The normalized percentage is weight divided by the sum of all output weights; this records intent and does not claim provider execution.
+      properties:
+        outputWeights:
+          type: array
+          minItems: 2
+          maxItems: 16
+          items: {$ref: '#/components/schemas/LoadBalancerOutputWeight'}
     TopologyNode:
       type: object
       additionalProperties: false
@@ -5705,6 +5723,11 @@ components:
           - $ref: '#/components/schemas/RouterConfiguration'
           - type: 'null'
           description: Desired IPv4 interface addresses and static routes for an isolated Linux netns Router.
+        loadBalancerConfiguration:
+          oneOf:
+          - $ref: '#/components/schemas/LoadBalancerConfiguration'
+          - type: 'null'
+          description: Desired relative weights for LOAD_BALANCER output ports.
     TopologyLink:
       type: object
       additionalProperties: false

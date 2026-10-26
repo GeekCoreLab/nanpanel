@@ -39,6 +39,7 @@ import type {
 import { TopologyCanvas } from './topology/TopologyCanvas';
 import { TopologyContextMenu, TopologyContextMenuHeading, TopologyContextMenuItem } from './topology/TopologyContextMenu';
 import './applications.css';
+import './application-network-controls.css';
 
 type View = 'topology' | 'versions';
 type ApplicationDrawer = 'applications' | 'info' | null;
@@ -919,7 +920,9 @@ function ApplicationFlowNodeCard({ data, selected }: NodeProps<ApplicationFlowNo
 type ApplicationDeviceFlowNodeData = {
   model: TopologyNode;
   disabled: boolean;
+  onEdit: (node: TopologyNode) => void;
   onEditYaml: (node: TopologyNode) => void;
+  onLoadBalancerWeightChange: (nodeId: string, outputPort: string, weight: number) => void;
 };
 type ApplicationDeviceFlowNode = Node<ApplicationDeviceFlowNodeData, 'application-device'>;
 type ApplicationNetworkFlowNode = ApplicationFlowNode | ApplicationDeviceFlowNode;
@@ -939,7 +942,7 @@ const virtualApplicationKinds = (Object.keys(nodePresets) as TopologyNodeKind[])
 const topologyYamlFields = [
   'kind', 'name', 'description', 'position', 'inputCount', 'outputCount', 'ports',
   'parentId', 'assetId', 'clusterId', 'ipAddress', 'providerId', 'switchBackend',
-  'firewallPolicy', 'routerConfiguration',
+  'firewallPolicy', 'routerConfiguration', 'loadBalancerConfiguration',
 ];
 
 function topologyNodeYaml(node: TopologyNode) {
@@ -955,7 +958,18 @@ function topologyNodeYaml(node: TopologyNode) {
 
 function ApplicationDeviceCard({ data, selected }: NodeProps<ApplicationDeviceFlowNode>) {
   const { model, disabled } = data;
-  const portHeight = Math.max(model.inputCount, model.outputCount, 1) * 25 + 12;
+  const [weightInputs, setWeightInputs] = useState<Record<string, string>>({});
+  const loadBalancer = model.kind === 'LOAD_BALANCER';
+  const outputRowHeight = loadBalancer ? 46 : 25;
+  const portHeight = Math.max(model.inputCount * 25, model.outputCount * outputRowHeight, 1) + 12;
+  const outputWeight = (portId: string) => model.loadBalancerConfiguration?.outputWeights
+    ?.find(item => item.outputPort === portId)?.weight ?? 100;
+  const actualShare = (portId: string) => {
+    const total = model.ports.filter(port => port.direction === 'OUTPUT')
+      .reduce((sum, port) => sum + outputWeight(port.id), 0);
+    return total === 0 ? 0 : outputWeight(portId) / total * 100;
+  };
+  const percentage = (value: number) => `${Number.isInteger(value) ? value : value.toFixed(1)}%`;
   return <article className={`application-network-device ${selected ? 'selected' : ''}`}>
     <div className="application-network-device-heading"><span>{model.kind}</span><small>{nodePresets[model.kind].description}</small></div>
     <strong title={model.name}>{model.name}</strong>
@@ -964,15 +978,48 @@ function ApplicationDeviceCard({ data, selected }: NodeProps<ApplicationDeviceFl
         <Handle id={port.id} type="target" position={Position.Left} isConnectable={!disabled} />
         <span>{port.id} · {port.layer}/{port.protocols.join(', ')}</span>
       </div>)}
-      {model.ports.filter(port => port.direction === 'OUTPUT').map((port, index) => <div key={port.id} className="application-network-port output" style={{ top: 8 + index * 25 }}>
-        <span>{port.id} · {port.layer}/{port.protocols.join(', ')}</span>
+      {model.ports.filter(port => port.direction === 'OUTPUT').map((port, index) => <div key={port.id}
+        className={`application-network-port output ${loadBalancer ? 'load-balancer-output' : ''}`}
+        style={{ top: 8 + index * outputRowHeight }}>
+        {loadBalancer ? <>
+          <span className="application-load-balancer-port-label">{port.id} · {percentage(actualShare(port.id))}</span>
+          <div className="application-load-balancer-controls nodrag nopan nowheel"
+            onPointerDown={event => event.stopPropagation()}
+            onMouseDown={event => event.stopPropagation()}
+            onTouchStart={event => event.stopPropagation()}
+            onClick={event => event.stopPropagation()}>
+            <input className="application-load-balancer-range nodrag" aria-label={`${port.id}分配权重滑轨`}
+              type="range" min={0} max={100} step={1} value={outputWeight(port.id)} disabled={disabled}
+              onChange={event => {
+                setWeightInputs(current => { const next = { ...current }; delete next[port.id]; return next; });
+                data.onLoadBalancerWeightChange(model.id, port.id, Number(event.target.value));
+              }} />
+            <input className="application-load-balancer-number nodrag" aria-label={`${port.id}分配权重数值`}
+              type="number" min={0} max={100} step={1} value={weightInputs[port.id] ?? String(outputWeight(port.id))} disabled={disabled}
+              onChange={event => {
+                const raw = event.target.value;
+                setWeightInputs(current => ({ ...current, [port.id]: raw }));
+                const value = Number(raw);
+                if (raw !== '' && Number.isInteger(value) && value >= 0 && value <= 100) {
+                  data.onLoadBalancerWeightChange(model.id, port.id, value);
+                }
+              }}
+              onBlur={() => setWeightInputs(current => { const next = { ...current }; delete next[port.id]; return next; })} />
+          </div>
+        </> : <span>{port.id} · {port.layer}/{port.protocols.join(', ')}</span>}
         <Handle id={port.id} type="source" position={Position.Right} isConnectable={!disabled} />
       </div>)}
     </div>
     {model.description && <p className="application-network-device-description">{model.description}</p>}
+    {loadBalancer && <p className="application-network-device-description">出口实际分配按权重归一化；全部权重为 0 时不分配流量。</p>}
     <div className="application-network-device-footer"><small>{model.providerId ? `Provider ${model.providerId}` : '期望虚拟设备'}</small>
-      <button type="button" className="application-yaml-button nodrag" disabled={disabled}
-        onClick={event => { event.stopPropagation(); data.onEditYaml(model); }}>编辑源 YAML</button></div>
+      <div className="application-network-device-actions">
+        <button type="button" className="application-yaml-button nodrag" disabled={disabled}
+          onClick={event => { event.stopPropagation(); data.onEdit(model); }}>编辑设备</button>
+        <button type="button" className="application-yaml-button nodrag" disabled={disabled}
+          onClick={event => { event.stopPropagation(); data.onEditYaml(model); }}>编辑源 YAML</button>
+      </div>
+    </div>
   </article>;
 }
 
@@ -1113,6 +1160,7 @@ function ApplicationNetworkTopologyCanvas({
   const [message, setMessage] = useState('');
   const [menu, setMenu] = useState<NetworkMenu>();
   const [editingResource, setEditingResource] = useState<KubernetesApplicationTopologyNode>();
+  const [editingDevice, setEditingDevice] = useState<TopologyNode>();
   const [yamlNode, setYamlNode] = useState<TopologyNode>();
   const [resourceYamlNode, setResourceYamlNode] = useState<KubernetesApplicationTopologyNode>();
   const [yamlError, setYamlError] = useState('');
@@ -1262,6 +1310,21 @@ function ApplicationNetworkTopologyCanvas({
   const edges = useMemo(() => [...selectorEdges, ...deviceEdges, ...attachmentEdges],
     [selectorEdges, deviceEdges, attachmentEdges]);
 
+  const updateLoadBalancerWeight = useCallback((nodeId: string, outputPort: string, weight: number) => {
+    if (saving || busy || !Number.isInteger(weight) || weight < 0 || weight > 100) return;
+    setDraft(current => ({ ...current, nodes: current.nodes.map(node => {
+      if (node.id !== nodeId || node.kind !== 'LOAD_BALANCER') return node;
+      const outputWeights = node.ports.filter(port => port.direction === 'OUTPUT').map(port => ({
+        outputPort: port.id,
+        weight: port.id === outputPort
+          ? weight
+          : node.loadBalancerConfiguration?.outputWeights.find(item => item.outputPort === port.id)?.weight ?? 100,
+      }));
+      return { ...node, loadBalancerConfiguration: { outputWeights } };
+    }) }));
+    setDirty(true);
+  }, [saving, busy]);
+
   useEffect(() => {
     if (loading) return;
     const applicationNodes: ApplicationFlowNode[] = visibleResources.map(resource => ({
@@ -1280,7 +1343,8 @@ function ApplicationNetworkTopologyCanvas({
     }));
     const deviceNodes: ApplicationDeviceFlowNode[] = draft.nodes.map(model => ({
       id: model.id, type: 'application-device', position: model.position,
-      data: { model, disabled: saving || busy, onEditYaml: node => {
+      data: { model, disabled: saving || busy, onEdit: setEditingDevice,
+        onLoadBalancerWeightChange: updateLoadBalancerWeight, onEditYaml: node => {
         setYamlNode(node);
         setYamlSource(topologyNodeYaml(node));
         setYamlError('');
@@ -1294,8 +1358,9 @@ function ApplicationNetworkTopologyCanvas({
       })),
       ...deviceNodes.map(node => ({
         id: node.id, type: node.type, kind: node.data.model.kind, name: node.data.model.name,
-        portCount: Math.max(...(['INPUT', 'OUTPUT'] as const).map(direction =>
-          node.data.model.ports.filter(port => port.direction === direction).length)),
+        portCount: Math.max(node.data.model.ports.filter(port => port.direction === 'INPUT').length,
+          node.data.model.ports.filter(port => port.direction === 'OUTPUT').length
+            * (node.data.model.kind === 'LOAD_BALANCER' ? 2 : 1)),
       })),
     ];
     const layoutPositions = layoutApplicationTopology(layoutNodes, edges);
@@ -1305,7 +1370,8 @@ function ApplicationNetworkTopologyCanvas({
       const occupied = deviceNodes.map(node => ({
         position: previousPositions.get(node.id) ?? node.position,
         height: 162 + Math.max(node.data.model.ports.filter(port => port.direction === 'INPUT').length,
-          node.data.model.ports.filter(port => port.direction === 'OUTPUT').length) * 25,
+          node.data.model.ports.filter(port => port.direction === 'OUTPUT').length
+            * (node.data.model.kind === 'LOAD_BALANCER' ? 2 : 1)) * 25,
       }));
       for (const node of applicationNodes) {
         const preserved = previousPositions.get(node.id);
@@ -1347,7 +1413,7 @@ function ApplicationNetworkTopologyCanvas({
       return [...positionedApplications, ...positionedDevices];
     });
   }, [loading, visibleResources, draft.nodes, yamlSourceChanges, changes, additions, saving, busy, hasDraft,
-    edges, setNodes]);
+    edges, setNodes, updateLoadBalancerWeight]);
 
   useEffect(() => {
     if (loading || !nodes.length || hasFittedInitialViewport.current) return;
@@ -1756,6 +1822,11 @@ function ApplicationNetworkTopologyCanvas({
         <TopologyContextMenuHeading>{draft.nodes.find(node => node.id === menu.nodeId)?.name ?? '虚拟设备'}</TopologyContextMenuHeading>
         <TopologyContextMenuItem onClick={() => {
           const node = draft.nodes.find(item => item.id === menu.nodeId);
+          if (node) setEditingDevice(node);
+          setMenu(undefined);
+        }}>编辑设备设置</TopologyContextMenuItem>
+        <TopologyContextMenuItem onClick={() => {
+          const node = draft.nodes.find(item => item.id === menu.nodeId);
           if (node) { setYamlNode(node); setYamlSource(topologyNodeYaml(node)); setYamlError(''); }
           setMenu(undefined);
         }}>编辑源 YAML</TopologyContextMenuItem>
@@ -1777,6 +1848,14 @@ function ApplicationNetworkTopologyCanvas({
       key={editingResource.id} node={editingResource} changes={changes[editingResource.id] ?? {}}
       disabled={busy || hasDraft} onClose={() => setEditingResource(undefined)}
       onSave={value => { onResourceUpdate(editingResource, value); setEditingResource(undefined); }} />}
+    {editingDevice && <ApplicationVirtualDeviceSettingsDialog node={editingDevice}
+      disabled={saving || busy} onClose={() => setEditingDevice(undefined)}
+      onSave={value => {
+        setDraft(current => ({ ...current, nodes: current.nodes.map(node =>
+          node.id === editingDevice.id ? { ...node, ...value } : node) }));
+        setDirty(true);
+        setEditingDevice(undefined);
+      }} />}
     {yamlNode && <ApplicationVirtualDeviceYamlDialog node={yamlNode} sourceYaml={yamlSource}
       error={yamlError} disabled={saving || busy} onChange={setYamlSource}
       onClose={() => setYamlNode(undefined)} onSave={saveDeviceYaml} />}
@@ -1787,6 +1866,45 @@ function ApplicationNetworkTopologyCanvas({
         setResourceYamlNode(undefined);
       }} />}
   </section>;
+}
+
+function ApplicationVirtualDeviceSettingsDialog({
+  node, disabled, onClose, onSave,
+}: {
+  node: TopologyNode;
+  disabled: boolean;
+  onClose: () => void;
+  onSave: (value: Pick<TopologyNode, 'name' | 'description'>) => void;
+}) {
+  const [name, setName] = useState(node.name);
+  const [description, setDescription] = useState(node.description ?? '');
+  const [error, setError] = useState('');
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!name.trim() || [...name.trim()].length > 100 || [...description].length > 500) {
+      setError('设备名称需为 1–100 个字符，用途说明最多 500 个字符。');
+      return;
+    }
+    onSave({ name: name.trim(), description: description.trim() || null });
+  };
+  return <div className="modal-backdrop"><section className="modal application-node-settings application-device-settings"
+    role="dialog" aria-modal="true" aria-labelledby="application-device-settings-title">
+    <div className="card-title"><div><span className="eyebrow">APPLICATION VIRTUAL DEVICE</span>
+      <h2 id="application-device-settings-title">编辑虚拟设备</h2></div>
+      <button type="button" className="icon-button" aria-label="关闭设备配置" onClick={onClose}>×</button>
+    </div>
+    <p className="application-node-settings-name"><strong>{node.kind}</strong><span>{node.inputCount} 入 / {node.outputCount} 出</span></p>
+    <form onSubmit={submit}>
+      <label className="field"><span>设备名称</span><input autoFocus required maxLength={100} value={name}
+        onChange={event => setName(event.target.value)} /></label>
+      <label className="field"><span>用途说明</span><textarea maxLength={500} value={description}
+        onChange={event => setDescription(event.target.value)} /></label>
+      <div className="alert">端口数量和设备专属配置可通过“编辑源 YAML”修改；这里的设置会保存到当前应用拓扑草稿。</div>
+      {error && <div className="alert error" role="alert">{error}</div>}
+      <div className="form-actions"><button type="button" className="secondary" onClick={onClose}>取消</button>
+        <button type="submit" className="primary" disabled={disabled}>保存到拓扑草稿</button></div>
+    </form>
+  </section></div>;
 }
 
 function ApplicationVirtualDeviceYamlDialog({
