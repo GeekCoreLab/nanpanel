@@ -36,6 +36,8 @@ import type {
   KubernetesApplicationVersionList,
   KubernetesClusterList,
   KubernetesClusterSummary,
+  KubernetesNamespaceResourceInventory,
+  KubernetesNamespaceResource,
   KubernetesTopologyNamespaceSnapshot,
   TopologyDraftWrite,
   TopologyLink,
@@ -72,6 +74,7 @@ const stateLabels: Record<string, string> = {
   DEPLOYED: '运行中', APPLYING: '部署中', FAILED: '部署失败', PARTIAL: '部分完成',
   DRAFT: '待确认', READY: '就绪', PROGRESSING: '更新中', MISSING: '资源缺失', PENDING: '待部署',
   UNAVAILABLE: '状态未知', ACTIVE: '已配置', CONFIGURED: '已配置', UNKNOWN: '未知',
+  RUNNING: '运行中', SUCCEEDED: '成功', BOUND: '已绑定', LOST: '已丢失',
 };
 
 function stateClass(state: string) {
@@ -104,6 +107,130 @@ function AppState({ value }: { value: string }) {
   return <span className={`application-state ${stateClass(value)}`}><i />{stateLabels[value] ?? value}</span>;
 }
 
+const resourceKindLabels: Record<string, string> = {
+  Pod: 'Pod', Service: 'Service', ConfigMap: 'ConfigMap', ServiceAccount: 'ServiceAccount',
+  Endpoints: 'Endpoints', PersistentVolumeClaim: 'PersistentVolumeClaim', ResourceQuota: 'ResourceQuota',
+  LimitRange: 'LimitRange', Role: 'Role', RoleBinding: 'RoleBinding', Deployment: 'Deployment',
+  StatefulSet: 'StatefulSet', DaemonSet: 'DaemonSet', ReplicaSet: 'ReplicaSet', Job: 'Job',
+  CronJob: 'CronJob', HorizontalPodAutoscaler: 'HorizontalPodAutoscaler',
+  PodDisruptionBudget: 'PodDisruptionBudget', Ingress: 'Ingress', NetworkPolicy: 'NetworkPolicy',
+  EndpointSlice: 'EndpointSlice', VirtualService: 'Istio VirtualService',
+  DestinationRule: 'Istio DestinationRule', Gateway: 'Istio Gateway', ServiceEntry: 'Istio ServiceEntry',
+  Sidecar: 'Istio Sidecar', AuthorizationPolicy: 'Istio AuthorizationPolicy',
+  PeerAuthentication: 'Istio PeerAuthentication', RequestAuthentication: 'Istio RequestAuthentication',
+};
+
+function ApplicationResourceInventory({ clusters, initialClusterId }: {
+  clusters: KubernetesClusterSummary[]; initialClusterId: string;
+}) {
+  const [clusterId, setClusterId] = useState(initialClusterId);
+  const [namespaces, setNamespaces] = useState<string[]>([]);
+  const [namespace, setNamespace] = useState('');
+  const [inventory, setInventory] = useState<KubernetesNamespaceResourceInventory>();
+  const [loading, setLoading] = useState(false);
+  const [namespaceLoading, setNamespaceLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [query, setQuery] = useState('');
+  const [refreshKey, setRefreshKey] = useState(0);
+
+  useEffect(() => {
+    if (!clusterId && initialClusterId) setClusterId(initialClusterId);
+  }, [clusterId, initialClusterId]);
+
+  useEffect(() => {
+    if (!clusterId) { setNamespaces([]); setNamespace(''); return; }
+    let current = true;
+    setNamespaceLoading(true);
+    setError('');
+    setInventory(undefined);
+    setNamespaces([]);
+    setNamespace('');
+    void api<KubernetesTopologyNamespaceSnapshot>(
+      `/kubernetes/clusters/${encodeURIComponent(clusterId)}/topology/namespaces`, 'GET', undefined, {}, true,
+    ).then(result => {
+      if (!current) return;
+      const names = result.data.namespaces.map(item => item.name);
+      setNamespaces(names);
+      setNamespace(names.includes('default') ? 'default' : names[0] ?? '');
+    }).catch(cause => {
+      if (current) setError((cause as Error).message);
+    }).finally(() => {
+      if (current) setNamespaceLoading(false);
+    });
+    return () => { current = false; };
+  }, [clusterId, refreshKey]);
+
+  useEffect(() => {
+    if (!clusterId || !namespace) { setInventory(undefined); return; }
+    let current = true;
+    setLoading(true);
+    setError('');
+    void api<KubernetesNamespaceResourceInventory>(
+      `/kubernetes/clusters/${encodeURIComponent(clusterId)}/namespaces/${encodeURIComponent(namespace)}/resources`,
+      'GET', undefined, {}, true,
+    ).then(result => {
+      if (current) setInventory(result.data);
+    }).catch(cause => {
+      if (current) { setInventory(undefined); setError((cause as Error).message); }
+    }).finally(() => {
+      if (current) setLoading(false);
+    });
+    return () => { current = false; };
+  }, [clusterId, namespace, refreshKey]);
+
+  const filtered = useMemo(() => {
+    const search = query.trim().toLocaleLowerCase();
+    if (!search) return inventory?.items ?? [];
+    return (inventory?.items ?? []).filter(item => [item.kind, item.apiVersion, item.name, item.status,
+      item.summary, ...Object.entries(item.labels).flat()].join(' ').toLocaleLowerCase().includes(search));
+  }, [inventory, query]);
+  const groups = useMemo(() => {
+  const grouped = new Map<string, KubernetesNamespaceResource[]>();
+    for (const item of filtered) grouped.set(item.kind, [...(grouped.get(item.kind) ?? []), item]);
+    return [...grouped.entries()];
+  }, [filtered]);
+  const selectedCluster = clusters.find(cluster => cluster.id === clusterId);
+
+  return <div className="application-resource-inventory">
+    <div className="application-resource-toolbar">
+      <label className="field"><span>集群</span><select value={clusterId} onChange={event => setClusterId(event.target.value)}>
+        {clusters.map(cluster => <option key={cluster.id} value={cluster.id}>{cluster.name} · {cluster.kind}</option>)}
+      </select></label>
+      <label className="field"><span>Namespace</span><select value={namespace} disabled={namespaceLoading || !namespaces.length}
+        onChange={event => setNamespace(event.target.value)}>
+        {namespaceLoading && <option value="">读取中…</option>}
+        {!namespaceLoading && !namespaces.length && <option value="">无可用 Namespace</option>}
+        {namespaces.map(value => <option key={value} value={value}>{value}</option>)}
+      </select></label>
+      <label className="application-resource-search"><span>筛选资源</span><input type="search" value={query}
+        onChange={event => setQuery(event.target.value)} placeholder="名称、类型、状态或摘要" /></label>
+      <button type="button" className="secondary application-resource-refresh" disabled={loading || namespaceLoading || !namespace}
+        onClick={() => setRefreshKey(value => value + 1)} aria-label="刷新资源清单" title="刷新资源清单">↻ 刷新</button>
+    </div>
+    <p className="application-resource-note">只读浏览 {selectedCluster?.name ?? '集群'} / {namespace || 'Namespace'} 中 NaNPanel 及外部创建的 Kubernetes 与 Istio 资源。ConfigMap 仅显示键名；Secret 不读取、不展示，清单不会接管或修改资源。</p>
+    {error && <div className="alert error application-resource-error" role="alert">{error}</div>}
+    <div className="application-resource-summary">
+      <div><strong>{inventory?.items.length ?? (loading ? '…' : 0)}</strong><span>资源总数</span></div>
+      <div><strong>{groups.length}</strong><span>资源类型</span></div>
+      <small>{inventory ? `最近读取 ${new Date(inventory.observedAt).toLocaleString()}` : '按所选 Namespace 实时读取'}</small>
+    </div>
+    <div className="application-resource-list">
+      {loading && <div className="application-empty-history">正在读取 Namespace 资源…</div>}
+      {!loading && !error && inventory && filtered.length === 0 && <div className="application-empty-history">{inventory.items.length ? '没有符合筛选条件的资源' : '该 Namespace 暂无受支持的资源'}</div>}
+      {!loading && groups.map(([kind, resources]) => <section className="application-resource-group" key={kind}>
+        <div className="application-resource-group-heading"><h3>{resourceKindLabels[kind] ?? kind}</h3><span>{resources.length}</span></div>
+        <div className="application-resource-cards">{resources.map(item => <article className="application-resource-card" key={`${item.apiVersion}/${item.kind}/${item.name}`}>
+          <div className="application-resource-card-heading"><strong title={item.name}>{item.name}</strong><AppState value={item.status} /></div>
+          <small className="application-resource-api-version">{item.apiVersion}</small>
+          <p>{item.summary || '无摘要'}</p>
+          {Object.keys(item.labels).length > 0 && <div className="application-resource-labels">{Object.entries(item.labels).map(([key, value]) => <span key={key}>{key}={value}</span>)}</div>}
+          {item.createdAt && <small className="application-resource-created">创建于 {new Date(item.createdAt).toLocaleString()}</small>}
+        </article>)}</div>
+      </section>)}
+    </div>
+  </div>;
+}
+
 export default function Applications({ notify }: { notify: (message: string) => void }) {
   const [items, setItems] = useState<KubernetesApplication[]>([]);
   const [selectedId, setSelectedId] = useState('');
@@ -127,6 +254,7 @@ export default function Applications({ notify }: { notify: (message: string) => 
   const [yamlSourceChanges, setYamlSourceChanges] = useState<Record<string, string>>({});
   const [additions, setAdditions] = useState<PendingApplicationNode[]>([]);
   const [view, setView] = useState<View>('topology');
+  const [resourceView, setResourceView] = useState(true);
   const [runtimeDeployment, setRuntimeDeployment] = useState('');
   const closeRuntimeDeployment = useCallback(() => setRuntimeDeployment(''), []);
   const [drawer, setDrawer] = useState<ApplicationDrawer>(null);
@@ -436,7 +564,7 @@ export default function Applications({ notify }: { notify: (message: string) => 
     {error && <div className="application-page-alert alert error" role="alert">{error}</div>}
     {isMock && <div className="application-page-alert alert" role="status">Mock 演示环境没有真实集群应用接口。此页面在 Live API 模式下连接已登记集群。</div>}
     <div className="application-layout">
-      {selectedApp && detail ? <section className="application-content">
+      {selectedApp && detail && !resourceView ? <section className="application-content">
         <div className="application-workspace-toolbar">
           <div className="application-toolbar-context">
             <button type="button" className="application-float-button" aria-label="打开应用列表" title="应用列表"
@@ -449,6 +577,8 @@ export default function Applications({ notify }: { notify: (message: string) => 
               aria-expanded={drawer === 'info'} onClick={() => setDrawer('info')}>ⓘ</button>
           </div>
           <div className="application-toolbar-actions">
+            <button type="button" className="application-float-button" onClick={() => setResourceView(true)}
+              aria-label="浏览集群全部资源" title="浏览集群全部资源">▦<span>集群资源</span></button>
             {!runtimeDeployment && <button type="button" className={`application-float-button ${view === 'versions' ? 'active' : ''}`}
               aria-label={view === 'topology' ? '打开版本历史' : '返回拓扑设置'}
               onClick={() => { setView(current => current === 'topology' ? 'versions' : 'topology'); setToolbarMenuOpen(false); }}>
@@ -511,6 +641,21 @@ export default function Applications({ notify }: { notify: (message: string) => 
             deploymentName={runtimeDeployment} namespace={detail.application.namespace}
             onBack={closeRuntimeDeployment} />
         </div>}
+      </section> : (clusters.length > 0 && (resourceView || !selectedApp)) ? <section className="application-content application-resource-workspace">
+        <div className="application-workspace-toolbar">
+          <div className="application-toolbar-context">
+            <button type="button" className="application-float-button" aria-label="打开应用列表" title="应用列表"
+              aria-expanded={drawer === 'applications'} onClick={() => setDrawer('applications')}>☷<span>应用</span></button>
+            <span className="application-current-name">Kubernetes 资源清单</span>
+          </div>
+          <div className="application-toolbar-actions">
+            {selectedApp && <button type="button" className="application-float-button" onClick={() => setResourceView(false)}
+              aria-label="返回应用拓扑" title="返回应用拓扑">←<span>应用拓扑</span></button>}
+            <button type="button" className="application-float-button" onClick={beginCreate} disabled={isMock}>＋<span>创建应用</span></button>
+          </div>
+        </div>
+        <ApplicationResourceInventory clusters={clusters}
+          initialClusterId={selectedApp?.clusterId ?? clusterId ?? clusters[0]?.id ?? ''} />
       </section> : <section className="application-content application-empty-workspace">
         <div className="application-workspace-toolbar">
           <div className="application-toolbar-context">
@@ -520,7 +665,7 @@ export default function Applications({ notify }: { notify: (message: string) => 
           </div>
           <button type="button" className="application-float-button" onClick={beginCreate} disabled={isMock}>＋<span>创建应用</span></button>
         </div>
-        <div className="application-blank"><div className="application-blank-icon">▦</div><h2>{loading ? '正在读取应用…' : items.length ? '选择一个应用' : '开始管理 Kubernetes 应用'}</h2><p>应用拓扑根据部署 YAML 自动生成。创建版本后检查资源 diff，再手动确认部署。</p><button className="primary" onClick={beginCreate} disabled={isMock}>＋ 创建应用</button></div>
+        <div className="application-blank"><div className="application-blank-icon">▦</div><h2>{loading ? '正在读取集群资源…' : !clusters.length ? '还没有已登记集群' : items.length ? '选择一个应用' : '开始管理 Kubernetes 应用'}</h2><p>{clusters.length ? '集群资源清单会显示所选 Namespace 中的资源。选择应用可进入拓扑编辑；创建版本后检查资源 diff，再手动确认部署。' : '先登记一个 Kubernetes 集群，应用管理才能浏览其中的资源。'}</p><button className="primary" onClick={beginCreate} disabled={isMock || !clusters.length}>＋ 创建应用</button></div>
       </section>}
     </div>
     {drawer && <div className="application-drawer-backdrop" onMouseDown={event => {
@@ -545,7 +690,7 @@ export default function Applications({ notify }: { notify: (message: string) => 
           {!loading && items.length === 0 && !error && <div className="application-empty-small"><b>◇</b><span>还没有应用</span><small>使用图形化向导或导入容器清单创建应用。</small><button className="link" onClick={() => { beginCreate(); setDrawer(null); }}>创建第一个应用 →</button></div>}
           <div className="application-list">
             {items.map(item => <button key={item.id} className={`application-list-item ${selectedId === item.id ? 'active' : ''}`} onClick={() => {
-              setSelectedId(item.id); setView('topology'); setRuntimeDeployment('');
+              setSelectedId(item.id); setView('topology'); setResourceView(false); setRuntimeDeployment('');
               setDrawer(null); setToolbarMenuOpen(false);
             }}>
               <span className="application-symbol">▦</span><span className="application-list-copy"><strong>{item.displayName}</strong><small>{item.clusterName} · {item.namespace}</small><small>版本 v{item.currentVersion} · {item.templateId}</small></span><AppState value={item.state} />

@@ -322,6 +322,38 @@ main:has(.applications-page)>footer{display:none}
 .application-list-heading-actions>.secondary,.application-list-heading-actions>.primary{min-height:28px;padding:5px 8px;font-size:9px}
 .application-list-heading-actions>.secondary{width:29px;padding:4px}
 
+.application-resource-inventory{display:flex;min-width:0;min-height:0;flex:1;flex-direction:column;overflow:hidden;padding:14px 16px 0}
+.application-resource-toolbar{display:grid;grid-template-columns:minmax(150px,1fr) minmax(150px,.8fr) minmax(190px,1.3fr) auto;align-items:end;gap:10px;flex:0 0 auto}
+.application-resource-toolbar .field{display:grid;min-width:0;gap:5px;margin:0;color:#78889d;font-size:9px}
+.application-resource-toolbar .field select,.application-resource-search input{width:100%;min-width:0;height:35px;padding:6px 9px;border:1px solid #dfe6ef;border-radius:7px;background:#fff;color:#435a78;font:inherit;font-size:10px}
+.application-resource-search{display:grid;min-width:0;gap:5px;color:#78889d;font-size:9px}
+.application-resource-search input::placeholder{color:#a4afbe}
+.application-resource-refresh{height:35px;white-space:nowrap}
+.application-resource-note{flex:0 0 auto;margin:11px 0;padding:9px 11px;border:1px solid #e4eaf2;border-radius:7px;background:#f8fafd;color:#75869b;font-size:9px;line-height:1.6}
+.application-resource-error{flex:0 0 auto;margin:0 0 9px;font-size:9px}
+.application-resource-summary{display:flex;align-items:center;gap:8px;flex:0 0 auto;margin:0 0 10px}
+.application-resource-summary>div{display:flex;align-items:baseline;gap:5px;padding:6px 9px;border:1px solid #e8edf4;border-radius:7px;background:#fff;color:#8190a4;font-size:8px}
+.application-resource-summary>div strong{color:#426da9;font-size:14px;font-weight:700}
+.application-resource-summary>small{margin-left:auto;color:#98a4b3;font-size:8px}
+.application-resource-list{min-height:0;flex:1;overflow-y:auto;overscroll-behavior:contain;padding:0 2px 16px;scrollbar-width:thin;scrollbar-color:#dfe6ef transparent}
+.application-resource-group{margin:0 0 13px}
+.application-resource-group-heading{display:flex;align-items:center;gap:7px;margin:0 0 7px;padding:0 2px}
+.application-resource-group-heading h3{margin:0;color:#526983;font-size:10px;font-weight:700}
+.application-resource-group-heading span{display:grid;min-width:18px;height:18px;place-items:center;padding:0 5px;border-radius:9px;background:#f0f4f9;color:#8090a4;font-size:8px}
+.application-resource-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,260px),1fr));gap:8px}
+.application-resource-card{display:grid;min-width:0;gap:5px;padding:10px 11px;border:1px solid #e6ebf2;border-radius:8px;background:#fff;box-shadow:0 2px 8px #263b5305}
+.application-resource-card-heading{display:flex;min-width:0;align-items:center;justify-content:space-between;gap:8px}
+.application-resource-card-heading>strong{overflow:hidden;color:#405773;font-size:10px;font-weight:650;text-overflow:ellipsis;white-space:nowrap}
+.application-resource-card-heading .application-state{flex:0 0 auto;font-size:8px}
+.application-resource-api-version,.application-resource-created{overflow-wrap:anywhere;color:#97a3b1;font-size:8px}
+.application-resource-card>p{margin:0;color:#6d7f96;font-size:9px;line-height:1.5;overflow-wrap:anywhere;word-break:break-word}
+.application-resource-labels{display:flex;flex-wrap:wrap;gap:4px}
+.application-resource-labels span{max-width:100%;overflow:hidden;padding:3px 5px;border:1px solid #e9edf3;border-radius:5px;background:#fafbfd;color:#75869b;font-size:7px;text-overflow:ellipsis;white-space:nowrap}
+.application-resource-created{margin-top:2px}
+.application-resource-workspace>.application-resource-inventory{padding-top:12px}
+@media(max-width:780px){.application-resource-toolbar{grid-template-columns:repeat(2,minmax(0,1fr))}.application-resource-search{grid-column:1/-1}.application-resource-refresh{justify-self:start}.application-resource-summary{flex-wrap:wrap}.application-resource-summary>small{width:100%;margin:0}}
+@media(max-width:520px){.application-resource-inventory{padding:9px 9px 0}.application-resource-toolbar{grid-template-columns:minmax(0,1fr)}.application-resource-search{grid-column:auto}.application-resource-refresh{width:100%}.application-resource-cards{grid-template-columns:minmax(0,1fr)}.application-resource-summary>div{flex:1;justify-content:center}}
+
 /* Full-screen topology workspace with overlay drawers and compact floating controls. */
 .applications-page{position:relative;min-width:0;min-height:0;flex:1;overflow:hidden}
 .application-page-alert{position:absolute;top:10px;left:50%;z-index:45;width:min(760px,calc(100% - 24px));max-height:30vh;transform:translateX(-50%);margin:0;overflow:auto;box-shadow:0 8px 28px #22354b22}

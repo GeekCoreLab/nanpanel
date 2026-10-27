@@ -25,6 +25,7 @@ public class KubernetesClusterResource {
   public record NodeHostMappingRequest(String hostId) {}
 
   @Inject KubernetesClusterRegistryService clusters;
+  @Inject KubernetesNamespaceResourceInventoryService resourceInventory;
   @Context jakarta.ws.rs.container.ContainerRequestContext request;
   @Context io.vertx.core.http.HttpServerRequest http;
 
@@ -102,6 +103,29 @@ public class KubernetesClusterResource {
       throw fail(404, "KUBERNETES_CLUSTER_NOT_FOUND", "集群未登记");
     } catch (KubernetesTopologyDiscovery.NamespaceNotFoundException missing) {
       throw fail(404, "KUBERNETES_NAMESPACE_NOT_FOUND", "Namespace 不存在或名称无效");
+    } catch (KubernetesClusterRegistryService.ClusterCredentialRejectedException rejected) {
+      throw fail(502, "KUBERNETES_CREDENTIALS_REJECTED", "已保存的集群凭据被 Kubernetes API 拒绝");
+    } catch (KubernetesClusterRegistryService.ClusterPermissionDeniedException denied) {
+      throw fail(403, "KUBERNETES_RBAC_DENIED", "集群凭据没有读取该 Namespace 资源的权限");
+    } catch (KubernetesClusterRegistryService.ClusterApiUnavailableException unavailable) {
+      throw fail(502, "KUBERNETES_CLUSTER_UNAVAILABLE", "无法读取该集群 Namespace 的资源清单");
+    }
+  }
+
+  @GET
+  @Path("{clusterId}/namespaces/{namespace}/resources")
+  public Response namespaceResources(@PathParam("clusterId") String clusterValue,
+                                     @PathParam("namespace") String namespace) {
+    actor();
+    if (namespace == null || !namespace.matches("[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")) {
+      throw fail(404, "KUBERNETES_NAMESPACE_NOT_FOUND", "Namespace 不存在或名称无效");
+    }
+    try {
+      return noStore(Response.ok(resourceInventory.list(uuid(clusterValue), namespace))).build();
+    } catch (KubernetesNamespaceResourceInventoryService.NamespaceNotFoundException missing) {
+      throw fail(404, "KUBERNETES_NAMESPACE_NOT_FOUND", "Namespace 不存在或名称无效");
+    } catch (KubernetesClusterRegistryService.ClusterNotFoundException missing) {
+      throw fail(404, "KUBERNETES_CLUSTER_NOT_FOUND", "集群未登记");
     } catch (KubernetesClusterRegistryService.ClusterCredentialRejectedException rejected) {
       throw fail(502, "KUBERNETES_CREDENTIALS_REJECTED", "已保存的集群凭据被 Kubernetes API 拒绝");
     } catch (KubernetesClusterRegistryService.ClusterPermissionDeniedException denied) {

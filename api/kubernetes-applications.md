@@ -2,6 +2,8 @@
 
 NaNPanel 把受管 Kubernetes 工作负载记录为应用。每个应用版本持久化一份标准化 YAML 清单，拓扑节点和 Service → Deployment 连线由这份清单的资源与 selector 生成。拓扑修改先创建 `DRAFT` 版本并返回资源级 YAML diff；只有单独确认部署才会向集群写入。
 
+应用管理同时提供按已登记集群和 Namespace 浏览资源的只读清单，包含通过 NaNPanel 创建和由其他工具创建的资源。清单覆盖常见工作负载、Service、配置/RBAC/存储资源、Ingress/网络策略、EndpointSlice 与 Istio 路由和安全策略；每种资源最多返回 512 项。它只提供资源摘要，不会自动登记、接管或修改外部资源。ConfigMap 仅展示键名，不返回值；Secret 不读取也不展示。没有已登记应用时，页面默认进入资源清单；有应用时可从应用工具栏打开。
+
 ## 创建方式
 
 页面提供 Bookinfo 模板、图形化单容器配置、`docker run`、Docker Compose 和 Kubernetes YAML 五种入口。每种入口先调用 `POST /api/v1/kubernetes/applications/preview`：后端解析并标准化输入，返回资源计数、注意事项和 YAML；管理员检查后再调用 `POST /api/v1/kubernetes/applications` 创建并部署初始版本。预览阶段不会连接或写入 Kubernetes。
@@ -42,6 +44,8 @@ Kubernetes YAML 仅接收 Deployment、Service 和 ServiceAccount，至少包含
 
 应用所需的集群权限限制在被选 Namespace：读取对应资源、创建首版资源和版本新增的 Deployment / Service，以及读取和更新该应用已登记的 Deployment、Service、ServiceAccount。不需要集群级写权限。应用资源同时登记 Kubernetes UID；同名资源被删除并重建后，旧应用不会自动接管新 UID。
 
+应用管理资源清单使用只读 `get/list` 权限浏览 Namespace 中的常见资源。部署脚本中的 `nanpanel-topology-inventory` ClusterRole 只授予资源读取权限，不包含 Secret 或写入权限；新加资源类型需要同步更新该角色。
+
 启用网络运行时后，还需要读取 Node、列出应用 Pod、创建/读取/更新/删除被应用标签托管的 NetworkAttachmentDefinition 与 EndpointSlice，并更新该应用已登记的 Deployment 和 Service。所需命名空间资源权限不会授予集群级写权限。
 
 启用 Service 流量路由还需要在应用 Namespace 读取 Namespace、Pod、Deployment 和 Service，并创建、读取和删除 Istio VirtualService。主机抓包需要已安装的 Linux netns Provider、root-owned `tcpdump` 和 Helper 报告 `network.topology.capture` 能力。抓包文件由 Core 单独保存并按 24 小时策略清理，不会写入普通 Helper 操作结果。
@@ -51,6 +55,7 @@ Kubernetes YAML 仅接收 Deployment、Service 和 ServiceAccount，至少包含
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
 | GET | `/api/v1/kubernetes/applications` | 列出已登记应用 |
+| GET | `/api/v1/kubernetes/clusters/{clusterId}/namespaces/{namespace}/resources` | 浏览指定 Namespace 的 Kubernetes 与 Istio 资源摘要 |
 | POST | `/api/v1/kubernetes/applications/preview` | 校验创建输入并返回资源计数和标准化 YAML，不写入集群 |
 | POST | `/api/v1/kubernetes/applications` | 创建并部署图形化配置或导入清单 |
 | POST | `/api/v1/kubernetes/applications/bookinfo` | 创建并部署 Bookinfo 初始版本 |

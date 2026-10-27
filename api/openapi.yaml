@@ -854,6 +854,50 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+  /api/v1/kubernetes/clusters/{clusterId}/namespaces/{namespace}/resources:
+    parameters:
+    - name: clusterId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    - name: namespace
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 63
+        pattern: '^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$'
+    get:
+      tags: [KubernetesClusters]
+      operationId: listKubernetesNamespaceResources
+      summary: 浏览 Namespace 中的 Kubernetes 与 Istio 资源
+      description: 只读返回常见工作负载、Service、配置元数据和路由资源摘要；不会读取 Secret，ConfigMap 仅返回键名，不接管或修改资源。每种资源最多返回 512 项。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: Namespace 资源摘要清单。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KubernetesNamespaceResourceInventory'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: 集群凭据缺少只读资源清单权限。
+          content:
+            application/problem+json:
+              schema: { $ref: '#/components/schemas/Problem' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '502':
+          description: 集群 API 不可用或已保存的凭据被拒绝。
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
   /api/v1/kubernetes/clusters/{clusterId}/namespaces/{namespace}/deployments:
     parameters:
     - name: clusterId
@@ -7754,6 +7798,53 @@ components:
           maxItems: 2048
           items:
             $ref: '#/components/schemas/KubernetesTopologyPod'
+    KubernetesNamespaceResourceInventory:
+      type: object
+      additionalProperties: false
+      required: [clusterId, namespace, observedAt, items]
+      properties:
+        clusterId:
+          type: string
+          format: uuid
+        namespace:
+          type: string
+          maxLength: 63
+        observedAt:
+          type: string
+          format: date-time
+        items:
+          type: array
+          maxItems: 8192
+          items:
+            $ref: '#/components/schemas/KubernetesNamespaceResource'
+    KubernetesNamespaceResource:
+      type: object
+      additionalProperties: false
+      required: [apiVersion, kind, name, status, summary, createdAt, labels]
+      properties:
+        apiVersion:
+          type: string
+          maxLength: 64
+        kind:
+          type: string
+          maxLength: 64
+        name:
+          type: string
+          maxLength: 253
+        status:
+          type: string
+          maxLength: 32
+        summary:
+          type: string
+          maxLength: 2048
+        createdAt:
+          type: [string, 'null']
+          maxLength: 64
+        labels:
+          type: object
+          additionalProperties:
+            type: string
+            maxLength: 128
     KubernetesTopologyService:
       type: object
       additionalProperties: false

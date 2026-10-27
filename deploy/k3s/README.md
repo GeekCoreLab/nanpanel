@@ -56,10 +56,13 @@ and restarts the Helper. It does the same for the Agent under
 and Helper configuration are retained.
 
 The deployment also binds the Core ServiceAccount to the read-only
-`nanpanel-topology-inventory` ClusterRole. It grants `get/list` for Namespace,
-Node, Pod, Service, and Ingress metadata across the cluster so the topology
-editor can drill into each namespace and Pod and verify a detected K3s host
-against a Ready Node. It grants no Secret access and no write verbs. When the
+`nanpanel-topology-inventory` ClusterRole. It grants `get/list` for Namespace
+and Node inventory plus namespaced workload, Service, ConfigMap metadata,
+ServiceAccount, PVC, EndpointSlice, Ingress, NetworkPolicy, and Istio route
+resources. The Application Manager can browse these resource summaries for a
+selected cluster and Namespace, including resources created outside NaNPanel.
+ConfigMap values and Secret resources are not returned; the Role grants no
+Secret access and no write verbs. When the
 Agent reports a local K3s API and its host is a Ready member of the same cluster,
 Core automatically registers the cluster using its in-cluster ServiceAccount;
 no kubeconfig or token is persisted. The hierarchical topology discovery is
