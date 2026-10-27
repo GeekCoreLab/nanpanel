@@ -14,4 +14,4 @@
 - [ADR-014：应用渐进式交付](ADR-014-progressive-delivery.md)（接受，代码及独立运行时验收见 P5 文档）。
 - [ADR-015：隔离 Linux 拓扑 Provider](ADR-015-isolated-linux-topology-provider.md)（接受，隔离实验完成，生产拓扑 Apply 待验收）。
 - [ADR-016：应用虚拟网络数据面](ADR-016-application-virtual-network-data-plane.md)（源码已实现，隔离集群包路径待验收）。
-- [ADR-017：拖拽式应用 Service 流量编排](ADR-017-application-service-traffic-steering.md)（设计已接受，尚未实现）。
+- [ADR-017：拖拽式应用 Service 流量编排](ADR-017-application-service-traffic-steering.md)（首个 Istio HTTP 路由及虚拟网线抓包实现已提供；隔离数据面验收待完成）。

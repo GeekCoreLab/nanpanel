@@ -41,7 +41,7 @@ import java.util.regex.Pattern;
 @Produces(MediaType.APPLICATION_JSON)
 public class KubernetesApplicationNetworkTopologyResource {
   private static final Pattern ETAG = Pattern.compile("\\\"application-network-([0-9]+)\\\"");
-  private static final String EMPTY_GRAPH = "{\"nodes\":[],\"links\":[],\"attachments\":[]}";
+  private static final String EMPTY_GRAPH = "{\"nodes\":[],\"links\":[],\"attachments\":[],\"trafficLinks\":[]}";
 
   @Inject AuthStore store;
   @Inject ObjectMapper mapper;
@@ -50,11 +50,15 @@ public class KubernetesApplicationNetworkTopologyResource {
 
   public record ApplicationAttachment(String id, String resourceId, String nodeId,
       String devicePort, String direction) {}
+  public record ApplicationTrafficLink(String id, String type, String sourceId,
+      String sourceHandle, String targetId, String targetHandle, String protocol,
+      Integer servicePort) {}
   public record NetworkTopologyWrite(List<TopologyResource.NodeView> nodes,
-      List<TopologyResource.LinkInput> links, List<ApplicationAttachment> attachments) {}
+      List<TopologyResource.LinkInput> links, List<ApplicationAttachment> attachments,
+      List<ApplicationTrafficLink> trafficLinks) {}
   public record NetworkTopologyView(String revisionId, long generation,
       List<TopologyResource.NodeView> nodes, List<TopologyResource.LinkInput> links,
-      List<ApplicationAttachment> attachments,
+      List<ApplicationAttachment> attachments, List<ApplicationTrafficLink> trafficLinks,
       String updatedAt, String updatedBy) {}
   public record RevisionList(List<RevisionSummary> items) {}
   public record RevisionSummary(String revisionId, long generation, int nodeCount,
@@ -86,7 +90,11 @@ public class KubernetesApplicationNetworkTopologyResource {
           "SELECT application_id FROM kubernetes_application_network_runtime "
               + "WHERE application_id=? AND state IN "
               + "('APPLYING','APPLIED','VERIFYING','VERIFY_FAILED','COMPENSATING','FAILED','PARTIAL')",
-          applicationId).isEmpty());
+          applicationId).isEmpty() || !query(connection,
+              "SELECT application_id FROM kubernetes_application_traffic_runtime "
+                  + "WHERE application_id=? AND state IN "
+                  + "('APPLYING','APPLIED','VERIFY_FAILED','COMPENSATING','FAILED','PARTIAL')",
+              applicationId).isEmpty());
       if (runtimeActive) throw fail(409, "APPLICATION_NETWORK_RUNTIME_ACTIVE",
           "应用网络运行时已接入；请先补偿恢复 Deployment 与 Service 后再修改拓扑");
       long expected = expectedGeneration(ifMatch);
@@ -106,7 +114,11 @@ public class KubernetesApplicationNetworkTopologyResource {
             "SELECT application_id FROM kubernetes_application_network_runtime "
                 + "WHERE application_id=? AND state IN "
                 + "('APPLYING','APPLIED','VERIFYING','VERIFY_FAILED','COMPENSATING','FAILED','PARTIAL') FOR UPDATE",
-            applicationId).isEmpty();
+            applicationId).isEmpty() || !query(connection,
+                "SELECT application_id FROM kubernetes_application_traffic_runtime "
+                    + "WHERE application_id=? AND state IN "
+                    + "('APPLYING','APPLIED','VERIFY_FAILED','COMPENSATING','FAILED','PARTIAL') FOR UPDATE",
+                applicationId).isEmpty();
         if (runtimeBlocked) throw fail(409, "APPLICATION_NETWORK_RUNTIME_ACTIVE",
             "应用网络运行时已接入；请先补偿恢复 Deployment 与 Service 后再修改拓扑");
         update(connection,
@@ -140,7 +152,8 @@ public class KubernetesApplicationNetworkTopologyResource {
             "kubernetes_application", applicationId.toString(), "SUCCEEDED", null,
             "保存应用虚拟设备拓扑 Revision：" + draft.nodes().size() + " 个设备、"
                 + draft.links().size() + " 条设备连接、"
-                + draft.attachments().size() + " 个应用工作负载接入");
+                + draft.attachments().size() + " 个应用工作负载接入、"
+                + draft.trafficLinks().size() + " 条业务流量边");
         return query(connection,
             "SELECT revision_id,generation,snapshot,updated_by,updated_at "
                 + "FROM kubernetes_application_network_topology_head WHERE application_id=?",
@@ -192,7 +205,7 @@ public class KubernetesApplicationNetworkTopologyResource {
   }
 
   private NetworkTopologyView emptyView() {
-    return new NetworkTopologyView(null, 0, List.of(), List.of(), List.of(), null, null);
+    return new NetworkTopologyView(null, 0, List.of(), List.of(), List.of(), List.of(), null, null);
   }
 
   private NetworkTopologyView view(Map<String, Object> row, String idColumn) {
@@ -206,6 +219,7 @@ public class KubernetesApplicationNetworkTopologyResource {
     Object revisionId = row.get(idColumn);
     return new NetworkTopologyView(revisionId == null ? null : String.valueOf(revisionId),
         number(row, "generation"), payload.nodes(), payload.links(), payload.attachments(),
+        payload.trafficLinks() == null ? List.of() : payload.trafficLinks(),
         Instant.ofEpochMilli(number(row, "updated_at")).toString(),
         row.get("updated_by") == null ? null : String.valueOf(row.get("updated_by")));
   }
@@ -219,7 +233,8 @@ public class KubernetesApplicationNetworkTopologyResource {
           "保存的应用网络拓扑 Revision 无法读取");
     }
     return new RevisionSummary(String.valueOf(row.get("id")), number(row, "generation"),
-        payload.nodes().size(), payload.links().size() + payload.attachments().size(),
+        payload.nodes().size(), payload.links().size() + payload.attachments().size()
+            + (payload.trafficLinks() == null ? 0 : payload.trafficLinks().size()),
         Instant.ofEpochMilli(number(row, "updated_at")).toString(),
         row.get("updated_by") == null ? null : String.valueOf(row.get("updated_by")));
   }
@@ -239,10 +254,17 @@ public class KubernetesApplicationNetworkTopologyResource {
   }
 
   private NetworkTopologyWrite parse(UUID applicationId, JsonNode body) {
-    if (!objectWithKeys(body, Set.of("nodes", "links", "attachments"))
+    if (!objectHasRequiredKeys(body, Set.of("nodes", "links", "attachments"),
+            Set.of("nodes", "links", "attachments", "trafficLinks"))
         || !body.path("attachments").isArray() || body.path("attachments").size() > 256) {
       throw fail(422, "INVALID_APPLICATION_NETWORK_TOPOLOGY",
-          "应用网络拓扑必须包含 nodes、links 与 attachments 数组");
+          "应用网络拓扑必须包含 nodes、links 与 attachments 数组，trafficLinks 可选");
+    }
+    JsonNode trafficLinksNode = body.path("trafficLinks");
+    if (!trafficLinksNode.isMissingNode()
+        && (!trafficLinksNode.isArray() || trafficLinksNode.size() > 512)) {
+      throw fail(422, "INVALID_APPLICATION_NETWORK_TOPOLOGY",
+          "trafficLinks 必须是最多包含 512 条边的数组");
     }
     for (JsonNode attachment : body.path("attachments")) {
       if (!objectWithKeys(attachment,
@@ -266,7 +288,25 @@ public class KubernetesApplicationNetworkTopologyResource {
             entry.path("resourceId").asText(), entry.path("nodeId").asText(),
             entry.path("devicePort").asText(), entry.path("direction").asText()));
       }
-      return new NetworkTopologyWrite(graph.nodes(), graph.links(), List.copyOf(attachments));
+      List<ApplicationTrafficLink> trafficLinks = new ArrayList<>();
+      for (JsonNode entry : trafficLinksNode) {
+        if (!objectWithKeys(entry, Set.of("id", "type", "sourceId", "sourceHandle",
+                "targetId", "targetHandle", "protocol", "servicePort"))
+            || !entry.path("id").isTextual() || !entry.path("type").isTextual()
+            || !entry.path("sourceId").isTextual() || !entry.path("sourceHandle").isTextual()
+            || !entry.path("targetId").isTextual() || !entry.path("targetHandle").isTextual()
+            || !entry.path("protocol").isTextual()
+            || (!entry.path("servicePort").isNull() && !entry.path("servicePort").canConvertToInt())) {
+          throw fail(422, "INVALID_APPLICATION_NETWORK_TOPOLOGY", "业务流量边字段无效");
+        }
+        trafficLinks.add(new ApplicationTrafficLink(entry.path("id").asText(),
+            entry.path("type").asText(), entry.path("sourceId").asText(),
+            entry.path("sourceHandle").asText(), entry.path("targetId").asText(),
+            entry.path("targetHandle").asText(), entry.path("protocol").asText(),
+            entry.path("servicePort").isNull() ? null : entry.path("servicePort").asInt()));
+      }
+      return new NetworkTopologyWrite(graph.nodes(), graph.links(), List.copyOf(attachments),
+          List.copyOf(trafficLinks));
     } catch (RuntimeException failure) {
       if (failure instanceof jakarta.ws.rs.WebApplicationException) throw failure;
       throw fail(422, "INVALID_APPLICATION_NETWORK_TOPOLOGY", "应用网络拓扑字段无效");
@@ -312,6 +352,102 @@ public class KubernetesApplicationNetworkTopologyResource {
         return "每个设备端口只能连接一条拓扑链路或一个应用工作负载";
       }
     }
+    return trafficLinkError(applicationId, draft, ids);
+  }
+
+  private String trafficLinkError(UUID applicationId, NetworkTopologyWrite draft,
+      Set<String> existingIds) {
+    Set<String> resourceIds = store.transaction(connection -> query(connection,
+        "SELECT resource_kind || '/' || resource_name AS resource_id "
+            + "FROM kubernetes_application_resource WHERE application_id=? "
+            + "AND resource_kind IN ('Deployment','Service')", applicationId).stream()
+        .map(row -> String.valueOf(row.get("resource_id")))
+        .collect(java.util.stream.Collectors.toSet()));
+    Map<String, TopologyResource.NodeView> devices = new HashMap<>();
+    draft.nodes().forEach(node -> devices.put(node.id(), node));
+    Set<String> ids = new HashSet<>(existingIds);
+    Set<String> usedRouteOutputs = new HashSet<>();
+    Map<String, Integer> routeEntries = new HashMap<>();
+    Map<String, String> routeEntryServices = new HashMap<>();
+    Map<String, Integer> routeBackends = new HashMap<>();
+    Set<String> usedEntryPorts = new HashSet<>();
+    Map<String, Set<String>> usedBackendServices = new HashMap<>();
+    for (ApplicationTrafficLink link : draft.trafficLinks()) {
+      if (!isCanonicalUuid(link.id()) || !ids.add(link.id()) || !"HTTP".equals(link.protocol())) {
+        return "业务流量边必须有唯一 UUID，首个路由 Provider 只支持 HTTP";
+      }
+      if ("CALL".equals(link.type())) {
+        if (!resourceIds.contains(link.sourceId()) || !link.sourceId().startsWith("Deployment/")
+            || !resourceIds.contains(link.targetId()) || !link.targetId().startsWith("Service/")
+            || !"call-output".equals(link.sourceHandle())
+            || !link.targetHandle().equals("call-input-" + link.servicePort())
+            || link.servicePort() == null || link.servicePort() < 1 || link.servicePort() > 65535) {
+          return "调用边必须从应用 Deployment 指向应用 Service 和有效端口";
+        }
+        continue;
+      }
+      if ("ROUTE_ENTRY".equals(link.type())) {
+        TopologyResource.NodeView lb = devices.get(link.targetId());
+        if (!resourceIds.contains(link.sourceId()) || !link.sourceId().startsWith("Service/")
+            || lb == null || !"LOAD_BALANCER".equals(lb.kind())
+            || !link.sourceHandle().equals("route-output-" + link.servicePort())
+            || !"route-input".equals(link.targetHandle())
+            || link.servicePort() == null || link.servicePort() < 1 || link.servicePort() > 65535
+            || routeEntries.putIfAbsent(link.targetId(), link.servicePort()) != null
+            || !usedEntryPorts.add(link.sourceId() + ":" + link.servicePort())) {
+          return "路由入口必须从一个稳定 Service 和端口连接到唯一流量分配器";
+        }
+        routeEntryServices.put(link.targetId(), link.sourceId());
+        continue;
+      }
+      if ("ROUTE_BACKEND".equals(link.type())) {
+        TopologyResource.NodeView lb = devices.get(link.sourceId());
+        if (lb == null || !"LOAD_BALANCER".equals(lb.kind())
+            || !resourceIds.contains(link.targetId()) || !link.targetId().startsWith("Service/")
+            || !link.sourceHandle().matches("route-out-[1-9][0-9]*")
+            || link.servicePort() == null || link.servicePort() < 1 || link.servicePort() > 65535
+            || !link.targetHandle().equals("backend-input-" + link.servicePort())
+            || !usedRouteOutputs.add(link.sourceId() + ":" + link.sourceHandle())) {
+          return "路由后端必须从流量分配器的唯一出口连接到应用 Service";
+        }
+        if (!usedBackendServices.computeIfAbsent(link.sourceId(), ignored -> new HashSet<>())
+            .add(link.targetId())) {
+          return "同一流量分配器不能重复连接同一个后端 Service";
+        }
+        routeBackends.merge(link.sourceId(), 1, Integer::sum);
+        continue;
+      }
+      return "未知的业务流量边类型";
+    }
+    for (Map.Entry<String, Integer> entry : routeEntries.entrySet()) {
+      if (routeBackends.getOrDefault(entry.getKey(), 0) < 1) {
+        return "每个流量分配器至少需要一个逻辑后端 Service";
+      }
+      TopologyResource.NodeView lb = devices.get(entry.getKey());
+      List<String> outputPorts = lb.ports().stream().filter(port -> "OUTPUT".equals(port.direction()))
+          .map(TopologyResource.PortView::id).toList();
+      long configuredBackends = usedRouteOutputs.stream()
+          .filter(value -> value.startsWith(entry.getKey() + ":"))
+          .count();
+      if (configuredBackends != routeBackends.get(entry.getKey())
+          || usedRouteOutputs.stream().filter(value -> value.startsWith(entry.getKey() + ":"))
+              .map(value -> value.substring(value.indexOf(':') + 1))
+              .anyMatch(port -> !port.startsWith("route-out-")
+                  || !outputPorts.contains("out-" + port.substring("route-out-".length())))) {
+        return "路由后端出口必须匹配流量分配器端口";
+      }
+      if (routeBackends.get(entry.getKey()) < 2) {
+        return "流量分配器至少要连接两个后端 Service 才能执行分流";
+      }
+      if (draft.trafficLinks().stream().anyMatch(link -> "ROUTE_BACKEND".equals(link.type())
+          && entry.getKey().equals(link.sourceId())
+          && routeEntryServices.get(entry.getKey()).equals(link.targetId()))) {
+        return "稳定 Service 不能同时作为此路由的入口和后端，避免路由环路";
+      }
+    }
+    for (String lbId : routeBackends.keySet()) {
+      if (!routeEntries.containsKey(lbId)) return "流量分配器后端缺少稳定 Service 路由入口";
+    }
     return null;
   }
 
@@ -336,6 +472,13 @@ public class KubernetesApplicationNetworkTopologyResource {
     var fields = value.fieldNames();
     while (fields.hasNext()) if (!keys.contains(fields.next())) return false;
     return true;
+  }
+
+  private boolean objectHasRequiredKeys(JsonNode value, Set<String> required, Set<String> allowed) {
+    if (value == null || !value.isObject() || !value.fieldNames().hasNext()) return false;
+    Set<String> actual = new HashSet<>();
+    value.fieldNames().forEachRemaining(actual::add);
+    return actual.containsAll(required) && allowed.containsAll(actual);
   }
 
   private String encode(NetworkTopologyWrite draft) {

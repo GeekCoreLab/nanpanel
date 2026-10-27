@@ -689,6 +689,8 @@ struct NetworkTopologyPayload {
     links: Vec<NetworkTopologyLink>,
     #[serde(default)]
     attachments: Vec<NetworkTopologyAttachment>,
+    #[serde(default)]
+    capture_link_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -918,7 +920,7 @@ fn valid_dispatch_target(capability: &str, target: &str) -> bool {
             valid_container_target(target)
         }
         "network.firewall.expose" => valid_container_target(target),
-        "network.topology.reconcile" => valid_topology_uuid(target),
+        "network.topology.reconcile" | "network.topology.capture" => valid_topology_uuid(target),
         _ => false,
     }
 }
@@ -953,8 +955,14 @@ fn valid_dispatch_payload(capability: &str, payload: Option<&str>) -> bool {
             })
         }
         ("network.topology.reconcile", Some(json)) => {
-            serde_json::from_str::<NetworkTopologyPayload>(json)
-                .is_ok_and(valid_network_topology_payload)
+            serde_json::from_str::<NetworkTopologyPayload>(json).is_ok_and(|payload| {
+                payload.action != "CAPTURE" && valid_network_topology_payload(payload)
+            })
+        }
+        ("network.topology.capture", Some(json)) => {
+            serde_json::from_str::<NetworkTopologyPayload>(json).is_ok_and(|payload| {
+                payload.action == "CAPTURE" && valid_network_topology_payload(payload)
+            })
         }
         ("container.deploy", Some(json)) => serde_json::from_str::<ContainerDeployPayload>(json)
             .is_ok_and(|payload| {
@@ -982,25 +990,57 @@ fn valid_dispatch_payload(capability: &str, payload: Option<&str>) -> bool {
 
 fn valid_dispatch_request_payload(capability: &str, target: &str, payload: Option<&str>) -> bool {
     valid_dispatch_payload(capability, payload)
-        && (capability != "network.topology.reconcile"
-            || payload.is_some_and(|json| valid_topology_dispatch(target, json)))
+        && match capability {
+            "network.topology.reconcile" => {
+                payload.is_some_and(|json| valid_topology_dispatch(target, json))
+            }
+            "network.topology.capture" => {
+                payload.is_some_and(|json| valid_topology_capture_dispatch(target, json))
+            }
+            _ => true,
+        }
 }
 
 pub(crate) fn valid_topology_dispatch(target: &str, json: &str) -> bool {
     valid_topology_uuid(target)
         && serde_json::from_str::<NetworkTopologyPayload>(json).is_ok_and(|payload| {
-            payload.topology_id == target && valid_network_topology_payload(payload)
+            payload.topology_id == target
+                && payload.action != "CAPTURE"
+                && valid_network_topology_payload(payload)
+        })
+}
+
+pub(crate) fn valid_topology_capture_dispatch(target: &str, json: &str) -> bool {
+    valid_topology_uuid(target)
+        && serde_json::from_str::<NetworkTopologyPayload>(json).is_ok_and(|payload| {
+            payload.topology_id == target
+                && payload.action == "CAPTURE"
+                && valid_network_topology_payload(payload)
         })
 }
 
 fn valid_network_topology_payload(payload: NetworkTopologyPayload) -> bool {
-    if !matches!(payload.action.as_str(), "APPLY" | "VERIFY" | "COMPENSATE")
-        || !valid_topology_uuid(&payload.topology_id)
+    if !matches!(
+        payload.action.as_str(),
+        "APPLY" | "VERIFY" | "COMPENSATE" | "CAPTURE"
+    ) || !valid_topology_uuid(&payload.topology_id)
         || !valid_topology_uuid(&payload.revision_id)
         || payload.generation == 0
         || payload.nodes.is_empty()
         || payload.nodes.len() > 16
         || payload.links.len() > 64
+    {
+        return false;
+    }
+    let capture_request = payload.action == "CAPTURE";
+    if capture_request
+        != payload
+            .capture_link_id
+            .as_ref()
+            .is_some_and(|capture_link_id| {
+                valid_topology_uuid(capture_link_id)
+                    && payload.links.iter().any(|link| &link.id == capture_link_id)
+            })
     {
         return false;
     }

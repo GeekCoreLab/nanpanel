@@ -69,13 +69,14 @@ public class InternalAgentHeartbeatResource {
         report.hostname().isBlank() || report.hostname().length() > 255 ||
         report.hostname().chars().anyMatch(Character::isISOControl) ||
         report.os().length() > 255 || report.arch().length() > 64 ||
-        report.capabilities().size() > 25 || report.capabilities().stream().anyMatch(
+        report.capabilities().size() > 40 || report.capabilities().stream().anyMatch(
             capability -> !Set.of("host.inventory", "agent.heartbeat", "agent.self_update",
                 "systemd.read", "systemd.restart", "systemd.journal.read", "package.install",
                 "file.write.protected", "container.list", "container.logs", "container.start",
                 "container.stop", "container.deploy", "nginx.route.set",
                 "network.firewall.expose",
                 "network.topology.reconcile",
+                "network.topology.capture",
                 "k3s.preflight", "k3s.install", "k3s.upgrade",
                 "kubeedge.edgecore.join",
                 "kubernetes.runtime.detect",

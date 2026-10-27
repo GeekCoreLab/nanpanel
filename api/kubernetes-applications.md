@@ -30,9 +30,11 @@ Kubernetes YAML 仅接收 Deployment、Service 和 ServiceAccount，至少包含
 
 保存拓扑仍只表示期望状态。运行时现已提供单节点 K3s 的显式 Apply、Verify 和 Compensate：保留默认 CNI，通过 Multus bridge 次级网卡、隔离 netns Helper、专属 bridge/veth、精确 CIDR 路由和宿主输出过滤接入虚拟拓扑；选中的 ClusterIP Service 使用 NaNPanel 管理的 EndpointSlice 指向次级 Pod IP。Apply 前会校验近期 Node/Agent/Helper 健康状态、Resource UID、Multus NAD API、Service 选择范围和目标端口；Apply 需要近期重新验证身份，操作保留 Kubernetes 原配置和 CIDR 预留，补偿时先恢复 Deployment/Service，再等待 Pod 离开次级网络后清理宿主资源。集群必须预先安装 Multus 并授予访问 Node、Pod、Deployment、Service、NetworkAttachmentDefinition 和 EndpointSlice 所需权限，NaNPanel 不会安装或修改 CNI。当前 Apply 只支持一个已映射且 Ready 的 K3s Node；仅执行隔离 netns Provider 支持的 SWITCH、ROUTER、FIREWALL、PACKET_TAP 和 L2 Ethernet 链路，Pod attachment 必须连接 Linux Bridge SWITCH，Service targetPort 必须为数字。其余虚拟设备仍可编辑并保存，但 Apply 会拒绝不支持的设备。跨节点优先按应用分配 VNI 使用 VXLAN；多节点/VXLAN 尚未实现。控制面发布不会自动 Apply 应用网络拓扑；真实 Pod/Service 包路径、默认 CNI 健康和宿主隔离仍需在隔离集群验收。详见 [ADR-016](../docs/adr/ADR-016-application-virtual-network-data-plane.md)。
 
-`PACKET_TAP` 当前只把链路两侧的帧镜像到 monitor 端口，不生成抓包文件。未来设计允许管理员从支持的画布链路临时发起有时长和数据量上限的抓包，停止后下载带链路、拓扑 Revision、抓取点和时间等元数据的 PCAPNG；抓包会话、文件记录和保留策略尚未实现。抓包必须保持原转发路径不变；不支持镜像的链路需明确显示不可抓取。Service 业务流只有在路由 Provider 提供真实抓包点时才可抓取，代理计数器不等于抓包；TLS 解密前采到的负载仍是密文。
+`PACKET_TAP` 把链路两侧的帧镜像到 monitor 端口；此外，已 Apply 的 Linux netns L2 Ethernet 网线支持从边的右键菜单启动有界抓包。Helper 使用受信任的 root-owned `tcpdump`，最多运行 5 秒或收集 128 帧，每帧最多保留 128 字节；文件最大 64 KiB，在 PostgreSQL 中保留 24 小时。下载文件为 PCAPNG，包含应用、拓扑 Revision/generation、链路、源端接口、双向观测、无额外过滤器和起止时间元数据。抓包不改路由或转发；不支持的链路、未 Apply 的链路、缺少 Helper `network.topology.capture` 能力的主机以及业务流量边都会显示为不可用。当前没有手动停止操作，抓取会自动在上述边界结束。TLS 解密前采到的负载仍是密文。
 
-应用画布的业务流量编排是与上述设备网线分开的设计，详见 [ADR-017](../docs/adr/ADR-017-application-service-traffic-steering.md)。Service→Deployment 连线仍表示 Kubernetes selector；Deployment→设备和设备→设备连线分别表示次级网络接入和 L2/L3 连接。未来的业务流量连线将表示调用方、稳定 Service 身份、协议/端口及可选路由条件；`LOAD_BALANCER` 出口连接逻辑后端 Service 组并保存相对权重，后端 Pod 由 Kubernetes Service/EndpointSlice 动态发现。Deployment 可同时被 Service 访问并发起其他 Service 调用；响应属于原连接，不需要反向连线。当前权重尚未接入实际服务路由，应用网络 Apply 仍拒绝 `LOAD_BALANCER`；生产 Istio/Gateway 路由 Provider 也尚未实现。保存业务流图不会改变 Pod 流量或安装数据面组件。
+应用画布的业务流量连线和设备网线是不同语义，详见 [ADR-017](../docs/adr/ADR-017-application-service-traffic-steering.md)。Service→Deployment 连线表示 Kubernetes selector；Deployment→Service 表示调用方关系；Service→`LOAD_BALANCER`→后端 Service 表示 HTTP 加权路由；Deployment→设备和设备→设备连线分别表示次级网络接入和 L2/L3 网线。一个 Deployment 可以同时提供 Service 并发起其他 Service 调用，响应复用原连接，不需要反向连线。
+
+首个路由 Provider 使用 Istio `networking.istio.io/v1` VirtualService。它只支持 TCP ServicePort 中名称以 `http` 开头或端口为 80/8080 的 HTTP 流量。Stable Service 作为调用方访问的固定身份，后端连接到不同逻辑 Service；Istio 会按当前 Service 端点转发，不需逐个指定 Pod。若画布为该 Stable Service/端口配置了 Deployment→Service 调用边，Provider 会以应用保留的 Pod 标签和 Deployment selector 限定来源；未配置调用边时策略作用于所有符合条件的网格来源。各出口权重会归一化为百分比，零权重后端不接收新请求，全部为零时 Apply 被拒绝。只有 namespace 已启用 Istio sidecar 注入、调用方 Pod Ready 且含 `istio-proxy` 时才可 Apply；NaNPanel 不安装 Istio、不启用注入、不重启 Pod。保存流量图不会改变 Pod 流量，只有单独确认 Apply 才创建 VirtualService；Verify 检查 UID、所有权和规则，Compensate 仅删除 UID 与所有权匹配的 NaNPanel 路由。请求路由和抓包仍是两套独立功能，业务流量边目前没有真实抓包点。控制面配置成功不等于真实流量比例已验收；隔离集群中的流量分配、端点变更和补偿验收仍待执行。
 
 应用资源画布使用可拖拽节点与贝塞尔曲线连线；空白处右键可新增 Deployment 或 ClusterIP Service，拖动 Service 输出端到 Deployment 输入端修改 selector，表单可编辑 Deployment 副本数（0–20）和镜像，或编辑 Service 首个端口、目标端口与协议。新增和修改都会先生成 YAML diff，确认部署前不写集群。后端不接受任意资源 YAML，不删除已有资源，也不写入 Secret、Namespace、集群级资源或自定义资源。新 Service 必须匹配应用内 Deployment；名称已被 Namespace 中其他资源占用时拒绝部署。部署一个草稿后，其他基于旧版本的草稿会标记为 `FAILED` 并提示已过期。
 
@@ -41,6 +43,8 @@ Kubernetes YAML 仅接收 Deployment、Service 和 ServiceAccount，至少包含
 应用所需的集群权限限制在被选 Namespace：读取对应资源、创建首版资源和版本新增的 Deployment / Service，以及读取和更新该应用已登记的 Deployment、Service、ServiceAccount。不需要集群级写权限。应用资源同时登记 Kubernetes UID；同名资源被删除并重建后，旧应用不会自动接管新 UID。
 
 启用网络运行时后，还需要读取 Node、列出应用 Pod、创建/读取/更新/删除被应用标签托管的 NetworkAttachmentDefinition 与 EndpointSlice，并更新该应用已登记的 Deployment 和 Service。所需命名空间资源权限不会授予集群级写权限。
+
+启用 Service 流量路由还需要在应用 Namespace 读取 Namespace、Pod、Deployment 和 Service，并创建、读取和删除 Istio VirtualService。主机抓包需要已安装的 Linux netns Provider、root-owned `tcpdump` 和 Helper 报告 `network.topology.capture` 能力。抓包文件由 Core 单独保存并按 24 小时策略清理，不会写入普通 Helper 操作结果。
 
 ## 路由
 
@@ -56,6 +60,12 @@ Kubernetes YAML 仅接收 Deployment、Service 和 ServiceAccount，至少包含
 | POST | `/api/v1/kubernetes/applications/{applicationId}/network-topology/runtime/apply` | 显式接入真实 Pod/Service 流量 |
 | POST | `/api/v1/kubernetes/applications/{applicationId}/network-topology/runtime/verify` | 显式验证 Helper、Pod 网卡和 EndpointSlice |
 | POST | `/api/v1/kubernetes/applications/{applicationId}/network-topology/runtime/compensate` | 恢复运行前资源与主机网络配置 |
+| GET | `/api/v1/kubernetes/applications/{applicationId}/network-topology/traffic-runtime` | 查询 Istio Service 流量路由状态 |
+| POST | `/api/v1/kubernetes/applications/{applicationId}/network-topology/traffic-runtime/{action}` | 显式创建、验证或补偿 Istio HTTP 路由（`apply`、`verify`、`compensate`） |
+| GET | `/api/v1/kubernetes/applications/{applicationId}/network-topology/captures` | 查询抓包支持状态和最近记录 |
+| POST | `/api/v1/kubernetes/applications/{applicationId}/network-topology/captures` | 对已 Apply 的 L2 Ethernet 网线启动限时抓包（需要近期重新验证身份） |
+| GET | `/api/v1/kubernetes/applications/{applicationId}/network-topology/captures/{captureId}` | 查询抓包状态和元数据 |
+| GET | `/api/v1/kubernetes/applications/{applicationId}/network-topology/captures/{captureId}/download` | 下载 24 小时内有效的 PCAPNG 文件 |
 | GET | `/api/v1/kubernetes/applications/{applicationId}/network-topology/revisions` | 查询应用虚拟拓扑 Revision 摘要 |
 | GET | `/api/v1/kubernetes/applications/{applicationId}/network-topology/revisions/{revisionId}` | 读取不可变应用虚拟拓扑 Revision |
 | GET | `/api/v1/kubernetes/applications/{applicationId}/versions` | 获取版本历史和差异 |

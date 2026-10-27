@@ -43,7 +43,7 @@ public class HostHelperOperationResource {
   private static final Set<String> CAPABILITIES = Set.of(
       "package.install", "file.write.protected", "container.list", "container.logs",
       "container.start", "container.stop", "container.deploy", "network.firewall.expose",
-      "network.topology.reconcile",
+      "network.topology.reconcile", "network.topology.capture",
       "file.list", "file.read", "file.write", "file.delete", "k3s.preflight", "k3s.install",
       "k3s.upgrade", "kubeedge.edgecore.join", "nginx.route.set");
   private static final java.util.regex.Pattern PACKAGE_NAME =
@@ -108,7 +108,8 @@ public class HostHelperOperationResource {
       @PathParam("hostId") String hostValue,
       @HeaderParam("Idempotency-Key") String idempotencyKey,
       HelperOperationRequest input) {
-    if (input != null && "network.topology.reconcile".equals(input.capability())) {
+    if (input != null && Set.of("network.topology.reconcile", "network.topology.capture")
+        .contains(input.capability())) {
       throw fail(403, "NETWORK_PROVIDER_PLAN_REQUIRED",
           "隔离拓扑操作必须经过持久化的 Provider 计划生命周期提交");
     }
@@ -454,7 +455,7 @@ public class HostHelperOperationResource {
       case "container.logs", "container.start", "container.stop", "container.deploy" ->
           CONTAINER_NAME.matcher(target).matches();
       case "network.firewall.expose" -> NETWORK_RULE_NAME.matcher(target).matches();
-      case "network.topology.reconcile" -> UUID_TEXT.matcher(target).matches();
+      case "network.topology.reconcile", "network.topology.capture" -> UUID_TEXT.matcher(target).matches();
       case "nginx.route.set" -> NGINX_ROUTE_NAME.matcher(target).matches();
       default -> false;
     };
@@ -574,7 +575,11 @@ public class HostHelperOperationResource {
       return;
     }
     if (capability.equals("network.topology.reconcile")) {
-      validateNetworkTopology(target, payload);
+      validateNetworkTopology(target, payload, false);
+      return;
+    }
+    if (capability.equals("network.topology.capture")) {
+      validateNetworkTopology(target, payload, true);
       return;
     }
     if (capability.equals("nginx.route.set")) {
@@ -585,7 +590,7 @@ public class HostHelperOperationResource {
       throw fail(422, "VALIDATION_FAILED", "该 Helper 操作不接受附加参数");
   }
 
-  private void validateNetworkTopology(String target, JsonNode payload) {
+  private void validateNetworkTopology(String target, JsonNode payload, boolean capture) {
     JsonNode topologyId = payload == null ? null : payload.get("topologyId");
     JsonNode revisionId = payload == null ? null : payload.get("revisionId");
     JsonNode generation = payload == null ? null : payload.get("generation");
@@ -593,18 +598,23 @@ public class HostHelperOperationResource {
     JsonNode nodes = payload == null ? null : payload.get("nodes");
     JsonNode links = payload == null ? null : payload.get("links");
     JsonNode attachments = payload == null ? null : payload.get("attachments");
+    JsonNode captureLinkId = payload == null ? null : payload.get("captureLinkId");
     Set<String> payloadFields = payload != null && payload.isObject() ? fieldSet(payload) : Set.of();
     Set<String> requiredPayloadFields = Set.of("action", "topologyId", "revisionId", "generation",
         "nodes", "links");
     Set<String> allowedPayloadFields = Set.of("action", "topologyId", "revisionId", "generation",
-        "nodes", "links", "attachments");
+        "nodes", "links", "attachments", "captureLinkId");
     if (payload == null || !payload.isObject() || !allowedPayloadFields.containsAll(payloadFields)
         || !payloadFields.containsAll(requiredPayloadFields)
         || topologyId == null || !topologyId.isTextual() || !target.equals(topologyId.asText())
         || revisionId == null || !revisionId.isTextual() || !UUID_TEXT.matcher(revisionId.asText()).matches()
         || generation == null || !generation.isIntegralNumber() || !generation.canConvertToLong()
         || generation.longValue() < 1 || action == null || !action.isTextual()
-        || !Set.of("APPLY", "VERIFY", "COMPENSATE").contains(action.asText())
+        || !(capture ? "CAPTURE".equals(action.asText())
+            : Set.of("APPLY", "VERIFY", "COMPENSATE").contains(action.asText()))
+        || (capture ? captureLinkId == null || !captureLinkId.isTextual()
+            || !UUID_TEXT.matcher(captureLinkId.asText()).matches()
+            : captureLinkId != null)
         || nodes == null || !nodes.isArray() || nodes.isEmpty() || nodes.size() > 16
         || links == null || !links.isArray() || links.size() > 64
         || (attachments != null && (!attachments.isArray() || attachments.size() > 64))
@@ -647,6 +657,7 @@ public class HostHelperOperationResource {
     }
     var linkIds = new java.util.HashSet<String>();
     var occupiedPorts = new java.util.HashSet<String>();
+    boolean captureLinkFound = false;
     for (JsonNode link : links) {
       if (!objectWithKeys(link, Set.of("id", "sourceNodeId", "sourcePort", "targetNodeId",
           "targetPort", "layer", "protocol"))) {
@@ -657,6 +668,7 @@ public class HostHelperOperationResource {
       String sourcePort = link.path("sourcePort").asText();
       String targetNode = link.path("targetNodeId").asText();
       String targetPort = link.path("targetPort").asText();
+      if (capture && captureLinkId.asText().equals(id)) captureLinkFound = true;
       if (!UUID_TEXT.matcher(id).matches() || !linkIds.add(id)
           || !nodeIds.contains(sourceNode) || !nodeIds.contains(targetNode) || sourceNode.equals(targetNode)
           || !sourcePort.matches("out-([1-9]|1[0-6])")
@@ -667,6 +679,9 @@ public class HostHelperOperationResource {
           || !occupiedPorts.add(physicalPortKey(targetNode, targetPort, nodeKinds))) {
         throw fail(422, "VALIDATION_FAILED", "Linux Bridge 链路必须连接唯一 L2 Ethernet switch 端口");
       }
+    }
+    if (capture && !captureLinkFound) {
+      throw fail(422, "VALIDATION_FAILED", "抓包选择的链路不属于此拓扑 Revision");
     }
     var attachmentIds = new java.util.HashSet<String>();
     var cidrs = new java.util.HashSet<String>();

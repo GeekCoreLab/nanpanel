@@ -1452,6 +1452,156 @@ paths:
               schema: { $ref: '#/components/schemas/KubernetesApplicationNetworkRuntime' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '409': { description: 当前运行时状态不能补偿。 }
+  /api/v1/kubernetes/applications/{applicationId}/network-topology/traffic-runtime:
+    parameters:
+    - name: applicationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    get:
+      tags: [KubernetesApplications]
+      operationId: getKubernetesApplicationTrafficRuntime
+      summary: 查询应用 Istio Service 流量路由状态
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: Istio VirtualService 路由状态。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationTrafficRuntime' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/kubernetes/applications/{applicationId}/network-topology/traffic-runtime/{action}:
+    parameters:
+    - name: applicationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    - name: action
+      in: path
+      required: true
+      schema: { type: string, enum: [apply, verify, compensate] }
+    post:
+      tags: [KubernetesApplications]
+      operationId: mutateKubernetesApplicationTrafficRuntime
+      summary: 显式应用、验证或补偿 Istio HTTP Service 路由
+      description: 要求近期重新验证身份。Apply 只创建本应用管理的 VirtualService；Compensate 仅删除 UID 和所有权均匹配的资源。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      responses:
+        '200':
+          description: 路由运行时状态。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationTrafficRuntime' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: 应用、拓扑、mesh 或路由资源状态不符合前置条件。 }
+        '422': { description: Service、端口、调用方或权重不受支持。 }
+  /api/v1/kubernetes/applications/{applicationId}/network-topology/captures:
+    parameters:
+    - name: applicationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    get:
+      tags: [KubernetesApplications]
+      operationId: listKubernetesApplicationPacketCaptures
+      summary: 查询应用虚拟网线抓包记录
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      parameters:
+      - name: limit
+        in: query
+        schema: { type: integer, minimum: 1, maximum: 20, default: 10 }
+      responses:
+        '200':
+          description: 抓包能力和最近记录。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationPacketCaptureList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [KubernetesApplications]
+      operationId: startKubernetesApplicationPacketCapture
+      summary: 对已 Apply 的 L2 Ethernet 网线启动有界抓包
+      description: 自动在 5 秒或 128 帧边界结束；需要近期重新验证身份，Helper 需报告受信任的 tcpdump 能力。
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+        csrfToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/KubernetesApplicationPacketCaptureRequest' }
+      responses:
+        '202':
+          description: 抓包已提交。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationPacketCapture' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { description: 拓扑运行时或活动抓包状态不符合前置条件。 }
+        '422': { description: 所选链路不是受支持的 L2 Ethernet 网线。 }
+  /api/v1/kubernetes/applications/{applicationId}/network-topology/captures/{captureId}:
+    parameters:
+    - name: applicationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    - name: captureId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    get:
+      tags: [KubernetesApplications]
+      operationId: getKubernetesApplicationPacketCapture
+      summary: 查询抓包状态和元数据
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: 抓包状态。
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/KubernetesApplicationPacketCapture' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+  /api/v1/kubernetes/applications/{applicationId}/network-topology/captures/{captureId}/download:
+    parameters:
+    - name: applicationId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    - name: captureId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    get:
+      tags: [KubernetesApplications]
+      operationId: downloadKubernetesApplicationPacketCapture
+      summary: 下载尚在保留期内的 PCAPNG 抓包文件
+      x-implementation-status: implemented
+      security:
+      - cookieAuth: []
+      responses:
+        '200':
+          description: PCAPNG artifact。
+          headers:
+            Content-Disposition: { schema: { type: string } }
+            X-Capture-Format: { schema: { type: string, const: PCAPNG } }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { description: 抓包未完成或文件已过期。 }
   /api/v1/kubernetes/applications/{applicationId}/network-topology/revisions/{revisionId}:
     parameters:
     - name: applicationId
@@ -6562,7 +6712,7 @@ components:
     KubernetesApplicationNetworkTopologyWrite:
       type: object
       additionalProperties: false
-      required: [nodes, links, attachments]
+      required: [nodes, links, attachments, trafficLinks]
       properties:
         nodes:
           type: array
@@ -6576,6 +6726,23 @@ components:
           type: array
           maxItems: 256
           items: { $ref: '#/components/schemas/KubernetesApplicationNetworkAttachment' }
+        trafficLinks:
+          type: array
+          maxItems: 512
+          items: { $ref: '#/components/schemas/KubernetesApplicationTrafficLink' }
+    KubernetesApplicationTrafficLink:
+      type: object
+      additionalProperties: false
+      required: [id, type, sourceId, sourceHandle, targetId, targetHandle, protocol, servicePort]
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, enum: [CALL, ROUTE_ENTRY, ROUTE_BACKEND] }
+        sourceId: { type: string, maxLength: 128 }
+        sourceHandle: { type: string, maxLength: 64 }
+        targetId: { type: string, maxLength: 128 }
+        targetHandle: { type: string, maxLength: 64 }
+        protocol: { type: string, enum: [HTTP] }
+        servicePort: { type: integer, minimum: 1, maximum: 65535, description: CALL/ROUTE_ENTRY 使用稳定 Service 端口；ROUTE_BACKEND 使用所选后端 Service 端口。 }
     KubernetesApplicationNetworkAttachment:
       type: object
       additionalProperties: false
@@ -6597,7 +6764,7 @@ components:
     KubernetesApplicationNetworkTopology:
       type: object
       additionalProperties: false
-      required: [revisionId, generation, nodes, links, attachments, updatedAt, updatedBy]
+      required: [revisionId, generation, nodes, links, attachments, trafficLinks, updatedAt, updatedBy]
       properties:
         revisionId: { type: [string, 'null'], format: uuid }
         generation: { type: integer, format: int64, minimum: 0 }
@@ -6613,6 +6780,10 @@ components:
           type: array
           maxItems: 256
           items: { $ref: '#/components/schemas/KubernetesApplicationNetworkAttachment' }
+        trafficLinks:
+          type: array
+          maxItems: 512
+          items: { $ref: '#/components/schemas/KubernetesApplicationTrafficLink' }
         updatedAt: { type: [string, 'null'], format: date-time }
         updatedBy: { type: [string, 'null'], format: uuid }
     KubernetesApplicationNetworkTopologyRevisionList:
@@ -6632,9 +6803,56 @@ components:
         revisionId: { type: string, format: uuid }
         generation: { type: integer, format: int64, minimum: 1 }
         nodeCount: { type: integer, minimum: 0, maximum: 100 }
-        linkCount: { type: integer, minimum: 0, maximum: 1056 }
+        linkCount: { type: integer, minimum: 0, maximum: 1568 }
         updatedAt: { type: string, format: date-time }
         updatedBy: { type: [string, 'null'], format: uuid }
+    KubernetesApplicationTrafficRuntime:
+      type: object
+      additionalProperties: false
+      required: [applicationId, revisionId, generation, state, detail, updatedAt, appliedAt]
+      properties:
+        applicationId: { type: string, format: uuid }
+        revisionId: { type: string, format: uuid }
+        generation: { type: integer, format: int64, minimum: 1 }
+        state: { type: string, enum: [APPLYING, APPLIED, VERIFY_FAILED, COMPENSATING, COMPENSATED, FAILED, PARTIAL] }
+        detail: { type: [string, 'null'], maxLength: 1000 }
+        updatedAt: { type: string, format: date-time }
+        appliedAt: { type: [string, 'null'], format: date-time }
+    KubernetesApplicationPacketCaptureRequest:
+      type: object
+      additionalProperties: false
+      required: [linkId]
+      properties:
+        linkId: { type: string, format: uuid }
+    KubernetesApplicationPacketCaptureList:
+      type: object
+      additionalProperties: false
+      required: [supported, items]
+      properties:
+        supported: { type: boolean, description: 目标 Helper 报告受信任 tcpdump 能力。 }
+        items:
+          type: array
+          maxItems: 20
+          items: { $ref: '#/components/schemas/KubernetesApplicationPacketCapture' }
+    KubernetesApplicationPacketCapture:
+      type: object
+      additionalProperties: false
+      required: [captureId, applicationId, revisionId, generation, linkId, capturePoint, state, packetCount, capturedBytes, truncated, detail, startedAt, completedAt, expiresAt]
+      properties:
+        captureId: { type: string, format: uuid }
+        applicationId: { type: string, format: uuid }
+        revisionId: { type: string, format: uuid }
+        generation: { type: integer, format: int64, minimum: 1 }
+        linkId: { type: string, format: uuid }
+        capturePoint: { type: [string, 'null'], maxLength: 128 }
+        state: { type: string, enum: [CAPTURING, COMPLETE, FAILED, EXPIRED] }
+        packetCount: { type: [integer, 'null'], minimum: 0 }
+        capturedBytes: { type: [integer, 'null'], minimum: 0 }
+        truncated: { type: boolean }
+        detail: { type: [string, 'null'], maxLength: 1000 }
+        startedAt: { type: string, format: date-time }
+        completedAt: { type: [string, 'null'], format: date-time }
+        expiresAt: { type: string, format: date-time }
     KubernetesApplicationNetworkRuntimeAction:
       type: object
       additionalProperties: false

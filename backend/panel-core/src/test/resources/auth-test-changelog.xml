@@ -129,4 +129,7 @@
     <changeSet id="host-application-releases-test" author="nanpanel">
         <sqlFile path="db/changelog/038-host-application-releases-test.sql"/>
     </changeSet>
+    <changeSet id="application-packet-captures-test" author="nanpanel">
+        <sql>CREATE TABLE kubernetes_application_packet_capture (capture_id UUID PRIMARY KEY, application_id UUID NOT NULL, revision_id UUID NOT NULL, generation BIGINT NOT NULL, link_id UUID NOT NULL, capture_point VARCHAR(128), operation_id UUID, idempotency_key VARCHAR(128) NOT NULL, state VARCHAR(16) NOT NULL, pcapng VARBINARY, packet_count INTEGER, captured_bytes INTEGER, truncated BOOLEAN NOT NULL DEFAULT FALSE, detail VARCHAR(512), created_by VARCHAR(36) NOT NULL, started_at BIGINT NOT NULL, completed_at BIGINT, expires_at BIGINT NOT NULL);</sql>
+    </changeSet>
 </databaseChangeLog>

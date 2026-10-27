@@ -55,33 +55,40 @@ flowchart LR
 ```
 
 The graph is declarative until a compatible route Provider binds it to a real
-interception point and reports Apply/Verify state. A provider may use an
-in-mesh proxy for east-west calls or a Gateway for ingress; supported
-protocols and matches are provider capabilities. Direct Pod-IP traffic stays
-outside a Service route unless a provider explicitly intercepts it. Multus and
-the virtual L2/L3 graph can provide reachability or inspection, but do not infer
-call relationships or execute relative backend weights. See [ADR-017](../adr/ADR-017-application-service-traffic-steering.md).
+interception point and reports Apply/Verify/Compensate state. The first
+provider writes application-owned Istio VirtualServices for HTTP Service ports
+(a port named `http*`, or port 80/8080), checks mesh-injected Ready callers,
+and normalizes backend weights to percentages. A drawn caller Deployment
+limits a route using its selector and an application ownership label; when no
+caller is drawn, the route applies to eligible mesh callers for that stable
+Service. Direct Pod-IP traffic stays outside this Service route. Multus and
+the virtual L2/L3 graph provide reachability or inspection, but do not infer
+call relationships or execute relative backend weights. Live split,
+endpoint-update, and compensation acceptance remains pending in an isolated
+cluster. See [ADR-017](../adr/ADR-017-application-service-traffic-steering.md).
 
 ### Capturing a selected link
 
-An operator should be able to start a temporary packet capture from a
-supported canvas link, inspect its state, stop it, and download the resulting
-PCAPNG file. This is a link action, not a new permanent route or a change to
-forwarding. The capture record must identify the topology revision, selected
-link, observation point and directions, filters, time bounds, and any
-truncation. Sessions need duration and size bounds, an authorized operator,
-and bounded artifact retention; exact defaults are still open.
+An operator can start a temporary packet capture from a supported canvas
+link, inspect its state, and download the resulting PCAPNG file. This is a
+link action, not a new permanent route or a change to forwarding. The current
+capture automatically ends after 5 seconds or 128 frames, with a 128-byte
+snapshot per frame; artifacts are limited to 64 KiB and retained for 24 hours.
+The PCAPNG metadata records the topology revision, selected link, source-side
+interface, both directions, no extra filter, start/end times, and truncation.
+Starting capture requires recent reauthentication and an available trusted
+Helper capability.
 
 The current Linux `PACKET_TAP` mirrors traffic from both business sides to its
-monitor port with `tc mirred`, but it does not write a packet-capture file or
-manage a capture session. A future recorder Provider must attach to that
-mirror (or another verified packet source), report the coverage it actually
-provides, and clean up temporary resources when capture stops. A logical
-Service traffic-flow edge can offer capture only if its route Provider exposes
-a real packet source. Request counters and proxy logs are observations, not
-packet captures. A packet capture sees payload as it exists at that point;
-traffic captured before TLS termination remains encrypted. Unsupported links
-must show capture as unavailable rather than implying that a capture ran.
+monitor port with `tc mirred`. Separately, the Helper can capture a selected
+applied L2 Ethernet wire by running trusted `tcpdump` inside the topology
+network namespace and converting its bounded classic PCAP stream into
+PCAPNG. The capture observes the source-side interface and does not alter the
+business path. This first slice does not capture the tap monitor port or a
+logical Service traffic-flow edge; proxy counters and logs are observations,
+not packet captures. A packet capture sees payload as it exists at that
+point; traffic captured before TLS termination remains encrypted. Unsupported
+links must show capture as unavailable rather than implying that a capture ran.
 
 No throughput, latency, or traffic-split accuracy target is claimed before an
 isolated data-plane experiment. Initial live acceptance must use an isolated

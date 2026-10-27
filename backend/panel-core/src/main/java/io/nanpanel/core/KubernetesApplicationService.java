@@ -1056,10 +1056,13 @@ public class KubernetesApplicationService {
     boolean networkRuntimeActive = store.transaction(connection -> !query(connection,
         "SELECT application_id FROM kubernetes_application_network_runtime WHERE application_id=? "
             + "AND state IN ('APPLYING','APPLIED','VERIFYING','VERIFY_FAILED','COMPENSATING','FAILED','PARTIAL')",
-        applicationId).isEmpty());
+        applicationId).isEmpty() || !query(connection,
+            "SELECT application_id FROM kubernetes_application_traffic_runtime WHERE application_id=? "
+                + "AND state IN ('APPLYING','APPLIED','VERIFY_FAILED','COMPENSATING','FAILED','PARTIAL')",
+            applicationId).isEmpty());
     if (networkRuntimeActive) throw new ApplicationException(409,
         "APPLICATION_NETWORK_RUNTIME_ACTIVE",
-        "请先补偿恢复应用网络运行时后再部署应用版本");
+        "请先补偿恢复应用网络或 Service 流量路由运行时后再部署应用版本");
     AppRow app = app(applicationId);
     StoredVersion desiredVersion = version(applicationId, versionNumber);
     if (desiredVersion == null) throw new ApplicationException(404,
@@ -1079,9 +1082,12 @@ public class KubernetesApplicationService {
       if (!query(connection,
           "SELECT application_id FROM kubernetes_application_network_runtime WHERE application_id=? "
               + "AND state IN ('APPLYING','APPLIED','VERIFYING','VERIFY_FAILED','COMPENSATING','FAILED','PARTIAL') FOR UPDATE",
-          applicationId).isEmpty()) {
+          applicationId).isEmpty() || !query(connection,
+              "SELECT application_id FROM kubernetes_application_traffic_runtime WHERE application_id=? "
+                  + "AND state IN ('APPLYING','APPLIED','VERIFY_FAILED','COMPENSATING','FAILED','PARTIAL') FOR UPDATE",
+              applicationId).isEmpty()) {
         throw new ApplicationException(409, "APPLICATION_NETWORK_RUNTIME_ACTIVE",
-            "请先补偿恢复应用网络运行时后再部署应用版本");
+            "请先补偿恢复应用网络或 Service 流量路由运行时后再部署应用版本");
       }
       int claimed = update(connection,
           "UPDATE kubernetes_application_version SET state='APPLYING',error_message=NULL "
@@ -1238,6 +1244,31 @@ public class KubernetesApplicationService {
     resource.setMetadata(metadata.build());
     if (resource instanceof Deployment deployment) {
       deployment.setStatus(null);
+      if (deployment.getSpec() == null || deployment.getSpec().getTemplate() == null
+          || deployment.getSpec().getSelector() == null
+          || deployment.getSpec().getSelector().getMatchLabels() == null) {
+        throw invalid("Deployment 必须包含 Pod 模板和 matchLabels selector");
+      }
+      String selectedApplication = deployment.getSpec().getSelector().getMatchLabels()
+          .get(APPLICATION_ID);
+      if (selectedApplication != null && !applicationId.toString().equals(selectedApplication)) {
+        throw invalid("Deployment selector 不能覆盖保留的应用所有权标签");
+      }
+      var template = deployment.getSpec().getTemplate();
+      Map<String, String> podLabels = template.getMetadata() == null
+          || template.getMetadata().getLabels() == null
+              ? new HashMap<>() : new HashMap<>(template.getMetadata().getLabels());
+      String selectedPodApplication = podLabels.get(APPLICATION_ID);
+      if (selectedPodApplication != null
+          && !applicationId.toString().equals(selectedPodApplication)) {
+        throw invalid("Deployment Pod 模板不能覆盖保留的应用所有权标签");
+      }
+      podLabels.put(APPLICATION_ID, applicationId.toString());
+      if (template.getMetadata() == null) {
+        template.setMetadata(new ObjectMetaBuilder().withLabels(podLabels).build());
+      } else {
+        template.getMetadata().setLabels(podLabels);
+      }
       validateDeployment(deployment);
     } else if (resource instanceof Service service) {
       service.setStatus(null);

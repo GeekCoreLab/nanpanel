@@ -1,6 +1,6 @@
 # ADR-017: Drag-driven application service traffic steering
 
-- Status: Accepted as a design; implementation and live acceptance have not started.
+- Status: Accepted; first application implementation is available, live data-plane acceptance is pending.
 - Date: 2026-10-26
 
 ## Context
@@ -14,9 +14,10 @@ network devices, but its existing connections have distinct meanings:
 - A device-to-device connection describes a typed network link.
 
 None of these connections declares which application call should be routed to
-which backend. A `LOAD_BALANCER` can store relative output weights, but those
-weights are desired intent only. Applying the current application network
-runtime rejects `LOAD_BALANCER` and executes a limited L2/Ethernet device graph.
+which backend. A `LOAD_BALANCER` can store relative output weights; the
+virtual-network runtime still executes only a limited L2/Ethernet device graph.
+An independent Service route runtime now applies the supported HTTP subset
+through Istio VirtualServices.
 
 A Kubernetes Deployment can serve requests and initiate calls to other
 Services at the same time. Modeling a Deployment as having one traffic
@@ -52,11 +53,14 @@ discover their Ready Pod endpoints.
    traffic flows. The response to a request is the return direction of the
    same connection and does not require a second reverse flow. A new request
    initiated by the Deployment is a separate flow.
-6. Keep the traffic graph as desired state. A route Provider must bind it to a
-   real traffic interception point, compile the route for a declared protocol,
-   and report Plan, Apply, Verify, and Compensate state. HTTP/HTTPS/gRPC and
-   L4 traffic may require different data-plane capabilities. A graph edge or
-   saved weight alone never claims that traffic is being steered.
+6. Keep the traffic graph as desired state. The first route Provider binds
+   HTTP Service-port routes to an application-owned Istio VirtualService and
+   reports Apply, Verify, and Compensate state. It accepts TCP Service ports
+   named `http*` or numbered 80/8080, requires an injected and Ready caller
+   sidecar, and supports an optional Deployment caller selector. HTTPS/gRPC
+   classification, host/path matches, L4 traffic, and Gateway ingress are not
+   in this first slice. A graph edge or saved weight alone never claims that
+   traffic is being steered.
 7. Keep route enforcement separate from the Multus/L2 virtual-network
    Provider. The latter can provide reachability or inspection paths; it does
    not infer application calls or weighted backend policy. Saving or
@@ -64,25 +68,23 @@ discover their Ready Pod endpoints.
    cluster. Initial live packet acceptance must use an isolated test namespace
    and cluster.
 8. Make packet capture an explicit, temporary operation on a selected
-   supported network link. The canvas should offer a link action to start a
-   capture, show its capture point and state, and let an authorized operator
-   stop it and download a PCAPNG artifact. A capture mirrors packets and must
-   not change forwarding, routing, or load-balancer weights. Apply duration,
-   packet/byte, and retention bounds; their concrete defaults remain to be
-   decided with the capture Provider. Record the topology revision, selected
-   link, capture point, direction, filters, start/end times, and truncation or
-   failure status with the artifact.
-9. Treat `PACKET_TAP` as a possible data-plane source, not as a capture file
-   recorder. Its current Linux implementation mirrors both business-link
-   directions to a monitor port using `tc mirred`; it does not start an
-   operator session or create PCAP/PCAPNG output. A future capture Provider
-   must connect an eligible link's mirror source to a bounded recorder and
-   report exactly which packets and directions it can observe. A logical
-   application traffic-flow edge may offer capture only when its route
-   Provider exposes a packet capture point; proxy counters or request logs
-   must not be presented as packet captures. Captured packets retain the
-   encryption present at the selected point, so a capture before TLS
-   termination contains encrypted application payload.
+   supported network link. The canvas offers a link action to start capture,
+   show its capture point and state, and download a PCAPNG artifact after the
+   bounded capture ends automatically. The first implementation accepts only
+   an applied L2 Ethernet wire and uses trusted `tcpdump` in its topology
+   namespace. Bounds are 5 seconds, 128 packets, 128 bytes per packet, 64 KiB
+   per artifact, and 24-hour retention. Capture mirrors packets and does not
+   change forwarding, routing, or load-balancer weights. PCAPNG metadata
+   records topology Revision/generation, selected link, source-side interface,
+   both directions, no extra filter, start/end times, and truncation/failure.
+9. Treat `PACKET_TAP` as separate from file capture. Its Linux implementation
+   mirrors both business-link directions to a monitor port using `tc mirred`;
+   the capture action reads the source-side interface of the selected wire and
+   does not record the monitor port. A logical application traffic-flow edge
+   has no packet capture point in the first route Provider. Proxy counters or
+   request logs must not be presented as packet captures. Captured packets
+   retain the encryption present at the selected point, so a capture before
+   TLS termination contains encrypted application payload.
 
 ## Consequences
 
@@ -94,20 +96,16 @@ discover their Ready Pod endpoints.
   per-Pod configuration.
 - A Deployment that both serves and consumes services appears in separate
   flows without being duplicated or assigned an artificial one-way role.
-- Existing `LOAD_BALANCER` output weights remain intent until a compatible
-  route Provider executes them. Direct Pod-IP traffic and destinations outside
-  a Provider's interception boundary are not covered by a Service route.
+- Existing `LOAD_BALANCER` output weights remain intent until the explicit
+  Istio route Apply executes them. Direct Pod-IP traffic and destinations
+  outside the mesh interception boundary are not covered by a Service route.
 - No throughput, latency, or split-accuracy target is committed here. Those
   values require a later isolated data-plane experiment.
 - Link capture is separate from persistent topology intent and traffic
-  steering. It is not implemented: the existing `PACKET_TAP` only mirrors
-  frames to a monitor port. Capture requires an explicit bounded session,
-  recorder, artifact lifecycle, and Provider evidence. A link without a
-  supported mirror point must be shown as unavailable rather than returning an
-  empty or inferred capture.
-- Capture limits, roles, and artifact retention need to be set by the capture
-  Provider before implementation. Starting or stopping a capture must be
-  auditable; saving the topology alone never starts one.
+  steering. It is implemented for applied L2 Ethernet wires, with an audited,
+  bounded automatic session and a 24-hour PCAPNG artifact. It does not use
+  `PACKET_TAP`'s monitor port; unsupported links are unavailable. Saving the
+  topology alone never starts a capture.
 
 ## Verification boundary
 
@@ -122,13 +120,11 @@ reverse route. Live acceptance must distinguish Service-routed traffic from
 direct Pod-IP traffic and must not be inferred from topology rendering,
 configuration creation, or mock requests.
 
-Packet-capture acceptance is a separate gate. On an isolated supported link,
-start a bounded capture and prove that its artifact contains packets observed
-at the reported point while the original business path continues forwarding
-unchanged. Verify that the artifact records the selected revision/link,
-directions, filters, time bounds, and whether configured limits truncated the
-capture; stopping the session must stop packet collection and release its
-temporary mirror/recorder resources. Also prove that an unsupported link is
-reported as unavailable and that application-flow capture is offered only
-when its route Provider exposes a real packet source. Encrypted payload must
-not be described as decrypted application content.
+Packet-capture acceptance remains a separate live gate. On an isolated
+supported link, start a bounded capture and prove that its artifact contains
+packets observed at the reported point while the original business path
+continues forwarding unchanged. Verify selected revision/link, directions,
+filter description, time bounds, and limit/truncation metadata. Also prove
+that unsupported links are reported as unavailable and that application-flow
+capture is not offered without a real route-provider packet source. Encrypted
+payload must not be described as decrypted application content.

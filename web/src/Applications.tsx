@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import {
@@ -22,10 +22,15 @@ import type {
   KubernetesApplicationRuntimeEventList,
   KubernetesApplicationRuntimeLog,
   KubernetesApplicationTopologyNode,
+  KubernetesApplicationTopologyServicePort,
   KubernetesApplicationTopologyAddition,
   KubernetesApplicationNetworkTopology,
   KubernetesApplicationNetworkTopologyWrite,
+  KubernetesApplicationTrafficLink,
   KubernetesApplicationNetworkRuntime,
+  KubernetesApplicationPacketCapture,
+  KubernetesApplicationPacketCaptureList,
+  KubernetesApplicationTrafficRuntime,
   KubernetesApplicationVersion,
   KubernetesApplicationVersionDraftRequest,
   KubernetesApplicationVersionList,
@@ -917,6 +922,8 @@ function ApplicationFlowNodeCard({ data, selected }: NodeProps<ApplicationFlowNo
   const service = resource.kind === 'Service';
   const account = resource.kind === 'ServiceAccount';
   const serviceAccessUrl = service ? applicationServiceAccessUrl(resource) : undefined;
+  const trafficPorts = data.networkMode && service
+    ? resource.servicePorts.filter(isHttpTrafficPort) : [];
   const title = deployment ? 'DEPLOYMENT' : service ? 'SERVICE' : 'SERVICE ACCOUNT';
   const servicePortSummary = resource.servicePorts.map((port, index) => {
     const displayedPort = index === 0 ? changes.servicePort ?? port.port : port.port;
@@ -929,6 +936,18 @@ function ApplicationFlowNodeCard({ data, selected }: NodeProps<ApplicationFlowNo
     title={deployment ? '单击查看此 Deployment 的 Pod、事件、日志与 Exec' : undefined}>
     {deployment && <Handle id="deployment-input" type="target" position={Position.Left} className="application-flow-handle deployment-input" isConnectable={!controlsDisabled} />}
     {service && <Handle id="service-output" type="source" position={Position.Right} className="application-flow-handle service-output" isConnectable={!controlsDisabled} />}
+    {data.networkMode && deployment && <Handle id="call-output" type="source" position={Position.Right} className="application-traffic-handle call-output" isConnectable={!controlsDisabled} />}
+    {trafficPorts.map((port, index) => <Fragment key={`traffic-port-${port.port}`}>
+      <Handle id={`call-input-${port.port}`} type="target" position={Position.Left}
+        style={{ top: `${119 + index * 23}px` }}
+        className="application-traffic-handle service-call-input" isConnectable={!controlsDisabled} />
+      <Handle id={`route-output-${port.port}`} type="source" position={Position.Right}
+        style={{ top: `${119 + index * 23}px` }}
+        className="application-traffic-handle service-route-output" isConnectable={!controlsDisabled} />
+      <Handle id={`backend-input-${port.port}`} type="target" position={Position.Top}
+        style={{ left: `${32 + (index % 3) * 18}%` }}
+        className="application-traffic-handle service-backend-input" isConnectable={!controlsDisabled} />
+    </Fragment>)}
     {deployment && data.networkMode && <>
       <Handle id="network-in-1" type="target" position={Position.Top} className="application-network-handle network-in" isConnectable={!controlsDisabled} />
       <Handle id="network-out-1" type="source" position={Position.Bottom} className="application-network-handle network-out" isConnectable={!controlsDisabled} />
@@ -944,6 +963,11 @@ function ApplicationFlowNodeCard({ data, selected }: NodeProps<ApplicationFlowNo
     </> : service ? <>
       <small>{resource.serviceType ?? 'ClusterIP'} · {servicePortSummary || `${resource.servicePort ?? '—'}/${resource.serviceProtocol ?? 'TCP'} → ${resource.targetPort ?? '—'}`}</small>
       <small>后端：{changes.targetDeployment ?? resource.targetDeployment ?? '通过拓扑连线指定'}</small>
+      {data.networkMode && <div className="application-service-traffic-ports">
+        {trafficPorts.length ? trafficPorts.map(port => <span key={port.port}>
+          HTTP · {port.name ? `${port.name} / ` : ''}:{port.port}
+        </span>) : <span className="unavailable">无可编排的 HTTP ServicePort</span>}
+      </div>}
     </> : <>
       <small>应用级身份资源</small>
       <small>ServiceAccount Token 自动挂载已关闭</small>
@@ -983,6 +1007,11 @@ type NetworkMenu = {
   connectedTo?: string;
 };
 type NetworkDraft = KubernetesApplicationNetworkTopologyWrite;
+
+function isHttpTrafficPort(port: KubernetesApplicationTopologyServicePort) {
+  return port.protocol === 'TCP'
+    && (/^http(?:-|$)/i.test(port.name ?? '') || port.port === 80 || port.port === 8080);
+}
 
 const virtualApplicationKinds = (Object.keys(nodePresets) as TopologyNodeKind[])
   .filter(kind => !['GATEWAY', 'HOST', 'SERVICE', 'FOLDER'].includes(kind));
@@ -1068,6 +1097,14 @@ function ApplicationDeviceCard({ data, selected }: NodeProps<ApplicationDeviceFl
         <Handle id={port.id} type="source" position={Position.Right} isConnectable={!disabled} />
           </div>)}
         </>}
+      {loadBalancer && <>
+        <Handle id="route-input" type="target" position={Position.Left}
+          className="application-traffic-handle lb-route-input" isConnectable={!disabled} />
+        {model.ports.filter(port => port.direction === 'OUTPUT').map((port, index) => <Handle
+          key={`route-${port.id}`} id={`route-${port.id}`} type="source" position={Position.Right}
+          className="application-traffic-handle lb-route-output"
+          style={{ top: 8 + index * outputRowHeight + 25 }} isConnectable={!disabled} />)}
+      </>}
     </div>
     {model.description && <p className="application-network-device-description">{model.description}</p>}
     {loadBalancer && <p className="application-network-device-description">出口实际分配按权重归一化；全部权重为 0 时不分配流量。</p>}
@@ -1208,7 +1245,7 @@ function ApplicationNetworkTopologyCanvas({
   onRemoveAddition: (id: string) => void;
   onShowVersions: () => void;
 }) {
-  const [draft, setDraft] = useState<NetworkDraft>({ nodes: [], links: [], attachments: [] });
+  const [draft, setDraft] = useState<NetworkDraft>({ nodes: [], links: [], attachments: [], trafficLinks: [] });
   const [etag, setEtag] = useState('');
   const [nodes, setNodes, updateNodes] = useNodesState<ApplicationNetworkFlowNode>([]);
   const { fitView, screenToFlowPosition } = useReactFlow<ApplicationNetworkFlowNode, Edge>();
@@ -1226,6 +1263,11 @@ function ApplicationNetworkTopologyCanvas({
   const [yamlSource, setYamlSource] = useState('');
   const [runtime, setRuntime] = useState<KubernetesApplicationNetworkRuntime | null>(null);
   const [runtimeBusy, setRuntimeBusy] = useState('');
+  const [trafficRuntime, setTrafficRuntime] = useState<KubernetesApplicationTrafficRuntime | null>(null);
+  const [trafficRuntimeBusy, setTrafficRuntimeBusy] = useState('');
+  const [captures, setCaptures] = useState<KubernetesApplicationPacketCaptureList | null>(null);
+  const [captureBusy, setCaptureBusy] = useState('');
+  const [captureDownloadBusy, setCaptureDownloadBusy] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [nodeMenuOpen, setNodeMenuOpen] = useState(false);
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -1244,30 +1286,70 @@ function ApplicationNetworkTopologyCanvas({
     }
   }, [applicationId]);
 
+  const refreshTrafficRuntime = useCallback(async () => {
+    try {
+      const result = await api<KubernetesApplicationTrafficRuntime>(
+        `/kubernetes/applications/${encodeURIComponent(applicationId)}/network-topology/traffic-runtime`,
+        'GET', undefined, {}, true,
+      );
+      setTrafficRuntime(result.data);
+    } catch (cause) {
+      if ((cause as { status?: number }).status === 404) setTrafficRuntime(null);
+      else setError((cause as Error).message);
+    }
+  }, [applicationId]);
+
+  const refreshCaptures = useCallback(async () => {
+    try {
+      const result = await api<KubernetesApplicationPacketCaptureList>(
+        `/kubernetes/applications/${encodeURIComponent(applicationId)}/network-topology/captures`,
+        'GET', undefined, {}, true,
+      );
+      setCaptures(result.data);
+    } catch (cause) {
+      if ((cause as { status?: number }).status === 404) setCaptures({ supported: false, items: [] });
+      else setError((cause as Error).message);
+    }
+  }, [applicationId]);
+
   useEffect(() => {
     let current = true;
     setLoading(true);
     setError('');
     void refreshRuntime();
+    void refreshTrafficRuntime();
+    void refreshCaptures();
     void api<KubernetesApplicationNetworkTopology>(
       `/kubernetes/applications/${encodeURIComponent(applicationId)}/network-topology`,
       'GET', undefined, {}, true,
     ).then(result => {
       if (!current) return;
       setDraft({ nodes: result.data.nodes, links: result.data.links,
-        attachments: result.data.attachments });
+        attachments: result.data.attachments, trafficLinks: result.data.trafficLinks ?? [] });
       setEtag(result.etag ?? '');
       setDirty(false);
     }).catch(cause => { if (current) setError((cause as Error).message); })
       .finally(() => { if (current) setLoading(false); });
     return () => { current = false; };
-  }, [applicationId, refreshRuntime]);
+  }, [applicationId, refreshRuntime, refreshTrafficRuntime, refreshCaptures]);
 
   useEffect(() => {
     if (!runtime || !['APPLYING', 'VERIFYING', 'COMPENSATING'].includes(runtime.state)) return;
     const timer = window.setInterval(() => void refreshRuntime(), 3000);
     return () => window.clearInterval(timer);
   }, [runtime?.state, refreshRuntime]);
+
+  useEffect(() => {
+    if (!trafficRuntime || !['APPLYING', 'COMPENSATING'].includes(trafficRuntime.state)) return;
+    const timer = window.setInterval(() => void refreshTrafficRuntime(), 3000);
+    return () => window.clearInterval(timer);
+  }, [trafficRuntime?.state, refreshTrafficRuntime]);
+
+  useEffect(() => {
+    if (!captures?.items.some(item => item.state === 'CAPTURING')) return;
+    const timer = window.setInterval(() => void refreshCaptures(), 1500);
+    return () => window.clearInterval(timer);
+  }, [captures?.items, refreshCaptures]);
 
   const runRuntimeAction = async (action: 'apply' | 'verify' | 'compensate') => {
     const labels = { apply: 'Apply', verify: 'Verify', compensate: 'Compensate' };
@@ -1291,6 +1373,81 @@ function ApplicationNetworkTopologyCanvas({
       setError((cause as Error).message);
     } finally {
       setRuntimeBusy('');
+    }
+  };
+
+  const runTrafficRuntimeAction = async (action: 'apply' | 'verify' | 'compensate') => {
+    const confirmation = action === 'apply'
+      ? '将向集群写入本应用专属的 Istio VirtualService，加权路由只作用于网格 sidecar 接管的 HTTP 请求。继续？'
+      : action === 'compensate'
+        ? '将删除此应用创建且 UID 匹配的 Istio VirtualService，恢复原生 Service 路由。继续？'
+        : '';
+    if (confirmation && !window.confirm(confirmation)) return;
+    setTrafficRuntimeBusy(action);
+    setError('');
+    setMessage('');
+    try {
+      const result = await api<KubernetesApplicationTrafficRuntime>(
+        `/kubernetes/applications/${encodeURIComponent(applicationId)}/network-topology/traffic-runtime/${action}`,
+        'POST', {}, {}, true,
+      );
+      setTrafficRuntime(result.data);
+      setMessage(`Service 流量路由 ${action.toUpperCase()} 已完成。`);
+    } catch (cause) {
+      setError((cause as Error).message);
+      void refreshTrafficRuntime();
+    } finally {
+      setTrafficRuntimeBusy('');
+    }
+  };
+
+  const startCapture = async (linkId: string) => {
+    if (dirty || saving || runtime?.state !== 'APPLIED' || isMock) {
+      setMessage('抓包要求拓扑已保存且虚拟网络 Runtime 为 APPLIED。');
+      return;
+    }
+    setCaptureBusy(linkId);
+    setError('');
+    setMessage('');
+    try {
+      const result = await api<KubernetesApplicationPacketCapture>(
+        `/kubernetes/applications/${encodeURIComponent(applicationId)}/network-topology/captures`,
+        'POST', { linkId }, {}, true,
+      );
+      setCaptures(current => ({ supported: current?.supported ?? false,
+        items: [result.data, ...(current?.items.filter(item => item.captureId !== result.data.captureId) ?? [])].slice(0, 20) }));
+      setMessage('已启动此虚拟网线的限时抓包；最多 5 秒或 128 帧，完成后可下载 PCAPNG。');
+      void refreshCaptures();
+    } catch (cause) {
+      setError((cause as Error).message);
+      void refreshCaptures();
+    } finally {
+      setCaptureBusy('');
+    }
+  };
+
+  const downloadCapture = async (capture: KubernetesApplicationPacketCapture) => {
+    setCaptureDownloadBusy(capture.captureId);
+    setError('');
+    try {
+      const response = await fetch(`/api/v1/kubernetes/applications/${encodeURIComponent(applicationId)}`
+        + `/network-topology/captures/${encodeURIComponent(capture.captureId)}/download`, {
+        method: 'GET', credentials: 'include',
+      });
+      if (!response.ok) {
+        const problem = await response.json().catch(() => ({}));
+        throw new Error(problem.detail ?? `下载失败 (${response.status})`);
+      }
+      const artifact = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement('a');
+      anchor.href = artifact;
+      anchor.download = `${capture.captureId}.pcapng`;
+      anchor.click();
+      window.setTimeout(() => URL.revokeObjectURL(artifact), 1000);
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setCaptureDownloadBusy('');
     }
   };
 
@@ -1366,8 +1523,22 @@ function ApplicationNetworkTopologyCanvas({
       data: { applicationAttachment: true },
     }];
   }), [draft.attachments, nodeIds, visibleResources]);
-  const edges = useMemo(() => [...selectorEdges, ...deviceEdges, ...attachmentEdges],
-    [selectorEdges, deviceEdges, attachmentEdges]);
+  const trafficEdges = useMemo<Edge[]>(() => draft.trafficLinks.map(link => ({
+    id: link.id,
+    source: link.sourceId,
+    sourceHandle: link.sourceHandle,
+    target: link.targetId,
+    targetHandle: link.targetHandle,
+    type: 'nanpanelBezier',
+    label: link.type === 'CALL' ? `HTTP:${link.servicePort} 调用`
+      : link.type === 'ROUTE_ENTRY' ? `HTTP:${link.servicePort} 路由入口`
+        : `HTTP:${link.servicePort} 后端`,
+    markerEnd: { type: MarkerType.ArrowClosed, color: '#a56bc4' },
+    style: { stroke: '#a56bc4', strokeWidth: 2.5, strokeDasharray: '7 4' },
+    data: { applicationTraffic: link.type },
+  })), [draft.trafficLinks]);
+  const edges = useMemo(() => [...selectorEdges, ...deviceEdges, ...attachmentEdges, ...trafficEdges],
+    [selectorEdges, deviceEdges, attachmentEdges, trafficEdges]);
 
   const updateLoadBalancerWeight = useCallback((nodeId: string, outputPort: string, weight: number) => {
     if (saving || busy || !Number.isInteger(weight) || weight < 0 || weight > 100) return;
@@ -1562,13 +1733,78 @@ function ApplicationNetworkTopologyCanvas({
     ) === key);
   }
 
+  function makeTrafficLink(connection: Connection | Edge): KubernetesApplicationTrafficLink | undefined {
+    const source = nodes.find(node => node.id === connection.source);
+    const target = nodes.find(node => node.id === connection.target);
+    if (!source || !target) return undefined;
+    if (source.type === 'application' && target.type === 'application'
+        && source.data.resource.kind === 'Deployment' && target.data.resource.kind === 'Service'
+      && !source.data.resource.id.startsWith('pending:')
+      && !target.data.resource.id.startsWith('pending:')
+        && connection.sourceHandle === 'call-output'
+        && typeof connection.targetHandle === 'string') {
+      const portMatch = connection.targetHandle.match(/^call-input-([1-9][0-9]{0,4})$/);
+      const servicePort = portMatch ? Number(portMatch[1]) : null;
+      if (!servicePort || !target.data.resource.servicePorts.some(port =>
+        port.port === servicePort && isHttpTrafficPort(port))) return undefined;
+      return { id: createUuid(), type: 'CALL', sourceId: source.id,
+        sourceHandle: 'call-output', targetId: target.id, targetHandle: connection.targetHandle,
+        protocol: 'HTTP', servicePort };
+    }
+    if (source.type === 'application' && target.type === 'application-device'
+        && source.data.resource.kind === 'Service' && target.data.model.kind === 'LOAD_BALANCER'
+      && !source.data.resource.id.startsWith('pending:')
+        && typeof connection.sourceHandle === 'string'
+        && connection.targetHandle === 'route-input') {
+      const portMatch = connection.sourceHandle.match(/^route-output-([1-9][0-9]{0,4})$/);
+      const servicePort = portMatch ? Number(portMatch[1]) : null;
+      if (!servicePort || !source.data.resource.servicePorts.some(port =>
+        port.port === servicePort && isHttpTrafficPort(port))) return undefined;
+      return { id: createUuid(), type: 'ROUTE_ENTRY', sourceId: source.id,
+        sourceHandle: connection.sourceHandle, targetId: target.id, targetHandle: 'route-input',
+        protocol: 'HTTP', servicePort };
+    }
+    if (source.type === 'application-device' && target.type === 'application'
+        && source.data.model.kind === 'LOAD_BALANCER' && target.data.resource.kind === 'Service'
+      && !target.data.resource.id.startsWith('pending:')
+        && typeof connection.targetHandle === 'string'
+        && typeof connection.sourceHandle === 'string'
+        && /^route-out-[1-9][0-9]*$/.test(connection.sourceHandle)) {
+      const portMatch = connection.targetHandle.match(/^backend-input-([1-9][0-9]{0,4})$/);
+      const servicePort = portMatch ? Number(portMatch[1]) : null;
+      if (!servicePort || !target.data.resource.servicePorts.some(port =>
+        port.port === servicePort && isHttpTrafficPort(port))) return undefined;
+      return { id: createUuid(), type: 'ROUTE_BACKEND', sourceId: source.id,
+        sourceHandle: connection.sourceHandle, targetId: target.id,
+        targetHandle: connection.targetHandle, protocol: 'HTTP', servicePort };
+    }
+    return undefined;
+  }
+
   function validConnection(connection: Connection | Edge) {
     const source = nodes.find(node => node.id === connection.source);
     const target = nodes.find(node => node.id === connection.target);
     if (!source || !target || saving || busy) return false;
     if (source.type === 'application' && target.type === 'application') {
-      return !hasDraft && source.data.resource.kind === 'Service'
-        && target.data.resource.kind === 'Deployment';
+      if (hasDraft) return false;
+      if (source.data.resource.kind === 'Service' && target.data.resource.kind === 'Deployment') {
+        return connection.sourceHandle === 'service-output'
+          && connection.targetHandle === 'deployment-input';
+      }
+      const traffic = makeTrafficLink(connection);
+      return !!traffic && !draft.trafficLinks.some(link => link.type === traffic.type
+        && link.sourceId === traffic.sourceId && link.targetId === traffic.targetId
+        && link.servicePort === traffic.servicePort);
+    }
+    if ((source.type === 'application' && target.type === 'application-device')
+        || (source.type === 'application-device' && target.type === 'application')) {
+      const traffic = makeTrafficLink(connection);
+      if (traffic) {
+        if (traffic.type === 'ROUTE_ENTRY') return !draft.trafficLinks.some(link =>
+          link.type === 'ROUTE_ENTRY' && link.targetId === traffic.targetId);
+        return !draft.trafficLinks.some(link => link.type === 'ROUTE_BACKEND'
+          && link.sourceId === traffic.sourceId && link.sourceHandle === traffic.sourceHandle);
+      }
     }
     if (source.type === 'application-device' && target.type === 'application-device') {
       const candidate = makeDeviceLink(connection);
@@ -1604,12 +1840,22 @@ function ApplicationNetworkTopologyCanvas({
     const target = nodes.find(node => node.id === connection.target);
     if (!source || !target) return;
     if (source.type === 'application' && target.type === 'application') {
-      if (source.data.resource.kind !== 'Service' || target.data.resource.kind !== 'Deployment') return;
-      const targetName = deploymentTarget(target.data.resource);
-      const currentTarget = changes[source.id]?.targetDeployment ?? source.data.resource.targetDeployment;
-      if (targetName !== currentTarget) {
-        onResourceUpdate(source.data.resource, { targetDeployment: targetName });
-        setMessage(`已将 ${source.data.resource.name} 连接到 ${targetName}；检查版本差异后再部署。`);
+      if (source.data.resource.kind === 'Service' && target.data.resource.kind === 'Deployment'
+          && connection.sourceHandle === 'service-output'
+          && connection.targetHandle === 'deployment-input') {
+        const targetName = deploymentTarget(target.data.resource);
+        const currentTarget = changes[source.id]?.targetDeployment ?? source.data.resource.targetDeployment;
+        if (targetName !== currentTarget) {
+          onResourceUpdate(source.data.resource, { targetDeployment: targetName });
+          setMessage(`已将 ${source.data.resource.name} 连接到 ${targetName}；检查版本差异后再部署。`);
+        }
+        return;
+      }
+      const traffic = makeTrafficLink(connection);
+      if (traffic) {
+        setDraft(current => ({ ...current, trafficLinks: [...current.trafficLinks, traffic] }));
+        setDirty(true);
+        setMessage(`已记录 ${source.data.resource.name} 对 ${target.data.resource.name} 的 HTTP 调用；此连线不代表响应需要反向路由。`);
       }
       return;
     }
@@ -1621,6 +1867,15 @@ function ApplicationNetworkTopologyCanvas({
       setDraft(current => ({ ...current, links: [...current.links, link] }));
       setDirty(true);
       setMessage('已添加虚拟设备链路；保存后仍需配置实际数据面接入。');
+      return;
+    }
+    const traffic = makeTrafficLink(connection);
+    if (traffic) {
+      setDraft(current => ({ ...current, trafficLinks: [...current.trafficLinks, traffic] }));
+      setDirty(true);
+      setMessage(traffic.type === 'ROUTE_ENTRY'
+        ? '已设置稳定 Service 到流量分配器的入口。'
+        : '已将流量分配器出口连接到逻辑后端 Service。');
       return;
     }
     const application = source.type === 'application' ? source
@@ -1683,6 +1938,7 @@ function ApplicationNetworkTopologyCanvas({
       nodes: current.nodes.filter(node => node.id !== nodeId),
       links: current.links.filter(link => link.sourceNodeId !== nodeId && link.targetNodeId !== nodeId),
       attachments: current.attachments.filter(attachment => attachment.nodeId !== nodeId),
+      trafficLinks: current.trafficLinks.filter(link => link.sourceId !== nodeId && link.targetId !== nodeId),
     }));
     setDirty(true);
     setMenu(undefined);
@@ -1692,6 +1948,7 @@ function ApplicationNetworkTopologyCanvas({
     setDraft(current => ({ ...current,
       links: current.links.filter(link => link.id !== edgeId),
       attachments: current.attachments.filter(attachment => attachment.id !== edgeId),
+      trafficLinks: current.trafficLinks.filter(link => link.id !== edgeId),
     }));
     setDirty(true);
     setMenu(undefined);
@@ -1755,7 +2012,7 @@ function ApplicationNetworkTopologyCanvas({
         'PUT', payload, { 'If-Match': etag }, true,
       );
       setDraft({ nodes: result.data.nodes, links: result.data.links,
-        attachments: result.data.attachments });
+        attachments: result.data.attachments, trafficLinks: result.data.trafficLinks ?? [] });
       setEtag(result.etag ?? '');
       setDirty(false);
       setMessage(`应用网络拓扑 Revision ${result.data.generation} 已保存。`);
@@ -1868,7 +2125,50 @@ function ApplicationNetworkTopologyCanvas({
             <button className="secondary" disabled={runtimeBusy !== ''} onClick={() => void refreshRuntime()}>刷新状态</button>
           </div>
         </div>
-        <div className="application-topology-footnote">Service 与 Deployment 连线用于生成资源 YAML 差异；Deployment 顶部/底部端口用于连接虚拟设备，虚拟设备之间可建立多层转发链路。拓扑与资源变更需分别保存，只有显式确认版本或 Apply 才会修改运行环境。</div>
+        <div className="application-network-note" role="note">Service 流量编排使用独立 Istio Provider：要求 Namespace 已启用 sidecar 注入、调用方 Pod Ready 且有 istio-proxy。没有 Deployment→Service 调用线时，权重路由适用于本 Namespace 符合条件的网格调用方；有调用线时按 Deployment selector 限定。只支持 HTTP ServicePort，不会自动安装 Istio、注入 Pod 或重启工作负载。</div>
+        <div className="application-network-runtime" aria-label="Service 流量路由运行时">
+          <div className="application-network-runtime-status">
+            <strong>{trafficRuntime ? `Service 路由：${trafficRuntime.state}` : 'Service 路由：未应用'}</strong>
+            <span>{trafficRuntime?.detail ?? 'Service→LOAD_BALANCER→Service 仅保存路由意图；显式 Apply 才会创建 Istio VirtualService。'}</span>
+          </div>
+          <div className="application-network-runtime-actions">
+            {(!trafficRuntime || ['COMPENSATED', 'FAILED'].includes(trafficRuntime.state)) && <button className="primary"
+              disabled={saving || busy || loading || dirty || trafficRuntimeBusy !== '' || isMock
+                || !draft.trafficLinks.some(link => link.type === 'ROUTE_ENTRY')}
+              onClick={() => void runTrafficRuntimeAction('apply')}>{trafficRuntimeBusy === 'apply' ? '应用中…' : 'Apply Service 分流'}</button>}
+            {trafficRuntime && ['APPLIED', 'VERIFY_FAILED'].includes(trafficRuntime.state) && <button className="secondary"
+              disabled={trafficRuntimeBusy !== '' || busy || isMock}
+              onClick={() => void runTrafficRuntimeAction('verify')}>{trafficRuntimeBusy === 'verify' ? '验证中…' : 'Verify 路由'}</button>}
+            {trafficRuntime && ['APPLYING', 'APPLIED', 'VERIFY_FAILED', 'PARTIAL', 'FAILED'].includes(trafficRuntime.state) && <button className="danger"
+              disabled={trafficRuntimeBusy !== '' || busy || isMock}
+              onClick={() => void runTrafficRuntimeAction('compensate')}>{trafficRuntimeBusy === 'compensate' ? '恢复中…' : 'Compensate 路由'}</button>}
+            <button className="secondary" disabled={trafficRuntimeBusy !== ''} onClick={() => void refreshTrafficRuntime()}>刷新路由状态</button>
+          </div>
+        </div>
+        <div className="application-capture-panel" aria-label="虚拟网线抓包">
+          <div className="application-capture-heading">
+            <div><strong>虚拟网线抓包</strong><small>{captures?.supported
+              ? '仅支持已 Apply 的 L2 Ethernet 网线；每次最多 5 秒、128 帧，文件保留 24 小时。'
+              : '目标 Helper 未报告受信任的 tcpdump 能力。'}</small></div>
+            <button className="secondary" disabled={captureBusy !== ''}
+              onClick={() => void refreshCaptures()}>刷新</button>
+          </div>
+          {captures?.items.length ? <ul className="application-capture-list">
+            {captures.items.map(capture => <li key={capture.captureId}>
+              <div><strong>{capture.state} · {capture.capturePoint ?? `link ${capture.linkId.slice(0, 8)}`}</strong>
+                <small>{capture.detail ?? `Revision ${capture.generation}`}
+                  {capture.packetCount !== null ? ` · ${capture.packetCount} 帧 / ${capture.capturedBytes ?? 0} 字节` : ''}
+                  {capture.truncated ? ' · 达到抓取上限' : ''}</small>
+                <small>拓扑 Revision {capture.generation} · 到期 {new Date(capture.expiresAt).toLocaleString('zh-CN')}</small></div>
+              {capture.state === 'COMPLETE' && <button className="secondary"
+                disabled={captureDownloadBusy !== ''}
+                onClick={() => void downloadCapture(capture)}>
+                {captureDownloadBusy === capture.captureId ? '下载中…' : '下载 PCAPNG'}
+              </button>}
+            </li>)}
+          </ul> : <p className="application-capture-empty">尚无抓包记录。右键画布中的蓝色 L2 Ethernet 网线即可开始。</p>}
+        </div>
+        <div className="application-topology-footnote">Service→Deployment 仍是 Kubernetes selector 关系；Deployment→Service 表示调用方向；Service→流量分配器→后端 Service 表示加权路由。响应复用原连接，不需要反向连线。Deployment 网卡和虚拟设备之间的绿色连线仍表示次级网络接入，蓝色设备连线表示 L2/L3 网线。</div>
       </aside>
     </div>}
     {menu && <TopologyContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(undefined)}>
@@ -1906,6 +2206,15 @@ function ApplicationNetworkTopologyCanvas({
         <TopologyContextMenuItem className="danger" onClick={() => removeDevice(menu.nodeId!)}>删除设备及接入链路</TopologyContextMenuItem>
       </> : menu.edgeId ? <>
         <TopologyContextMenuHeading>应用网络链路</TopologyContextMenuHeading>
+        {draft.links.some(link => link.id === menu.edgeId
+          && link.layer === 'L2' && link.protocol === 'ETHERNET') && <TopologyContextMenuItem
+          disabled={captureBusy !== '' || dirty || saving || runtime?.state !== 'APPLIED'
+            || !captures?.supported || isMock}
+          onClick={() => {
+            const link = draft.links.find(item => item.id === menu.edgeId);
+            setMenu(undefined);
+            if (link) void startCapture(link.id);
+          }}>{captureBusy === menu.edgeId ? '抓包任务提交中…' : '抓包此网线'}</TopologyContextMenuItem>}
         <TopologyContextMenuItem className="danger" onClick={() => removeEdge(menu.edgeId!)}>删除连接</TopologyContextMenuItem>
       </> : <>
         <TopologyContextMenuHeading>添加应用拓扑节点</TopologyContextMenuHeading>

@@ -30,6 +30,7 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
 public class InternalAgentControlResource {
   @Inject AuthStore store;
   @Inject ObjectMapper mapper;
+  @Inject KubernetesApplicationPacketCaptureService packetCaptures;
 
   @Inject
   @ConfigProperty(name = "nanpanel.agent.gateway-token")
@@ -52,7 +53,7 @@ public class InternalAgentControlResource {
       throw fail(401, "GATEWAY_UNAUTHORIZED", "Gateway 身份无效");
     if (report == null || report.agentId() == null || report.operationId() == null ||
         report.idempotencyKey() == null || report.status() == null || report.detail() == null ||
-        report.idempotencyKey().length() > 128 || report.detail().length() > 2000 ||
+        report.idempotencyKey().length() > 128 || report.detail().length() > 60000 ||
         report.detail().chars().anyMatch(ch -> Character.isISOControl(ch) &&
             ch != '\n' && ch != '\r' && ch != '\t') ||
         !Set.of("SUCCEEDED", "FAILED").contains(report.status()))
@@ -65,6 +66,9 @@ public class InternalAgentControlResource {
               "AND idempotency_key=?",
           operationId, agentId, report.idempotencyKey());
       if (!rows.isEmpty()) {
+        if (report.detail().length() > 2000) {
+          throw fail(400, "INVALID_OPERATION_RESULT", "普通 Helper 操作结果超过长度限制");
+        }
         String existingStatus = String.valueOf(rows.getFirst().get("status"));
         if (!"RUNNING".equals(existingStatus)) {
           if (existingStatus.equals(report.status()) &&
@@ -78,12 +82,16 @@ public class InternalAgentControlResource {
         return Response.noContent().build();
       }
       var operations = query(c,
-          "SELECT kind,service_id,host_id,capability,target,requested_by,status,error_json " +
+          "SELECT kind,service_id,host_id,capability,target,requested_by,status,error_json,idempotency_key " +
               "FROM operation WHERE id=? AND agent_id=? " +
               "AND idempotency_key=?",
           operationId, agentId, report.idempotencyKey());
       if (operations.isEmpty()) throw fail(404, "NOT_FOUND", "Agent 操作不存在或已结束");
       var operation = operations.getFirst();
+      if (report.detail().length() > 2000
+          && !"network.topology.capture".equals(operation.get("capability"))) {
+        throw fail(400, "INVALID_OPERATION_RESULT", "普通 Helper 操作结果超过长度限制");
+      }
       String existingStatus = String.valueOf(operation.get("status"));
       if (Set.of("SUCCEEDED", "FAILED", "CANCELLED").contains(existingStatus)) {
         if (existingStatus.equals(report.status())) return acknowledgeResult();
@@ -216,12 +224,24 @@ public class InternalAgentControlResource {
     UUID hostId = (UUID)operation.get("host_id");
     String capability = String.valueOf(operation.get("capability"));
     String target = String.valueOf(operation.get("target"));
+    String operationDetail = report.detail();
+    String resultStatus = report.status();
     Instant now = Instant.now();
-    if ("SUCCEEDED".equals(report.status())) {
+    if ("network.topology.capture".equals(capability)) {
+      var capture = packetCaptures.recordAgentResult(c,
+          String.valueOf(operation.get("idempotency_key")), report.status(), report.detail(), operationId);
+      if ("SUCCEEDED".equals(report.status()) && capture != null && capture.complete()) {
+        operationDetail = "Packet capture artifact stored as " + capture.captureId();
+      } else {
+        resultStatus = "FAILED";
+        operationDetail = "FAILED: bounded packet capture failed or returned invalid data";
+      }
+    }
+    if ("SUCCEEDED".equals(resultStatus)) {
       var result = new LinkedHashMap<String, Object>();
       result.put("capability", capability);
       result.put("target", target);
-      result.put("output", report.detail());
+      result.put("output", operationDetail);
       result.put("completedAt", now.toString());
       update(c,
           "UPDATE operation SET status='SUCCEEDED',phase='COMMIT',result_json=?,error_json=NULL," +
@@ -233,8 +253,10 @@ public class InternalAgentControlResource {
           "受限 Helper 操作已完成");
       return acknowledgeResult();
     }
-    boolean denied = report.detail().startsWith("DENIED:");
-    boolean executionFailed = report.detail().startsWith("FAILED:");
+    boolean denied = operationDetail.startsWith("DENIED:")
+        || report.detail().startsWith("DENIED:");
+    boolean executionFailed = operationDetail.startsWith("FAILED:")
+        || report.detail().startsWith("FAILED:");
     String status = denied || executionFailed ? "FAILED" : "UNKNOWN";
     String outcome = denied ? "NOT_EXECUTED" : executionFailed ? "VERIFIED_FAILED" : "UNCERTAIN";
     String code = denied ? "HELPER_PERMISSION_DENIED" : executionFailed
@@ -243,7 +265,7 @@ public class InternalAgentControlResource {
         ? "Helper 操作执行或验证失败。" : "Agent 返回结果不足以确认 Helper 操作是否执行。";
     String error = mapper.writeValueAsString(Map.of(
         "code", code, "message", message, "retryable", false,
-        "executionOutcome", outcome, "agentDetail", report.detail()));
+        "executionOutcome", outcome, "agentDetail", operationDetail));
     update(c,
         "UPDATE operation SET status=?,phase=?,error_json=?,updated_at=?,finished_at=? WHERE id=?",
         status, denied ? "APPLY" : "VERIFY", error,

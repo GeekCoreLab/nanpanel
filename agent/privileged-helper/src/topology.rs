@@ -17,6 +17,10 @@ const NETWORK_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_NODES: usize = 16;
 const MAX_LINKS: usize = 64;
 const MAX_ROUTER_ROUTES: usize = 64;
+const MAX_CAPTURE_BYTES: usize = 32 * 1024;
+const MAX_CAPTURE_PACKETS: u16 = 128;
+const MAX_CAPTURE_SNAPLEN: u16 = 128;
+const MAX_CAPTURE_DURATION: Duration = Duration::from_secs(5);
 const FIRST_VRF_TABLE_ID: u32 = 10_000;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -25,6 +29,7 @@ enum Action {
     Apply,
     Verify,
     Compensate,
+    Capture,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -38,6 +43,8 @@ struct TopologyRequest {
     links: Vec<TopologyLink>,
     #[serde(default)]
     attachments: Vec<TopologyAttachment>,
+    #[serde(default)]
+    capture_link_id: Option<Uuid>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -242,6 +249,12 @@ pub(crate) fn available() -> bool {
             .any(|candidate| trusted_binary(Path::new(candidate)))
 }
 
+pub(crate) fn capture_available() -> bool {
+    ["/usr/sbin/tcpdump", "/usr/bin/tcpdump"]
+        .iter()
+        .any(|candidate| trusted_binary(Path::new(candidate)))
+}
+
 pub(crate) fn vrf_available() -> bool {
     let Ok(ip) = ip_binary() else {
         return false;
@@ -328,6 +341,21 @@ fn trusted_system_file(path: &Path) -> bool {
 pub(crate) fn validate_target_payload(target: &str, payload: Option<&str>) -> Result<(), String> {
     let payload = payload.ok_or_else(|| "DENIED: topology payload is required".to_owned())?;
     let request = decode(payload)?;
+    if request.action == Action::Capture {
+        return Err("DENIED: packet capture must use the dedicated capture capability".to_owned());
+    }
+    compile(target, request).map(|_| ())
+}
+
+pub(crate) fn validate_capture_target_payload(
+    target: &str,
+    payload: Option<&str>,
+) -> Result<(), String> {
+    let payload = payload.ok_or_else(|| "DENIED: topology payload is required".to_owned())?;
+    let request = decode(payload)?;
+    if request.action != Action::Capture {
+        return Err("DENIED: packet capture requires the CAPTURE action".to_owned());
+    }
     compile(target, request).map(|_| ())
 }
 
@@ -341,6 +369,7 @@ pub(crate) async fn execute(request: &Request) -> Result<String, String> {
         Action::Apply => apply(&topology).await,
         Action::Verify => verify(&topology).await,
         Action::Compensate => compensate(&topology).await,
+        Action::Capture => capture(&topology).await,
     }
 }
 
@@ -356,6 +385,17 @@ fn compile(target: &str, request: TopologyRequest) -> Result<CompiledTopology, S
         || request.links.len() > MAX_LINKS
     {
         return Err("DENIED: topology identity or size is invalid".to_owned());
+    }
+    match (request.action, request.capture_link_id) {
+        (Action::Capture, Some(link_id)) if request.links.iter().any(|link| link.id == link_id) => {
+        }
+        (Action::Capture, _) => {
+            return Err("DENIED: capture requires a link in the selected topology".to_owned());
+        }
+        (_, Some(_)) => {
+            return Err("DENIED: capture link is only valid for capture operations".to_owned());
+        }
+        (_, None) => {}
     }
 
     let mut node_ids = HashSet::new();
@@ -2757,6 +2797,127 @@ async fn verify(topology: &CompiledTopology) -> Result<String, String> {
     .to_string())
 }
 
+async fn capture(topology: &CompiledTopology) -> Result<String, String> {
+    use tokio::io::AsyncReadExt;
+
+    let link_id = topology
+        .request
+        .capture_link_id
+        .ok_or_else(|| "DENIED: capture link is missing".to_owned())?;
+    if !topology.request.links.iter().any(|link| link.id == link_id) {
+        return Err("DENIED: capture link is not part of the topology".to_owned());
+    }
+    let (interface, _) = topology
+        .interfaces
+        .get(&link_id)
+        .ok_or_else(|| "DENIED: selected link has no isolated interface".to_owned())?;
+    let ip = ip_binary()?;
+    if !capture_available() {
+        return Err("FAILED: root-owned tcpdump is unavailable on the mapped host".to_owned());
+    }
+    if !namespace_exists(&ip, &topology.namespace).await? || !namespace_owned(topology, &ip).await?
+    {
+        return Err(
+            "DENIED: selected topology runtime is missing or its ownership changed".to_owned(),
+        );
+    }
+    verify(topology).await?;
+    let tcpdump = trusted_executable(&["/usr/sbin/tcpdump", "/usr/bin/tcpdump"])?;
+    let args = vec![
+        "netns".to_owned(),
+        "exec".to_owned(),
+        topology.namespace.clone(),
+        tcpdump.to_string_lossy().into_owned(),
+        "-U".to_owned(),
+        "-i".to_owned(),
+        interface.clone(),
+        "-c".to_owned(),
+        MAX_CAPTURE_PACKETS.to_string(),
+        "-s".to_owned(),
+        MAX_CAPTURE_SNAPLEN.to_string(),
+        "-w".to_owned(),
+        "-".to_owned(),
+    ];
+    let mut child = tokio::process::Command::new(&ip)
+        .args(&args)
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|_| "FAILED: could not start bounded packet capture".to_owned())?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "FAILED: packet capture output pipe is unavailable".to_owned())?;
+    let mut pcap = Vec::with_capacity(16 * 1024);
+    let read = tokio::time::timeout(MAX_CAPTURE_DURATION, stdout.read_to_end(&mut pcap)).await;
+    let duration_limit_reached = match read {
+        Ok(Ok(_)) => false,
+        Ok(Err(_)) => {
+            let _ = child.kill().await;
+            return Err("FAILED: could not read bounded packet capture".to_owned());
+        }
+        Err(_) => {
+            child.kill().await.map_err(|_| {
+                "FAILED: could not stop packet capture at its time limit".to_owned()
+            })?;
+            true
+        }
+    };
+    let status = tokio::time::timeout(Duration::from_secs(2), child.wait())
+        .await
+        .map_err(|_| "FAILED: packet capture process did not stop".to_owned())?
+        .map_err(|_| "FAILED: packet capture process could not be reaped".to_owned())?;
+    let valid_magic = pcap.get(..4).is_some_and(|magic| {
+        magic == [0xd4, 0xc3, 0xb2, 0xa1]
+            || magic == [0xa1, 0xb2, 0xc3, 0xd4]
+            || magic == [0x4d, 0x3c, 0xb2, 0xa1]
+            || magic == [0xa1, 0xb2, 0x3c, 0x4d]
+    });
+    if (!status.success() && !duration_limit_reached)
+        || pcap.len() < 24
+        || pcap.len() > MAX_CAPTURE_BYTES
+        || !valid_magic
+    {
+        return Err(
+            "FAILED: packet capture returned an invalid or oversized PCAP stream".to_owned(),
+        );
+    }
+    Ok(serde_json::json!({
+        "format": "PCAP_V1",
+        "capturePoint": format!("source-side interface {interface}"),
+        "direction": "BOTH",
+        "durationLimitReached": duration_limit_reached,
+        "packetLimit": MAX_CAPTURE_PACKETS,
+        "snapLength": MAX_CAPTURE_SNAPLEN,
+        "pcapBase64": base64_encode(&pcap),
+    })
+    .to_string())
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = chunk.get(1).copied().unwrap_or_default();
+        let third = chunk.get(2).copied().unwrap_or_default();
+        encoded.push(ALPHABET[(first >> 2) as usize] as char);
+        encoded.push(ALPHABET[(((first & 0x03) << 4) | (second >> 4)) as usize] as char);
+        encoded.push(if chunk.len() > 1 {
+            ALPHABET[(((second & 0x0f) << 2) | (third >> 6)) as usize] as char
+        } else {
+            '='
+        });
+        encoded.push(if chunk.len() > 2 {
+            ALPHABET[(third & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    encoded
+}
+
 async fn router_addresses_match(
     router: &Router,
     ip: &Path,
@@ -3172,10 +3333,10 @@ async fn namespace_owned(topology: &CompiledTopology, ip: &Path) -> Result<bool,
 #[cfg(test)]
 mod tests {
     use super::{
-        FIRST_VRF_TABLE_ID, Router, RouterRoute, SwitchBackend, all_static_routes_match, compile,
-        decode, firewall_rules_match, has_packet_mirror, interface_statistics,
-        router_l3mdev_rule_matches, router_routes_match, router_vrf_alias, router_vrfs_match,
-        validate_target_payload,
+        FIRST_VRF_TABLE_ID, Router, RouterRoute, SwitchBackend, all_static_routes_match,
+        base64_encode, compile, decode, firewall_rules_match, has_packet_mirror,
+        interface_statistics, router_l3mdev_rule_matches, router_routes_match, router_vrf_alias,
+        router_vrfs_match, validate_capture_target_payload, validate_target_payload,
     };
     use serde_json::json;
     use uuid::Uuid;
@@ -3202,6 +3363,39 @@ mod tests {
         let (target, payload) = sample();
         validate_target_payload(&target, Some(&payload)).map_err(anyhow::Error::msg)?;
         Ok(())
+    }
+
+    #[test]
+    fn capture_accepts_only_a_selected_saved_l2_ethernet_wire() -> anyhow::Result<()> {
+        let (target, payload) = sample();
+        let mut value = serde_json::from_str::<serde_json::Value>(&payload)?;
+        let link_id = Uuid::new_v4();
+        value["action"] = json!("CAPTURE");
+        value["captureLinkId"] = json!(link_id);
+        value["links"] = json!([{
+            "id": link_id,
+            "sourceNodeId": value["nodes"][0]["id"],
+            "sourcePort": "out-1",
+            "targetNodeId": value["nodes"][1]["id"],
+            "targetPort": "in-1",
+            "layer": "L2",
+            "protocol": "ETHERNET"
+        }]);
+        validate_capture_target_payload(&target, Some(&value.to_string()))
+            .map_err(anyhow::Error::msg)?;
+
+        value["captureLinkId"] = json!(Uuid::new_v4());
+        assert!(validate_capture_target_payload(&target, Some(&value.to_string())).is_err());
+        value["captureLinkId"] = json!(link_id);
+        value["links"][0]["protocol"] = json!("IP");
+        assert!(validate_capture_target_payload(&target, Some(&value.to_string())).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn packet_capture_base64_encoder_uses_standard_padding() {
+        assert_eq!(base64_encode(b"hello"), "aGVsbG8=");
+        assert_eq!(base64_encode(b"ab"), "YWI=");
     }
 
     #[test]

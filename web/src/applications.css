@@ -197,6 +197,13 @@ main:has(.applications-page)>footer{display:none}
 .application-flow-handle.react-flow__handle{z-index:3;width:12px!important;height:12px!important;border:2px solid #fff!important;box-shadow:0 1px 5px #263b5333}
 .application-flow-handle.service-output{background:#45a47b!important}
 .application-flow-handle.deployment-input{background:#5487e7!important}
+.application-traffic-handle.react-flow__handle{z-index:4;width:11px!important;height:11px!important;border:2px solid #fff!important;background:#a56bc4!important;box-shadow:0 1px 5px #263b5333}
+.application-flow-node .application-traffic-handle.service-call-input{left:-6px!important}
+.application-flow-node .application-traffic-handle.service-route-output{right:-6px!important}
+.application-flow-node .application-traffic-handle.service-backend-input{top:-6px!important}
+.application-service-traffic-ports{display:flex;flex-wrap:wrap;gap:4px;margin-top:7px}
+.application-service-traffic-ports span{padding:3px 6px;border:1px solid #e5d9ee;border-radius:10px;background:#fbf7fd;color:#8b63a0;font-size:8px;line-height:1.2}
+.application-service-traffic-ports span.unavailable{border-color:#eceff3;background:#f8f9fb;color:#98a2af}
 .application-topology-canvas .react-flow__edge-path{stroke:#91addc;stroke-width:2}
 .application-topology-canvas .react-flow__controls{overflow:hidden;border:1px solid #e3eaf3;border-radius:7px;box-shadow:0 2px 10px #263b530d}
 .application-topology-canvas .react-flow__controls-button{width:27px;height:27px;border-color:#edf1f6;background:#fff;fill:#70839e}
@@ -222,6 +229,15 @@ main:has(.applications-page)>footer{display:none}
 .application-network-runtime-status strong{color:#30445f;font-size:11px}
 .application-network-runtime-actions{display:flex;flex:0 0 auto;flex-wrap:wrap;gap:6px}
 .application-network-runtime-actions button{padding:6px 9px;font-size:10px}
+.application-capture-panel{display:grid;gap:8px;margin:0 0 10px;padding:10px 12px;border:1px solid #dce5f0;border-radius:8px;background:#fff}
+.application-capture-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.application-capture-heading>div,.application-capture-list li>div{display:grid;gap:4px;min-width:0}
+.application-capture-heading strong,.application-capture-list strong{color:#30445f;font-size:11px;overflow-wrap:anywhere}
+.application-capture-heading small,.application-capture-list small,.application-capture-empty{color:#708198;font-size:9px;line-height:1.5;overflow-wrap:anywhere}
+.application-capture-list{display:grid;gap:7px;margin:0;padding:0;list-style:none}
+.application-capture-list li{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px;border:1px solid #edf1f6;border-radius:7px;background:#fbfcfe}
+.application-capture-list button,.application-capture-heading button{flex:0 0 auto;padding:6px 9px;font-size:9px}
+.application-capture-empty{margin:0;padding:7px 0}
 @media(max-width:760px){.application-network-runtime{align-items:flex-start;flex-direction:column}.application-network-runtime-actions{width:100%}}
 .application-network-topology .page-heading{margin-bottom:10px}
 .application-network-card{display:flex;min-height:0;height:100%;flex-direction:column;gap:8px}
@@ -255,6 +271,8 @@ main:has(.applications-page)>footer{display:none}
 .application-network-canvas .application-network-handle{width:9px;height:9px;border:2px solid #fff;background:#5984c1;box-shadow:0 0 0 1px #8aa8d0}
 .application-network-canvas .application-network-handle.network-in{top:0;background:#5f91db}
 .application-network-canvas .application-network-handle.network-out{bottom:0;background:#55ad82}
+.application-network-canvas .application-traffic-handle.lb-route-input{z-index:4;left:-6px!important;top:18px!important;background:#a56bc4!important}
+.application-network-canvas .application-traffic-handle.lb-route-output{z-index:4;right:-6px!important;background:#a56bc4!important}
 .application-network-topology .application-topology-footnote{flex:0 0 auto}
 @media(max-width:620px){.application-network-topology{padding:4px 0 12px}.application-network-canvas{height:450px;min-height:390px;flex:none}.application-network-device,.application-network-canvas .react-flow__node-application,.application-network-canvas .react-flow__node-application-device{width:300px!important}.application-network-device{min-height:120px;padding:10px}}
 

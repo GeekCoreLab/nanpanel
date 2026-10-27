@@ -12,6 +12,7 @@ use uuid::Uuid;
 const JOURNAL_FILE: &str = "operation-journal.json";
 const MAX_JOURNAL_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_OPERATIONS: usize = 1024;
+const MAX_CAPTURE_RESULT_BYTES: usize = 56 * 1024;
 
 #[derive(Clone, Debug)]
 pub enum Claim {
@@ -155,7 +156,36 @@ impl OperationJournal {
         status: &str,
         detail: &str,
     ) -> Result<()> {
-        if !matches!(status, "SUCCEEDED" | "FAILED") || detail.len() > 2000 {
+        self.complete_with_limit(operation_id, idempotency_key, status, detail, 2000)
+            .await
+    }
+
+    pub async fn complete_capture(
+        &mut self,
+        operation_id: &str,
+        idempotency_key: &str,
+        status: &str,
+        detail: &str,
+    ) -> Result<()> {
+        self.complete_with_limit(
+            operation_id,
+            idempotency_key,
+            status,
+            detail,
+            MAX_CAPTURE_RESULT_BYTES,
+        )
+        .await
+    }
+
+    async fn complete_with_limit(
+        &mut self,
+        operation_id: &str,
+        idempotency_key: &str,
+        status: &str,
+        detail: &str,
+        maximum_detail_bytes: usize,
+    ) -> Result<()> {
+        if !matches!(status, "SUCCEEDED" | "FAILED") || detail.len() > maximum_detail_bytes {
             bail!("Agent operation result is invalid or too large");
         }
         let Some(operation) = self.operations.get_mut(idempotency_key) else {
@@ -308,6 +338,32 @@ mod tests {
                 .await
                 .is_err()
         );
+        std::fs::remove_dir_all(directory)?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn capture_result_can_be_durably_replayed_above_the_normal_result_limit() -> Result<()> {
+        let directory = temporary_directory()?;
+        let detail = "x".repeat(4096);
+        let mut journal = OperationJournal::open(&directory).await?;
+        journal.claim("capture-1", "capture-key-1").await?;
+        assert!(
+            journal
+                .complete("capture-1", "capture-key-1", "SUCCEEDED", &detail)
+                .await
+                .is_err()
+        );
+        journal
+            .complete_capture("capture-1", "capture-key-1", "SUCCEEDED", &detail)
+            .await?;
+
+        let mut restored = OperationJournal::open(&directory).await?;
+        assert!(matches!(
+            restored.claim("capture-1", "capture-key-1").await?,
+            Claim::Replay { status, detail: replayed }
+                if status == "SUCCEEDED" && replayed == detail
+        ));
         std::fs::remove_dir_all(directory)?;
         Ok(())
     }

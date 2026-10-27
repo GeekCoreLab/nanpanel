@@ -21,7 +21,7 @@ use tonic::Streaming;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 use tracing::{info, warn};
 
-use crate::gateway::valid_topology_dispatch;
+use crate::gateway::{valid_topology_capture_dispatch, valid_topology_dispatch};
 use crate::v1::{
     AgentMessage, ControlMessage, Heartbeat, KubernetesRuntimeDiscovery, NetbirdOverlaySummary,
     NetbirdPeerPath as NetbirdPeerPathMessage, NetworkAddress, NetworkInterface, NetworkRoute,
@@ -34,6 +34,8 @@ use crate::{
     direct_dns, helper,
     operation_journal::{Claim, OperationJournal},
 };
+
+const MAX_CAPTURE_RESULT_BYTES: usize = 56 * 1024;
 
 #[derive(Clone)]
 struct HostSnapshot {
@@ -662,6 +664,7 @@ async fn connect_once(
                                 | "container.deploy"
                                 | "network.firewall.expose"
                                 | "network.topology.reconcile"
+                                | "network.topology.capture"
                                 | "k3s.preflight"
                                 | "k3s.install"
                                 | "k3s.upgrade"
@@ -937,13 +940,28 @@ async fn connect_once(
                         ("FAILED", detail)
                     }
                 };
-                let detail = bounded_detail(&detail);
-                if let Err(error) = operation_journal
-                    .lock()
-                    .await
-                    .complete(&operation_id, &idempotency_key, status, &detail)
-                    .await
-                {
+                let is_capture = capability == "network.topology.capture";
+                let (status, detail) = if is_capture && detail.len() > MAX_CAPTURE_RESULT_BYTES {
+                    (
+                        "FAILED",
+                        "FAILED: packet capture result exceeded the reporting limit".to_owned(),
+                    )
+                } else if is_capture {
+                    (status, detail)
+                } else {
+                    (status, bounded_detail(&detail))
+                };
+                let mut journal = operation_journal.lock().await;
+                let persisted = if is_capture {
+                    journal
+                        .complete_capture(&operation_id, &idempotency_key, status, &detail)
+                        .await
+                } else {
+                    journal
+                        .complete(&operation_id, &idempotency_key, status, &detail)
+                        .await
+                };
+                if let Err(error) = persisted {
                     warn!(operation_id = %operation_id, %error, "unable to persist Agent operation result");
                 }
                 if let Err(error) = send_operation_result(
@@ -1638,6 +1656,7 @@ fn valid_control(capability: &str, target: &str, payload_json: &str) -> bool {
                 )
         }
         "network.topology.reconcile" => valid_topology_dispatch(target, payload_json),
+        "network.topology.capture" => valid_topology_capture_dispatch(target, payload_json),
         "k3s.preflight" => {
             target.is_empty()
                 && has_payload

@@ -81,6 +81,7 @@ pub struct HelperConfig {
     nginx_routes: Option<nginx_routes::NginxRouteConfig>,
     network_operations_available: bool,
     topology_operations_available: bool,
+    packet_capture_available: bool,
     vrf_operations_available: bool,
     ovs_operations_available: bool,
     netbird_binary: Option<std::path::PathBuf>,
@@ -165,6 +166,7 @@ struct HelperRuntime {
     nginx_routes: Option<Arc<NginxRouteConfig>>,
     network_operations_available: bool,
     topology_operations_available: bool,
+    packet_capture_available: bool,
     vrf_operations_available: bool,
     ovs_operations_available: bool,
     kubeedge_available: bool,
@@ -257,6 +259,8 @@ impl HelperConfig {
             bail!("Agent binary directory must be root-owned and not group/world writable");
         }
         let topology_operations_available = topology::available();
+        let packet_capture_available =
+            topology_operations_available && topology::capture_available();
         let vrf_operations_available = topology_operations_available && topology::vrf_available();
         Ok(Self {
             socket_path: path,
@@ -271,6 +275,7 @@ impl HelperConfig {
             nginx_routes: None,
             network_operations_available,
             topology_operations_available,
+            packet_capture_available,
             vrf_operations_available,
             ovs_operations_available: topology::ovs_available(),
             netbird_binary,
@@ -308,6 +313,7 @@ pub async fn serve(config: HelperConfig) -> Result<()> {
         nginx_routes: config.nginx_routes.map(Arc::new),
         network_operations_available: config.network_operations_available,
         topology_operations_available: config.topology_operations_available,
+        packet_capture_available: config.packet_capture_available,
         vrf_operations_available: config.vrf_operations_available,
         ovs_operations_available: config.ovs_operations_available,
         kubeedge_available,
@@ -419,6 +425,8 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                                 .network_operations_available,
                                             topology_operations_available: runtime
                                                 .topology_operations_available,
+                                            packet_capture_available: runtime
+                                                .packet_capture_available,
                                             vrf_operations_available: runtime
                                                 .vrf_operations_available,
                                             ovs_operations_available: runtime
@@ -485,7 +493,7 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                         let _guard = runtime.network_lock.lock().await;
                                         expose_network_port(&request).await
                                     }
-                                    "network.topology.reconcile" => {
+                                    "network.topology.reconcile" | "network.topology.capture" => {
                                         let _guard = runtime.network_lock.lock().await;
                                         topology::execute(&request).await
                                     }
@@ -664,6 +672,11 @@ fn validate_capability_target(
         {
             Ok(())
         }
+        "network.topology.capture"
+            if topology_operations_available && uuid::Uuid::parse_str(target).is_ok() =>
+        {
+            Ok(())
+        }
         "helper.status"
         | "helper.capabilities"
         | "agent.update"
@@ -687,6 +700,7 @@ fn validate_capability_target(
         | "container.deploy"
         | "network.firewall.expose"
         | "network.topology.reconcile"
+        | "network.topology.capture"
         | "nginx.route.set" => Err("DENIED: target or parameters are invalid".to_owned()),
         _ => Err("DENIED: unsupported capability or target".to_owned()),
     }
@@ -699,6 +713,7 @@ fn validate_payload_presence(request: &Request) -> std::result::Result<(), Strin
             | "file.write.protected"
             | "network.firewall.expose"
             | "network.topology.reconcile"
+            | "network.topology.capture"
             | "file.write"
             | "container.deploy"
             | "k3s.preflight"
@@ -712,6 +727,12 @@ fn validate_payload_presence(request: &Request) -> std::result::Result<(), Strin
     }
     if request.capability == "network.topology.reconcile" {
         topology::validate_target_payload(&request.target, request.payload_json.as_deref())?;
+    }
+    if request.capability == "network.topology.capture" {
+        topology::validate_capture_target_payload(
+            &request.target,
+            request.payload_json.as_deref(),
+        )?;
     }
     Ok(())
 }
@@ -731,6 +752,7 @@ struct CapabilityState {
     has_container_runtime: bool,
     network_operations_available: bool,
     topology_operations_available: bool,
+    packet_capture_available: bool,
     vrf_operations_available: bool,
     ovs_operations_available: bool,
     netbird_status_available: bool,
@@ -767,6 +789,9 @@ fn available_capabilities(state: CapabilityState) -> Vec<&'static str> {
     }
     if state.topology_operations_available {
         capabilities.push("network.topology.reconcile");
+    }
+    if state.packet_capture_available {
+        capabilities.push("network.topology.capture");
     }
     if state.topology_operations_available && state.vrf_operations_available {
         capabilities.push("network.topology.vrf");
@@ -3419,6 +3444,7 @@ mod tests {
             has_container_runtime: true,
             network_operations_available: true,
             topology_operations_available: true,
+            packet_capture_available: true,
             vrf_operations_available: true,
             ovs_operations_available: true,
             netbird_status_available: true,
