@@ -64,7 +64,8 @@ public class KubernetesNamespaceResourceInventoryService {
       List<ResourceSummary> items) {}
 
   public record ResourceSummary(String apiVersion, String kind, String name, String status,
-      String summary, String createdAt, Map<String, String> labels) {}
+      String summary, String createdAt, Map<String, String> labels,
+      Map<String, String> selector, Map<String, String> podLabels) {}
 
   private record ResourceKind(String apiVersion, String kind, boolean optional) {}
 
@@ -135,7 +136,40 @@ public class KubernetesNamespaceResourceInventoryService {
     String state = state(descriptor.kind(), spec, statusFields);
     String summary = summary(descriptor.kind(), spec, statusFields, fields);
     return new ResourceSummary(descriptor.apiVersion(), descriptor.kind(), metadata.getName(),
-        state, bounded(summary), metadata.getCreationTimestamp(), safeLabels(metadata.getLabels()));
+        state, bounded(summary), metadata.getCreationTimestamp(), safeLabels(metadata.getLabels()),
+        selectorFor(descriptor.kind(), spec),
+        podLabelsFor(descriptor.kind(), spec, metadata.getLabels()));
+  }
+
+  /** Service workload selector (`spec.selector`), used to relate a Service to workloads. */
+  static Map<String, String> selectorFor(String kind, Map<String, Object> spec) {
+    return "Service".equals(kind) ? stringMap(spec.get("selector")) : Map.of();
+  }
+
+  /** Pod-template labels for a workload, matched against Service selectors in the console. */
+  static Map<String, String> podLabelsFor(String kind, Map<String, Object> spec,
+      Map<String, String> metadataLabels) {
+    return switch (kind) {
+      case "Deployment", "StatefulSet", "DaemonSet", "ReplicaSet", "Job" ->
+          stringMap(childMap(childMap(spec.get("template")).get("metadata")).get("labels"));
+      case "Pod" -> stringMap(metadataLabels);
+      default -> Map.of();
+    };
+  }
+
+  /** Coerce a bounded string-to-string map without restricting keys to DISPLAY_LABELS. */
+  static Map<String, String> stringMap(Object value) {
+    if (!(value instanceof Map<?, ?> map) || map.isEmpty()) return Map.of();
+    Map<String, String> selected = new LinkedHashMap<>();
+    for (var entry : map.entrySet()) {
+      if (selected.size() >= 32) break;
+      if (!(entry.getKey() instanceof String key) || key.isBlank() || key.length() > 253) continue;
+      if (entry.getValue() == null) continue;
+      String text = String.valueOf(entry.getValue());
+      if (text.isBlank() || text.length() > 128) continue;
+      selected.put(key, text);
+    }
+    return Map.copyOf(selected);
   }
 
   private static String state(String kind, Map<String, Object> spec,

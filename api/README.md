@@ -10,6 +10,10 @@
 
 Kubernetes 工作负载应用、YAML 派生拓扑、版本草稿、资源级 diff 与显式部署见 [Kubernetes 应用 API](kubernetes-applications.md)。
 
+网站（域名反向代理）站点记录与受管 Nginx 下发见 [网站 API](reverse-proxy-sites.md)。
+
+基于既有观测的告警规则与实时求值见 [告警 API](alerts.md)。
+
 ## 主机运维功能链
 
 | 方法 | 路径 | 用途 |
@@ -31,7 +35,7 @@ Kubernetes 工作负载应用、YAML 派生拓扑、版本草稿、资源级 dif
 | GET | `/api/v1/hosts/{hostId}/services/{serviceId}` | 服务观测、可用动作及 ETag |
 | POST | `/api/v1/hosts/{hostId}/services/{serviceId}/restart` | 接受服务重启任务 |
 | POST | `/api/v1/hosts/{hostId}/services/{serviceId}/journal` | 查询服务最近 12 行 journal |
-| POST | `/api/v1/hosts/{hostId}/operations` | 提交类型化 Helper 操作，包括文件管理、受限容器、临时防火墙操作和 K3s 只读安装前置校验 |
+| POST | `/api/v1/hosts/{hostId}/operations` | 提交类型化 Helper 操作，包括文件管理、受限容器、临时防火墙操作、受管 Nginx 路由写入/撤回/证书安装和 K3s 只读安装前置校验 |
 | GET/POST | `/api/v1/cluster-providers/{providerId}/clusters/{clusterId}/credentials` | 查询凭据元数据或加密托管 KubeEdge 凭据（创建需近期重新验证；秘密不会再次返回） |
 | DELETE | `/api/v1/cluster-providers/{providerId}/clusters/{clusterId}/credentials/{credentialId}` | 撤销 KubeEdge 凭据（需近期重新验证） |
 | POST | `/api/v1/hosts/{hostId}/ssh/probe` | 使用主机资产 SSH 凭据和已确认 host key 执行只读可达性探测 |
@@ -44,7 +48,7 @@ Kubernetes 工作负载应用、YAML 派生拓扑、版本草稿、资源级 dif
 
 这里的 `SystemService` 是主机 systemd unit，与平台逻辑服务 `Service` 分开。URL 使用平台 UUID，服务端解析受管 unit，不接受任意命令或客户端指定的主机身份。
 
-Agent 接入码由数据库保存 SHA-256 哈希，明文仅在创建响应中出现一次，15 分钟到期且只能兑换一次。安装器在发出接入码前先用 UI 展示的证书 SHA-256 指纹校验控制器证书；Agent 在本机生成私钥和 CSR，Core 只签发 CN 与预分配 Agent UUID 一致的客户端证书。mTLS Gateway 校验证书链，并将证书指纹随心跳交给 Core 再次匹配登记记录。安装响应会携带可选的 2–8 个 Relay HTTPS 源站和由 Core Ed25519 签名的故障切换端点清单，安装器将其写入 Agent 环境配置；Agent 启动时验签，清单篡改或签名无效时拒绝启动；Relay 不授权身份，Core 心跳校验后才开放控制路由。Agent 上报 Helper 状态、主机清单和 systemd 服务观测，并每 30 秒通过 `ip -j` 采集网卡、IP 地址与 IPv4/IPv6 路由快照。网络快照按主机保存最近一次结果，读取接口不会触发远程执行。更新任务经 Core 持久化并由本机 root Helper 从固定控制器下载，原子替换 Agent。Helper 只暴露固定类型操作：systemd unit 使用格式校验，软件包使用安全名称校验，受保护文件只写入固定目录，容器部署使用校验过的镜像和 loopback 端口，临时防火墙参数通过接口/协议/端口校验并要求 30–300 秒自动回滚；主机文件管理可浏览绝对路径并读写或删除普通文件，拒绝 `.`、`..` 和符号链接，读取最多 64 KiB、写入最多 32 KiB、目录最多返回 200 项。读取内容会留在操作任务结果中。Helper 不依赖逐项权限配置，也不提供任意 Shell。`k3s.preflight` 仅按 server/agent 角色读取主机资源、发行版、systemd、cgroup 和已有 K3s 安装状态，并返回阻塞项及警告；该操作不安装或修改主机。容器操作限于列表、100 行日志、启停和固定安全参数部署。journal 最多返回 12 行；操作结果经 Agent 本地持久化，Core 确认后删除。SSH 的固定探测、systemd 状态/有界日志/重启及 Agent 初始化使用主机资产内加密保存且已确认 host key 的 SSH 配置；一次性接入码经 SSH stdin 传递，不进入操作记录或审计。安装任务持久化、幂等并等待 mTLS 心跳；SSH 断线或 token 已兑换但未见心跳时标记 UNKNOWN。其他 agentless 管理能力、证书吊销/续期和通用路由配置仍未实现。Agent gRPC 协议见 [agent.proto](../agent/protocol/agent.proto)。
+Agent 接入码由数据库保存 SHA-256 哈希，明文仅在创建响应中出现一次，15 分钟到期且只能兑换一次。安装器在发出接入码前先用 UI 展示的证书 SHA-256 指纹校验控制器证书；Agent 在本机生成私钥和 CSR，Core 只签发 CN 与预分配 Agent UUID 一致的客户端证书。mTLS Gateway 校验证书链，并将证书指纹随心跳交给 Core 再次匹配登记记录。安装响应会携带可选的 2–8 个 Relay HTTPS 源站和由 Core Ed25519 签名的故障切换端点清单，安装器将其写入 Agent 环境配置；Agent 启动时验签，清单篡改或签名无效时拒绝启动；Relay 不授权身份，Core 心跳校验后才开放控制路由。Agent 上报 Helper 状态、主机清单和 systemd 服务观测，并每 30 秒通过 `ip -j` 采集网卡、IP 地址与 IPv4/IPv6 路由快照。网络快照按主机保存最近一次结果，读取接口不会触发远程执行。更新任务经 Core 持久化并由本机 root Helper 从固定控制器下载，原子替换 Agent。Helper 只暴露固定类型操作：systemd unit 使用格式校验，软件包使用安全名称校验，受保护文件只写入固定目录，容器部署使用校验过的镜像和 loopback 端口，临时防火墙参数通过接口/协议/端口校验并要求 30–300 秒自动回滚；主机文件管理可浏览绝对路径并读写或删除普通文件，拒绝 `.`、`..` 和符号链接，读取最多 64 KiB、写入最多 32 KiB、目录最多返回 200 项。读取内容会留在操作任务结果中。Helper 不依赖逐项权限配置，也不提供任意 Shell。`k3s.preflight` 仅按 server/agent 角色读取主机资源、发行版、systemd、cgroup 和已有 K3s 安装状态，并返回阻塞项及警告；该操作不安装或修改主机。容器操作限于列表、100 行日志、启停和固定安全参数部署。journal 最多返回 12 行；操作结果经 Agent 本地持久化，Core 确认后删除。SSH 的固定探测、systemd 状态/有界日志/重启及 Agent 初始化使用主机资产内加密保存且已确认 host key 的 SSH 配置；一次性接入码经 SSH stdin 传递，不进入操作记录或审计。安装任务持久化、幂等并等待 mTLS 心跳；SSH 断线或 token 已兑换但未见心跳时标记 UNKNOWN。其他 agentless 管理能力、证书吊销/续期和任意指令式路由配置仍未实现；受管 Nginx 路由可通过 `nginx.route.set` 写入、`nginx.route.remove` 撤回（仅操作带 NaNPanel 归属标记的固定目录文件）；TLS 证书经 `nginx.tls.install` 写入受管证书目录，私钥不进入 Core 存储。Agent gRPC 协议见 [agent.proto](../agent/protocol/agent.proto)。
 
 ## 认证、授权与读取
 

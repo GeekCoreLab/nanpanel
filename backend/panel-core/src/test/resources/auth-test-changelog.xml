@@ -132,4 +132,16 @@
     <changeSet id="application-packet-captures-test" author="nanpanel">
         <sql>CREATE TABLE kubernetes_application_packet_capture (capture_id UUID PRIMARY KEY, application_id UUID NOT NULL, revision_id UUID NOT NULL, generation BIGINT NOT NULL, link_id UUID NOT NULL, capture_point VARCHAR(128), operation_id UUID, idempotency_key VARCHAR(128) NOT NULL, state VARCHAR(16) NOT NULL, pcapng VARBINARY, packet_count INTEGER, captured_bytes INTEGER, truncated BOOLEAN NOT NULL DEFAULT FALSE, detail VARCHAR(512), created_by VARCHAR(36) NOT NULL, started_at BIGINT NOT NULL, completed_at BIGINT, expires_at BIGINT NOT NULL);</sql>
     </changeSet>
+    <changeSet id="reverse-proxy-sites-test" author="nanpanel">
+        <sql>CREATE TABLE reverse_proxy_site (site_id UUID PRIMARY KEY, host_id UUID NOT NULL REFERENCES host(id) ON DELETE CASCADE, domain VARCHAR(253) NOT NULL, listen_address VARCHAR(45) NOT NULL, listen_port INTEGER NOT NULL CHECK (listen_port BETWEEN 1 AND 65535), upstream_port INTEGER NOT NULL CHECK (upstream_port BETWEEN 1 AND 65535), health_path VARCHAR(256) NOT NULL DEFAULT '/', tls_name VARCHAR(32), state VARCHAR(16) NOT NULL CHECK (state IN ('DRAFT','APPLIED','DISABLED','FAILED')), operation_id UUID REFERENCES operation(id), created_by VARCHAR(36) NOT NULL REFERENCES panel_user(id), created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL);</sql>
+        <sql>CREATE UNIQUE INDEX reverse_proxy_site_endpoint_unique ON reverse_proxy_site(host_id, domain, listen_port);</sql>
+        <sql>CREATE INDEX reverse_proxy_site_host_idx ON reverse_proxy_site(host_id, created_at DESC);</sql>
+    </changeSet>
+    <changeSet id="alert-rules-test" author="nanpanel">
+        <sql>CREATE TABLE alert_rule (rule_id UUID PRIMARY KEY, name VARCHAR(120) NOT NULL, condition_kind VARCHAR(32) NOT NULL CHECK (condition_kind IN ('HOST_NOT_ONLINE','HELPER_UNAVAILABLE','SERVICE_INACTIVE')), host_id UUID REFERENCES host(id) ON DELETE CASCADE, unit_name VARCHAR(255), severity VARCHAR(16) NOT NULL CHECK (severity IN ('WARNING','CRITICAL')), enabled BOOLEAN NOT NULL DEFAULT TRUE, created_by VARCHAR(36) NOT NULL REFERENCES panel_user(id), created_at BIGINT NOT NULL);</sql>
+        <sql>CREATE INDEX alert_rule_enabled_idx ON alert_rule(enabled, created_at DESC);</sql>
+    </changeSet>
+    <changeSet id="host-container-deployments-test" author="nanpanel">
+        <sql>CREATE TABLE host_container_deployment (host_id UUID NOT NULL REFERENCES host(id) ON DELETE CASCADE, container_name VARCHAR(63) NOT NULL, image VARCHAR(255) NOT NULL, host_port INTEGER CHECK (host_port BETWEEN 1 AND 65535), container_port INTEGER CHECK (container_port BETWEEN 1 AND 65535), created_at BIGINT NOT NULL, PRIMARY KEY (host_id, container_name));</sql>
+    </changeSet>
 </databaseChangeLog>

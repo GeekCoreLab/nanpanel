@@ -42,10 +42,12 @@ public class HostHelperOperationResource {
       .connectTimeout(Duration.ofSeconds(2)).build();
   private static final Set<String> CAPABILITIES = Set.of(
       "package.install", "file.write.protected", "container.list", "container.logs",
-      "container.start", "container.stop", "container.deploy", "network.firewall.expose",
+      "container.start", "container.stop", "container.deploy", "container.remove",
+      "network.firewall.expose",
       "network.topology.reconcile", "network.topology.capture",
       "file.list", "file.read", "file.write", "file.delete", "k3s.preflight", "k3s.install",
-      "k3s.upgrade", "kubeedge.edgecore.join", "nginx.route.set");
+      "k3s.upgrade", "kubeedge.edgecore.join", "nginx.route.set", "nginx.route.remove",
+      "nginx.tls.install");
   private static final java.util.regex.Pattern PACKAGE_NAME =
       java.util.regex.Pattern.compile("[A-Za-z0-9][A-Za-z0-9+_.:-]{0,127}");
   private static final java.util.regex.Pattern FILE_NAME =
@@ -60,6 +62,8 @@ public class HostHelperOperationResource {
       java.util.regex.Pattern.compile("[A-Za-z0-9][A-Za-z0-9_.-]{0,62}");
   private static final java.util.regex.Pattern NGINX_ROUTE_NAME =
       java.util.regex.Pattern.compile("nanpanel-[a-z][a-z0-9-]{0,52}");
+  private static final java.util.regex.Pattern TLS_NAME =
+      java.util.regex.Pattern.compile("[a-z][a-z0-9-]{0,31}");
   private static final java.util.regex.Pattern UUID_TEXT = java.util.regex.Pattern.compile(
       "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
 
@@ -452,11 +456,13 @@ public class HostHelperOperationResource {
       case "file.write.protected" -> FILE_NAME.matcher(target).matches();
       case "file.list" -> validHostPath(target, true);
       case "file.read", "file.write", "file.delete" -> validHostPath(target, false);
-      case "container.logs", "container.start", "container.stop", "container.deploy" ->
+      case "container.logs", "container.start", "container.stop", "container.deploy",
+          "container.remove" ->
           CONTAINER_NAME.matcher(target).matches();
       case "network.firewall.expose" -> NETWORK_RULE_NAME.matcher(target).matches();
       case "network.topology.reconcile", "network.topology.capture" -> UUID_TEXT.matcher(target).matches();
-      case "nginx.route.set" -> NGINX_ROUTE_NAME.matcher(target).matches();
+      case "nginx.route.set", "nginx.route.remove" -> NGINX_ROUTE_NAME.matcher(target).matches();
+      case "nginx.tls.install" -> TLS_NAME.matcher(target).matches();
       default -> false;
     };
     if (!validTarget) throw fail(422, "VALIDATION_FAILED", "操作目标格式无效");
@@ -547,16 +553,39 @@ public class HostHelperOperationResource {
       return;
     }
     if (capability.equals("container.deploy") && payload != null && !payload.isNull()) {
+      if (!payload.isObject() || fieldSet(payload).stream().anyMatch(field -> !Set.of(
+          "image", "hostPort", "containerPort", "environment", "volumes", "memoryMb",
+          "stateful").contains(field)) || !payload.has("image"))
+        throw fail(422, "VALIDATION_FAILED", "容器部署包含未定义字段");
       JsonNode image = payload.get("image");
       JsonNode hostPort = payload.get("hostPort");
       JsonNode containerPort = payload.get("containerPort");
       boolean hostPortMissing = hostPort == null || hostPort.isNull();
       boolean containerPortMissing = containerPort == null || containerPort.isNull();
-      if (!payload.isObject() || payload.size() != 3 || image == null || !image.isTextual() ||
-          !CONTAINER_IMAGE.matcher(image.asText()).matches() ||
-          hostPortMissing != containerPortMissing ||
-          (!hostPortMissing && (!validPort(hostPort) || !validPort(containerPort))))
+      if (image == null || !image.isTextual() || !CONTAINER_IMAGE.matcher(image.asText()).matches()
+          || hostPortMissing != containerPortMissing
+          || (!hostPortMissing && (!validPort(hostPort) || !validPort(containerPort))))
         throw fail(422, "VALIDATION_FAILED", "容器镜像或端口映射无效");
+      JsonNode environment = payload.get("environment");
+      if (environment != null && !environment.isNull()) {
+        if (!environment.isArray() || environment.isEmpty() || environment.size() > 32
+            || !allValidEnvironmentEntries(environment))
+          throw fail(422, "VALIDATION_FAILED", "环境变量必须是 1–32 个 KEY=VALUE 条目");
+      }
+      JsonNode volumes = payload.get("volumes");
+      if (volumes != null && !volumes.isNull()) {
+        if (!volumes.isArray() || volumes.isEmpty() || volumes.size() > 16
+            || !validVolumeMounts(volumes))
+          throw fail(422, "VALIDATION_FAILED", "数据卷名称或挂载路径无效");
+      }
+      JsonNode memoryMb = payload.get("memoryMb");
+      if (memoryMb != null && !memoryMb.isNull()
+          && (!memoryMb.isIntegralNumber() || !memoryMb.canConvertToInt()
+              || memoryMb.intValue() < 64 || memoryMb.intValue() > 2048))
+        throw fail(422, "VALIDATION_FAILED", "内存限制必须在 64–2048 MiB");
+      JsonNode stateful = payload.get("stateful");
+      if (stateful != null && !stateful.isNull() && !stateful.isBoolean())
+        throw fail(422, "VALIDATION_FAILED", "stateful 必须是布尔值");
       return;
     }
     if (capability.equals("network.firewall.expose")) {
@@ -584,6 +613,10 @@ public class HostHelperOperationResource {
     }
     if (capability.equals("nginx.route.set")) {
       validateNginxRoute(payload);
+      return;
+    }
+    if (capability.equals("nginx.tls.install")) {
+      validateTlsMaterial(payload);
       return;
     }
     if (payload != null && !payload.isNull())
@@ -737,12 +770,22 @@ public class HostHelperOperationResource {
     return actualKeys.equals(expectedKeys);
   }
 
-  private void validateNginxRoute(JsonNode payload) {
+  void validateNginxRoute(JsonNode payload) {
     JsonNode address = payload == null ? null : payload.get("listenAddress");
     JsonNode port = payload == null ? null : payload.get("listenPort");
     JsonNode hostname = payload == null ? null : payload.get("serverName");
     JsonNode healthPath = payload == null ? null : payload.get("healthPath");
     JsonNode backends = payload == null ? null : payload.get("backends");
+    JsonNode tls = payload == null ? null : payload.get("tls");
+    java.util.Set<String> routeFields = payload != null && payload.isObject()
+        ? fieldSet(payload) : java.util.Set.of();
+    java.util.Set<String> baseFields = java.util.Set.of(
+        "listenAddress", "listenPort", "serverName", "healthPath", "backends");
+    boolean validFields = routeFields.equals(baseFields)
+        || (routeFields.size() == 6 && routeFields.containsAll(baseFields)
+            && routeFields.contains("tls"));
+    boolean validTls = tls == null || (tls.isObject() && tls.size() == 2
+        && validTlsName(tls.get("certificate")) && validTlsName(tls.get("privateKey")));
     boolean validAddress = address != null && address.isTextual()
         && validHostAddress(address.asText());
     boolean validHostname = hostname != null && hostname.isTextual()
@@ -754,9 +797,9 @@ public class HostHelperOperationResource {
         && healthPath.asText().startsWith("/") && healthPath.asText().length() <= 256
         && !healthPath.asText().contains("..")
         && healthPath.asText().matches("/[A-Za-z0-9/._~-]*");
-    if (payload == null || !payload.isObject() || payload.size() != 5 || !validAddress
+    if (payload == null || !payload.isObject() || !validFields || !validAddress
         || !validPort(port) || !validHostname || !validHealthPath || backends == null
-        || !backends.isArray() || backends.isEmpty() || backends.size() > 2) {
+        || !backends.isArray() || backends.isEmpty() || backends.size() > 2 || !validTls) {
       throw fail(422, "VALIDATION_FAILED", "Nginx 路由监听地址、主机名或健康检查参数无效");
     }
     var names = new java.util.HashSet<String>();
@@ -781,6 +824,30 @@ public class HostHelperOperationResource {
     if (weightSum != 100 || !hasPositiveWeight) {
       throw fail(422, "VALIDATION_FAILED", "Nginx 后端权重总和必须为 100");
     }
+  }
+
+  /** TLS material payload: exactly the two PEMs, bounded in size and marker-checked. */
+  private void validateTlsMaterial(JsonNode payload) {
+    if (payload == null || !payload.isObject() || payload.size() != 2
+        || !fieldSet(payload).equals(java.util.Set.of("certificatePem", "privateKeyPem"))
+        || !validPem(payload.get("certificatePem"), "CERTIFICATE")
+        || !validPem(payload.get("privateKeyPem"), "PRIVATE KEY")) {
+      throw fail(422, "VALIDATION_FAILED", "TLS 证书或私钥格式无效");
+    }
+  }
+
+  private static boolean validTlsName(JsonNode value) {
+    return value != null && value.isTextual() && TLS_NAME.matcher(value.asText()).matches();
+  }
+
+  private static boolean validPem(JsonNode value, String label) {
+    if (value == null || !value.isTextual()) return false;
+    String pem = value.asText().trim();
+    if (pem.isEmpty() || pem.length() > 64 * 1024) return false;
+    String begin = "-----BEGIN " + label + "-----";
+    String end = "-----END " + label + "-----";
+    return pem.startsWith(begin) && pem.endsWith(end)
+        && pem.chars().allMatch(ch -> ch >= 0x21 && ch <= 0x7e || ch == '\n' || ch == '\r' || ch == ' ');
   }
 
   private boolean validHostAddress(String value) {
@@ -852,6 +919,37 @@ public class HostHelperOperationResource {
     String[] components = target.substring(1).split("/", -1);
     return components.length > 0 && java.util.Arrays.stream(components).allMatch(component ->
         !component.isEmpty() && !component.equals(".") && !component.equals(".."));
+  }
+
+  private boolean allValidEnvironmentEntries(JsonNode array) {
+    for (JsonNode entry : array) {
+      if (!entry.isTextual() || !validEnvironmentEntry(entry.asText())) return false;
+    }
+    return true;
+  }
+
+  private boolean validEnvironmentEntry(String value) {
+    if (value == null || value.isEmpty() || value.length() > 2048 || value.contains("\0"))
+      return false;
+    int equals = value.indexOf('=');
+    if (equals <= 0) return false;
+    String name = value.substring(0, equals);
+    return name.length() <= 64 && name.matches("[A-Za-z_][A-Za-z0-9_]*");
+  }
+
+  private boolean validVolumeMounts(JsonNode array) {
+    var keys = new java.util.HashSet<String>();
+    for (JsonNode volume : array) {
+      if (!volume.isObject() || volume.size() != 2) return false;
+      JsonNode name = volume.get("name");
+      JsonNode mountPath = volume.get("mountPath");
+      if (name == null || !name.isTextual() || !CONTAINER_NAME.matcher(name.asText()).matches()
+          || mountPath == null || !mountPath.isTextual()
+          || !validHostPath(mountPath.asText(), false)
+          || !keys.add(name.asText() + ":" + mountPath.asText()))
+        return false;
+    }
+    return true;
   }
 
   private boolean validPort(JsonNode value) {
