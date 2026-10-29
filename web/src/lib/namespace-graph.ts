@@ -8,12 +8,43 @@
  * the React inventory view.
  */
 
+export type IngressRouteLike = { host: string; path: string; serviceName: string; port: number };
+
 export type NamespaceResourceLike = {
   kind: string;
   name: string;
   selector?: Record<string, string> | null;
   podLabels?: Record<string, string> | null;
+  ingressRoutes?: readonly IngressRouteLike[] | null;
 };
+
+export type IngressEdge = { ingress: string; service: string; label: string };
+
+/**
+ * Ingress → Service edges from structured rule paths. Routes whose Service is not in
+ * the namespace inventory are skipped so every edge references a node that exists.
+ */
+export function deriveIngressEdges(
+  items: readonly NamespaceResourceLike[],
+): IngressEdge[] {
+  const serviceNames = new Set(items.filter(item => item.kind === 'Service').map(item => item.name));
+  const seen = new Set<string>();
+  const edges: IngressEdge[] = [];
+  for (const ingress of items) {
+    if (ingress.kind !== 'Ingress') continue;
+    for (const route of ingress.ingressRoutes ?? []) {
+      if (!route.serviceName || !serviceNames.has(route.serviceName)) continue;
+      const host = route.host || '*';
+      const path = route.path && route.path !== '*' ? route.path : '/';
+      const label = `${host}${path}${route.port ? `:${route.port}` : ''}`;
+      const key = `${ingress.name}->${route.serviceName}:${label}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      edges.push({ ingress: ingress.name, service: route.serviceName, label });
+    }
+  }
+  return edges;
+}
 
 export type SelectorEdge = {
   service: string;
@@ -76,7 +107,7 @@ export type GraphNode = {
   id: string;
   label: string;
   kind: string;
-  column: 0 | 1;
+  column: number;
   x: number;
   y: number;
 };
@@ -85,8 +116,9 @@ export type GraphEdge = { id: string; source: string; target: string; label: str
 
 export type NamespaceGraphLayout = { nodes: GraphNode[]; edges: GraphEdge[] };
 
-const SETTLED_COLUMN_X = 0;
-const WORKLOAD_COLUMN_X = 360;
+const INGRESS_COLUMN_X = 0;
+const SERVICE_COLUMN_X = 360;
+const WORKLOAD_COLUMN_X = 720;
 const ROW_GAP = 96;
 
 /**
@@ -97,23 +129,36 @@ const ROW_GAP = 96;
 export function layoutNamespaceGraph(
   items: readonly NamespaceResourceLike[],
 ): NamespaceGraphLayout {
+  const ingresses = items.filter(item => item.kind === 'Ingress');
   const services = items.filter(item => item.kind === 'Service');
   const workloads = items.filter(item => WORKLOAD_KINDS.has(item.kind));
   const nodes: GraphNode[] = [
+    ...ingresses.map((ingress, row) => ({
+      id: `ing:${ingress.name}`, label: ingress.name, kind: ingress.kind,
+      column: 0, x: INGRESS_COLUMN_X, y: row * ROW_GAP,
+    })),
     ...services.map((service, row) => ({
       id: `svc:${service.name}`, label: service.name, kind: service.kind,
-      column: 0 as const, x: SETTLED_COLUMN_X, y: row * ROW_GAP,
+      column: 1, x: SERVICE_COLUMN_X, y: row * ROW_GAP,
     })),
     ...workloads.map((workload, row) => ({
       id: `wl:${workload.kind}/${workload.name}`, label: workload.name, kind: workload.kind,
-      column: 1 as const, x: WORKLOAD_COLUMN_X, y: row * ROW_GAP,
+      column: 2, x: WORKLOAD_COLUMN_X, y: row * ROW_GAP,
     })),
   ];
-  const edges = deriveNamespaceSelectorEdges(items).map(edge => ({
-    id: `svc:${edge.service}->wl:${edge.workloadKind}/${edge.workload}`,
-    source: `svc:${edge.service}`,
-    target: `wl:${edge.workloadKind}/${edge.workload}`,
-    label: Object.entries(edge.sharedLabels).map(([key, value]) => `${key}=${value}`).join(' · '),
-  }));
+  const edges = [
+    ...deriveIngressEdges(items).map(edge => ({
+      id: `ing:${edge.ingress}->svc:${edge.service}:${edge.label}`,
+      source: `ing:${edge.ingress}`,
+      target: `svc:${edge.service}`,
+      label: edge.label,
+    })),
+    ...deriveNamespaceSelectorEdges(items).map(edge => ({
+      id: `svc:${edge.service}->wl:${edge.workloadKind}/${edge.workload}`,
+      source: `svc:${edge.service}`,
+      target: `wl:${edge.workloadKind}/${edge.workload}`,
+      label: Object.entries(edge.sharedLabels).map(([key, value]) => `${key}=${value}`).join(' · '),
+    })),
+  ];
   return { nodes, edges };
 }

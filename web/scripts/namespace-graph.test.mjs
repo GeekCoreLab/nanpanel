@@ -68,8 +68,8 @@ test('graph layout places services left and workloads right with stable ids', ()
   ]);
   assert.deepEqual(layout.nodes.map(n => n.id),
     ['svc:orders', 'svc:cache', 'wl:Deployment/orders', 'wl:StatefulSet/cache']);
-  assert.deepEqual(layout.nodes.map(n => n.column), [0, 0, 1, 1]);
-  assert.deepEqual(layout.nodes.map(n => n.x), [0, 0, 360, 360]);
+  assert.deepEqual(layout.nodes.map(n => n.column), [1, 1, 2, 2]);
+  assert.deepEqual(layout.nodes.map(n => n.x), [360, 360, 720, 720]);
   assert.deepEqual(layout.nodes.map(n => n.y), [0, 96, 0, 96]);
 });
 
@@ -119,4 +119,52 @@ test('managed app index is empty without a cluster or namespace', () => {
   assert.deepEqual(buildManagedAppIndex(apps, '', 'shop'), {});
   assert.deepEqual(buildManagedAppIndex(apps, 'c1', ''), {});
   assert.deepEqual(buildManagedAppIndex([], 'c1', 'shop'), {});
+});
+
+import { deriveIngressEdges } from '../src/lib/namespace-graph.ts';
+
+const ingressRoute = (host, path, serviceName, port) => ({ host, path, serviceName, port });
+
+test('ingress routes become edges only for services present in the namespace', () => {
+  const edges = deriveIngressEdges([
+    resource('Ingress', 'shop-ingress', { ingressRoutes: [
+      ingressRoute('shop.example.test', '/', 'shop', 80),
+      ingressRoute('shop.example.test', '/api', 'missing-svc', 8080),
+    ] }),
+    resource('Service', 'shop', { selector: { app: 'shop' } }),
+  ]);
+  assert.deepEqual(edges, [
+    { ingress: 'shop-ingress', service: 'shop', label: 'shop.example.test/:80' },
+  ]);
+});
+
+test('a default backend renders as a wildcard label', () => {
+  const edges = deriveIngressEdges([
+    resource('Ingress', 'fallback', { ingressRoutes: [ingressRoute('', '*', 'web', 8080)] }),
+    resource('Service', 'web', { selector: { app: 'web' } }),
+  ]);
+  assert.deepEqual(edges, [{ ingress: 'fallback', service: 'web', label: '*/:8080' }]);
+});
+
+test('duplicate ingress routes are reported once', () => {
+  const edges = deriveIngressEdges([
+    resource('Ingress', 'shop-ingress', { ingressRoutes: [
+      ingressRoute('a.test', '/', 'shop', 80),
+      ingressRoute('a.test', '/', 'shop', 80),
+    ] }),
+    resource('Service', 'shop', { selector: { app: 'shop' } }),
+  ]);
+  assert.equal(edges.length, 1);
+});
+
+test('a namespace with an ingress lays out three columns', () => {
+  const layout = layoutNamespaceGraph([
+    resource('Ingress', 'shop-ingress', { ingressRoutes: [ingressRoute('a.test', '/', 'shop', 80)] }),
+    resource('Service', 'shop', { selector: { app: 'shop' } }),
+    resource('Deployment', 'shop', { podLabels: { app: 'shop' } }),
+  ]);
+  assert.deepEqual(layout.nodes.map(n => n.id), ['ing:shop-ingress', 'svc:shop', 'wl:Deployment/shop']);
+  assert.deepEqual(layout.nodes.map(n => n.x), [0, 360, 720]);
+  assert.deepEqual(layout.edges.map(e => e.source), ['ing:shop-ingress', 'svc:shop']);
+  assert.deepEqual(layout.edges.map(e => e.target), ['svc:shop', 'wl:Deployment/shop']);
 });

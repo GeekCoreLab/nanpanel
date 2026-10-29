@@ -4,7 +4,7 @@ import { layoutNamespaceGraph, type NamespaceResourceLike } from '../lib/namespa
 
 const KIND_COLORS: Record<string, string> = {
   Service: '#6d4fb5', Deployment: '#2f6fb0', StatefulSet: '#2f8f6b',
-  DaemonSet: '#a1692f', ReplicaSet: '#8a6bbf', Pod: '#5b7288',
+  DaemonSet: '#a1692f', ReplicaSet: '#8a6bbf', Pod: '#5b7288', Ingress: '#8a4f2f',
 };
 
 export type NamespaceGraphResource = NamespaceResourceLike & {
@@ -30,7 +30,10 @@ export function NamespaceGraph({ items, managedAppIds, onOpenApplication }: {
   const itemById = useMemo(() => {
     const map = new Map<string, NamespaceGraphResource>();
     for (const item of items) {
-      map.set(item.kind === 'Service' ? `svc:${item.name}` : `wl:${item.kind}/${item.name}`, item);
+      const id = item.kind === 'Ingress' ? `ing:${item.name}`
+        : item.kind === 'Service' ? `svc:${item.name}`
+        : `wl:${item.kind}/${item.name}`;
+      map.set(id, item);
     }
     return map;
   }, [items]);
