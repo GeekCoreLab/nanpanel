@@ -24,25 +24,33 @@ export type LoadBalancerNodeLike = {
 };
 
 export type RoutePlanIssue = {
-  code: 'DUPLICATE_ENTRY' | 'NO_BACKENDS' | 'ZERO_WEIGHT';
+  code: 'DUPLICATE_ENTRY' | 'SHARED_BALANCER' | 'ONE_BACKEND' | 'ZERO_WEIGHT';
   message: string;
   routeIds: string[];
 };
 
 /**
- * Flags plan-level problems that would make the compiled Istio route ambiguous or
- * useless: the same Service:port drawn from two route entries, an entry with no
- * backend, or an entry whose backends all carry zero weight. Pure so the guard is
- * unit-tested and the canvas only renders the result.
+ * Flags plan-level problems a weighted Istio route cannot express. The rules mirror
+ * the backend traffic reconciler exactly, so the canvas never offers an apply the
+ * server will reject: one route entry per Service:port, one entry per balancer, at
+ * least two backends per entry, and at least one non-zero backend weight.
  */
 export function validateRoutePlan(plan: readonly RoutePlanRow[]): RoutePlanIssue[] {
   const issues: RoutePlanIssue[] = [];
   const byService = new Map<string, RoutePlanRow[]>();
+  const byBalancer = new Map<string, RoutePlanRow[]>();
   for (const row of plan) {
     const key = `${row.serviceName}:${row.servicePort}`;
     byService.set(key, [...(byService.get(key) ?? []), row]);
-    if (row.backends.length === 0) {
-      issues.push({ code: 'NO_BACKENDS', message: `${key} 未连接后端 Service`, routeIds: [row.id] });
+    byBalancer.set(row.balancerId, [...(byBalancer.get(row.balancerId) ?? []), row]);
+    if (row.backends.length < 2) {
+      issues.push({
+        code: 'ONE_BACKEND',
+        message: row.backends.length === 0
+          ? `${key} 未连接后端 Service（需要至少两个）`
+          : `${key} 只连接了 1 个后端 Service（需要至少两个）`,
+        routeIds: [row.id],
+      });
     } else if (row.totalWeight === 0) {
       issues.push({ code: 'ZERO_WEIGHT', message: `${key} 的后端权重全为 0`, routeIds: [row.id] });
     }
@@ -56,6 +64,16 @@ export function validateRoutePlan(plan: readonly RoutePlanRow[]): RoutePlanIssue
       });
     }
   }
+  for (const rows of byBalancer.values()) {
+    if (rows.length > 1) {
+      const services = rows.map(row => `${row.serviceName}:${row.servicePort}`).join('、');
+      issues.push({
+        code: 'SHARED_BALANCER',
+        message: `同一个流量分配器被 ${services} 同时驱动`,
+        routeIds: rows.map(row => row.id),
+      });
+    }
+  }
   return issues;
 }
 
@@ -63,6 +81,7 @@ export type RoutePlanBackend = { name: string; weight: number; share: number };
 
 export type RoutePlanRow = {
   id: string;
+  balancerId: string;
   serviceName: string;
   servicePort: number;
   totalWeight: number;
@@ -94,7 +113,8 @@ export function compileApplicationRoutePlan(
       });
     const totalWeight = backends.reduce((sum, backend) => sum + backend.weight, 0);
     return {
-      id: entry.id, serviceName, servicePort: entry.servicePort, totalWeight,
+      id: entry.id, balancerId: entry.targetId, serviceName,
+      servicePort: entry.servicePort, totalWeight,
       backends: backends.map(backend => ({
         ...backend,
         share: totalWeight === 0 ? 0 : Math.round(backend.weight / totalWeight * 100),

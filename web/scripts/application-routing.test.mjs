@@ -113,46 +113,64 @@ test('backends and calls without a route entry produce no plan row', () => {
 });
 import { validateRoutePlan } from '../src/lib/application-routing.ts';
 
-const planRow = (id, serviceName, servicePort, backends, totalWeight) => ({
-  id, serviceName, servicePort, totalWeight, backends, callers: [],
+const planRow = (id, serviceName, servicePort, backends, totalWeight, balancerId) => ({
+  id, balancerId: balancerId ?? `lb-${id}`, serviceName, servicePort, totalWeight,
+  backends, callers: [],
 });
+const weighted = (name, weight) => ({ name, weight, share: weight });
 
 test('a consistent plan has no issues', () => {
   const plan = [
-    planRow('e1', 'orders', 80, [{ name: 'v1', weight: 100, share: 100 }], 100),
-    planRow('e2', 'inventory', 80, [{ name: 'inv', weight: 100, share: 100 }], 100),
+    planRow('e1', 'orders', 80, [weighted('v1', 90), weighted('v2', 10)], 100),
+    planRow('e2', 'inventory', 80, [weighted('inv', 100), weighted('inv2', 0)], 100),
   ];
   assert.deepEqual(validateRoutePlan(plan), []);
 });
 
 test('the same service and port drawn twice is reported as a duplicate entry', () => {
   const issues = validateRoutePlan([
-    planRow('e1', 'orders', 80, [{ name: 'v1', weight: 100, share: 100 }], 100),
-    planRow('e2', 'orders', 80, [{ name: 'v2', weight: 100, share: 100 }], 100),
+    planRow('e1', 'orders', 80, [weighted('v1', 100), weighted('v2', 0)], 100),
+    planRow('e2', 'orders', 80, [weighted('v3', 100), weighted('v4', 0)], 100),
   ]);
-  assert.equal(issues.length, 1);
-  assert.equal(issues[0].code, 'DUPLICATE_ENTRY');
-  assert.deepEqual(issues[0].routeIds, ['e1', 'e2']);
+  const duplicate = issues.find(issue => issue.code === 'DUPLICATE_ENTRY');
+  assert.ok(duplicate);
+  assert.deepEqual(duplicate.routeIds, ['e1', 'e2']);
+  assert.equal(duplicate.message, 'orders:80 被 2 个路由入口重复定义');
 });
 
 test('the same service on different ports is not a duplicate', () => {
-  assert.deepEqual(validateRoutePlan([
-    planRow('e1', 'orders', 80, [{ name: 'v1', weight: 100, share: 100 }], 100),
-    planRow('e2', 'orders', 8080, [{ name: 'v1', weight: 100, share: 100 }], 100),
-  ]), []);
+  const issues = validateRoutePlan([
+    planRow('e1', 'orders', 80, [weighted('v1', 100), weighted('v2', 0)], 100),
+    planRow('e2', 'orders', 8080, [weighted('v1', 100), weighted('v2', 0)], 100),
+  ]);
+  assert.deepEqual(issues, []);
 });
 
-test('an entry without backends and one with only zero weights are flagged', () => {
+test('two services driving one balancer are reported as a shared balancer', () => {
+  const issues = validateRoutePlan([
+    planRow('e1', 'orders', 80, [weighted('v1', 100), weighted('v2', 0)], 100, 'lb-shared'),
+    planRow('e2', 'inventory', 80, [weighted('i1', 100), weighted('i2', 0)], 100, 'lb-shared'),
+  ]);
+  const shared = issues.find(issue => issue.code === 'SHARED_BALANCER');
+  assert.ok(shared);
+  assert.deepEqual(shared.routeIds, ['e1', 'e2']);
+  assert.equal(shared.message, '同一个流量分配器被 orders:80、inventory:80 同时驱动');
+});
+
+test('fewer than two backends is reported, matching the backend requirement', () => {
   const issues = validateRoutePlan([
     planRow('e1', 'orders', 80, [], 0),
-    planRow('e2', 'inventory', 80, [{ name: 'inv', weight: 0, share: 0 }], 0),
+    planRow('e2', 'inventory', 80, [weighted('inv', 100)], 100),
   ]);
-  assert.deepEqual(issues.map(issue => issue.code), ['NO_BACKENDS', 'ZERO_WEIGHT']);
-  assert.equal(issues[0].message, 'orders:80 未连接后端 Service');
-  assert.equal(issues[1].message, 'inventory:80 的后端权重全为 0');
+  assert.deepEqual(issues.map(issue => issue.code), ['ONE_BACKEND', 'ONE_BACKEND']);
+  assert.equal(issues[0].message, 'orders:80 未连接后端 Service（需要至少两个）');
+  assert.equal(issues[1].message, 'inventory:80 只连接了 1 个后端 Service（需要至少两个）');
 });
 
-test('no backends is reported instead of zero weight for the same row', () => {
-  const issues = validateRoutePlan([planRow('e1', 'orders', 80, [], 0)]);
-  assert.deepEqual(issues.map(issue => issue.code), ['NO_BACKENDS']);
+test('all-zero backends are reported once the backend count is satisfied', () => {
+  const issues = validateRoutePlan([
+    planRow('e1', 'orders', 80, [weighted('v1', 0), weighted('v2', 0)], 0),
+  ]);
+  assert.deepEqual(issues.map(issue => issue.code), ['ZERO_WEIGHT']);
+  assert.equal(issues[0].message, 'orders:80 的后端权重全为 0');
 });

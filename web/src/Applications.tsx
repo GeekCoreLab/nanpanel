@@ -2357,7 +2357,9 @@ function ApplicationNetworkTopologyCanvas({
           </div>)}
           {routePlanIssues.length > 0 && <ul className="application-route-issues">
             {routePlanIssues.map(issue => <li key={`${issue.code}-${issue.routeIds.join('-')}`}>
-              <span>{issue.code === 'DUPLICATE_ENTRY' ? '重复入口' : issue.code === 'NO_BACKENDS' ? '缺后端' : '零权重'}</span>
+              <span>{issue.code === 'DUPLICATE_ENTRY' ? '重复入口'
+                : issue.code === 'SHARED_BALANCER' ? '分配器冲突'
+                : issue.code === 'ONE_BACKEND' ? '后端不足' : '零权重'}</span>
               {issue.message}</li>)}
           </ul>}
           <div className="application-route-actions">
