@@ -15,10 +15,13 @@ class RoleCatalogTest {
     var admin = roles.get(0);
     assertEquals("ADMIN", admin.id());
     assertEquals("平台管理员", admin.name());
-    assertEquals(9, admin.permissions().size());
+    assertEquals(23, admin.permissions().size());
     assertTrue(admin.permissions().contains("host.read"));
     assertTrue(admin.permissions().contains("admin.user.manage"));
     assertTrue(admin.permissions().contains("system-service.restart"));
+    assertTrue(admin.permissions().contains("database.read"));
+    assertTrue(admin.permissions().contains("site.tls"));
+    assertTrue(admin.permissions().contains("file.write"));
   }
 
   @Test
@@ -37,8 +40,8 @@ class RoleCatalogTest {
 
   @Test
   void adminDoesNotPermitActionsOutsideItsList() {
-    assertFalse(RoleCatalog.permits("ADMIN", "site.apply", "site:s-1"));
-    assertFalse(RoleCatalog.permits("ADMIN", "alert-rule.create", "alert-rule:r-1"));
+    assertFalse(RoleCatalog.permits("ADMIN", "cluster.create", "cluster:c-1"));
+    assertFalse(RoleCatalog.permits("ADMIN", "network.firewall.expose", "host:h-1"));
   }
 
   @Test

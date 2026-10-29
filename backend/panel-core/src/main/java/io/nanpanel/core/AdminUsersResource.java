@@ -23,6 +23,7 @@ public class AdminUsersResource {
   private static final Pattern USERNAME =
       Pattern.compile("^[a-z][a-z0-9_.-]{2,63}$");
   @Inject AuthStore store;
+  @Inject RoleRepository roleRepository;
   @Inject io.vertx.core.http.HttpServerRequest http;
   @Inject
   @ConfigProperty(name = "nanpanel.auth.secure-cookie", defaultValue = "true")
@@ -302,7 +303,7 @@ public class AdminUsersResource {
   @Path("roles")
   public Object roles() {
     session();
-    return Map.of("items", RoleCatalog.roles().stream()
+    return Map.of("items", roleRepository.roles().stream()
         .map(role -> Map.of("id", role.id(), "name", role.name(),
             "permissions", role.permissions()))
         .toList());

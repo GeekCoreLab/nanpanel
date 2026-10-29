@@ -20,7 +20,12 @@ public final class RoleCatalog {
   private static final List<String> ADMIN_PERMISSIONS = List.of(
       "host.read", "agent.read", "system-service.read", "system-service.restart",
       "operation.read", "admin.overview.read", "admin.user.manage",
-      "admin.settings.manage", "admin.audit.read");
+      "admin.settings.manage", "admin.audit.read",
+      "app-store.read", "app-store.deploy",
+      "site.read", "site.apply", "site.disable", "site.delete", "site.tls",
+      "alert-rule.read", "alert-rule.create", "alert-rule.delete",
+      "database.read",
+      "file.read", "file.write", "file.delete");
 
   private static final List<Role> ROLES = List.of(
       new Role("ADMIN", "平台管理员", ADMIN_PERMISSIONS));
