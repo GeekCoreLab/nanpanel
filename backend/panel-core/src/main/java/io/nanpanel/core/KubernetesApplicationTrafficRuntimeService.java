@@ -48,7 +48,7 @@ public class KubernetesApplicationTrafficRuntimeService {
   private record CreatedRoute(String name, String uid) {}
   private record RuntimeSnapshot(String namespace, String revisionId, long generation,
       List<RoutePlan> routes) {}
-  private record RouteEntry(String serviceId, int port) {}
+  record RouteEntry(String serviceId, int port) {}
   private record Backend(String serviceName, int port, int weight, String outputPort) {}
 
   public RuntimeView apply(String actor, String remoteAddress, UUID applicationId) {
@@ -155,7 +155,6 @@ public class KubernetesApplicationTrafficRuntimeService {
     }
     Map<String, JsonNode> devices = new HashMap<>();
     graph.path("nodes").forEach(node -> devices.put(node.path("id").asText(), node));
-    Map<String, RouteEntry> entries = new LinkedHashMap<>();
     Map<String, List<JsonNode>> routeLinks = new LinkedHashMap<>();
     Map<String, Set<String>> callers = new HashMap<>();
     graph.path("trafficLinks").forEach(link -> {
@@ -166,15 +165,12 @@ public class KubernetesApplicationTrafficRuntimeService {
               + link.path("servicePort").asInt(), ignored -> new HashSet<>())
               .add(link.path("sourceId").asText());
         }
-      } else if ("ROUTE_ENTRY".equals(type)) {
-        String lbId = link.path("targetId").asText();
-          entries.put(lbId, new RouteEntry(link.path("sourceId").asText(),
-              link.path("servicePort").asInt()));
       } else if ("ROUTE_BACKEND".equals(type)) {
         routeLinks.computeIfAbsent(link.path("sourceId").asText(), ignored -> new ArrayList<>())
             .add(link);
       }
     });
+    Map<String, RouteEntry> entries = indexRouteEntries(graph.path("trafficLinks"));
     if (entries.isEmpty()) throw fail(422, "APPLICATION_TRAFFIC_ROUTE_EMPTY",
         "拓扑中没有 Service → LOAD_BALANCER → Service 路由");
 
@@ -381,6 +377,28 @@ public class KubernetesApplicationTrafficRuntimeService {
   private boolean isHttpPort(ServicePort port) {
     String name = port.getName() == null ? "" : port.getName().toLowerCase(java.util.Locale.ROOT);
     return name.startsWith("http") || port.getPort() == 80 || port.getPort() == 8080;
+  }
+
+  /**
+   * One weighted route entry per LOAD_BALANCER. Two different Service:port entries
+   * feeding the same balancer used to silently overwrite each other (last one won),
+   * dropping a route the operator drew; reject it instead.
+   */
+  static Map<String, RouteEntry> indexRouteEntries(JsonNode trafficLinks) {
+    Map<String, RouteEntry> entries = new LinkedHashMap<>();
+    for (JsonNode link : trafficLinks) {
+      if (!"ROUTE_ENTRY".equals(link.path("type").asText())) continue;
+      String balancerId = link.path("targetId").asText();
+      RouteEntry entry = new RouteEntry(link.path("sourceId").asText(),
+          link.path("servicePort").asInt());
+      RouteEntry existing = entries.putIfAbsent(balancerId, entry);
+      if (existing != null
+          && !(existing.serviceId().equals(entry.serviceId()) && existing.port() == entry.port())) {
+        throw fail(422, "APPLICATION_TRAFFIC_ROUTE_DUPLICATE",
+            "同一个流量分配器只能由一个稳定 Service 驱动");
+      }
+    }
+    return entries;
   }
 
   private Map<String, Integer> weights(JsonNode configuration) {
