@@ -65,7 +65,11 @@ public class KubernetesNamespaceResourceInventoryService {
 
   public record ResourceSummary(String apiVersion, String kind, String name, String status,
       String summary, String createdAt, Map<String, String> labels,
-      Map<String, String> selector, Map<String, String> podLabels) {}
+      Map<String, String> selector, Map<String, String> podLabels,
+      List<IngressRoute> ingressRoutes) {}
+
+  /** One Ingress rule path: which host/path sends traffic to which Service port. */
+  public record IngressRoute(String host, String path, String serviceName, int port) {}
 
   private record ResourceKind(String apiVersion, String kind, boolean optional) {}
 
@@ -138,7 +142,8 @@ public class KubernetesNamespaceResourceInventoryService {
     return new ResourceSummary(descriptor.apiVersion(), descriptor.kind(), metadata.getName(),
         state, bounded(summary), metadata.getCreationTimestamp(), safeLabels(metadata.getLabels()),
         selectorFor(descriptor.kind(), spec),
-        podLabelsFor(descriptor.kind(), spec, metadata.getLabels()));
+        podLabelsFor(descriptor.kind(), spec, metadata.getLabels()),
+        ingressRoutesFor(descriptor.kind(), spec));
   }
 
   /** Service workload selector (`spec.selector`), used to relate a Service to workloads. */
@@ -155,6 +160,32 @@ public class KubernetesNamespaceResourceInventoryService {
       case "Pod" -> stringMap(metadataLabels);
       default -> Map.of();
     };
+  }
+
+  /** Structured Ingress → Service routes so the console can draw them without parsing text. */
+  static List<IngressRoute> ingressRoutesFor(String kind, Map<String, Object> spec) {
+    if (!"Ingress".equals(kind)) return List.of();
+    List<IngressRoute> routes = new ArrayList<>();
+    for (Object ruleValue : list(spec.get("rules"))) {
+      Map<String, Object> rule = childMap(ruleValue);
+      String host = value(rule.get("host"), "");
+      for (Object pathValue : list(childMap(rule.get("http")).get("paths"))) {
+        Map<String, Object> path = childMap(pathValue);
+        Map<String, Object> service = childMap(childMap(path.get("backend")).get("service"));
+        String name = value(service.get("name"), "");
+        if (name.isEmpty()) continue;
+        routes.add(new IngressRoute(host, value(path.get("path"), "/"), name,
+            number(childMap(service.get("port")).get("number"), 0)));
+        if (routes.size() >= 32) return List.copyOf(routes);
+      }
+    }
+    Map<String, Object> fallback = childMap(childMap(spec.get("defaultBackend")).get("service"));
+    String fallbackName = value(fallback.get("name"), "");
+    if (!fallbackName.isEmpty()) {
+      routes.add(new IngressRoute("", "*", fallbackName,
+          number(childMap(fallback.get("port")).get("number"), 0)));
+    }
+    return List.copyOf(routes);
   }
 
   /** Coerce a bounded string-to-string map without restricting keys to DISPLAY_LABELS. */
