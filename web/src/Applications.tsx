@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import {
@@ -8,6 +8,9 @@ import {
 } from '@xyflow/react';
 import { api, isMock } from './lib/api';
 import { createUuid } from './lib/uuid.ts';
+import { compileApplicationRoutePlan, type RoutePlanRow } from './lib/application-routing.ts';
+import { buildManagedAppIndex, deriveNamespaceSelectorEdges } from './lib/namespace-graph.ts';
+import { NamespaceGraph } from './topology/NamespaceGraph.tsx';
 import { parseDocument, stringify as stringifyYaml } from 'yaml';
 import { connectionError, createTopologyNode, draftError, nodePresets, topologyPhysicalPortKey, validNodeShape } from './lib/topology-model';
 import type {
@@ -120,8 +123,9 @@ const resourceKindLabels: Record<string, string> = {
   PeerAuthentication: 'Istio PeerAuthentication', RequestAuthentication: 'Istio RequestAuthentication',
 };
 
-function ApplicationResourceInventory({ clusters, initialClusterId }: {
-  clusters: KubernetesClusterSummary[]; initialClusterId: string;
+function ApplicationResourceInventory({ clusters, apps, initialClusterId, onOpenApplication }: {
+  clusters: KubernetesClusterSummary[]; apps: KubernetesApplication[]; initialClusterId: string;
+  onOpenApplication: (applicationId: string) => void;
 }) {
   const [clusterId, setClusterId] = useState(initialClusterId);
   const [namespaces, setNamespaces] = useState<string[]>([]);
@@ -132,6 +136,7 @@ function ApplicationResourceInventory({ clusters, initialClusterId }: {
   const [error, setError] = useState('');
   const [query, setQuery] = useState('');
   const [refreshKey, setRefreshKey] = useState(0);
+  const [graphView, setGraphView] = useState(false);
 
   useEffect(() => {
     if (!clusterId && initialClusterId) setClusterId(initialClusterId);
@@ -189,6 +194,11 @@ function ApplicationResourceInventory({ clusters, initialClusterId }: {
     for (const item of filtered) grouped.set(item.kind, [...(grouped.get(item.kind) ?? []), item]);
     return [...grouped.entries()];
   }, [filtered]);
+  const selectorEdges = useMemo(() => deriveNamespaceSelectorEdges(inventory?.items ?? []), [inventory]);
+  const managedAppIds = useMemo(
+    () => (inventory ? buildManagedAppIndex(apps, inventory.clusterId, inventory.namespace) : {}),
+    [apps, inventory],
+  );
   const selectedCluster = clusters.find(cluster => cluster.id === clusterId);
 
   return <div className="application-resource-inventory">
@@ -204,6 +214,8 @@ function ApplicationResourceInventory({ clusters, initialClusterId }: {
       </select></label>
       <label className="application-resource-search"><span>筛选资源</span><input type="search" value={query}
         onChange={event => setQuery(event.target.value)} placeholder="名称、类型、状态或摘要" /></label>
+      <button type="button" className="secondary application-resource-view-toggle" aria-pressed={graphView}
+        onClick={() => setGraphView(value => !value)} title="切换资源列表与选择关系图">{graphView ? '列表' : '关系图'}</button>
       <button type="button" className="secondary application-resource-refresh" disabled={loading || namespaceLoading || !namespace}
         onClick={() => setRefreshKey(value => value + 1)} aria-label="刷新资源清单" title="刷新资源清单">↻ 刷新</button>
     </div>
@@ -214,7 +226,14 @@ function ApplicationResourceInventory({ clusters, initialClusterId }: {
       <div><strong>{groups.length}</strong><span>资源类型</span></div>
       <small>{inventory ? `最近读取 ${new Date(inventory.observedAt).toLocaleString()}` : '按所选 Namespace 实时读取'}</small>
     </div>
-    <div className="application-resource-list">
+    {selectorEdges.length > 0 && <div className="application-resource-relations">
+      <span className="application-resource-relations-title">选择关系 · {selectorEdges.length}</span>
+      <ul>{selectorEdges.map(edge => <li key={`${edge.service}->${edge.workloadKind}/${edge.workload}`}>
+        <code>{edge.service}</code><span aria-hidden="true">→</span><code>{edge.workload}</code>
+        <small>{Object.entries(edge.sharedLabels).map(([key, value]) => `${key}=${value}`).join(' · ')}</small>
+      </li>)}</ul>
+    </div>}
+    {!graphView && <div className="application-resource-list">
       {loading && <div className="application-empty-history">正在读取 Namespace 资源…</div>}
       {!loading && !error && inventory && filtered.length === 0 && <div className="application-empty-history">{inventory.items.length ? '没有符合筛选条件的资源' : '该 Namespace 暂无受支持的资源'}</div>}
       {!loading && groups.map(([kind, resources]) => <section className="application-resource-group" key={kind}>
@@ -227,7 +246,8 @@ function ApplicationResourceInventory({ clusters, initialClusterId }: {
           {item.createdAt && <small className="application-resource-created">创建于 {new Date(item.createdAt).toLocaleString()}</small>}
         </article>)}</div>
       </section>)}
-    </div>
+    </div>}
+    {graphView && <NamespaceGraph items={filtered} managedAppIds={managedAppIds} onOpenApplication={onOpenApplication} />}
   </div>;
 }
 
@@ -654,7 +674,11 @@ export default function Applications({ notify }: { notify: (message: string) => 
             <button type="button" className="application-float-button" onClick={beginCreate} disabled={isMock}>＋<span>创建应用</span></button>
           </div>
         </div>
-        <ApplicationResourceInventory clusters={clusters}
+        <ApplicationResourceInventory clusters={clusters} apps={items}
+          onOpenApplication={applicationId => {
+            setSelectedId(applicationId); setView('topology'); setResourceView(false);
+            setRuntimeDeployment(''); setDrawer(null); setToolbarMenuOpen(false);
+          }}
           initialClusterId={selectedApp?.clusterId ?? clusterId ?? clusters[0]?.id ?? ''} />
       </section> : <section className="application-content application-empty-workspace">
         <div className="application-workspace-toolbar">
@@ -1160,6 +1184,8 @@ function isHttpTrafficPort(port: KubernetesApplicationTopologyServicePort) {
 
 const virtualApplicationKinds = (Object.keys(nodePresets) as TopologyNodeKind[])
   .filter(kind => !['GATEWAY', 'HOST', 'SERVICE', 'FOLDER'].includes(kind));
+/** MIME tag carried by draggable palette entries so drops from elsewhere are ignored. */
+const nodePaletteMime = 'application/x-nanpanel-topology-node';
 const topologyYamlFields = [
   'kind', 'name', 'description', 'position', 'inputCount', 'outputCount', 'ports',
   'parentId', 'assetId', 'clusterId', 'ipAddress', 'providerId', 'switchBackend',
@@ -1415,6 +1441,7 @@ function ApplicationNetworkTopologyCanvas({
   const [captureDownloadBusy, setCaptureDownloadBusy] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [nodeMenuOpen, setNodeMenuOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(true);
   const canvasRef = useRef<HTMLDivElement>(null);
   const hasFittedInitialViewport = useRef(false);
 
@@ -1684,6 +1711,12 @@ function ApplicationNetworkTopologyCanvas({
   })), [draft.trafficLinks]);
   const edges = useMemo(() => [...selectorEdges, ...deviceEdges, ...attachmentEdges, ...trafficEdges],
     [selectorEdges, deviceEdges, attachmentEdges, trafficEdges]);
+
+  const routePlan = useMemo<RoutePlanRow[]>(() => compileApplicationRoutePlan(
+    draft.trafficLinks, draft.nodes,
+    (id) => visibleResources.find(resource => resource.id === id)?.name,
+  ), [draft.trafficLinks, draft.nodes, visibleResources]);
+  const [routePlanOpen, setRoutePlanOpen] = useState(false);
 
   const updateLoadBalancerWeight = useCallback((nodeId: string, outputPort: string, weight: number) => {
     if (saving || busy || !Number.isInteger(weight) || weight < 0 || weight > 100) return;
@@ -2040,13 +2073,13 @@ function ApplicationNetworkTopologyCanvas({
     setMessage(`已将 ${application.data.resource.name} 接入虚拟设备；保存关系不会自动改动 Pod 网络。`);
   }
 
-  function addDevice(kind: TopologyNodeKind) {
+  function addDevice(kind: TopologyNodeKind, at?: { x: number; y: number }) {
     if (saving || busy) return;
     const used = new Set(draft.nodes.filter(node => node.kind === kind).map(node => node.name));
     const prefix = nodePresets[kind].name;
     let index = 1;
     while (used.has(`${prefix} ${index}`)) index++;
-    const point = menu?.point ?? canvasCenter();
+    const point = at ?? menu?.point ?? canvasCenter();
     const model = createTopologyNode(kind, point);
     model.name = `${prefix} ${index}`;
     setDraft(current => ({ ...current, nodes: [...current.nodes, model] }));
@@ -2054,7 +2087,7 @@ function ApplicationNetworkTopologyCanvas({
     setMenu(undefined);
   }
 
-  function addResource(kind: 'Service' | 'Deployment') {
+  function addResource(kind: 'Service' | 'Deployment', at?: { x: number; y: number }) {
     if (saving || busy || hasDraft) return;
     const existingNames = new Set(visibleResources
       .filter(resource => resource.kind === kind).map(resource => resource.name));
@@ -2062,7 +2095,7 @@ function ApplicationNetworkTopologyCanvas({
     let suffix = 1;
     while (existingNames.has(`${prefix}-${suffix}`)) suffix++;
     const name = `${prefix}-${suffix}`;
-    const point = menu?.point ?? canvasCenter();
+    const point = at ?? menu?.point ?? canvasCenter();
     const deployment = visibleResources.find(resource => resource.kind === 'Deployment');
     onAdditionChange({
       id: `pending:${kind}/${name}`, kind, name,
@@ -2142,6 +2175,38 @@ function ApplicationNetworkTopologyCanvas({
     }
   }
 
+  const paletteDragStart = (kind: string) => (event: DragEvent<HTMLElement>) => {
+    event.dataTransfer.setData(nodePaletteMime, JSON.stringify({ kind }));
+    event.dataTransfer.effectAllowed = 'copy';
+  };
+
+  const paletteDragOver = (event: DragEvent<HTMLDivElement>) => {
+    if (Array.from(event.dataTransfer.types).includes(nodePaletteMime)) {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+    }
+  };
+
+  const paletteDrop = (event: DragEvent<HTMLDivElement>) => {
+    const raw = event.dataTransfer.getData(nodePaletteMime);
+    if (!raw) return;
+    event.preventDefault();
+    if (saving || busy) return;
+    let kind: unknown;
+    try {
+      kind = (JSON.parse(raw) as { kind?: unknown }).kind;
+    } catch {
+      return;
+    }
+    const point = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+    if (kind === 'Deployment' || kind === 'Service') {
+      if (hasDraft) return;
+      addResource(kind, point);
+    } else if (typeof kind === 'string' && Object.hasOwn(nodePresets, kind)) {
+      addDevice(kind as TopologyNodeKind, point);
+    }
+  };
+
   async function saveTopology() {
     if (!dirty || saving || busy || !etag) return;
     setSaving(true);
@@ -2208,6 +2273,7 @@ function ApplicationNetworkTopologyCanvas({
         onConnectEnd={(_, state) => {
           if (state.toHandle && !state.isValid) setMessage('连接需符合端口方向与类型；Service 连接 Deployment，Deployment 网卡端口连接虚拟设备。');
         }}
+        onDrop={paletteDrop} onDragOver={paletteDragOver}
         nodesDraggable={!saving && !busy} nodesConnectable={!saving && !busy}
         elementsSelectable deleteKeyCode={null} minZoom={0.25} maxZoom={1.8}
         noWheelClassName="nowheel"
@@ -2217,6 +2283,41 @@ function ApplicationNetworkTopologyCanvas({
         <MiniMap position="bottom-right" pannable zoomable maskColor="#dfe7f2a8"
           nodeColor={node => node.type === 'application-device' ? '#758dad' : '#5f91dc'} />
       </TopologyCanvas>
+      {!loading && <aside className={`application-node-palette ${paletteOpen ? 'open' : ''}`}
+        aria-label="节点拖拽面板" aria-hidden={!paletteOpen}>
+        <div className="application-node-palette-header">
+          <strong>节点库</strong>
+          <button type="button" className="application-node-palette-toggle"
+            aria-label={paletteOpen ? '收起节点库' : '展开节点库'} aria-expanded={paletteOpen}
+            onClick={() => setPaletteOpen(open => !open)}>{paletteOpen ? '收起 ▴' : '节点库 ▾'}</button>
+        </div>
+        {paletteOpen && <>
+          <div className="application-node-palette-group">
+            <span className="application-node-palette-group-title">应用资源</span>
+            <button type="button" className="application-node-palette-item"
+              draggable={!hasDraft && !saving && !busy} disabled={hasDraft || saving || busy}
+              onDragStart={paletteDragStart('Deployment')} onClick={() => addResource('Deployment')}>
+              <span className="application-node-palette-kind">Deployment</span>
+              <small>工作负载 · 副本与镜像</small>
+            </button>
+            <button type="button" className="application-node-palette-item"
+              draggable={!hasDraft && !saving && !busy} disabled={hasDraft || saving || busy}
+              onDragStart={paletteDragStart('Service')} onClick={() => addResource('Service')}>
+              <span className="application-node-palette-kind">ClusterIP Service</span>
+              <small>服务端口与协议</small>
+            </button>
+          </div>
+          <div className="application-node-palette-group">
+            <span className="application-node-palette-group-title">虚拟网络设备</span>
+            {virtualApplicationKinds.map(kind => <button type="button" className="application-node-palette-item"
+              key={kind} draggable={!saving && !busy} disabled={saving || busy}
+              onDragStart={paletteDragStart(kind)} onClick={() => addDevice(kind)}>
+              <span className="application-node-palette-kind">{nodePresets[kind].name}</span>
+              <small>{nodePresets[kind].inputs} 入 / {nodePresets[kind].outputs} 出</small>
+            </button>)}
+          </div>
+        </>}
+      </aside>}
       <div className="application-floating-tool-stack">
         <div className="application-node-menu-wrap">
           <button type="button" className="application-canvas-fab primary" aria-label="添加拓扑节点" title="添加节点"
@@ -2236,6 +2337,37 @@ function ApplicationNetworkTopologyCanvas({
         <button type="button" className="application-canvas-fab" aria-label="拓扑设置与运行时" title="拓扑设置"
           aria-expanded={settingsOpen} onClick={() => setSettingsOpen(true)}>⚙<span>拓扑设置</span></button>
       </div>
+      {routePlan.length > 0 && <div className={`application-route-plan ${routePlanOpen ? 'open' : ''}`}
+        role="region" aria-label="拖拽路由计划">
+        <button type="button" className="application-route-plan-toggle" aria-expanded={routePlanOpen}
+          onClick={() => setRoutePlanOpen(open => !open)}>
+          <span>路由计划</span><b>{routePlan.length} 组</b><small>{routePlanOpen ? '收起 ▾' : '展开 ▴'}</small>
+        </button>
+        {routePlanOpen && <div className="application-route-plan-body">
+          {routePlan.map(route => <div key={route.id} className="application-route-row">
+            {route.callers.length > 0 && <span className="application-route-callers">{route.callers.join('、')} →</span>}
+            <span className="application-route-entry">{route.serviceName}:{route.servicePort}</span>
+            <span className="application-route-arrow">⇒</span>
+            {route.backends.length ? route.backends.map(backend => <span key={backend.name}
+              className="application-route-backend">{backend.name} <b>{backend.share}%</b></span>)
+              : <span className="application-route-missing">未连接后端 Service</span>}
+          </div>)}
+          <div className="application-route-actions">
+            <strong>{trafficRuntime ? `Service 路由：${trafficRuntime.state}` : 'Service 路由：未应用'}</strong>
+            {(!trafficRuntime || ['COMPENSATED', 'FAILED'].includes(trafficRuntime.state)) && <button type="button" className="primary"
+              disabled={saving || busy || loading || dirty || trafficRuntimeBusy !== '' || isMock}
+              onClick={() => void runTrafficRuntimeAction('apply')}>{trafficRuntimeBusy === 'apply' ? '应用中…' : '写入 Istio 路由'}</button>}
+            {trafficRuntime && ['APPLIED', 'VERIFY_FAILED'].includes(trafficRuntime.state) && <button type="button" className="secondary"
+              disabled={trafficRuntimeBusy !== '' || busy || isMock}
+              onClick={() => void runTrafficRuntimeAction('verify')}>{trafficRuntimeBusy === 'verify' ? '验证中…' : 'Verify'}</button>}
+            {trafficRuntime && ['APPLYING', 'APPLIED', 'VERIFY_FAILED', 'PARTIAL', 'FAILED'].includes(trafficRuntime.state) && <button type="button" className="danger"
+              disabled={trafficRuntimeBusy !== '' || busy || isMock}
+              onClick={() => void runTrafficRuntimeAction('compensate')}>{trafficRuntimeBusy === 'compensate' ? '恢复中…' : '恢复'}</button>}
+            {dirty && <small className="application-route-dirty">先保存拓扑，才能写入路由</small>}
+          </div>
+          <small className="application-route-hint">这是拖拽画出的加权路由意图；在此一键写入 Istio VirtualService，无需手写配置或单独 API 网关。要求 Namespace 已启用 sidecar 注入且调用方 Pod Ready。</small>
+        </div>}
+      </div>}
       {loading && <div className="application-canvas-status" role="status">正在读取拓扑…</div>}
       {additions.some(addition => addition.kind === 'Service' && !addition.targetDeployment && !addition.sourceYaml)
         && <div className="application-canvas-warning" role="status">新增 Service 尚未连接到 Deployment；连接 Service 与 Deployment 后即可生成差异。</div>}

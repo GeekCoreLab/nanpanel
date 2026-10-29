@@ -428,6 +428,39 @@ main:has(.applications-page)>footer{display:none}
 .application-node-flyout>button:hover{background:#f2f6fd;color:#3b70ca}
 .application-node-flyout>button:disabled{color:#aab5c3;cursor:not-allowed}
 .application-node-flyout>button small{color:#8796aa;font-size:8px;white-space:nowrap}
+.application-node-palette{position:absolute;top:12px;left:12px;z-index:7;display:flex;width:192px;max-height:calc(100% - 24px);flex-direction:column;gap:8px;padding:9px;border:1px solid #dce5f0;border-radius:11px;background:#fffffff2;box-shadow:0 8px 26px #263b5317;backdrop-filter:blur(10px);overflow-y:auto;overscroll-behavior:contain;scrollbar-width:none}
+.application-node-palette:not(.open){width:auto}
+.application-node-palette-header{display:flex;align-items:center;justify-content:space-between;gap:8px;color:#536982}
+.application-node-palette-header strong{font-size:11px;letter-spacing:.02em}
+.application-node-palette-toggle{padding:3px 8px;border:1px solid #e0e7f0;border-radius:6px;background:#f6f9ff;color:#6b7f98;font-size:9px;cursor:pointer}
+.application-node-palette-toggle:hover{border-color:#a8c1e8;color:#3973cf}
+.application-node-palette-group{display:grid;gap:3px}
+.application-node-palette-group-title{padding:4px 2px 2px;color:#8190a5;font-size:8px;letter-spacing:.05em;text-transform:uppercase}
+.application-node-palette-item{display:grid;gap:1px;padding:7px 8px;border:1px solid #e7edf5;border-radius:7px;background:#fbfcff;color:#536982;text-align:left;cursor:grab}
+.application-node-palette-item:hover{border-color:#a8c1e8;background:#f2f6fd;color:#3b70ca}
+.application-node-palette-item:active{cursor:grabbing}
+.application-node-palette-item:disabled{opacity:.5;cursor:not-allowed}
+.application-node-palette-kind{font-size:10px;font-weight:600}
+.application-node-palette-item small{color:#8796aa;font-size:8px}
+@media(max-width:620px){.application-node-palette{display:none}}
+.application-route-plan{position:absolute;left:64px;bottom:16px;z-index:7;display:flex;flex-direction:column-reverse;align-items:flex-start;gap:8px;max-width:calc(100% - 280px)}
+.application-route-plan-toggle{display:inline-flex;align-items:center;gap:8px;padding:6px 12px;border:1px solid #e2d3ef;border-radius:999px;background:#faf6ff;color:#7a4fa3;font-size:10px;box-shadow:0 4px 14px #263b5318;cursor:pointer}
+.application-route-plan-toggle:hover{border-color:#c9a9e2;background:#f6edff}
+.application-route-plan-toggle b{color:#8a5ab8;font-weight:700}
+.application-route-plan-toggle small{color:#a98ac2}
+.application-route-plan-body{width:min(520px,calc(100vw - 40px));max-height:34vh;overflow-y:auto;display:grid;gap:6px;padding:10px 12px;border:1px solid #e2d3ef;border-radius:10px;background:#fffffffa;box-shadow:0 10px 30px #263b5322;backdrop-filter:blur(8px)}
+.application-route-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:11px;color:#536982}
+.application-route-callers{color:#8796aa}
+.application-route-entry{font-weight:600;color:#3b70ca}
+.application-route-arrow{color:#a56bc4}
+.application-route-backend{padding:1px 7px;border-radius:999px;background:#f1eaf8;color:#7a4fa3}
+.application-route-backend b{color:#6a3f96}
+.application-route-missing{color:#b55d57}
+.application-route-hint{color:#8796aa;font-size:10px;line-height:1.5;border-top:1px solid #edf1f6;padding-top:6px}
+.application-route-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding-top:4px;border-top:1px solid #edf1f6}
+.application-route-actions strong{font-size:10px;color:#7a4fa3}
+.application-route-actions button{padding:4px 10px;border-radius:7px;font-size:10px}
+.application-route-dirty{color:#b58a43;font-size:9px}
 .application-canvas-status{position:absolute;top:14px;left:14px;z-index:6;padding:7px 10px;border:1px solid #dce6f2;border-radius:8px;background:#ffffffed;color:#71839b;font-size:9px;box-shadow:0 3px 12px #263b5310}
 .application-canvas-warning,.application-canvas-notice{position:absolute;top:14px;left:50%;z-index:7;width:min(520px,calc(100% - 150px));max-height:26vh;transform:translateX(-50%);padding:8px 11px;border:1px solid #e4eaf2;border-radius:8px;background:#ffffffed;color:#6f8199;font-size:9px;line-height:1.55;box-shadow:0 4px 15px #263b5314;overflow:auto;backdrop-filter:blur(10px)}
 .application-canvas-warning{top:auto;bottom:16px;border-color:#efe3c8;background:#fffaf0;color:#9c7b43}
@@ -593,3 +626,22 @@ main:has(.applications-page)>footer{display:none}
 .application-runtime-error{margin:12px 20px 0;padding:11px 14px;font-size:12px}
 @media(max-width:850px){.application-runtime-layout{grid-template-columns:230px minmax(0,1fr)}}
 @media(max-width:620px){.application-runtime-heading{padding:14px}.application-runtime-heading h2{font-size:20px}.application-runtime-heading p{font-size:12px}.application-runtime-heading-actions button{min-height:38px;padding:0 11px;font-size:12px}.application-runtime-layout{grid-template-columns:1fr;grid-template-rows:minmax(105px,25%) minmax(0,1fr)}.application-runtime-pods-heading{padding:11px 12px 7px}.application-runtime-pod{gap:5px;margin:2px 7px;padding:9px}.application-runtime-pod strong{font-size:12px}.application-runtime-summary{gap:9px;padding:13px}.application-runtime-summary small{font-size:11px}.application-runtime-summary strong{font-size:12px}.application-runtime-summary select{height:34px;font-size:12px}.application-runtime-tabs{padding:0 10px}.application-runtime-tabs button{height:42px;padding:0 12px;font-size:12px}.application-runtime-containers,.application-runtime-events,.application-runtime-logs,.application-runtime-exec{padding:13px}.application-runtime-content-heading h3{font-size:14px}.application-runtime-content-heading p{font-size:11px}.application-runtime-container{padding:12px}.application-runtime-container strong{font-size:13px}.application-runtime-container small,.application-runtime-container>span:last-child{font-size:11px}.application-runtime-event{grid-template-columns:56px minmax(0,1fr);gap:9px;padding:12px 2px}.application-runtime-event>span{font-size:11px}.application-runtime-event strong{font-size:12px}.application-runtime-event p{font-size:12px}.application-runtime-event small,.application-runtime-event time{font-size:10px}.application-runtime-log-output{min-height:220px;padding:11px;font-size:11px}.application-runtime-empty{padding:20px 10px;font-size:11px}.application-runtime-exec-options{min-height:32vh;flex-wrap:wrap;gap:10px}.application-runtime-exec-options button{min-height:42px;padding:0 14px;font-size:12px}.application-exec-console{height:min(55dvh,520px);min-height:240px;padding:9px}.application-runtime-error{margin:10px 12px 0;font-size:11px}}
+
+.application-resource-relations{display:flex;flex-wrap:wrap;align-items:center;gap:8px 10px;margin:0 0 12px;padding:9px 12px;border:1px solid #dbe6f5;border-radius:10px;background:#f4f8ff}
+.application-resource-relations-title{font-size:11px;font-weight:600;color:#4a6585}
+.application-resource-relations ul{display:flex;flex-wrap:wrap;gap:6px;margin:0;padding:0;list-style:none}
+.application-resource-relations li{display:flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;background:#fff;border:1px solid #e2ecf9;font-size:11px}
+.application-resource-relations li code{font-size:11px;color:#23405f}
+.application-resource-relations li span{color:#7d93ad}
+.application-resource-relations li small{color:#8796aa;font-size:10px}
+
+.application-resource-view-toggle[aria-pressed="true"]{background:#eef4ff;border-color:#b9d0f2;color:#2f5f9e}
+.application-namespace-graph{height:520px;border:1px solid #dbe3ee;border-radius:12px;background:#fbfcfe;overflow:hidden}
+
+.application-namespace-graph{position:relative}
+.namespace-graph-detail{position:absolute;top:12px;right:12px;z-index:5;width:264px;display:flex;flex-direction:column;gap:8px;padding:12px;border:1px solid #dbe3ee;border-radius:11px;background:#fff;box-shadow:0 8px 24px rgba(30,50,80,.12)}
+.namespace-graph-detail header{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.namespace-graph-detail header strong{font-size:12px;color:#24374d;word-break:break-all}
+.namespace-graph-detail p{margin:0;font-size:11px;line-height:1.5;color:#5b6f86}
+.namespace-graph-status{align-self:flex-start;padding:1px 8px;border-radius:999px;background:#eef4ff;color:#2f5f9e;font-size:10px}
+.namespace-graph-detail button.primary{align-self:flex-start}

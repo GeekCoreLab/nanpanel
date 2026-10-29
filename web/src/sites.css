@@ -1,0 +1,28 @@
+.sites-workspace{display:flex;flex-direction:column;gap:16px;padding:20px;overflow:auto}
+.sites-header h2{margin:0 0 4px;font-size:18px}
+.sites-header p{margin:0;max-width:760px;color:#5b6f86;font-size:12px;line-height:1.6}
+.sites-grid{display:grid;grid-template-columns:minmax(280px,360px) 1fr;gap:16px;align-items:start}
+.sites-form{display:flex;flex-direction:column;gap:10px;padding:16px}
+.sites-form h3{margin:0;font-size:14px}
+.sites-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.sites-form button.primary{align-self:flex-start;margin-top:4px}
+.sites-list{padding:16px}
+.sites-list-heading{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.sites-list-heading h3{margin:0;font-size:14px}
+.sites-list-heading span{color:#8796aa;font-size:11px}
+.sites-list ul{display:flex;flex-direction:column;gap:8px;margin:0;padding:0;list-style:none}
+.sites-list li{display:grid;grid-template-columns:1fr auto auto;align-items:center;gap:12px;padding:10px 12px;border:1px solid #e6ebf2;border-radius:10px;background:#fbfcff}
+.sites-item-copy{display:flex;flex-direction:column;gap:2px;min-width:0}
+.sites-item-copy strong{font-size:12px;word-break:break-all}
+.sites-item-copy small{color:#8796aa;font-size:10px;word-break:break-all}
+.sites-item-actions{display:flex;gap:6px}
+.sites-item-actions button{padding:5px 10px;border-radius:7px;font-size:10px}
+.sites-state{padding:2px 9px;border-radius:999px;font-size:10px;white-space:nowrap}
+.sites-state-draft{background:#eef1f6;color:#5b6f86}
+.sites-state-applied{background:#e7f6ef;color:#1f7a52}
+.sites-state-failed{background:#fdeceb;color:#b23b36}
+@media (max-width:900px){.sites-grid{grid-template-columns:1fr}}.sites-state-disabled{background:#f3eee6;color:#8a6a3a}
+.sites-badge{margin-left:6px;padding:1px 6px;border-radius:999px;background:#e7f6ef;color:#1f7a52;font-size:9px;font-weight:600;vertical-align:middle}
+.sites-tls-dialog{width:min(560px,92vw)}
+.sites-tls-dialog textarea{width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;border:1px solid #dbe3ee;border-radius:8px;padding:8px;resize:vertical}
+.sites-tls-dialog .form-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
