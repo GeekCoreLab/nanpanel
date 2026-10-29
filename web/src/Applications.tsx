@@ -8,7 +8,7 @@ import {
 } from '@xyflow/react';
 import { api, isMock } from './lib/api';
 import { createUuid } from './lib/uuid.ts';
-import { compileApplicationRoutePlan, type RoutePlanRow } from './lib/application-routing.ts';
+import { compileApplicationRoutePlan, validateRoutePlan, type RoutePlanRow } from './lib/application-routing.ts';
 import { buildManagedAppIndex, deriveNamespaceSelectorEdges } from './lib/namespace-graph.ts';
 import { NamespaceGraph } from './topology/NamespaceGraph.tsx';
 import { parseDocument, stringify as stringifyYaml } from 'yaml';
@@ -1716,6 +1716,7 @@ function ApplicationNetworkTopologyCanvas({
     draft.trafficLinks, draft.nodes,
     (id) => visibleResources.find(resource => resource.id === id)?.name,
   ), [draft.trafficLinks, draft.nodes, visibleResources]);
+  const routePlanIssues = useMemo(() => validateRoutePlan(routePlan), [routePlan]);
   const [routePlanOpen, setRoutePlanOpen] = useState(false);
 
   const updateLoadBalancerWeight = useCallback((nodeId: string, outputPort: string, weight: number) => {
@@ -2341,7 +2342,9 @@ function ApplicationNetworkTopologyCanvas({
         role="region" aria-label="拖拽路由计划">
         <button type="button" className="application-route-plan-toggle" aria-expanded={routePlanOpen}
           onClick={() => setRoutePlanOpen(open => !open)}>
-          <span>路由计划</span><b>{routePlan.length} 组</b><small>{routePlanOpen ? '收起 ▾' : '展开 ▴'}</small>
+          <span>路由计划</span><b>{routePlan.length} 组</b>
+          {routePlanIssues.length > 0 && <em className="application-route-issue-count">{routePlanIssues.length} 个问题</em>}
+          <small>{routePlanOpen ? '收起 ▾' : '展开 ▴'}</small>
         </button>
         {routePlanOpen && <div className="application-route-plan-body">
           {routePlan.map(route => <div key={route.id} className="application-route-row">
@@ -2352,10 +2355,16 @@ function ApplicationNetworkTopologyCanvas({
               className="application-route-backend">{backend.name} <b>{backend.share}%</b></span>)
               : <span className="application-route-missing">未连接后端 Service</span>}
           </div>)}
+          {routePlanIssues.length > 0 && <ul className="application-route-issues">
+            {routePlanIssues.map(issue => <li key={`${issue.code}-${issue.routeIds.join('-')}`}>
+              <span>{issue.code === 'DUPLICATE_ENTRY' ? '重复入口' : issue.code === 'NO_BACKENDS' ? '缺后端' : '零权重'}</span>
+              {issue.message}</li>)}
+          </ul>}
           <div className="application-route-actions">
             <strong>{trafficRuntime ? `Service 路由：${trafficRuntime.state}` : 'Service 路由：未应用'}</strong>
             {(!trafficRuntime || ['COMPENSATED', 'FAILED'].includes(trafficRuntime.state)) && <button type="button" className="primary"
-              disabled={saving || busy || loading || dirty || trafficRuntimeBusy !== '' || isMock}
+              disabled={saving || busy || loading || dirty || trafficRuntimeBusy !== '' || isMock
+                || routePlanIssues.length > 0}
               onClick={() => void runTrafficRuntimeAction('apply')}>{trafficRuntimeBusy === 'apply' ? '应用中…' : '写入 Istio 路由'}</button>}
             {trafficRuntime && ['APPLIED', 'VERIFY_FAILED'].includes(trafficRuntime.state) && <button type="button" className="secondary"
               disabled={trafficRuntimeBusy !== '' || busy || isMock}
@@ -2363,6 +2372,7 @@ function ApplicationNetworkTopologyCanvas({
             {trafficRuntime && ['APPLYING', 'APPLIED', 'VERIFY_FAILED', 'PARTIAL', 'FAILED'].includes(trafficRuntime.state) && <button type="button" className="danger"
               disabled={trafficRuntimeBusy !== '' || busy || isMock}
               onClick={() => void runTrafficRuntimeAction('compensate')}>{trafficRuntimeBusy === 'compensate' ? '恢复中…' : '恢复'}</button>}
+            {routePlanIssues.length > 0 && <small className="application-route-dirty">先解决路由计划里的问题，才能写入路由</small>}
             {dirty && <small className="application-route-dirty">先保存拓扑，才能写入路由</small>}
           </div>
           <small className="application-route-hint">这是拖拽画出的加权路由意图；在此一键写入 Istio VirtualService，无需手写配置或单独 API 网关。要求 Namespace 已启用 sidecar 注入且调用方 Pod Ready。</small>

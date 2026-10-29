@@ -111,3 +111,48 @@ test('backends and calls without a route entry produce no plan row', () => {
   );
   assert.equal(plan.length, 0);
 });
+import { validateRoutePlan } from '../src/lib/application-routing.ts';
+
+const planRow = (id, serviceName, servicePort, backends, totalWeight) => ({
+  id, serviceName, servicePort, totalWeight, backends, callers: [],
+});
+
+test('a consistent plan has no issues', () => {
+  const plan = [
+    planRow('e1', 'orders', 80, [{ name: 'v1', weight: 100, share: 100 }], 100),
+    planRow('e2', 'inventory', 80, [{ name: 'inv', weight: 100, share: 100 }], 100),
+  ];
+  assert.deepEqual(validateRoutePlan(plan), []);
+});
+
+test('the same service and port drawn twice is reported as a duplicate entry', () => {
+  const issues = validateRoutePlan([
+    planRow('e1', 'orders', 80, [{ name: 'v1', weight: 100, share: 100 }], 100),
+    planRow('e2', 'orders', 80, [{ name: 'v2', weight: 100, share: 100 }], 100),
+  ]);
+  assert.equal(issues.length, 1);
+  assert.equal(issues[0].code, 'DUPLICATE_ENTRY');
+  assert.deepEqual(issues[0].routeIds, ['e1', 'e2']);
+});
+
+test('the same service on different ports is not a duplicate', () => {
+  assert.deepEqual(validateRoutePlan([
+    planRow('e1', 'orders', 80, [{ name: 'v1', weight: 100, share: 100 }], 100),
+    planRow('e2', 'orders', 8080, [{ name: 'v1', weight: 100, share: 100 }], 100),
+  ]), []);
+});
+
+test('an entry without backends and one with only zero weights are flagged', () => {
+  const issues = validateRoutePlan([
+    planRow('e1', 'orders', 80, [], 0),
+    planRow('e2', 'inventory', 80, [{ name: 'inv', weight: 0, share: 0 }], 0),
+  ]);
+  assert.deepEqual(issues.map(issue => issue.code), ['NO_BACKENDS', 'ZERO_WEIGHT']);
+  assert.equal(issues[0].message, 'orders:80 未连接后端 Service');
+  assert.equal(issues[1].message, 'inventory:80 的后端权重全为 0');
+});
+
+test('no backends is reported instead of zero weight for the same row', () => {
+  const issues = validateRoutePlan([planRow('e1', 'orders', 80, [], 0)]);
+  assert.deepEqual(issues.map(issue => issue.code), ['NO_BACKENDS']);
+});

@@ -23,6 +23,42 @@ export type LoadBalancerNodeLike = {
   loadBalancerConfiguration?: { outputWeights: { outputPort: string; weight: number }[] } | null;
 };
 
+export type RoutePlanIssue = {
+  code: 'DUPLICATE_ENTRY' | 'NO_BACKENDS' | 'ZERO_WEIGHT';
+  message: string;
+  routeIds: string[];
+};
+
+/**
+ * Flags plan-level problems that would make the compiled Istio route ambiguous or
+ * useless: the same Service:port drawn from two route entries, an entry with no
+ * backend, or an entry whose backends all carry zero weight. Pure so the guard is
+ * unit-tested and the canvas only renders the result.
+ */
+export function validateRoutePlan(plan: readonly RoutePlanRow[]): RoutePlanIssue[] {
+  const issues: RoutePlanIssue[] = [];
+  const byService = new Map<string, RoutePlanRow[]>();
+  for (const row of plan) {
+    const key = `${row.serviceName}:${row.servicePort}`;
+    byService.set(key, [...(byService.get(key) ?? []), row]);
+    if (row.backends.length === 0) {
+      issues.push({ code: 'NO_BACKENDS', message: `${key} 未连接后端 Service`, routeIds: [row.id] });
+    } else if (row.totalWeight === 0) {
+      issues.push({ code: 'ZERO_WEIGHT', message: `${key} 的后端权重全为 0`, routeIds: [row.id] });
+    }
+  }
+  for (const [key, rows] of byService) {
+    if (rows.length > 1) {
+      issues.push({
+        code: 'DUPLICATE_ENTRY',
+        message: `${key} 被 ${rows.length} 个路由入口重复定义`,
+        routeIds: rows.map(row => row.id),
+      });
+    }
+  }
+  return issues;
+}
+
 export type RoutePlanBackend = { name: string; weight: number; share: number };
 
 export type RoutePlanRow = {
