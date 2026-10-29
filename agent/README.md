@@ -15,7 +15,16 @@ Nginx 路由能力默认关闭。先创建 root 拥有、组/其他用户不可�
 Environment=NANPANEL_NGINX_INCLUDE_DIR=/etc/nginx/nanpanel-routes
 ```
 
-若 Nginx 二进制不在 `/usr/sbin/nginx` 或 `/usr/bin/nginx`，还可设置 `NANPANEL_NGINX_BINARY` 为绝对路径。Helper 会要求二进制、父目录和 include 目录均由 root 拥有且不可被组/其他用户写入；重启 `nanpanel-helper.service` 后，主机应重新上报 `nginx.route.set` 才能创建发布计划。Helper 仅写入 `nanpanel-*` 受管文件，执行 Nginx 配置检查和 reload，并核对候选后端及监听地址的真实 HTTP 2xx 响应；监听端口绑定到指定主机接口，防火墙和 HTTPS/TLS 入口仍由运维人员配置。
+若 Nginx 二进制不在 `/usr/sbin/nginx` 或 `/usr/bin/nginx`，还可设置 `NANPANEL_NGINX_BINARY` 为绝对路径。Helper 会要求二进制、父目录和 include 目录均由 root 拥有且不可被组/其他用户写入；重启 `nanpanel-helper.service` 后，主机应重新上报 `nginx.route.set` 才能创建发布计划。Helper 仅写入 `nanpanel-*` 受管文件，执行 Nginx 配置检查和 reload，并核对候选后端及监听地址的真实 HTTP 2xx 响应；监听端口绑定到指定主机接口，防火墙仍由运维人员配置。
+
+TLS 终止可选启用。先创建 root 拥有、组/其他用户不可写的证书目录（例如 `/etc/nanpanel/tls`），再为 Helper 添加 drop-in：
+
+```ini
+[Service]
+Environment=NANPANEL_NGINX_TLS_DIR=/etc/nanpanel/tls
+```
+
+该目录启用后上报 `nginx.tls.install`：仅接受 `[a-z][a-z0-9-]{0,31}` 的目标名与分别带 `BEGIN CERTIFICATE` / `BEGIN PRIVATE KEY` 标记、各不超过 64 KiB 的 PEM，原子写入 `<name>.crt` 与 `<name>.key`（0600，root 拥有）。路由载荷可带 `tls: {"certificate":"<name>","privateKey":"<name>"}`，此时渲染 `listen <地址>:<端口> ssl` 与受管目录内的证书路径；Helper 只按名字解析路径，并要求两个文件都是受管目录内 root 拥有、不可组/其他用户写入的普通文件，否则拒绝。重建站点状态探测改走 HTTPS（接受自签证书）。Core 从不保存私钥，私钥只存在于主机侧受管目录。
 
 Core 按选定顺序逐台运行稳定版本验证、候选版本切换和 HTTP 健康检查。每批完成后计划暂停，需操作员批准下一批；故障时自动恢复稳定路由，手动回滚按相反顺序恢复已成功主机。旧稳定容器会保留为手动回滚槽位，不会自动删除。Docker 和 Podman 实机流量、故障补偿及跨 Core 重启验收仍需在隔离环境完成，不能用本地构建或 Helper 单元测试替代。
 

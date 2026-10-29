@@ -88,10 +88,20 @@ pub struct HelperConfig {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContainerVolumeSpec {
+    name: String,
+    mount_path: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContainerSpec {
     image: String,
     host_port: Option<u16>,
     container_port: Option<u16>,
+    environment: Vec<String>,
+    volumes: Vec<ContainerVolumeSpec>,
+    memory_mb: u32,
+    stateful: bool,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -112,10 +122,27 @@ struct NetworkFirewallPayload {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ContainerVolumePayload {
+    name: String,
+    mount_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ContainerDeployPayload {
     image: String,
+    #[serde(default)]
     host_port: Option<u16>,
+    #[serde(default)]
     container_port: Option<u16>,
+    #[serde(default)]
+    environment: Option<Vec<String>>,
+    #[serde(default)]
+    volumes: Option<Vec<ContainerVolumePayload>>,
+    #[serde(default)]
+    memory_mb: Option<u32>,
+    #[serde(default)]
+    stateful: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -479,7 +506,7 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                         .await
                                     }
                                     "container.logs" | "container.start" | "container.stop"
-                                    | "container.deploy" => {
+                                    | "container.deploy" | "container.remove" => {
                                         manage_container(
                                             &request,
                                             runtime
@@ -510,6 +537,27 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                         Some(routes) => {
                                             routes
                                                 .set_route(
+                                                    &request.target,
+                                                    request.payload_json.as_deref(),
+                                                )
+                                                .await
+                                        }
+                                        None => Err(
+                                            "DENIED: managed Nginx route support is not configured"
+                                                .to_owned(),
+                                        ),
+                                    },
+                                    "nginx.route.remove" => match runtime.nginx_routes.as_deref() {
+                                        Some(routes) => routes.remove_route(&request.target).await,
+                                        None => Err(
+                                            "DENIED: managed Nginx route support is not configured"
+                                                .to_owned(),
+                                        ),
+                                    },
+                                    "nginx.tls.install" => match runtime.nginx_routes.as_deref() {
+                                        Some(routes) => {
+                                            routes
+                                                .install_tls(
                                                     &request.target,
                                                     request.payload_json.as_deref(),
                                                 )
@@ -643,6 +691,18 @@ fn validate_capability_target(
         {
             Ok(())
         }
+        "nginx.route.remove"
+            if nginx_routes_available
+                && nginx_routes::NginxRouteConfig::validate_target(target) =>
+        {
+            Ok(())
+        }
+        "nginx.tls.install"
+            if nginx_routes_available
+                && nginx_routes::NginxRouteConfig::validate_tls_target(target) =>
+        {
+            Ok(())
+        }
         "k3s.preflight" | "k3s.install" | "k3s.upgrade" | "kubeedge.edgecore.join"
             if target.is_empty() =>
         {
@@ -658,6 +718,7 @@ fn validate_capability_target(
         }
         "container.list" if target.is_empty() && has_container_runtime => Ok(()),
         "container.logs" | "container.start" | "container.stop" | "container.deploy"
+        | "container.remove"
             if valid_container_name(target) && has_container_runtime =>
         {
             Ok(())
@@ -698,10 +759,13 @@ fn validate_capability_target(
         | "container.start"
         | "container.stop"
         | "container.deploy"
+        | "container.remove"
         | "network.firewall.expose"
         | "network.topology.reconcile"
         | "network.topology.capture"
-        | "nginx.route.set" => Err("DENIED: target or parameters are invalid".to_owned()),
+        | "nginx.route.set"
+        | "nginx.route.remove"
+        | "nginx.tls.install" => Err("DENIED: target or parameters are invalid".to_owned()),
         _ => Err("DENIED: unsupported capability or target".to_owned()),
     }
 }
@@ -721,6 +785,7 @@ fn validate_payload_presence(request: &Request) -> std::result::Result<(), Strin
             | "k3s.upgrade"
             | "kubeedge.edgecore.join"
             | "nginx.route.set"
+            | "nginx.tls.install"
     );
     if required != request.payload_json.is_some() {
         return Err("DENIED: payload presence does not match capability schema".to_owned());
@@ -782,6 +847,7 @@ fn available_capabilities(state: CapabilityState) -> Vec<&'static str> {
             "container.start",
             "container.stop",
             "container.deploy",
+            "container.remove",
         ]);
     }
     if state.network_operations_available {
@@ -807,6 +873,8 @@ fn available_capabilities(state: CapabilityState) -> Vec<&'static str> {
     }
     if state.nginx_routes_available {
         capabilities.push("nginx.route.set");
+        capabilities.push("nginx.route.remove");
+        capabilities.push("nginx.tls.install");
     }
     capabilities
 }
@@ -2612,6 +2680,16 @@ async fn manage_container(
                 request.target.clone(),
             ]);
         }
+        "container.remove" => {
+            if request.payload_json.is_some() || !valid_container_name(&request.target) {
+                return Err("DENIED: container remove target or payload is invalid".to_owned());
+            }
+            args.extend([
+                "rm".to_owned(),
+                "--force".to_owned(),
+                request.target.clone(),
+            ]);
+        }
         "container.deploy" => {
             let requested_spec = parse_container_deploy_spec(request)?;
             args.extend([
@@ -2620,20 +2698,37 @@ async fn manage_container(
                 "--name".to_owned(),
                 request.target.clone(),
                 "--restart=unless-stopped".to_owned(),
-                "--memory=256m".to_owned(),
+                "--memory".to_owned(),
+                format!("{}m", requested_spec.memory_mb),
                 "--cpus=1".to_owned(),
                 "--pids-limit=256".to_owned(),
-                "--cap-drop=ALL".to_owned(),
                 "--security-opt=no-new-privileges".to_owned(),
-                "--read-only".to_owned(),
                 "--network=bridge".to_owned(),
+                "--cap-drop=ALL".to_owned(),
             ]);
+            if requested_spec.stateful {
+                for capability in ["CHOWN", "DAC_OVERRIDE", "FOWNER", "SETUID", "SETGID"] {
+                    args.push("--cap-add".to_owned());
+                    args.push(capability.to_owned());
+                }
+            } else {
+                args.push("--read-only".to_owned());
+            }
             if let (Some(host_port), Some(container_port)) =
                 (requested_spec.host_port, requested_spec.container_port)
             {
                 args.extend([
                     "--publish".to_owned(),
                     format!("127.0.0.1:{host_port}:{container_port}"),
+                ]);
+            }
+            for entry in &requested_spec.environment {
+                args.extend(["--env".to_owned(), entry.clone()]);
+            }
+            for volume in &requested_spec.volumes {
+                args.extend([
+                    "--volume".to_owned(),
+                    format!("{}:{}", volume.name, volume.mount_path),
                 ]);
             }
             args.push(requested_spec.image);
@@ -2664,17 +2759,50 @@ where
 
 fn parse_container_deploy_spec(request: &Request) -> std::result::Result<ContainerSpec, String> {
     let payload = parse_payload::<ContainerDeployPayload>(request)?;
-    if !valid_container_image(&payload.image)
-        || payload.host_port.is_some_and(|port| port == 0)
-        || payload.container_port.is_some_and(|port| port == 0)
-        || payload.host_port.is_some() != payload.container_port.is_some()
-    {
+    let host_port = payload.host_port.unwrap_or_default();
+    let container_port = payload.container_port.unwrap_or_default();
+    let environment = payload.environment.unwrap_or_default();
+    let volumes = payload.volumes.unwrap_or_default();
+    let memory_mb = payload.memory_mb.unwrap_or(DEFAULT_CONTAINER_MEMORY_MB);
+    let stateful = payload.stateful.unwrap_or(false);
+    if !valid_container_image(&payload.image) || (host_port == 0) != (container_port == 0) {
         return Err("DENIED: container image or port mapping is invalid".to_owned());
+    }
+    if environment.len() > 32
+        || environment
+            .iter()
+            .any(|entry| !valid_environment_entry(entry))
+    {
+        return Err("DENIED: environment variables must be bounded KEY=VALUE entries".to_owned());
+    }
+    let mut volume_keys = std::collections::HashSet::new();
+    if volumes.len() > 16
+        || volumes.iter().any(|volume| {
+            !valid_volume_name(&volume.name) || !valid_container_mount_path(&volume.mount_path)
+        })
+        || volumes
+            .iter()
+            .any(|volume| !volume_keys.insert((volume.name.clone(), volume.mount_path.clone())))
+    {
+        return Err("DENIED: volumes must name a valid volume and absolute mount path".to_owned());
+    }
+    if !(64..=2048).contains(&memory_mb) {
+        return Err("DENIED: memory limit must be between 64 and 2048 MiB".to_owned());
     }
     Ok(ContainerSpec {
         image: payload.image,
-        host_port: payload.host_port,
-        container_port: payload.container_port,
+        host_port: (host_port != 0).then_some(host_port),
+        container_port: (container_port != 0).then_some(container_port),
+        environment,
+        volumes: volumes
+            .into_iter()
+            .map(|volume| ContainerVolumeSpec {
+                name: volume.name,
+                mount_path: volume.mount_path,
+            })
+            .collect(),
+        memory_mb,
+        stateful,
     })
 }
 
@@ -2989,6 +3117,35 @@ fn valid_container_name(name: &str) -> bool {
         && name
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+}
+
+const DEFAULT_CONTAINER_MEMORY_MB: u32 = 256;
+
+fn valid_environment_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && (name.as_bytes()[0].is_ascii_alphabetic() || name.as_bytes()[0] == b'_')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn valid_environment_entry(entry: &str) -> bool {
+    if entry.is_empty() || entry.len() > 2048 || entry.contains('\0') {
+        return false;
+    }
+    let Some(equals) = entry.find('=') else {
+        return false;
+    };
+    valid_environment_name(&entry[..equals])
+}
+
+fn valid_container_mount_path(path: &str) -> bool {
+    valid_host_path(path, false).is_ok()
+}
+
+fn valid_volume_name(name: &str) -> bool {
+    valid_container_name(name)
 }
 
 fn valid_network_rule_name(name: &str) -> bool {
@@ -3759,6 +3916,27 @@ mod tests {
             )
             .is_err()
         );
+        assert!(
+            validate(
+                "nginx.route.remove",
+                "nanpanel-route0123456789abcdef0123456789abcdef",
+                false,
+                false,
+                true
+            )
+            .is_ok()
+        );
+        assert!(
+            validate(
+                "nginx.route.remove",
+                "nanpanel-route0123456789abcdef0123456789abcdef",
+                false,
+                false,
+                false
+            )
+            .is_err()
+        );
+        assert!(validate("nginx.route.remove", "customer-site", false, false, true).is_err());
         assert!(validate_envelope(&request("agent.update", "", now + 30_000)).is_ok());
         assert!(valid_package_name("libssl3"));
         assert!(!valid_package_name("-y"));
@@ -3778,6 +3956,7 @@ mod tests {
             "file.write",
             "file.delete",
             "container.deploy",
+            "container.remove",
             "network.firewall.expose",
             "network.topology.reconcile",
             "network.topology.vrf",
@@ -3786,6 +3965,7 @@ mod tests {
             "kubeedge.edgecore.join",
             "network.overlay.peer_paths.read",
             "nginx.route.set",
+            "nginx.route.remove",
         ] {
             assert!(capabilities.contains(&capability));
         }
@@ -3850,6 +4030,88 @@ mod tests {
             Some(r#"{"image":"registry.example.test/web:2.0","command":"id"}"#.to_owned());
         assert!(validate_payload_presence(&deploy).is_ok());
         assert!(parse_container_deploy_spec(&deploy).is_err());
+    }
+
+    #[test]
+    fn container_deploy_accepts_bounded_environment_volumes_and_stateful() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        let mut deploy = request("container.deploy", "nanpanel-stateful", now + 30_000);
+        deploy.payload_json = Some(
+            r##"{"image":"mysql:8.4","hostPort":13306,"containerPort":3306,"environment":["MYSQL_ROOT_PASSWORD=hunter2","MYSQL_DATABASE=app"],"volumes":[{"name":"data","mountPath":"/var/lib/mysql"}],"memoryMb":1024,"stateful":true}"##
+                .to_owned(),
+        );
+        let spec = parse_container_deploy_spec(&deploy).expect("valid stateful payload");
+        assert_eq!(spec.environment.len(), 2);
+        assert_eq!(spec.volumes.len(), 1);
+        assert_eq!(spec.memory_mb, 1024);
+        assert!(spec.stateful);
+
+        for invalid in [
+            r#"{"image":"mysql:8.4","environment":["-bad=value"]}"#,
+            r#"{"image":"mysql:8.4","environment":["NO_EQUALS"]}"#,
+            r#"{"image":"mysql:8.4","volumes":[{"name":"data","mountPath":"../etc"}]}"#,
+            r#"{"image":"mysql:8.4","volumes":[{"name":"data","mountPath":"relative"}]}"#,
+            r#"{"image":"mysql:8.4","memoryMb":32}"#,
+            r#"{"image":"mysql:8.4","memoryMb":4096}"#,
+        ] {
+            deploy.payload_json = Some(invalid.to_owned());
+            assert!(
+                parse_container_deploy_spec(&deploy).is_err(),
+                "must reject: {invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn container_remove_targets_a_container_and_rejects_payload() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        assert!(
+            validate_capability_target(
+                "container.remove",
+                "nanpanel-web",
+                true,
+                false,
+                false,
+                false,
+                false,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_capability_target(
+                "container.remove",
+                "bad;name",
+                true,
+                false,
+                false,
+                false,
+                false,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_capability_target(
+                "container.remove",
+                "nanpanel-web",
+                false,
+                false,
+                false,
+                false,
+                false,
+            )
+            .is_err()
+        );
+        let remove = request("container.remove", "nanpanel-web", now + 30_000);
+        assert!(validate_payload_presence(&remove).is_ok());
+        let mut with_payload = remove;
+        with_payload.payload_json = Some(r#"{"removeVolumes":true}"#.to_owned());
+        assert!(validate_payload_presence(&with_payload).is_err());
     }
 
     #[test]

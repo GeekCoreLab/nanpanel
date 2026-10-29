@@ -122,6 +122,49 @@ struct NginxRoutePayload {
     server_name: String,
     health_path: String,
     backends: Vec<NginxRouteBackend>,
+    #[serde(default)]
+    tls: Option<NginxRouteTls>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct NginxRouteTls {
+    certificate: String,
+    private_key: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct NginxTlsPayload {
+    certificate_pem: String,
+    private_key_pem: String,
+}
+
+fn valid_tls_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 32
+        && name.as_bytes()[0].is_ascii_lowercase()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn valid_pem(pem: &str, label: &str) -> bool {
+    let trimmed = pem.trim();
+    if trimmed.len() > 64 * 1024 {
+        return false;
+    }
+    let begin = format!("-----BEGIN {label}-----");
+    let end = format!("-----END {label}-----");
+    trimmed.starts_with(&begin)
+        && trimmed.ends_with(&end)
+        && trimmed
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() || byte == b'\n' || byte == b'\r' || byte == b' ')
+}
+
+fn valid_nginx_tls_payload(payload: &NginxTlsPayload) -> bool {
+    valid_pem(&payload.certificate_pem, "CERTIFICATE")
+        && valid_pem(&payload.private_key_pem, "PRIVATE KEY")
 }
 
 #[derive(Deserialize)]
@@ -134,10 +177,27 @@ struct NginxRouteBackend {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ContainerVolumePayload {
+    name: String,
+    mount_path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct ContainerDeployPayload {
     image: String,
+    #[serde(default)]
     host_port: Option<u16>,
+    #[serde(default)]
     container_port: Option<u16>,
+    #[serde(default)]
+    environment: Option<Vec<String>>,
+    #[serde(default)]
+    volumes: Option<Vec<ContainerVolumePayload>>,
+    #[serde(default)]
+    memory_mb: Option<u32>,
+    #[serde(default)]
+    stateful: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -662,6 +722,7 @@ async fn connect_once(
                                 | "container.start"
                                 | "container.stop"
                                 | "container.deploy"
+                                | "container.remove"
                                 | "network.firewall.expose"
                                 | "network.topology.reconcile"
                                 | "network.topology.capture"
@@ -670,6 +731,8 @@ async fn connect_once(
                                 | "k3s.upgrade"
                                 | "kubeedge.edgecore.join"
                                 | "nginx.route.set"
+                                | "nginx.route.remove"
+                                | "nginx.tls.install"
                         )
                     {
                         capabilities.push(capability);
@@ -1628,7 +1691,7 @@ fn valid_control(capability: &str, target: &str, payload_json: &str) -> bool {
                 && serde_json::from_str::<serde_json::Value>(payload_json)
                     .is_ok_and(|value| value.is_object())
         }
-        "container.logs" | "container.start" | "container.stop" => {
+        "container.logs" | "container.start" | "container.stop" | "container.remove" => {
             valid_container_target(target) && !has_payload
         }
         "container.deploy" => {
@@ -1636,10 +1699,27 @@ fn valid_control(capability: &str, target: &str, payload_json: &str) -> bool {
                 && (!has_payload
                     || serde_json::from_str::<ContainerDeployPayload>(payload_json).is_ok_and(
                         |payload| {
+                            // `stateful` only relaxes the runtime sandbox and needs no
+                            // first-pass bound; the privileged-helper validates it strictly.
+                            let _ = payload.stateful;
                             valid_container_image(&payload.image)
                                 && payload.host_port.is_some() == payload.container_port.is_some()
                                 && payload.host_port.is_none_or(|port| port > 0)
                                 && payload.container_port.is_none_or(|port| port > 0)
+                                && payload
+                                    .environment
+                                    .as_ref()
+                                    .is_none_or(|variables| variables.len() <= 32)
+                                && payload.volumes.as_ref().is_none_or(|volumes| {
+                                    volumes.len() <= 16
+                                        && volumes.iter().all(|volume| {
+                                            !volume.name.is_empty()
+                                                && volume.mount_path.starts_with('/')
+                                        })
+                                })
+                                && payload
+                                    .memory_mb
+                                    .is_none_or(|memory| (64..=2048).contains(&memory))
                         },
                     ))
         }
@@ -1723,6 +1803,13 @@ fn valid_control(capability: &str, target: &str, payload_json: &str) -> bool {
                 && has_payload
                 && serde_json::from_str::<NginxRoutePayload>(payload_json)
                     .is_ok_and(|payload| valid_nginx_route_payload(&payload))
+        }
+        "nginx.route.remove" => valid_nginx_route_target(target) && !has_payload,
+        "nginx.tls.install" => {
+            valid_tls_name(target)
+                && has_payload
+                && serde_json::from_str::<NginxTlsPayload>(payload_json)
+                    .is_ok_and(|payload| valid_nginx_tls_payload(&payload))
         }
         _ => false,
     }
@@ -1867,10 +1954,15 @@ fn valid_nginx_route_payload(payload: &NginxRoutePayload) -> bool {
             .health_path
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || b"/._~-".contains(&byte));
+    let valid_tls = payload
+        .tls
+        .as_ref()
+        .is_none_or(|tls| valid_tls_name(&tls.certificate) && valid_tls_name(&tls.private_key));
     if !valid_address
         || payload.listen_port == 0
         || !valid_host
         || !valid_path
+        || !valid_tls
         || payload.backends.is_empty()
         || payload.backends.len() > 2
     {
@@ -2290,6 +2382,17 @@ mod tests {
             "nginx.route.set",
             "nanpanel-route0123456789abcdef0123456789abcdef",
             r#"{"listenAddress":"0.0.0.0","listenPort":18080,"serverName":"app.example.test","healthPath":"/health","backends":[{"name":"stable","port":20080,"weight":100}]}"#,
+        ));
+        assert!(valid_control(
+            "nginx.route.remove",
+            "nanpanel-route0123456789abcdef0123456789abcdef",
+            "",
+        ));
+        assert!(!valid_control("nginx.route.remove", "customer-site", "",));
+        assert!(!valid_control(
+            "nginx.route.remove",
+            "nanpanel-route0123456789abcdef0123456789abcdef",
+            r#"{"serverName":"app.example.test"}"#,
         ));
         assert!(valid_control(
             "container.deploy",
