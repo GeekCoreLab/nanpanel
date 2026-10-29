@@ -62,7 +62,7 @@ SSH 配置属于主机资产，不依赖本机 SSH alias。`PUT /api/v1/hosts/{h
 | GET / POST | `/api/v1/admin/users` | 列表 / 创建管理员 |
 | GET / PATCH | `/api/v1/admin/users/{userId}` | 详情 / 更新显示名、启用状态 |
 | PUT | `/api/v1/admin/users/{userId}/password` | 重置其他管理员密码 |
-| GET | `/api/v1/admin/roles` | 只读内置 ADMIN 及权限列表 |
+| GET | `/api/v1/admin/roles` | 只读内置 ADMIN 及权限列表（角色存于 `panel_role`/`panel_role_permission`，首次读取时按 `RoleCatalog` 幂等播种） |
 | GET / PATCH | `/api/v1/admin/settings` | 读取 / 更新非机密平台设置 |
 | GET | `/api/v1/admin/audit-events` | 按主体、动作、结果、时间筛选审计 |
 | GET | `/api/v1/admin/audit-events/{eventId}` | 查询单条脱敏审计 |
