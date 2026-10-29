@@ -10,7 +10,7 @@
 NaNPanel 是 **Java 主控 + Rust 边缘** 的混合云基础设施控制面。与三个竞品相比，它的差异化不是「再做一块 K8s 面板」或「再做一块单机服务器面板」，而是：
 
 1. **异构统一**：K8s 集群、Docker/Podman 容器主机、纯裸机 Linux、跨 NAT 节点，进同一控制面、同一张图。三家各自只覆盖一半：KubeSphere 只管 K8s；1Panel/宝塔以单机服务器为主（多节点在 Pro/企业版）。
-2. **真图形化**：React Flow 拖拽连线的拓扑、虚拟网线、L2/L3 设备（Router/VRF/Firewall/Packet Tap/OVS/Load Balancer）与 Service→流量分配器加权路由。这是三者都没有的设备级可视化与执行。资源清单还会按 Service `selector` 只读呈现「Service → 工作负载」选择关系，并提供只读 React Flow「关系图」视图，点击节点可查看摘要/标签，受管应用可直接「在画布中编排」，外部资源保持只读，无需读 YAML 即可看懂并接管流量的归属。
+2. **真图形化**：React Flow 拖拽连线的拓扑、虚拟网线、L2/L3 设备（Router/VRF/Firewall/Packet Tap/OVS/Load Balancer）与 Service→流量分配器加权路由。这是三者都没有的设备级可视化与执行。资源清单还会按 Service `selector` 只读呈现「Service → 工作负载」选择关系，并提供只读 React Flow「关系图」视图（三列：Ingress → Service → 工作负载，边为 Ingress 规则与 selector 关系），点击节点可查看摘要/标签，受管应用可直接「在画布中编排」，外部资源保持只读，无需读 YAML 即可看懂并接管流量的归属。
 3. **边缘安全边界**：非 root Rust Agent + 受限 root Helper + 本地 IPC 身份校验 + mTLS + 审计，替代宝塔式面板 root 直管模型。
 4. **自组织发现**：Agent 自动发现主机/容器运行时/K3s，自动纳管集群、自动映射 Node→Host，构成「自组织面板」的发现输入；期望状态图 + Provider 协调作为「自我」收敛既有数据面。
 

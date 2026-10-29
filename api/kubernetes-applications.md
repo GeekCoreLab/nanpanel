@@ -2,7 +2,7 @@
 
 NaNPanel 把受管 Kubernetes 工作负载记录为应用。每个应用版本持久化一份标准化 YAML 清单，拓扑节点和 Service → Deployment 连线由这份清单的资源与 selector 生成。拓扑修改先创建 `DRAFT` 版本并返回资源级 YAML diff；只有单独确认部署才会向集群写入。
 
-应用管理同时提供按已登记集群和 Namespace 浏览资源的只读清单，包含通过 NaNPanel 创建和由其他工具创建的资源。清单覆盖常见工作负载、Service、配置/RBAC/存储资源、Ingress/网络策略、EndpointSlice 与 Istio 路由和安全策略；每种资源最多返回 512 项。它只提供资源摘要，不会自动登记、接管或修改外部资源。ConfigMap 仅展示键名，不返回值；Secret 不读取也不展示。没有已登记应用时，页面默认进入资源清单；有应用时可从应用工具栏打开。清单额外返回 Service 的 `selector` 与工作负载的 Pod 模板标签（`podLabels`），控制台据此只读展示「Service → 工作负载」的选择关系（selector 为 Pod 标签子集即视为选中），并在「列表 / 关系图」间切换：关系图以只读 React Flow 画布呈现该关系（不可拖拽、不可连接），点击节点可查看资源摘要与标签；仅当节点属于同一集群/Namespace 下由 NaNPanel 管理的应用时提供「在画布中编排」跳转到可编辑拓扑，外部资源保持只读、不接管、不修改，不新增任何写操作。
+应用管理同时提供按已登记集群和 Namespace 浏览资源的只读清单，包含通过 NaNPanel 创建和由其他工具创建的资源。清单覆盖常见工作负载、Service、配置/RBAC/存储资源、Ingress/网络策略、EndpointSlice 与 Istio 路由和安全策略；每种资源最多返回 512 项。它只提供资源摘要，不会自动登记、接管或修改外部资源。ConfigMap 仅展示键名，不返回值；Secret 不读取也不展示。没有已登记应用时，页面默认进入资源清单；有应用时可从应用工具栏打开。清单额外返回 Service 的 `selector`、工作负载的 Pod 模板标签（`podLabels`）以及 Ingress 的结构化路由（`ingressRoutes`：host、path、目标 Service 与端口，最多 32 条），控制台据此只读展示「Ingress → Service → 工作负载」的完整关系（selector 为 Pod 标签子集即视为选中），并在「列表 / 关系图」间切换：关系图以只读 React Flow 画布呈现该关系（不可拖拽、不可连接），点击节点可查看资源摘要与标签；仅当节点属于同一集群/Namespace 下由 NaNPanel 管理的应用时提供「在画布中编排」跳转到可编辑拓扑，外部资源保持只读、不接管、不修改，不新增任何写操作。
 
 ## 创建方式
 
