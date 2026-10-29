@@ -302,12 +302,9 @@ public class AdminUsersResource {
   @Path("roles")
   public Object roles() {
     session();
-    return Map.of(
-        "items",
-        List.of(Map.of("id", "ADMIN", "name", "平台管理员", "permissions",
-                       List.of("host.read", "agent.read", "system-service.read",
-                               "system-service.restart", "operation.read",
-                               "admin.overview.read", "admin.user.manage",
-                               "admin.settings.manage", "admin.audit.read"))));
+    return Map.of("items", RoleCatalog.roles().stream()
+        .map(role -> Map.of("id", role.id(), "name", role.name(),
+            "permissions", role.permissions()))
+        .toList());
   }
 }

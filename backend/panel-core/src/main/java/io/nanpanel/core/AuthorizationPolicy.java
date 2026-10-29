@@ -13,8 +13,9 @@ import java.util.Set;
  * <ul>
  *   <li>Default deny — a request is allowed only when an explicit ALLOW matches.</li>
  *   <li>Deny wins — any matching DENY rejects, regardless of ALLOW statements.</li>
- *   <li>Wildcards: {@code *} matches everything, {@code host:*} matches any action in
- *       the {@code host} family, and {@code host:*} as a resource matches any host.</li>
+ *   <li>Actions use the platform's existing dotted vocabulary ({@code host.read},
+ *       {@code admin.user.manage}); wildcards are {@code *} and {@code host.*}.
+ *       Resources are {@code type:id}, with {@code host:*} matching any host.</li>
  *   <li>A statement that matches the action but not the resource has no effect.</li>
  * </ul>
  */
@@ -30,9 +31,11 @@ public final class AuthorizationPolicy {
   public record Statement(String effect, List<String> actions, List<String> resources) {}
 
   private static final java.util.regex.Pattern ACTION =
-      java.util.regex.Pattern.compile("[a-z][a-z0-9-]*:[a-z][a-z0-9-]*");
+      java.util.regex.Pattern.compile("[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)+");
   private static final java.util.regex.Pattern ACTION_PATTERN =
-      java.util.regex.Pattern.compile("(\\*|[a-z][a-z0-9-]*:(\\*|[a-z][a-z0-9-]*))");
+      java.util.regex.Pattern.compile(
+          "(\\*|[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)*\\.\\*"
+              + "|[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)+)");
   private static final java.util.regex.Pattern RESOURCE_PATTERN =
       java.util.regex.Pattern.compile("(\\*|[a-z][a-z0-9-]*:[A-Za-z0-9._-]+|[a-z][a-z0-9-]*:\\*)");
 
@@ -69,13 +72,16 @@ public final class AuthorizationPolicy {
     return action != null && ACTION.matcher(action).matches();
   }
 
-  /** `*` or `family:*` matches by prefix; anything else must be identical. */
+  /** `*`, `prefix.*` or an exact match; `type:*` wildcards the resource id. */
   private static boolean matchesAny(List<String> patterns, String value) {
     if (patterns == null) return false;
     for (String pattern : patterns) {
       if (pattern == null) continue;
       String norm = pattern.toLowerCase(Locale.ROOT);
       if ("*".equals(norm) || norm.equals(value)) return true;
+      if (norm.endsWith(".*") && value.startsWith(norm.substring(0, norm.length() - 1))) {
+        return true;
+      }
       if (norm.endsWith(":*") && value.startsWith(norm.substring(0, norm.length() - 1))) {
         return true;
       }

@@ -21,45 +21,54 @@ class AuthorizationPolicyTest {
 
   @Test
   void anExactAllowGrantsOnlyThatActionAndResource() {
-    var statements = List.of(allow(List.of("host:read"), List.of("host:h-1")));
-    assertTrue(AuthorizationPolicy.permits(statements, "host:read", "host:h-1"));
-    assertFalse(AuthorizationPolicy.permits(statements, "host:read", "host:h-2"));
-    assertFalse(AuthorizationPolicy.permits(statements, "host:write", "host:h-1"));
+    var statements = List.of(allow(List.of("host.read"), List.of("host:h-1")));
+    assertTrue(AuthorizationPolicy.permits(statements, "host.read", "host:h-1"));
+    assertFalse(AuthorizationPolicy.permits(statements, "host.read", "host:h-2"));
+    assertFalse(AuthorizationPolicy.permits(statements, "host.write", "host:h-1"));
   }
 
   @Test
   void wildcardActionsAndResourcesBroadenTheStatement() {
     assertTrue(AuthorizationPolicy.permits(
-        List.of(allow(List.of("host:*"), List.of("host:*"))), "host:restart", "host:h-9"));
+        List.of(allow(List.of("host.*"), List.of("host:*"))), "host.restart", "host:h-9"));
     assertTrue(AuthorizationPolicy.permits(
-        List.of(allow(List.of("*"), List.of("*"))), "site:apply", "site:s-1"));
+        List.of(allow(List.of("*"), List.of("*"))), "site.apply", "site:s-1"));
     assertFalse(AuthorizationPolicy.permits(
-        List.of(allow(List.of("host:*"), List.of("host:*"))), "site:apply", "site:s-1"));
+        List.of(allow(List.of("host.*"), List.of("host:*"))), "site.apply", "site:s-1"));
+  }
+
+  @Test
+  void multiSegmentWildcardsRespectTheirPrefix() {
+    assertTrue(AuthorizationPolicy.permits(
+        List.of(allow(List.of("admin.user.*"), List.of("*"))), "admin.user.manage", "user:u-1"));
+    assertFalse(AuthorizationPolicy.permits(
+        List.of(allow(List.of("admin.user.*"), List.of("*"))), "admin.settings.manage",
+        "user:u-1"));
   }
 
   @Test
   void defaultIsDenyWhenNothingMatches() {
-    assertFalse(AuthorizationPolicy.permits(List.of(), "host:read", "host:h-1"));
-    assertFalse(AuthorizationPolicy.permits(null, "host:read", "host:h-1"));
+    assertFalse(AuthorizationPolicy.permits(List.of(), "host.read", "host:h-1"));
+    assertFalse(AuthorizationPolicy.permits(null, "host.read", "host:h-1"));
   }
 
   @Test
   void anExplicitDenyBeatsABroaderAllow() {
     var statements = List.of(
-        allow(List.of("host:*"), List.of("*")),
-        deny(List.of("host:delete"), List.of("host:h-1")));
-    assertTrue(AuthorizationPolicy.permits(statements, "host:restart", "host:h-1"));
-    assertFalse(AuthorizationPolicy.permits(statements, "host:delete", "host:h-1"));
-    assertTrue(AuthorizationPolicy.permits(statements, "host:delete", "host:h-2"));
+        allow(List.of("host.*"), List.of("*")),
+        deny(List.of("host.delete"), List.of("host:h-1")));
+    assertTrue(AuthorizationPolicy.permits(statements, "host.restart", "host:h-1"));
+    assertFalse(AuthorizationPolicy.permits(statements, "host.delete", "host:h-1"));
+    assertTrue(AuthorizationPolicy.permits(statements, "host.delete", "host:h-2"));
   }
 
   @Test
   void aDenyOnAnotherResourceDoesNotBlock() {
     var statements = List.of(
-        allow(List.of("host:read"), List.of("host:*")),
-        deny(List.of("host:read"), List.of("host:h-2")));
-    assertTrue(AuthorizationPolicy.permits(statements, "host:read", "host:h-1"));
-    assertFalse(AuthorizationPolicy.permits(statements, "host:read", "host:h-2"));
+        allow(List.of("host.read"), List.of("host:*")),
+        deny(List.of("host.read"), List.of("host:h-2")));
+    assertTrue(AuthorizationPolicy.permits(statements, "host.read", "host:h-1"));
+    assertFalse(AuthorizationPolicy.permits(statements, "host.read", "host:h-2"));
   }
 
   @Test
@@ -68,24 +77,28 @@ class AuthorizationPolicyTest {
         new Statement("MAYBE", List.of("*"), List.of("*")),
         new Statement(ALLOW, List.of(), List.of("*")),
         new Statement(ALLOW, List.of("Host Read"), List.of("*")),
-        new Statement(ALLOW, List.of("*"), List.of("host h-1")));
-    assertFalse(AuthorizationPolicy.permits(statements, "host:read", "host:h-1"));
+        new Statement(ALLOW, List.of("host.read"), List.of("host h-1")));
+    assertFalse(AuthorizationPolicy.permits(statements, "host.read", "host:h-1"));
   }
 
   @Test
   void malformedRequestsAreDenied() {
     var statements = List.of(allow(List.of("*"), List.of("*")));
     assertFalse(AuthorizationPolicy.permits(statements, "hostread", "host:h-1"));
-    assertFalse(AuthorizationPolicy.permits(statements, "host:read", ""));
-    assertFalse(AuthorizationPolicy.permits(statements, "host:read", null));
+    assertFalse(AuthorizationPolicy.permits(statements, "host:read", "host:h-1"));
+    assertFalse(AuthorizationPolicy.permits(statements, "host.read", ""));
+    assertFalse(AuthorizationPolicy.permits(statements, "host.read", null));
     assertFalse(AuthorizationPolicy.permits(statements, null, "host:h-1"));
   }
 
   @Test
   void statementValidationMatchesTheDocumentedGrammar() {
-    assertTrue(AuthorizationPolicy.validStatement(allow(List.of("host:read"), List.of("host:h-1"))));
-    assertTrue(AuthorizationPolicy.validStatement(allow(List.of("host:*"), List.of("*"))));
+    assertTrue(AuthorizationPolicy.validStatement(allow(List.of("host.read"), List.of("host:h-1"))));
+    assertTrue(AuthorizationPolicy.validStatement(allow(List.of("host.*"), List.of("*"))));
+    assertTrue(AuthorizationPolicy.validStatement(
+        allow(List.of("admin.user.manage"), List.of("user:u-1"))));
     assertFalse(AuthorizationPolicy.validStatement(allow(List.of("host"), List.of("*"))));
+    assertFalse(AuthorizationPolicy.validStatement(allow(List.of("host:read"), List.of("*"))));
     assertFalse(AuthorizationPolicy.validStatement(allow(List.of("*"), List.of("host:*:x"))));
     assertFalse(AuthorizationPolicy.validStatement(allow(List.of("*"), List.of("HOST:x"))));
     assertFalse(AuthorizationPolicy.validStatement(null));
@@ -93,7 +106,7 @@ class AuthorizationPolicyTest {
 
   @Test
   void duplicateStatementsDoNotChangeTheOutcome() {
-    var single = allow(List.of("host:read"), List.of("host:h-1"));
-    assertTrue(AuthorizationPolicy.permits(List.of(single, single), "host:read", "host:h-1"));
+    var single = allow(List.of("host.read"), List.of("host:h-1"));
+    assertTrue(AuthorizationPolicy.permits(List.of(single, single), "host.read", "host:h-1"));
   }
 }
