@@ -87,7 +87,8 @@ NaNPanel 是 **Java 主控 + Rust 边缘** 的混合云基础设施控制面。�
 - [x] 授权判定内核：`subject/action/resource` 语义（默认拒绝、拒绝优先、`*` 与 `admin.user.*` 通配、语句语法校验），纯函数 `AuthorizationPolicy` + 10 项单测。
 - [x] 内置角色目录：`RoleCatalog` 成为 `ADMIN` 角色权限的唯一来源，`permits(role, action, resource)` 复用判定内核，+5 项单测；权限表补齐应用商店/站点/告警/数据库/文件等新模块动作（共 23 项）。
 - [x] 角色持久化（迁移 047 `panel_role` / `panel_role_permission`）：`RoleRepository` 首次读取时按目录幂等播种，`GET /api/v1/admin/roles` 改读数据库且响应结构不变（+1 项含 HTTP 的集成测试，含重复读取不重复写入的断言）；**仍未接入任何端点的鉴权**。
-- [ ] 角色/工作区持久化与端点接线、项目隔离（PROJECT_PLAN §12 预留接口落地）。
+- [x] 端点 → 权限映射 `EndpointPermissions`（方法特异规则优先、`PUBLIC` 白名单）+ 反射式覆盖测试：任何缺少映射的新端点都会测试失败（本轮借此补上 4 个遗漏的 bastion 端点），并断言映射中的权限都已声明给 `ADMIN`（36 项）。**仍未强制鉴权**。
+- [ ] 过滤器接线（ADMIN 旁路 → 非 ADMIN 判定）、工作区隔离、自定义角色（PROJECT_PLAN §12 预留接口落地）。
 - [x] 告警：基于已采集观测的规则引擎（主机离线 / Helper 不可用 / systemd 单元未运行）+ 实时求值 API 与控制台「告警」页（迁移 046，纯函数 `AlertEvaluator` 7 项单测 + 资源测试）。
 - [ ] 监控/告警增强：接入 Prometheus 指标做 CPU/内存/磁盘类告警，通知通道（邮件/Webhook）与历史留存、日报推送。
 - [ ] 补齐 StatefulSet/DaemonSet/Job/CronJob 工作负载、ConfigMap/Secret/PV 管理。

@@ -18,13 +18,18 @@ public final class RoleCatalog {
   public record Role(String id, String name, List<String> permissions) {}
 
   private static final List<String> ADMIN_PERMISSIONS = List.of(
-      "host.read", "agent.read", "system-service.read", "system-service.restart",
+      "host.read", "host.write", "host.deploy", "auth.self",
+      "agent.read", "agent.write", "agent.enroll",
+      "system-service.read", "system-service.restart",
       "operation.read", "admin.overview.read", "admin.user.manage",
       "admin.settings.manage", "admin.audit.read",
+      "kubernetes.read", "kubernetes.write", "topology.read", "topology.write",
+      "network.read", "network.write",
       "app-store.read", "app-store.deploy",
       "site.read", "site.apply", "site.disable", "site.delete", "site.tls",
       "alert-rule.read", "alert-rule.create", "alert-rule.delete",
       "database.read",
+      "bastion.read", "bastion.session",
       "file.read", "file.write", "file.delete");
 
   private static final List<Role> ROLES = List.of(

@@ -15,7 +15,7 @@ class RoleCatalogTest {
     var admin = roles.get(0);
     assertEquals("ADMIN", admin.id());
     assertEquals("平台管理员", admin.name());
-    assertEquals(23, admin.permissions().size());
+    assertEquals(36, admin.permissions().size());
     assertTrue(admin.permissions().contains("host.read"));
     assertTrue(admin.permissions().contains("admin.user.manage"));
     assertTrue(admin.permissions().contains("system-service.restart"));

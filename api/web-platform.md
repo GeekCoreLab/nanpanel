@@ -62,7 +62,7 @@ SSH 配置属于主机资产，不依赖本机 SSH alias。`PUT /api/v1/hosts/{h
 | GET / POST | `/api/v1/admin/users` | 列表 / 创建管理员 |
 | GET / PATCH | `/api/v1/admin/users/{userId}` | 详情 / 更新显示名、启用状态 |
 | PUT | `/api/v1/admin/users/{userId}/password` | 重置其他管理员密码 |
-| GET | `/api/v1/admin/roles` | 只读内置 ADMIN 及权限列表（角色存于 `panel_role`/`panel_role_permission`，首次读取时按 `RoleCatalog` 幂等播种） |
+| GET | `/api/v1/admin/roles` | 只读内置 ADMIN 及权限列表（角色存于 `panel_role`/`panel_role_permission`，首次读取时按 `RoleCatalog` 幂等播种；权限词表见下） |
 | GET / PATCH | `/api/v1/admin/settings` | 读取 / 更新非机密平台设置 |
 | GET | `/api/v1/admin/audit-events` | 按主体、动作、结果、时间筛选审计 |
 | GET | `/api/v1/admin/audit-events/{eventId}` | 查询单条脱敏审计 |
@@ -88,3 +88,13 @@ SSH 配置属于主机资产，不依赖本机 SSH alias。`PUT /api/v1/hosts/{h
 当前 `/auth/*` 和 `/system` 使用数据库账号及 Cookie 会话，Basic 不再接受；管理员账号/角色、平台设置、认证/管理审计查询、主机/Agent 只读查询及仪表盘统计也已接入持久化数据库。systemd 服务观测和重启/journal 任务端点已接入数据库、Gateway、Agent 与 Helper；观测过期时明确返回 UNKNOWN。密码泄露库与多实例共享限流尚未接入，证书吊销/续期也仍待实现。
 
 Cookie 生命周期与轮换设计参考 [OWASP Session Management](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html)，CSRF 同步 token 与来源校验参考 [OWASP CSRF Prevention](https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html)。本文的具体超时、角色与端点是本项目设计选择。
+
+## 端点 → 权限映射（已定义，未强制）
+
+`EndpointPermissions` 为每个端点声明所需权限（`host.read`、`kubernetes.write`、`site.apply`、`database.read`、`bastion.session` 等，`PUBLIC` 表示无需会话：登录、CSRF、Agent 接入/下载、内部 Agent 回调）。
+
+- 规则按前缀匹配、**方法特异规则优先**（例如 `GET /reverse-proxy-sites` → `site.read`，`DELETE` → `site.delete`，其余 → `site.apply`）。
+- `EndpointPermissionsTest` 通过反射扫描全部 `@Path` 资源，**任何没有映射的新端点都会让测试失败**（本轮就借此发现了四个此前遗漏的 bastion 端点）。
+- 同时断言：映射里出现的每个权限都必须在 `ADMIN` 权限表中声明，避免出现"能映射但无人拥有"的空权限。
+
+**当前仍未在任何端点强制鉴权**：`AuthorizationPolicy` / `RoleCatalog` / `EndpointPermissions` 三者齐备但未接线，因此现有行为零变化。
