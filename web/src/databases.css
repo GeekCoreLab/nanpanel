@@ -1,0 +1,21 @@
+.databases-workspace{display:flex;flex-direction:column;gap:16px;padding:20px;overflow:auto}
+.databases-header h2{margin:0 0 4px;font-size:18px}
+.databases-header p{margin:0;max-width:780px;color:#5b6f86;font-size:12px;line-height:1.6}
+.databases-empty{padding:20px;display:flex;flex-direction:column;gap:6px}
+.databases-empty strong{font-size:13px}
+.databases-empty p{margin:0;color:#5b6f86;font-size:12px}
+.databases-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px}
+.databases-card{display:flex;flex-direction:column;gap:10px;padding:16px}
+.databases-card-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.databases-engine{padding:2px 9px;border-radius:999px;background:#eef4ff;color:#2f5f9e;font-size:10px;font-weight:600}
+.databases-card-head strong{font-size:13px;word-break:break-all}
+.databases-host{color:#8796aa;font-size:10px}
+.databases-facts{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:0}
+.databases-facts dt{color:#8796aa;font-size:10px}
+.databases-facts dd{margin:2px 0 0;font-size:12px;word-break:break-all}
+.databases-connection{display:flex;flex-direction:column;gap:3px;padding:8px 10px;border:1px solid #e2ecf9;border-radius:8px;background:#f7faff}
+.databases-connection span{color:#8796aa;font-size:10px}
+.databases-connection code{font-size:11px;word-break:break-all}
+.databases-note{margin:0;font-size:11px;color:#9a6b1f;background:#fdf4e5;border-radius:8px;padding:8px 10px}
+.databases-actions{display:flex;justify-content:flex-end}
+.databases-actions button{padding:5px 12px;border-radius:7px;font-size:10px}

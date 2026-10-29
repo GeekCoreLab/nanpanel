@@ -218,3 +218,6 @@ export type AlertRule = { id: string; name: string; condition: AlertCondition; h
 export type AlertRuleList = { items: (AlertRule)[] };
 export type FiringAlert = { ruleId: string; ruleName: string; severity: "WARNING" | "CRITICAL"; condition: AlertCondition; hostname: string; detail: string };
 export type FiringAlertList = { generatedAt: string; evaluatedRules: number; alerts: (FiringAlert)[] };
+export type DatabaseEngine = { id: string; label: string; defaultPort: number; scheme: string };
+export type DatabaseInstance = { hostId: string; hostname: string; containerName: string; image: string | null; engine: DatabaseEngine; hostPort: number | null; containerPort: number | null; connectionUrl: string | null; note: string; deployedAt: string };
+export type DatabaseList = { engines: (DatabaseEngine)[]; items: (DatabaseInstance)[] };
