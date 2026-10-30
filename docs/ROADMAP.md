@@ -89,7 +89,8 @@ NaNPanel 是 **Java 主控 + Rust 边缘** 的混合云基础设施控制面。�
 - [x] 角色持久化（迁移 047 `panel_role` / `panel_role_permission`）：`RoleRepository` 首次读取时按目录幂等播种，`GET /api/v1/admin/roles` 改读数据库且响应结构不变（+1 项含 HTTP 的集成测试，含重复读取不重复写入的断言）；**仍未接入任何端点的鉴权**。
 - [x] 端点 → 权限映射 `EndpointPermissions`（方法特异规则优先、`PUBLIC` 白名单）+ 反射式覆盖测试：任何缺少映射的新端点都会测试失败（本轮借此补上 4 个遗漏的 bastion 端点），并断言映射中的权限都已声明给 `ADMIN`（36 项）。**仍未强制鉴权**。
 - [x] 过滤器接线：`SessionFilter` 按 `EndpointPermissions` 判定权限，`ADMIN` 恒通过、`PUBLIC` 与 `/auth/*` 自助端点放行、API 密钥沿用作用域校验，其余角色按库中 `panel_role_permission` 判定，拒绝返回 403 `PERMISSION_DENIED` 并审计（迁移 048 给账号加 `role_id` 并回填 `ADMIN`）。集成测试用受限角色证明「授权端点 200 / 其它端点 403 / ADMIN 不受影响」，全量 139 项通过。
-- [ ] 工作区/项目隔离、角色管理与账号角色分配界面、自定义角色创建入口（PROJECT_PLAN §12 预留接口落地）。
+- [x] 账号角色分配：`PATCH /admin/users/{id}` 支持 `roleId`（校验角色存在、禁止移除最后一位 ACTIVE ADMIN），控制台「管理员」页可在编辑表单中改角色；集成测试覆盖分配、未知角色 422、自我降级 409、列表回显。
+- [ ] 工作区/项目隔离、自定义角色创建入口（PROJECT_PLAN §12 预留接口落地）。
 - [x] 告警：基于已采集观测的规则引擎（主机离线 / Helper 不可用 / systemd 单元未运行）+ 实时求值 API 与控制台「告警」页（迁移 046，纯函数 `AlertEvaluator` 7 项单测 + 资源测试）。
 - [ ] 监控/告警增强：接入 Prometheus 指标做 CPU/内存/磁盘类告警，通知通道（邮件/Webhook）与历史留存、日报推送。
 - [ ] 补齐 StatefulSet/DaemonSet/Job/CronJob 工作负载、ConfigMap/Secret/PV 管理。
