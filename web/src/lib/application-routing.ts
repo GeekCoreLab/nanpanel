@@ -78,7 +78,15 @@ export function validateRoutePlan(plan: readonly RoutePlanRow[]): RoutePlanIssue
   return issues;
 }
 
-export type RoutePlanBackend = { name: string; weight: number; share: number; id: string; linkId: string };
+export type RoutePlanBackend = {
+  name: string;
+  weight: number;
+  share: number;
+  id: string;
+  linkId: string;
+  /** Service port the backend link targets, needed for a faithful route body. */
+  port: number;
+};
 
 export type RoutePlanRow = {
   /** The ROUTE_ENTRY link id. */
@@ -114,6 +122,7 @@ export function compileApplicationRoutePlan(
           weight: weights.get(outputPort) ?? DEFAULT_WEIGHT,
           id: link.targetId,
           linkId: link.id,
+          port: link.servicePort,
         };
       });
     const totalWeight = backends.reduce((sum, backend) => sum + backend.weight, 0);

@@ -40,8 +40,8 @@ test('compiles a weighted route with normalized percentages and callers', () => 
   assert.equal(row.totalWeight, 100);
   // Backends now carry canvas ids too, so a plan row can be mapped back onto the graph.
   assert.deepEqual(row.backends, [
-    { name: 'orders-v1', weight: 80, share: 80, id: 'svc-v1', linkId: 'b1' },
-    { name: 'orders-v2', weight: 20, share: 20, id: 'svc-v2', linkId: 'b2' },
+    { name: 'orders-v1', weight: 80, share: 80, id: 'svc-v1', linkId: 'b1', port: 80 },
+    { name: 'orders-v2', weight: 20, share: 20, id: 'svc-v2', linkId: 'b2', port: 80 },
   ]);
   assert.deepEqual(row.callers, ['orders-deployment']);
 });
@@ -64,7 +64,7 @@ test('zero total weight yields zero shares instead of dividing by zero', () => {
   );
   assert.equal(plan[0].totalWeight, 0);
   assert.deepEqual(plan[0].backends,
-    [{ name: 'orders-v1', weight: 0, share: 0, id: 'svc-v1', linkId: 'b1' }]);
+    [{ name: 'orders-v1', weight: 0, share: 0, id: 'svc-v1', linkId: 'b1', port: 80 }]);
 });
 
 test('a route entry without a backend is reported as empty', () => {

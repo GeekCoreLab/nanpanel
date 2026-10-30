@@ -11,6 +11,7 @@ import { createUuid } from './lib/uuid.ts';
 import { findFreePosition } from './lib/canvas-layout.ts';
 import { compareRoutePlan, compileApplicationRoutePlan, MAX_ROUTE_BACKENDS, planRouteDraft, routePlanTargets, validateRoutePlan, type RoutePlanRow } from './lib/application-routing.ts';
 import { buildManagedAppIndex, deriveNamespaceSelectorEdges } from './lib/namespace-graph.ts';
+import { buildRouteBody } from './lib/route-manifest.ts';
 import { NamespaceGraph } from './topology/NamespaceGraph.tsx';
 import { parseDocument, stringify as stringifyYaml } from 'yaml';
 import { connectionError, createTopologyNode, draftError, nodePresets, topologyPhysicalPortKey, validNodeShape } from './lib/topology-model';
@@ -635,6 +636,7 @@ export default function Applications({ notify }: { notify: (message: string) => 
               <ApplicationNetworkTopologyCanvas
                 key={`application-topology-${detail.application.id}`}
                 applicationId={detail.application.id}
+                namespace={detail.application.namespace ?? ''}
                 resources={nodeList}
                 topologyEdges={detail.topology.edges}
                 yamlSourceChanges={yamlSourceChanges}
@@ -1397,11 +1399,12 @@ function layoutApplicationTopology(nodes: TopologyLayoutNode[], edges: Edge[]) {
 }
 
 function ApplicationNetworkTopologyCanvas({
-  applicationId, resources, topologyEdges, yamlSourceChanges, changes, additions, hasDraft,
-  currentDraft, busy, onResourceYamlSave, onResourceUpdate, onAdditionChange, onRemoveAddition,
-  onShowVersions, onOpenDeployment,
+  applicationId, namespace, resources, topologyEdges, yamlSourceChanges, changes, additions,
+  hasDraft, currentDraft, busy, onResourceYamlSave, onResourceUpdate, onAdditionChange,
+  onRemoveAddition, onShowVersions, onOpenDeployment,
 }: {
   applicationId: string;
+  namespace: string;
   resources: KubernetesApplicationTopologyNode[];
   topologyEdges: KubernetesApplicationDetail['topology']['edges'];
   yamlSourceChanges: Record<string, string>;
@@ -1731,6 +1734,7 @@ function ApplicationNetworkTopologyCanvas({
     return row ? routePlanTargets(row) : null;
   }, [routePlan, highlightedRoute]);
   const [routeDraftOpen, setRouteDraftOpen] = useState(false);
+  const [manifestRoute, setManifestRoute] = useState<RoutePlanRow | null>(null);
   const [routeDraftEntry, setRouteDraftEntry] = useState('');
   const [routeDraftBackendIds, setRouteDraftBackendIds] = useState<string[]>([]);
   const [routeDraftError, setRouteDraftError] = useState('');
@@ -2422,6 +2426,21 @@ function ApplicationNetworkTopologyCanvas({
             setRouteDraftBackendIds([]);
             setRouteDraftError('');
           }}>⇄<span>生成路由</span></button>
+        {manifestRoute && <div className="modal-backdrop" role="presentation">
+          <div className="modal role-editor" role="dialog" aria-label="路由主体预览">
+            <div className="card-title"><h2>{manifestRoute.serviceName}:{manifestRoute.servicePort} 的路由主体</h2>
+              <button className="icon-button" aria-label="关闭路由预览"
+                onClick={() => setManifestRoute(null)}>×</button></div>
+            <p className="muted">下面是这条路由的 hosts 与加权后端。资源名称、标签与拓扑注解由服务端按应用与版本生成，
+              这里不显示——不要把这段内容直接 <code>kubectl apply</code>。</p>
+            <pre className="journal-output">{stringifyYaml({
+              apiVersion: 'networking.istio.io/v1beta1',
+              kind: 'VirtualService',
+              metadata: { name: '<server-generated>', namespace: namespace || '<namespace>' },
+              spec: buildRouteBody(manifestRoute, namespace),
+            })}</pre>
+          </div>
+        </div>}
         {routeDraftOpen && <div className="modal-backdrop" role="presentation">
           <div className="modal application-route-draft" role="dialog" aria-label="生成路由草稿">
             <div className="card-title"><h2>生成路由草稿</h2>
@@ -2497,6 +2516,11 @@ function ApplicationNetworkTopologyCanvas({
             }}>
             {route.callers.length > 0 && <span className="application-route-callers">{route.callers.join('、')} →</span>}
             <span className="application-route-entry">{route.serviceName}:{route.servicePort}</span>
+            <button type="button" className="application-route-yaml"
+              title="查看这条路由将要写入的 VirtualService 主体"
+              onClick={event => { event.stopPropagation(); setManifestRoute(route); }}>
+              YAML
+            </button>
             {driftByRoute.get(route.id) && <span className={`application-route-sync sync-${driftByRoute.get(route.id)?.status.toLowerCase()}`}
               title={driftByRoute.get(route.id)?.message}>
               {driftByRoute.get(route.id)?.status === 'MATCH' ? '已同步'
