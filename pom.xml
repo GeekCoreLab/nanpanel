@@ -133,6 +133,11 @@
                         <systemPropertyVariables>
                             <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
                         </systemPropertyVariables>
+                        <!-- Each @TestProfile boots its own Quarkus application inside the single
+                             forked JVM. Late in the full suite the default heap runs out and the
+                             run dies with an OutOfMemoryError that reads like a random
+                             interruption, so give the fork a real heap and keep a dump on OOM. -->
+                        <argLine>-Xmx6144m -XX:MaxMetaspaceSize=2g -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=${project.build.directory}</argLine>
                     </configuration>
                 </plugin>
                 

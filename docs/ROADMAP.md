@@ -144,8 +144,13 @@ NaNPanel 是 **Java 主控 + Rust 边缘** 的混合云基础设施控制面。�
 - Secret/证书/令牌沿用 Kubernetes credential key 的 AES-GCM 加密与用途绑定，不新增明文存储。
 ## 已知问题
 
-- **全量测试偶发中断（未复现）**：`panel-core` 全量运行曾出现一次「64 个用例后 BUILD FAILURE」，当时输出的用例全部通过、
-  且无 forked VM/OOM/端口占用等标记；随后连续三次完整运行均 165 项全绿。若再次出现，请保留完整日志并检查
-  `target/surefire-reports` 中被中断的测试类。
+- **全量测试中断：已定位为 forked JVM 内存耗尽（已修）**。原因是 60+ 个 `@TestProfile` 各自在同一 Surefire fork 里
+  启动一套 Quarkus 应用，类加载器越积越多：先是 `java.lang.OutOfMemoryError: Java heap space`（表现为「跑到一半
+  BUILD FAILURE、已跑的用例全绿」），抬高堆之后又变成 `OutOfMemoryError: Metaspace`。现在根 `pom.xml` 给 surefire
+  固定 `-Xmx6144m -XX:MaxMetaspaceSize=2g -XX:+HeapDumpOnOutOfMemoryError`，OOM 时会把堆转储留在
+  `backend/panel-core/target/`。**看到堆转储就说明某个 profile 又变重了，不要只调大内存。**
+- **测试库缺表会让后台调度狂刷错误（已修）**：`KubernetesApplicationNetworkRuntimeService` 每 10 秒跑一次
+  reconcile，而测试 changelog 里没有 `kubernetes_application_network_runtime`，于是每个测试类都在刷
+  `Table ... not found`，并连带把接口拖到 30 秒超时。`auth-test-changelog.xml` 已补上该表与两张关联表。
 - **测试库共享**：多个集成测试共用同一个 H2 内存库，因此每个用例在开头都会重置管理员口令并清理自己的数据；
   新增测试时请沿用 `resetAdmin()` + 清理自身数据的方式，否则会互相干扰。
