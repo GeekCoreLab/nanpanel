@@ -12,6 +12,7 @@ import { findFreePosition } from './lib/canvas-layout.ts';
 import { compareRoutePlan, compileApplicationRoutePlan, MAX_ROUTE_BACKENDS, planRouteDraft, routePlanTargets, validateRoutePlan, type RoutePlanRow } from './lib/application-routing.ts';
 import { buildManagedAppIndex, deriveNamespaceSelectorEdges } from './lib/namespace-graph.ts';
 import { buildRouteBody } from './lib/route-manifest.ts';
+import { buildApplicationBundle } from './lib/application-manifest.ts';
 import { NamespaceGraph } from './topology/NamespaceGraph.tsx';
 import { parseDocument, stringify as stringifyYaml } from 'yaml';
 import { connectionError, createTopologyNode, draftError, nodePresets, topologyPhysicalPortKey, validNodeShape } from './lib/topology-model';
@@ -1721,6 +1722,30 @@ function ApplicationNetworkTopologyCanvas({
     (id) => visibleResources.find(resource => resource.id === id)?.name,
   ), [draft.trafficLinks, draft.nodes, visibleResources]);
   const routePlanIssues = useMemo(() => validateRoutePlan(routePlan), [routePlan]);
+
+  const exportBundle = useCallback(() => {
+    const bundle = buildApplicationBundle({
+      applicationName: applicationId,
+      namespace,
+      resources: resources.map(node => ({
+        kind: node.kind,
+        name: node.name,
+        sourceYaml: yamlSourceChanges[node.id] ?? node.sourceYaml ?? '',
+      })),
+      routes: routePlan,
+      exportedAt: new Date().toISOString(),
+    });
+    const url = URL.createObjectURL(new Blob([bundle.yaml], { type: 'text/yaml' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${applicationId}-bundle.yaml`;
+    link.click();
+    URL.revokeObjectURL(url);
+    setMessage(`已导出 ${bundle.resourceCount} 个资源与 ${bundle.routeCount} 条路由`
+      + (bundle.skipped.length
+        ? `；跳过 ${bundle.skipped.length} 个没有源码的待添加对象（${bundle.skipped.join('、')}）`
+        : '') + '。文件不含运行时状态与证书。');
+  }, [applicationId, namespace, resources, yamlSourceChanges, routePlan]);
   // What the cluster was actually told, versus what the canvas currently draws.
   const routeDrift = useMemo(() => trafficRuntime?.routes
     ? compareRoutePlan(routePlan, trafficRuntime.routes) : [], [routePlan, trafficRuntime?.routes]);
@@ -2493,6 +2518,9 @@ function ApplicationNetworkTopologyCanvas({
         </div>
         <button type="button" className="application-canvas-fab" aria-label="拓扑设置与运行时" title="拓扑设置"
           aria-expanded={settingsOpen} onClick={() => setSettingsOpen(true)}>⚙<span>拓扑设置</span></button>
+        <button type="button" className="application-tool"
+          title="导出当前资源源码与画布编译出的路由（不含运行时状态）"
+          onClick={exportBundle}>⤓<span>导出清单</span></button>
       </div>
       {routePlan.length > 0 && <div className={`application-route-plan ${routePlanOpen ? 'open' : ''}`}
         role="region" aria-label="拖拽路由计划">
