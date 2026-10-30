@@ -10,6 +10,7 @@ TLS 终止已支持（手工证书）：`POST /{siteId}/tls` 经 `nginx.tls.inst
 | --- | --- | --- |
 | GET | `/api/v1/reverse-proxy-sites` | 列出站点（含主机名、状态），按创建时间倒序，最多 200 条 |
 | POST | `/api/v1/reverse-proxy-sites` | 登记站点（Cookie + CSRF），返回 201 与站点详情 |
+| PUT | `/api/v1/reverse-proxy-sites/{siteId}` | 修改未生效站点的域名、监听地址/端口、上游端口或健康检查路径 |
 | POST | `/api/v1/reverse-proxy-sites/{siteId}/apply` | 编译并下发受管 Nginx 路由（需 `Idempotency-Key`）；也用于「启用」已停用站点 |
 | POST | `/api/v1/reverse-proxy-sites/{siteId}/disable` | 撤回该站点的受管 Nginx 路由文件（需 `Idempotency-Key`） |
 | POST | `/api/v1/reverse-proxy-sites/{siteId}/tls` | 安装证书/私钥并记录受管 TLS 名（需 `Idempotency-Key`） |
@@ -80,6 +81,16 @@ TLS 状态不在 `state` 里：`tlsName` 非空表示已在该主机安装证书
 - `FAILED`：最近一次下发失败。
 
 站点记录保存在 `reverse_proxy_site` 表（迁移 `044-reverse-proxy-sites.sql`），同一 `(host_id, domain, listen_port)` 唯一。
+
+## 修改站点
+
+`PUT /api/v1/reverse-proxy-sites/{siteId}` 接受与创建相同的字段：
+
+- 仅 `DRAFT` / `FAILED` / `DISABLED` 状态可改；`APPLIED` 返回 `409 SITE_APPLIED`（先 `disable`，避免改动与主机上正在服务的路由不一致）。
+- **不能更换主机**：`hostId` 与现记录不同时返回 422。
+- 修改后仍用下发时的同一校验器校验；若站点已安装证书，校验载荷会带上现有的 `tls` 名称。
+- 与其它站点域名/端口冲突返回 `409 SITE_CONFLICT`。
+- 修改只改记录，需要再次 `apply` 才生效（控制台会提示）。
 
 ## 站点 HTTPS
 

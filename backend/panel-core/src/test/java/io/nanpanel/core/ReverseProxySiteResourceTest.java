@@ -95,6 +95,36 @@ class ReverseProxySiteResourceTest {
         .post("/api/v1/reverse-proxy-sites").then().statusCode(409)
         .body("code", equalTo("SITE_CONFLICT"));
 
+    // A draft site can be corrected instead of deleted and recreated.
+    given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.token())
+        .contentType("application/json")
+        .body("{\"hostId\":\"" + hostId + "\",\"domain\":\"shop.example.com\","
+            + "\"listenAddress\":\"192.0.2.10\",\"listenPort\":80,\"upstreamPort\":8081,"
+            + "\"healthPath\":\"/healthz\"}")
+        .put("/api/v1/reverse-proxy-sites/" + siteId).then().statusCode(200)
+        .body("healthPath", equalTo("/healthz"))
+        .body("upstreamPort", equalTo(8081))
+        .body("state", equalTo("DRAFT"));
+
+    // An edit is validated with the same rules as a create.
+    given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.token())
+        .contentType("application/json")
+        .body("{\"hostId\":\"" + hostId + "\",\"domain\":\"bad_domain\","
+            + "\"listenAddress\":\"192.0.2.10\",\"listenPort\":80,\"upstreamPort\":8081}")
+        .put("/api/v1/reverse-proxy-sites/" + siteId).then().statusCode(422)
+        .body("code", equalTo("VALIDATION_FAILED"));
+
+    // Sites cannot be moved to another host by an edit.
+    given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.token())
+        .contentType("application/json")
+        .body("{\"hostId\":\"" + UUID.randomUUID() + "\",\"domain\":\"shop.example.com\","
+            + "\"listenAddress\":\"192.0.2.10\",\"listenPort\":80,\"upstreamPort\":8081}")
+        .put("/api/v1/reverse-proxy-sites/" + siteId).then().statusCode(422)
+        .body("code", equalTo("VALIDATION_FAILED"));
+
     given().cookie("nanpanel_session", session.cookie())
         .header("X-CSRF-Token", session.token())
         .contentType("application/json")
@@ -165,6 +195,14 @@ class ReverseProxySiteResourceTest {
     given().cookie("nanpanel_session", session.cookie())
         .header("X-CSRF-Token", session.token())
         .delete("/api/v1/reverse-proxy-sites/" + siteId).then().statusCode(409)
+        .body("code", equalTo("SITE_APPLIED"));
+    // An applied site must be disabled before it can be edited.
+    given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.token())
+        .contentType("application/json")
+        .body("{\"domain\":\"shop.example.com\",\"listenAddress\":\"192.0.2.10\","
+            + "\"listenPort\":80,\"upstreamPort\":9000}")
+        .put("/api/v1/reverse-proxy-sites/" + siteId).then().statusCode(409)
         .body("code", equalTo("SITE_APPLIED"));
     given().cookie("nanpanel_session", session.cookie())
         .header("X-CSRF-Token", session.token())

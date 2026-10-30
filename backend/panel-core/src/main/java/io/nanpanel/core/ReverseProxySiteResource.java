@@ -14,6 +14,7 @@ import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HeaderParam;
 import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
@@ -106,6 +107,52 @@ public class ReverseProxySiteResource {
       throw fail(409, "SITE_CONFLICT", "同一主机上该域名与监听端口已存在站点");
     }
     return Response.status(201).entity(loadSite(siteId)).build();
+  }
+
+  /**
+   * Edit a site that is not currently serving traffic. APPLIED sites must be disabled
+   * first, mirroring the delete rule, so an edit can never silently diverge from the
+   * route the host is running.
+   */
+  @PUT
+  @Path("{siteId}")
+  public Response edit(@PathParam("siteId") String siteValue, SiteRequest input) {
+    session();
+    UUID siteId = uuidText(siteValue, "siteId");
+    Map<String, Object> site = loadSite(siteId);
+    if ("APPLIED".equals(String.valueOf(site.get("state")))) {
+      throw fail(409, "SITE_APPLIED", "站点已生效，需先停用后再修改");
+    }
+    if (input == null) throw fail(422, "VALIDATION_FAILED", "站点参数缺失");
+    if (input.hostId() != null && !input.hostId().isBlank()
+        && !input.hostId().equals(String.valueOf(site.get("hostId")))) {
+      throw fail(422, "VALIDATION_FAILED", "站点不能更换主机，请新建站点");
+    }
+    String domain = input.domain() == null ? "" : input.domain().trim().toLowerCase();
+    String address = input.listenAddress() == null ? "" : input.listenAddress().trim();
+    int listenPort = port(input.listenPort());
+    int upstreamPort = port(input.upstreamPort());
+    String healthPath = input.healthPath() == null || input.healthPath().isBlank()
+        ? "/" : input.healthPath().trim();
+    ObjectNode payload = payload(address, listenPort, domain, healthPath, upstreamPort);
+    Object existingTls = site.get("tlsName");
+    if (existingTls != null) {
+      ObjectNode tls = payload.putObject("tls");
+      tls.put("certificate", String.valueOf(existingTls));
+      tls.put("privateKey", String.valueOf(existingTls));
+    }
+    helperOperations.validateNginxRoute(payload);
+    try {
+      store.transaction(c -> update(c, """
+          UPDATE reverse_proxy_site SET domain=?, listen_address=?, listen_port=?,
+            upstream_port=?, health_path=?, updated_at=? WHERE site_id=?""",
+          domain, address, listenPort, upstreamPort, healthPath,
+          System.currentTimeMillis(), siteId));
+    } catch (RuntimeException conflict) {
+      if (!uniqueViolation(conflict)) throw conflict;
+      throw fail(409, "SITE_CONFLICT", "同一主机上该域名与监听端口已存在站点");
+    }
+    return Response.ok(loadSite(siteId)).build();
   }
 
   @POST
