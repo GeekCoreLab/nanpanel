@@ -34,7 +34,7 @@ public class AlertRuleResource {
   @Context io.vertx.core.http.HttpServerRequest http;
 
   public record RuleRequest(String name, String condition, String hostId, String unitName,
-                            String severity, Boolean enabled) {}
+                            String severity, Boolean enabled, String channelId) {}
 
   @SuppressWarnings("unchecked")
   private Map<String, Object> session() {
@@ -54,8 +54,9 @@ public class AlertRuleResource {
     session();
     var rows = store.transaction(c -> query(c, """
         SELECT r.rule_id, r.name, r.condition_kind, r.host_id, h.hostname, r.unit_name,
-               r.severity, r.enabled
+               r.severity, r.enabled, r.channel_id, ch.name AS channel_name
         FROM alert_rule r LEFT JOIN host h ON h.id = r.host_id
+        LEFT JOIN alert_channel ch ON ch.channel_id = r.channel_id
         ORDER BY r.created_at DESC LIMIT 200"""));
     var items = new ArrayList<Map<String, Object>>(rows.size());
     for (var row : rows) items.add(map(row));
@@ -90,6 +91,19 @@ public class AlertRuleResource {
     }
     final UUID ruleHost = hostId;
     final String unit = serviceRule ? input.unitName() : null;
+    UUID channel = null;
+    if (input.channelId() != null && !input.channelId().isBlank()) {
+      try {
+        channel = UUID.fromString(input.channelId());
+      } catch (RuntimeException invalid) {
+        throw fail(422, "VALIDATION_FAILED", "channelId 必须是 UUID");
+      }
+      final UUID scope = channel;
+      var channels = store.transaction(c -> query(c,
+          "SELECT channel_id FROM alert_channel WHERE channel_id = ?", scope));
+      if (channels.isEmpty()) throw fail(404, "CHANNEL_NOT_FOUND", "通知渠道不存在");
+    }
+    final UUID ruleChannel = channel;
     var duplicates = store.transaction(c -> query(c,
         "SELECT rule_id FROM alert_rule WHERE condition_kind = ? AND "
             + "((host_id IS NULL AND ? IS NULL) OR host_id = ?) AND "
@@ -104,9 +118,9 @@ public class AlertRuleResource {
     store.transaction(c -> {
       update(c, """
           INSERT INTO alert_rule (rule_id, name, condition_kind, host_id, unit_name, severity,
-            enabled, created_by, created_at) VALUES (?,?,?,?,?,?,?,?,?)""",
+            enabled, created_by, created_at, channel_id) VALUES (?,?,?,?,?,?,?,?,?,?)""",
           ruleId, input.name().trim(), input.condition(), ruleHost, unit, input.severity(),
-          input.enabled() == null || input.enabled(), actorId, now);
+          input.enabled() == null || input.enabled(), actorId, now, ruleChannel);
       audit(c, actorId, "alert-rule.create", "alert_rule", ruleId.toString(), "SUCCEEDED",
           clientIp(), "创建告警规则 " + input.name().trim());
       return null;
@@ -138,8 +152,9 @@ public class AlertRuleResource {
   private Map<String, Object> byId(UUID ruleId) {
     var rows = store.transaction(c -> query(c, """
         SELECT r.rule_id, r.name, r.condition_kind, r.host_id, h.hostname, r.unit_name,
-               r.severity, r.enabled
-        FROM alert_rule r LEFT JOIN host h ON h.id = r.host_id WHERE r.rule_id = ?""", ruleId));
+               r.severity, r.enabled, r.channel_id, ch.name AS channel_name
+        FROM alert_rule r LEFT JOIN host h ON h.id = r.host_id
+        LEFT JOIN alert_channel ch ON ch.channel_id = r.channel_id WHERE r.rule_id = ?""", ruleId));
     return rows.isEmpty() ? null : map(rows.get(0));
   }
 
@@ -153,6 +168,10 @@ public class AlertRuleResource {
     item.put("unitName", row.get("unit_name") == null ? null : String.valueOf(row.get("unit_name")));
     item.put("severity", String.valueOf(row.get("severity")));
     item.put("enabled", Boolean.TRUE.equals(row.get("enabled")));
+    item.put("channelId", row.get("channel_id") == null ? null
+        : String.valueOf(row.get("channel_id")));
+    item.put("channelName", row.get("channel_name") == null ? null
+        : String.valueOf(row.get("channel_name")));
     return item;
   }
 }

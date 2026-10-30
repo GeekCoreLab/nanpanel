@@ -151,4 +151,9 @@
     <changeSet id="host-container-deployments-test" author="nanpanel">
         <sql>CREATE TABLE host_container_deployment (host_id UUID NOT NULL REFERENCES host(id) ON DELETE CASCADE, container_name VARCHAR(63) NOT NULL, image VARCHAR(255) NOT NULL, host_port INTEGER CHECK (host_port BETWEEN 1 AND 65535), container_port INTEGER CHECK (container_port BETWEEN 1 AND 65535), created_at BIGINT NOT NULL, PRIMARY KEY (host_id, container_name));</sql>
     </changeSet>
+    <changeSet id="alert-channels-test" author="nanpanel">
+        <sql>CREATE TABLE alert_channel (channel_id UUID PRIMARY KEY, name VARCHAR(120) NOT NULL UNIQUE, kind VARCHAR(16) NOT NULL CHECK (kind IN ('WEBHOOK')), url VARCHAR(500) NOT NULL, enabled BOOLEAN NOT NULL DEFAULT TRUE, last_status VARCHAR(16), last_at BIGINT, last_error VARCHAR(300), created_by VARCHAR(36) NOT NULL REFERENCES panel_user(id), created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL);</sql>
+        <sql>ALTER TABLE alert_rule ADD COLUMN channel_id UUID REFERENCES alert_channel(channel_id) ON DELETE SET NULL;</sql>
+        <sql>CREATE TABLE alert_firing_state (dedupe_key VARCHAR(200) PRIMARY KEY, rule_id UUID NOT NULL, channel_id UUID REFERENCES alert_channel(channel_id) ON DELETE CASCADE, hostname VARCHAR(255), since BIGINT NOT NULL, last_sent_at BIGINT);</sql>
+    </changeSet>
 </databaseChangeLog>

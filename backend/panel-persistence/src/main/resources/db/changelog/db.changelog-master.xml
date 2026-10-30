@@ -48,4 +48,5 @@
 <changeSet id="046-alert-rules" author="nanpanel"><sqlFile path="046-alert-rules.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE alert_rule;</sql></rollback></changeSet>
 <changeSet id="047-roles" author="nanpanel"><sqlFile path="047-roles.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE panel_role_permission; DROP TABLE panel_role;</sql></rollback></changeSet>
 <changeSet id="048-user-roles" author="nanpanel"><sqlFile path="048-user-roles.sql" relativeToChangelogFile="true"/><rollback><sql>ALTER TABLE panel_user DROP COLUMN role_id;</sql></rollback></changeSet>
+<changeSet id="049-alert-channels" author="nanpanel"><sqlFile path="049-alert-channels.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE alert_firing_state; ALTER TABLE alert_rule DROP COLUMN channel_id; DROP TABLE alert_channel;</sql></rollback></changeSet>
 </databaseChangeLog>
