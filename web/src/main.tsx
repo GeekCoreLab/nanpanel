@@ -1334,9 +1334,51 @@ function Users({ self, notify }: { self: string; notify: (s: string) => void }) 
 }
 function Settings({ notify }: { notify: (s: string) => void }) {
  const [value, setValue] = useState<PlatformSettings>(); const [tag, setTag] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
+ const [migrateStrategy, setMigrateStrategy] = useState<'skip' | 'overwrite'>('skip'); const [migrateBusy, setMigrateBusy] = useState(''); const [migrateReport, setMigrateReport] = useState<{ imported: number; skipped: number; failed: { kind: string; name: string | null; reason: string }[] }>(); const [migrateError, setMigrateError] = useState('');
+ async function exportConfig() {
+  setMigrateBusy('export'); setMigrateError('');
+  try {
+   const r = await fetch('/api/v1/config/export', { credentials: 'same-origin' });
+   if (!r.ok) throw new Error(`导出失败（HTTP ${r.status}）`);
+   const blob = await r.blob(); const url = URL.createObjectURL(blob);
+   const link = document.createElement('a'); link.href = url; link.download = 'nanpanel-config.json';
+   document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
+   notify('配置已导出（站点、告警规则、通知渠道）');
+  } catch (e) { setMigrateError((e as Error).message); } finally { setMigrateBusy(''); }
+ }
+ async function importConfig(file: File) {
+  setMigrateBusy('import'); setMigrateError(''); setMigrateReport(undefined);
+  try {
+   const text = await file.text(); const parsed = JSON.parse(text);
+   const r = await api<{ imported: number; skipped: number; failed: { kind: string; name: string | null; reason: string }[] }>(`/config/import?strategy=${migrateStrategy}`, 'POST', parsed, {}, true);
+   setMigrateReport(r.data); notify(`导入完成：成功 ${r.data.imported}，跳过 ${r.data.skipped}，失败 ${r.data.failed.length}`);
+  } catch (e) { setMigrateError((e as Error).message); } finally { setMigrateBusy(''); }
+ }
  const load = () => api<PlatformSettings>('/admin/settings').then(r => { setValue(r.data); setTag(r.etag ?? ''); setError(''); }).catch(e => setError(e.message)); useEffect(() => { void load(); }, []);
  async function save(e: FormEvent) { e.preventDefault(); if (!value) return; setBusy(true); try { const { siteName, defaultTimezone, hostOfflineAfterSeconds, operationRetentionDays } = value; const r = await api<PlatformSettings>('/admin/settings', 'PATCH', { siteName, defaultTimezone, hostOfflineAfterSeconds, operationRetentionDays }, { 'If-Match': tag }); setTag(r.etag ?? ''); setValue(r.data); setError(''); notify('平台设置已保存'); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } }
- return <><PageHeading title="平台设置" description="管理非机密平台配置；修改使用版本校验，避免覆盖并发变更。" action={<button className="secondary" onClick={load}>↻ 重新读取</button>} /><section className="card settings-card">{error && <div className="alert error">{error}</div>}{value ? <form onSubmit={save}><h2>基本设置</h2><p className="muted">仅影响平台展示与控制面策略。</p><Field label="站点名称"><input required maxLength={100} value={value.siteName} onChange={e => setValue({ ...value, siteName: e.target.value })} /></Field><Field label="默认展示时区"><select value={value.defaultTimezone} onChange={e => setValue({ ...value, defaultTimezone: e.target.value })}>{[...new Set([value.defaultTimezone, 'Asia/Shanghai', 'UTC', 'Asia/Singapore', 'America/New_York'])].map(t => <option key={t}>{t}</option>)}</select></Field><Field label="主机离线阈值（30–600 秒）"><input type="number" required min={30} max={600} value={value.hostOfflineAfterSeconds} onChange={e => setValue({ ...value, hostOfflineAfterSeconds: Number(e.target.value) })} /></Field><Field label="已结束任务保留天数（7–365 天）"><input type="number" required min={7} max={365} value={value.operationRetentionDays} onChange={e => setValue({ ...value, operationRetentionDays: Number(e.target.value) })} /></Field><div className="alert">非终态与 UNKNOWN 任务不因保留期被清理。审计保留独立于任务保留策略。</div><button className="primary" disabled={busy}>{busy ? '正在保存…' : '保存设置'}</button><p className="muted">最近修改：{time(value.updatedAt)}</p></form> : !error && <p>正在读取设置…</p>}</section></>;
+ return <><PageHeading title="平台设置" description="管理非机密平台配置；修改使用版本校验，避免覆盖并发变更。" action={<button className="secondary" onClick={load}>↻ 重新读取</button>} /><section className="card settings-card">{error && <div className="alert error">{error}</div>}{value ? <form onSubmit={save}><h2>基本设置</h2><p className="muted">仅影响平台展示与控制面策略。</p><Field label="站点名称"><input required maxLength={100} value={value.siteName} onChange={e => setValue({ ...value, siteName: e.target.value })} /></Field><Field label="默认展示时区"><select value={value.defaultTimezone} onChange={e => setValue({ ...value, defaultTimezone: e.target.value })}>{[...new Set([value.defaultTimezone, 'Asia/Shanghai', 'UTC', 'Asia/Singapore', 'America/New_York'])].map(t => <option key={t}>{t}</option>)}</select></Field><Field label="主机离线阈值（30–600 秒）"><input type="number" required min={30} max={600} value={value.hostOfflineAfterSeconds} onChange={e => setValue({ ...value, hostOfflineAfterSeconds: Number(e.target.value) })} /></Field><Field label="已结束任务保留天数（7–365 天）"><input type="number" required min={7} max={365} value={value.operationRetentionDays} onChange={e => setValue({ ...value, operationRetentionDays: Number(e.target.value) })} /></Field><div className="alert">非终态与 UNKNOWN 任务不因保留期被清理。审计保留独立于任务保留策略。</div><button className="primary" disabled={busy}>{busy ? '正在保存…' : '保存设置'}</button><p className="muted">最近修改：{time(value.updatedAt)}</p></form> : !error && <p>正在读取设置…</p>}</section>
+ <section className="card settings-card">
+  <h2>配置迁移</h2>
+  <p className="muted">导出站点、告警规则与通知渠道（不含证书、密钥与运行时状态），可在另一台面板导入。主机按主机名匹配，站点一律以草稿导入，不会自动下发。</p>
+  {migrateError && <div className="alert error">{migrateError}</div>}
+  <div className="config-migrate-actions">
+   <button className="secondary" disabled={migrateBusy !== ''} onClick={() => void exportConfig()}>{migrateBusy === 'export' ? '导出中…' : '导出配置'}</button>
+   <label className="field config-migrate-import"><span>冲突策略</span>
+    <select value={migrateStrategy} onChange={e => setMigrateStrategy(e.target.value as 'skip' | 'overwrite')}>
+     <option value="skip">跳过已存在（skip）</option>
+     <option value="overwrite">覆盖已存在（overwrite）</option>
+    </select></label>
+   <label className="secondary config-migrate-file"><input type="file" accept="application/json,.json" disabled={migrateBusy !== ''}
+     onChange={e => { const f = e.target.files?.[0]; if (f) void importConfig(f); e.target.value = ''; }} />
+    {migrateBusy === 'import' ? '导入中…' : '选择 JSON 导入'}</label>
+  </div>
+  {migrateReport && <div className="config-migrate-report">
+   <span>成功 {migrateReport.imported}</span><span>跳过 {migrateReport.skipped}</span>
+   <span className={migrateReport.failed.length ? 'failed' : ''}>失败 {migrateReport.failed.length}</span>
+   {migrateReport.failed.length > 0 && <ul>{migrateReport.failed.map((f, i) => <li key={`${f.kind}-${i}`}>
+    <b>{f.kind}</b> {f.name ?? '—'}：{f.reason}</li>)}</ul>}
+  </div>}
+ </section></>;
 }
 function Audit() {
  const [outcome, setOutcome] = useState(''); const [query, setQuery] = useState(''); const [actorDraft, setActorDraft] = useState(''); const [actionDraft, setActionDraft] = useState(''); const [fromDraft, setFromDraft] = useState(''); const [toDraft, setToDraft] = useState(''); const [filters, setFilters] = useState({ outcome: '', actorId: '', action: '', from: '', to: '' }); const [cursors, setCursors] = useState<(string | null)[]>([null]); const [selected, setSelected] = useState<string>();

@@ -21,3 +21,10 @@
 .topology .port-duplex .duplex-input,.topology .port-duplex .duplex-output{top:9px!important;width:12px!important;height:12px!important;border:2px solid #fff!important}
 .topology .port-duplex .duplex-input{left:-6px!important;background:#4a86ed!important}
 .topology .port-duplex .duplex-output{right:-6px!important;background:#2eaf83!important}
+.config-migrate-actions{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;margin-top:10px}
+.config-migrate-import{min-width:220px}
+.config-migrate-file{display:inline-flex;align-items:center;cursor:pointer}
+.config-migrate-file input{display:none}
+.config-migrate-report{display:flex;flex-wrap:wrap;gap:14px;margin-top:12px;font-size:12px}
+.config-migrate-report .failed{color:#ef4444}
+.config-migrate-report ul{margin:0;padding-left:16px;flex-basis:100%}
