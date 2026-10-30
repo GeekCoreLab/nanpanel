@@ -204,10 +204,17 @@ public class AdminUsersResource {
     var actor = session();
     recent(actor);
     if (body == null || body.isEmpty() ||
-        !Set.of("displayName", "status").containsAll(body.keySet()))
-      throw fail(422, "VALIDATION_FAILED", "仅支持更新显示名称和账号状态");
+        !Set.of("displayName", "status", "roleId").containsAll(body.keySet()))
+      throw fail(422, "VALIDATION_FAILED", "仅支持更新显示名称、账号状态和角色");
     String display = null;
     String status = null;
+    String roleId = null;
+    if (body.containsKey("roleId")) {
+      if (!(body.get("roleId") instanceof String value)
+          || !value.matches("[A-Za-z][A-Za-z0-9_-]{1,63}"))
+        throw fail(422, "VALIDATION_FAILED", "无效角色");
+      roleId = value;
+    }
     if (body.containsKey("displayName")) {
       if (!(body.get("displayName") instanceof String value))
         throw fail(422, "VALIDATION_FAILED", "显示名称必须为非空文本");
@@ -224,6 +231,7 @@ public class AdminUsersResource {
     }
     final String newDisplay = display;
     final String newStatus = status;
+    final String newRole = roleId;
     return store.transaction(c -> {
       query(c, "SELECT id FROM auth_bootstrap_lock WHERE id=1 FOR UPDATE");
       var user = query(c, "SELECT * FROM panel_user WHERE id=? FOR UPDATE", id);
@@ -243,20 +251,37 @@ public class AdminUsersResource {
         if ("ACTIVE".equals(target.get("status")) && active <= 1)
           throw fail(409, "ADMIN_CONFLICT", "不能禁用最后一位管理员");
       }
-      if (newDisplay != null || newStatus != null) {
+      if (newRole != null) {
+        var roles = query(c, "SELECT role_id FROM panel_role WHERE role_id=?", newRole);
+        if (roles.isEmpty())
+          throw fail(422, "VALIDATION_FAILED", "角色不存在");
+        boolean wasAdmin = "ADMIN".equals(String.valueOf(target.get("role_id")));
+        if (wasAdmin && !"ADMIN".equals(newRole)
+            && "ACTIVE".equals(target.get("status"))) {
+          long admins = ((Number)query(c,
+              "SELECT COUNT(*) AS count FROM panel_user "
+                  + "WHERE role_id='ADMIN' AND status='ACTIVE' AND id<>?", id)
+              .getFirst().get("count")).longValue();
+          if (admins == 0)
+            throw fail(409, "ADMIN_CONFLICT", "不能移除最后一位管理员的管理员角色");
+        }
+      }
+      if (newDisplay != null || newStatus != null || newRole != null) {
         update(c,
                "UPDATE panel_user SET display_name=COALESCE(?,display_name),"
-                   + "status=COALESCE(?,status),updated_at=?,version=version+1 "
-                   + "WHERE id=?",
-               newDisplay, newStatus, System.currentTimeMillis(), id);
+                   + "status=COALESCE(?,status),role_id=COALESCE(?,role_id),"
+                   + "updated_at=?,version=version+1 WHERE id=?",
+               newDisplay, newStatus, newRole, System.currentTimeMillis(), id);
       }
       if ("DISABLED".equals(newStatus))
         update(c, "DELETE FROM web_session WHERE user_id=?", id);
-      audit(c, String.valueOf(actor.get("user_id")),
-            newStatus == null ? "admin.user.profile.update"
-                              : "admin.user.status.update",
-            "user", id, "SUCCEEDED", http.remoteAddress().host(),
-            newStatus == null ? "修改管理员显示名称" : "更新管理员账号状态");
+      String action = newRole != null ? "admin.user.role.update"
+          : newStatus != null ? "admin.user.status.update"
+                              : "admin.user.profile.update";
+      audit(c, String.valueOf(actor.get("user_id")), action, "user", id,
+            "SUCCEEDED", http.remoteAddress().host(),
+            newRole != null ? "更新管理员角色为 " + newRole
+                : newStatus != null ? "更新管理员账号状态" : "修改管理员显示名称");
       var updated = byId(c, id);
       return Response.ok(view(updated)).tag(tag(updated)).build();
     });

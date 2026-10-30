@@ -112,3 +112,14 @@ Cookie 生命周期与轮换设计参考 [OWASP Session Management](https://chea
 - 工作区/项目级隔离：资源目前都是平台级，`resource` 参数统一按 `*` 判定。
 - 界面上的角色管理与账号角色分配：`GET /api/v1/admin/roles` 只读，账号角色通过 `role_id` 直接落库。
 - 自定义角色（非内置）可以在库中创建并被正确判定，但还没有创建入口。
+
+## 账号角色分配
+
+`PATCH /api/v1/admin/users/{id}` 除 `displayName`、`status` 外还接受 `roleId`（需 `If-Match` 账号 ETag）：
+
+- `roleId` 必须是 `panel_role` 中已存在的角色，否则 `422 VALIDATION_FAILED`。
+- 若目标账号当前是 **ACTIVE 的 ADMIN**，且改后不再是 `ADMIN`，则要求系统里至少还有另一位 ACTIVE 的 `ADMIN`，否则返回 `409 ADMIN_CONFLICT`（防止把平台锁死）。
+- 成功后写 `admin.user.role.update` 审计，账号列表的 `roles[0]` 立即反映新角色，权限在下一次请求生效（无需重新登录）。
+- 控制台「管理员」页的「管理 → 修改显示名称」表单里新增角色下拉，提交时与 `displayName` 一起 `PATCH`。
+
+**仍未实现**：自定义角色的创建/编辑界面（角色目前只能通过数据库或迁移写入），工作区/项目级隔离。
