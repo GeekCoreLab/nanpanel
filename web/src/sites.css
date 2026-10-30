@@ -26,3 +26,6 @@
 .sites-tls-dialog{width:min(560px,92vw)}
 .sites-tls-dialog textarea{width:100%;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;border:1px solid #dbe3ee;border-radius:8px;padding:8px;resize:vertical}
 .sites-tls-dialog .form-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}
+.sites-form-actions{display:flex;align-items:center;gap:8px}
+.sites-form-actions button.primary{align-self:auto;margin-top:0}
+.sites-item-actions button{white-space:nowrap}

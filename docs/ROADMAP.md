@@ -68,7 +68,7 @@ NaNPanel 是 **Java 主控 + Rust 边缘** 的混合云基础设施控制面。�
 - [x] 站点实体：域名、上游（本机 loopback 端口）、监听地址/端口、健康检查路径，编译为受管 Nginx 路由（复用 P5 `nginx.route.set`）。控制台「网站」页支持登记、下发（应用）、删除记录。
 - [x] 手工证书 TLS 终止：`nginx.tls.install` 写入主机受管证书目录（0600、root 拥有，Core 不存私钥），`nginx.route.set` 支持 `tls` 渲染 `listen …:443 ssl`、探测走 HTTPS；站点已接入：`POST /{siteId}/tls` + 网站页「HTTPS」按钮（粘贴证书/私钥后自动重新下发）。
 - [ ] acme/Let's Encrypt 证书申请与自动续期。
-- [x] 站点启停：`disable` 经 `nginx.route.remove` 撤回受管路由（失败自动还原、幂等、失败不改状态），`apply` 即启用；与 P7 一键绑定域名（部署元数据记录发布端口，网站表单可「从已部署容器带入」主机与上游端口）。
+- [x] 站点启停：`disable` 经 `nginx.route.remove` 撤回受管路由（失败自动还原、幂等、失败不改状态），`apply` 即启用；未生效站点可 `PUT` 修改后重新应用（`APPLIED` 需先停用、不可更换主机）；与 P7 一键绑定域名（部署元数据记录发布端口，网站表单可「从已部署容器带入」主机与上游端口）。
 - [ ] 站点健康探测与配置回滚（多次应用的历史版本）。
 - [ ] 验收：真实域名 + 免费证书 + 反代到容器应用，续期与回滚验证。
 - 已落地（2026-10-30）：`reverse_proxy_site` 表（迁移 044，含 `tls_name`）+ `/api/v1/reverse-proxy-sites`（列表 / 登记 / 下发 / 停用 / 删除记录 / 安装证书），登记时复用下发校验保证「已登记即可下发」；`apply` 编译 `nginx.route.set`（有证书时带 `tls`），`disable` 调用 `nginx.route.remove` 撤回受管路由（Helper 侧带归属校验、`nginx -t` 校验、失败还原），状态机 `DRAFT → APPLIED ⇄ DISABLED`。剩余：ACME 自动签发与续期、健康探测、配置回滚、真实主机验收。

@@ -24,6 +24,7 @@ export function Sites({ notify }: { notify: (message: string) => void }) {
   const [listenPort, setListenPort] = useState('80');
   const [upstreamPort, setUpstreamPort] = useState('8080');
   const [healthPath, setHealthPath] = useState('/');
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [tlsSite, setTlsSite] = useState<ReverseProxySite | null>(null);
   const [certPem, setCertPem] = useState('');
   const [keyPem, setKeyPem] = useState('');
@@ -70,14 +71,21 @@ export function Sites({ notify }: { notify: (message: string) => void }) {
     if (isMock) return;
     setBusy('create');
     try {
-      await api<ReverseProxySite>('/reverse-proxy-sites', 'POST', {
+      const body = {
         hostId, domain: domain.trim(), listenAddress: listenAddress.trim(),
         listenPort: Number(listenPort), upstreamPort: Number(upstreamPort),
         healthPath: healthPath.trim() || '/',
-      }, {}, true);
-      notify(`站点 ${domain.trim()} 已创建`);
-      setDomain('');
-      setListenAddress('');
+      };
+      if (editingId) {
+        await api<ReverseProxySite>(`/reverse-proxy-sites/${editingId}`, 'PUT', body, {}, true);
+        notify(`站点 ${domain.trim()} 已更新，需要重新应用才会生效`);
+      } else {
+        await api<ReverseProxySite>('/reverse-proxy-sites', 'POST', body, {}, true);
+        notify(`站点 ${domain.trim()} 已创建`);
+        setDomain('');
+        setListenAddress('');
+      }
+      setEditingId(null);
       await load();
     } catch (cause) {
       setError((cause as Error).message);
@@ -114,6 +122,24 @@ export function Sites({ notify }: { notify: (message: string) => void }) {
     } finally {
       setBusy('');
     }
+  }
+
+  function startEdit(site: ReverseProxySite) {
+    setEditingId(site.id);
+    setHostId(site.hostId);
+    setDomain(site.domain);
+    setListenAddress(site.listenAddress);
+    setListenPort(String(site.listenPort));
+    setUpstreamPort(String(site.upstreamPort));
+    setHealthPath(site.healthPath);
+    setError('');
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+    setDomain('');
+    setListenAddress('');
+    setError('');
   }
 
   function openTls(site: ReverseProxySite) {
@@ -167,7 +193,7 @@ export function Sites({ notify }: { notify: (message: string) => void }) {
     <div className="sites-grid">
       <form className="card sites-form" onSubmit={submit}>
         <span className="eyebrow">NEW SITE</span>
-        <h3>登记站点</h3>
+        <h3>{editingId ? '编辑站点' : '登记站点'}</h3>
         {deployments.length > 0 && <label className="field"><span>从已部署容器带入</span>
           <select value="" onChange={event => applyDeployment(event.target.value)}>
             <option value="">选择已部署容器（自动填主机与上游端口）</option>
@@ -197,9 +223,13 @@ export function Sites({ notify }: { notify: (message: string) => void }) {
         </div>
         <label className="field"><span>健康检查路径</span>
           <input value={healthPath} onChange={event => setHealthPath(event.target.value)} placeholder="/" /></label>
-        <button className="primary" type="submit" disabled={isMock || busy === 'create' || !hostId}>
-          {busy === 'create' ? '创建中…' : '创建站点'}
-        </button>
+        <div className="sites-form-actions">
+          <button className="primary" type="submit" disabled={isMock || busy === 'create' || !hostId}>
+            {busy === 'create' ? '提交中…' : editingId ? '保存修改' : '创建站点'}
+          </button>
+          {editingId && <button type="button" className="secondary" disabled={busy === 'create'}
+            onClick={cancelEdit}>取消编辑</button>}
+        </div>
       </form>
 
       <div className="card sites-list">
@@ -213,6 +243,10 @@ export function Sites({ notify }: { notify: (message: string) => void }) {
           </div>
           <span className={`sites-state sites-state-${site.state.toLowerCase()}`}>{STATE_LABELS[site.state] ?? site.state}</span>
           <div className="sites-item-actions">
+            <button type="button" className="secondary"
+              disabled={isMock || busy === site.id || site.state === 'APPLIED'}
+              title={site.state === 'APPLIED' ? '已生效站点需先停用后再修改' : '修改域名、地址、端口或健康检查路径'}
+              onClick={() => startEdit(site)}>编辑</button>
             <button type="button" className="secondary" disabled={isMock || busy === site.id}
               title="粘贴证书与私钥，切换到受管 HTTPS 终止"
               onClick={() => openTls(site)}>{site.tlsName ? '更新证书' : 'HTTPS'}</button>
