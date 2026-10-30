@@ -26,3 +26,6 @@
 .alerts-channels li .alerts-item-copy small{display:block}
 .alerts-channel-form{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-top:12px;padding-top:12px;border-top:1px solid var(--border,rgba(148,163,184,.16))}
 .alerts-channel-form .field{flex:1 1 220px;margin:0}
+.alerts-events{margin-top:14px}
+.alerts-checkbox{display:flex;align-items:center;gap:6px;font-size:12px;white-space:nowrap;padding-bottom:6px}
+.alerts-checkbox input{width:auto}

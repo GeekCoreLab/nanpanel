@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { api, isMock } from './lib/api';
 import type {
-  AlertChannel, AlertChannelList, AlertCondition, AlertRule, AlertRuleList, FiringAlertList,
+  AlertChannel, AlertChannelList, AlertCondition, AlertEvent, AlertEventList, AlertRule,
+  AlertRuleList, FiringAlertList,
   Host, HostPage,
 } from './lib/types';
 import './alerts.css';
@@ -34,19 +35,23 @@ export function Alerts({ notify }: { notify: (message: string) => void }) {
   const [channelId, setChannelId] = useState('');
   const [channelName, setChannelName] = useState('');
   const [channelUrl, setChannelUrl] = useState('');
+  const [notifyRecovery, setNotifyRecovery] = useState(true);
+  const [events, setEvents] = useState<AlertEvent[]>([]);
 
   const load = useCallback(async () => {
     if (isMock) return;
     setLoading(true);
     try {
-      const [ruleResult, alertResult, channelResult] = await Promise.all([
+      const [ruleResult, alertResult, channelResult, eventResult] = await Promise.all([
         api<AlertRuleList>('/alert-rules', 'GET', undefined, {}, true),
         api<FiringAlertList>('/alerts', 'GET', undefined, {}, true),
         api<AlertChannelList>('/alert-channels', 'GET', undefined, {}, true),
+        api<AlertEventList>('/alert-events?limit=20', 'GET', undefined, {}, true),
       ]);
       setRules(ruleResult.data.items);
       setFiring(alertResult.data);
       setChannels(channelResult.data.items);
+      setEvents(eventResult.data.items);
       setError('');
     } catch (cause) {
       setError((cause as Error).message);
@@ -93,7 +98,7 @@ export function Alerts({ notify }: { notify: (message: string) => void }) {
     setBusy('channel');
     try {
       await api<AlertChannel>('/alert-channels', 'POST', {
-        name: channelName.trim(), url: channelUrl.trim(),
+        name: channelName.trim(), url: channelUrl.trim(), notifyRecovery,
       }, {}, true);
       notify(`通知渠道「${channelName.trim()}」已创建`);
       setChannelName('');
@@ -231,6 +236,7 @@ export function Alerts({ notify }: { notify: (message: string) => void }) {
               <strong>{channel.name}</strong>
               <small className="mono">{channel.url}</small>
               <small>{channel.enabled ? '已启用' : '已停用'} · 被 {channel.ruleCount} 条规则使用
+                {channel.notifyRecovery ? ' · 恢复也通知' : ' · 只通知告警'}
                 {channel.lastStatus ? ` · 上次投递 ${channel.lastStatus === 'SUCCEEDED' ? '成功' : '失败'}`
                   : ' · 尚未投递'}
                 {channel.lastError ? `（${channel.lastError}）` : ''}</small>
@@ -245,6 +251,10 @@ export function Alerts({ notify }: { notify: (message: string) => void }) {
             <label className="field"><span>名称</span>
               <input value={channelName} onChange={event => setChannelName(event.target.value)}
                 required maxLength={120} placeholder="例如：值班群 Webhook" /></label>
+            <label className="alerts-checkbox">
+              <input type="checkbox" checked={notifyRecovery}
+                onChange={event => setNotifyRecovery(event.target.checked)} />
+              <span>恢复时也通知</span></label>
             <label className="field"><span>Webhook 地址</span>
               <input value={channelUrl} onChange={event => setChannelUrl(event.target.value)}
                 required maxLength={500} placeholder="https://example.com/hooks/nanpanel" /></label>
@@ -253,6 +263,27 @@ export function Alerts({ notify }: { notify: (message: string) => void }) {
           </form>
         </div>
       </div>
+    </div>
+
+    <div className="card alerts-events">
+      <div className="alerts-card-heading"><h3>通知历史</h3>
+        <span>{events.length ? `最近 ${events.length} 条` : '暂无记录'}</span></div>
+      {events.length === 0
+        ? <p className="application-muted">
+          还没有投递记录。规则绑定渠道后，告警触发与恢复都会在这里留下一次实际投递尝试。</p>
+        : <div className="table-wrap"><table>
+          <thead><tr><th>时间</th><th>类型</th><th>规则</th><th>对象</th><th>渠道</th><th>结果</th></tr></thead>
+          <tbody>{events.map(item => <tr key={item.id}>
+            <td className="mono">{new Date(item.createdAt).toLocaleString()}</td>
+            <td><span className={`alerts-severity alerts-severity-${item.kind === 'RECOVERED' ? 'warning' : item.severity.toLowerCase()}`}>
+              {item.kind === 'RECOVERED' ? '恢复' : '告警'}</span></td>
+            <td>{item.ruleName}</td>
+            <td>{item.hostname ?? '—'}{item.detail ? <small className="muted"> · {item.detail}</small> : null}</td>
+            <td>{item.channelName ?? '—'}</td>
+            <td>{item.status === 'SUCCEEDED' ? '已送达'
+              : <span title={item.error ?? ''}>失败{item.error ? `（${item.error}）` : ''}</span>}</td>
+          </tr>)}</tbody>
+        </table></div>}
     </div>
   </section>;
 }

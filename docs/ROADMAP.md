@@ -54,6 +54,7 @@ NaNPanel 是 **Java 主控 + Rust 边缘** 的混合云基础设施控制面。�
 
 - [x] 容器页（2026-10-30）：控制台新增「容器」，复用既有 `container.list/logs/start/stop/remove` 能力列容器、启停、看日志、移除（移除二次确认，只 `rm --force`、保留命名数据卷）；列表由 `docker ps --all` 输出解析，纯函数 + 4 项单测覆盖空行/CRLF、暂停态不误判为运行、Exited/Created/Restarting 分类。**运行时验收需真实主机**。
 
+- [x] 告警闭环（2026-10-30）：恢复也通知（`alert.recovered`，渠道可用 `notifyRecovery=false` 关闭）、每次投递尝试（含失败）写入 `alert_event`，新增只读 `GET /api/v1/alert-events` 与控制台「通知历史」表。集成测试覆盖两种边沿、失败记录与事件筛选。
 - [x] 告警通知（2026-10-30）：新增 Webhook 通知渠道（迁移 049：`alert_channel` + `alert_rule.channel_id` + `alert_firing_state`），规则可绑定渠道；`AlertNotifier` 每 60s 求值一次，按「规则+主机+明细」去重，只对新进入告警的对象投递，失败不记去重键（下一轮重试），恢复后清除状态（再次告警会重新通知）。渠道 CRUD + `POST /{id}/test` 连通性测试，投递结果写回 `lastStatus`/`lastError`。控制台告警页新增渠道卡片与规则绑定下拉。集成测试用内嵌 HTTP 服务验证载荷、去重、恢复后重发、失败重试与 502 报告。
 
 ### P7｜应用商店与一键部署
