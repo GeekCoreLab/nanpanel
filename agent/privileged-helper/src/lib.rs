@@ -22,10 +22,12 @@ use tokio::io::AsyncReadExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio_util::codec::{Framed, LinesCodec};
 
+mod backup;
 mod cron_jobs;
 mod metrics;
 mod nginx_routes;
 mod topology;
+pub use backup::BackupConfig;
 pub use cron_jobs::CronConfig;
 pub use metrics::MetricsConfig;
 pub use nginx_routes::NginxRouteConfig;
@@ -85,6 +87,7 @@ pub struct HelperConfig {
     nginx_routes: Option<nginx_routes::NginxRouteConfig>,
     cron: Option<cron_jobs::CronConfig>,
     metrics: Option<metrics::MetricsConfig>,
+    backup: Option<backup::BackupConfig>,
     network_operations_available: bool,
     topology_operations_available: bool,
     packet_capture_available: bool,
@@ -199,6 +202,7 @@ struct HelperRuntime {
     nginx_routes: Option<Arc<NginxRouteConfig>>,
     cron: Option<Arc<cron_jobs::CronConfig>>,
     metrics: Option<Arc<metrics::MetricsConfig>>,
+    backup: Option<Arc<backup::BackupConfig>>,
     network_operations_available: bool,
     topology_operations_available: bool,
     packet_capture_available: bool,
@@ -310,6 +314,7 @@ impl HelperConfig {
             nginx_routes: None,
             cron: None,
             metrics: None,
+            backup: None,
             network_operations_available,
             topology_operations_available,
             packet_capture_available,
@@ -331,6 +336,11 @@ impl HelperConfig {
 
     pub fn with_metrics(mut self, metrics: Option<metrics::MetricsConfig>) -> Self {
         self.metrics = metrics;
+        self
+    }
+
+    pub fn with_backup(mut self, backup: Option<backup::BackupConfig>) -> Self {
+        self.backup = backup;
         self
     }
 }
@@ -360,6 +370,7 @@ pub async fn serve(config: HelperConfig) -> Result<()> {
         nginx_routes: config.nginx_routes.map(Arc::new),
         cron: config.cron.map(Arc::new),
         metrics: config.metrics.map(Arc::new),
+        backup: config.backup.map(Arc::new),
         network_operations_available: config.network_operations_available,
         topology_operations_available: config.topology_operations_available,
         packet_capture_available: config.packet_capture_available,
@@ -462,6 +473,7 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                     runtime.nginx_routes.is_some(),
                                     runtime.cron.is_some(),
                                     runtime.metrics.is_some(),
+                                    runtime.backup.is_some(),
                                 )
                             }) {
                                 Err(error) => Err(error),
@@ -489,6 +501,7 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                             nginx_routes_available: runtime.nginx_routes.is_some(),
                                             cron_available: runtime.cron.is_some(),
                                             metrics_available: runtime.metrics.is_some(),
+                                            backup_available: runtime.backup.is_some(),
                                         })
                                     )
                                     .to_string()),
@@ -741,6 +754,7 @@ fn validate_capability_target(
     nginx_routes_available: bool,
     cron_available: bool,
     metrics_available: bool,
+    backup_available: bool,
 ) -> std::result::Result<(), String> {
     match capability {
         "helper.status" | "helper.capabilities" | "agent.update" if target.is_empty() => Ok(()),
@@ -767,6 +781,11 @@ fn validate_capability_target(
         }
         "cron.list" if target.is_empty() && cron_available => Ok(()),
         "metrics.read" if target.is_empty() && metrics_available => Ok(()),
+        "backup.list" if target.is_empty() && backup_available => Ok(()),
+        "backup.create" if target.is_empty() && backup_available => Ok(()),
+        "backup.delete" if backup_available && backup::BackupConfig::validate_target(target) => {
+            Ok(())
+        }
         "cron.write" | "cron.remove"
             if cron_available && cron_jobs::CronConfig::validate_target(target) =>
         {
@@ -856,6 +875,7 @@ fn validate_payload_presence(request: &Request) -> std::result::Result<(), Strin
             | "nginx.route.set"
             | "nginx.tls.install"
             | "cron.write"
+            | "backup.create"
     );
     if required != request.payload_json.is_some() {
         return Err("DENIED: payload presence does not match capability schema".to_owned());
@@ -895,6 +915,7 @@ struct CapabilityState {
     nginx_routes_available: bool,
     cron_available: bool,
     metrics_available: bool,
+    backup_available: bool,
 }
 
 fn available_capabilities(state: CapabilityState) -> Vec<&'static str> {
@@ -912,6 +933,9 @@ fn available_capabilities(state: CapabilityState) -> Vec<&'static str> {
         "file.write",
         "file.delete",
     ];
+    if state.backup_available {
+        capabilities.extend(["backup.list", "backup.create", "backup.delete"]);
+    }
     if state.metrics_available {
         capabilities.extend(["metrics.read"]);
     }
@@ -3687,6 +3711,7 @@ mod tests {
             nginx_routes_available: true,
             cron_available: true,
             metrics_available: true,
+            backup_available: true,
         }
     }
 
@@ -3794,6 +3819,7 @@ mod tests {
             validate_capability_target(
                 &request.capability,
                 &request.target,
+                false,
                 false,
                 false,
                 false,
@@ -3930,7 +3956,7 @@ mod tests {
             .as_millis() as i64;
         let validate = |capability, target, containers, firewall, nginx| {
             validate_capability_target(
-                capability, target, containers, firewall, false, false, nginx, false, false,
+                capability, target, containers, firewall, false, false, nginx, false, false, false,
             )
         };
         assert!(validate("agent.update", "", false, false, false).is_ok());
@@ -3973,7 +3999,7 @@ mod tests {
                 "temporary-test",
                 false,
                 true,
-                false
+                false,
             )
             .is_ok()
         );
@@ -4071,6 +4097,7 @@ mod tests {
                 true,
                 false,
                 false,
+                false,
                 false
             )
             .is_ok()
@@ -4085,6 +4112,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 false
             )
             .is_err()
@@ -4093,6 +4121,7 @@ mod tests {
             validate_capability_target(
                 "k3s.preflight",
                 "",
+                false,
                 false,
                 false,
                 false,
@@ -4177,6 +4206,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 false
             )
             .is_ok()
@@ -4191,6 +4221,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 false
             )
             .is_err()
@@ -4199,6 +4230,7 @@ mod tests {
             validate_capability_target(
                 "container.remove",
                 "nanpanel-web",
+                false,
                 false,
                 false,
                 false,
@@ -4254,6 +4286,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 false
             )
             .is_err()
@@ -4264,6 +4297,7 @@ mod tests {
                 "ssh-temp",
                 false,
                 true,
+                false,
                 false,
                 false,
                 false,

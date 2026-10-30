@@ -128,6 +128,13 @@ struct NginxRoutePayload {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct BackupPayload {
+    source: String,
+    name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct CronJobPayload {
     schedule: String,
     command: String,
@@ -746,6 +753,9 @@ async fn connect_once(
                                 | "cron.write"
                                 | "cron.remove"
                                 | "metrics.read"
+                                | "backup.list"
+                                | "backup.create"
+                                | "backup.delete"
                         )
                     {
                         capabilities.push(capability);
@@ -1820,6 +1830,14 @@ fn valid_control(capability: &str, target: &str, payload_json: &str) -> bool {
         "nginx.route.remove" => valid_nginx_route_target(target) && !has_payload,
         "cron.list" => target.is_empty() && !has_payload,
         "metrics.read" => target.is_empty() && !has_payload,
+        "backup.list" => target.is_empty() && !has_payload,
+        "backup.create" => {
+            target.is_empty()
+                && has_payload
+                && serde_json::from_str::<BackupPayload>(payload_json)
+                    .is_ok_and(|payload| valid_backup_payload(&payload))
+        }
+        "backup.delete" => valid_backup_file(target) && !has_payload,
         "cron.write" => {
             valid_cron_target(target)
                 && has_payload
@@ -1943,6 +1961,42 @@ fn valid_k3s_token(token: &str) -> bool {
         && token
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+}
+
+fn valid_backup_file(target: &str) -> bool {
+    let Some(stem) = target.strip_suffix(".tar.gz") else {
+        return false;
+    };
+    let Some((name, stamp)) = stem.rsplit_once('-') else {
+        return false;
+    };
+    !name.is_empty()
+        && name.len() <= 32
+        && name.as_bytes()[0].is_ascii_lowercase()
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && stamp.len() == 16
+        && stamp.as_bytes()[8] == b'T'
+        && stamp.as_bytes()[15] == b'Z'
+        && stamp
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| index == 8 || index == 15 || byte.is_ascii_digit())
+}
+
+fn valid_backup_payload(payload: &BackupPayload) -> bool {
+    payload.source.starts_with('/')
+        && payload.source.len() <= 1024
+        && !payload.source.contains("..")
+        && payload.name.len() >= 2
+        && payload.name.len() <= 32
+        && payload.name.as_bytes()[0].is_ascii_lowercase()
+        && payload
+            .name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && !payload.name.ends_with('-')
 }
 
 fn valid_cron_target(target: &str) -> bool {
