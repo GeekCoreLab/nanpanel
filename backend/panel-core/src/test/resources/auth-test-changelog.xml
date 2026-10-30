@@ -164,4 +164,7 @@
         <sql>ALTER TABLE alert_firing_state ADD COLUMN detail VARCHAR(500);</sql>
         <sql>CREATE TABLE alert_event (event_id UUID PRIMARY KEY, dedupe_key VARCHAR(200) NOT NULL, rule_id UUID, rule_name VARCHAR(120) NOT NULL, channel_id UUID, channel_name VARCHAR(120), kind VARCHAR(16) NOT NULL CHECK (kind IN ('FIRING','RECOVERED')), severity VARCHAR(16) NOT NULL, condition_kind VARCHAR(32) NOT NULL, hostname VARCHAR(255), detail VARCHAR(500), status VARCHAR(16) NOT NULL CHECK (status IN ('SUCCEEDED','FAILED')), error VARCHAR(300), created_at BIGINT NOT NULL);</sql>
     </changeSet>
+    <changeSet id="cron-jobs-test" author="nanpanel">
+        <sql>CREATE TABLE cron_job (host_id UUID NOT NULL REFERENCES host(id) ON DELETE CASCADE, job_id VARCHAR(42) NOT NULL, schedule VARCHAR(128) NOT NULL, command VARCHAR(900) NOT NULL, state VARCHAR(16) NOT NULL DEFAULT 'DRAFT' CHECK (state IN ('DRAFT','APPLIED','DISABLED','FAILED','UNKNOWN')), operation_id UUID, created_by VARCHAR(36) NOT NULL REFERENCES panel_user(id), created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL, PRIMARY KEY (host_id, job_id));</sql>
+    </changeSet>
 </databaseChangeLog>
