@@ -76,6 +76,8 @@ public final class EndpointPermissions {
       new Rule("GET", API + "/reverse-proxy-sites", "site.read"),
       new Rule("DELETE", API + "/reverse-proxy-sites", "site.delete"),
       new Rule("*", API + "/reverse-proxy-sites", "site.apply"),
+      new Rule("GET", API + "/database-instances", "host.read"),
+      new Rule("*", API + "/database-instances", "host.write"),
       new Rule("GET", API + "/backups", "host.read"),
       new Rule("*", API + "/backups", "host.write"),
       new Rule("GET", API + "/cron-jobs", "host.read"),
