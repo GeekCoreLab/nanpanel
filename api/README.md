@@ -39,7 +39,7 @@ Kubernetes 工作负载应用、YAML 派生拓扑、版本草稿、资源级 dif
 | GET | `/api/v1/hosts/{hostId}/services/{serviceId}` | 服务观测、可用动作及 ETag |
 | POST | `/api/v1/hosts/{hostId}/services/{serviceId}/restart` | 接受服务重启任务 |
 | POST | `/api/v1/hosts/{hostId}/services/{serviceId}/journal` | 查询服务最近 12 行 journal |
-| POST | `/api/v1/hosts/{hostId}/operations` | 提交类型化 Helper 操作，包括文件管理、受限容器、临时防火墙操作、受管 Nginx 路由写入/撤回/证书安装、受管定时任务（`cron.list` / `cron.write` / `cron.remove`）、只读主机指标（`metrics.read`）和 K3s 只读安装前置校验 |
+| POST | `/api/v1/hosts/{hostId}/operations` | 提交类型化 Helper 操作，包括文件管理、受限容器、临时防火墙操作、受管 Nginx 路由写入/撤回/证书安装、受管定时任务（`cron.list` / `cron.write` / `cron.remove`）、只读主机指标（`metrics.read`）、受管备份（`backup.list` / `backup.create` / `backup.delete`）和 K3s 只读安装前置校验 |
 | GET/POST | `/api/v1/cluster-providers/{providerId}/clusters/{clusterId}/credentials` | 查询凭据元数据或加密托管 KubeEdge 凭据（创建需近期重新验证；秘密不会再次返回） |
 | DELETE | `/api/v1/cluster-providers/{providerId}/clusters/{clusterId}/credentials/{credentialId}` | 撤销 KubeEdge 凭据（需近期重新验证） |
 | POST | `/api/v1/hosts/{hostId}/ssh/probe` | 使用主机资产 SSH 凭据和已确认 host key 执行只读可达性探测 |
