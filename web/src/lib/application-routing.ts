@@ -127,3 +127,79 @@ export function compileApplicationRoutePlan(
     };
   });
 }
+export type AppliedRouteBackendLike = { service: string; port: number; weight: number };
+
+export type AppliedRouteLike = {
+  name: string;
+  service: string;
+  port: number;
+  backends: readonly AppliedRouteBackendLike[];
+};
+
+export type RouteDriftStatus = 'MATCH' | 'DRIFT' | 'NOT_APPLIED' | 'STALE';
+
+export type RouteDriftRow = {
+  status: RouteDriftStatus;
+  key: string;
+  message: string;
+  routeId?: string;
+  appliedName?: string;
+};
+
+const routeKey = (service: string, port: number) => `${service}:${port}`;
+
+/**
+ * Compare what the canvas draws with what the cluster was actually told. The applied
+ * side is the snapshot the panel wrote, so this catches both "I changed the weights but
+ * never applied" and "the cluster runs a route the canvas no longer declares" — the two
+ * mistakes a drag-and-drop router invites. Weights are compared with a one-point
+ * tolerance because the canvas rounds percentages and the server normalizes integers.
+ */
+export function compareRoutePlan(
+  plan: readonly RoutePlanRow[],
+  applied: readonly AppliedRouteLike[],
+): RouteDriftRow[] {
+  const remaining = new Map(applied.map(route => [routeKey(route.service, route.port), route]));
+  const rows: RouteDriftRow[] = [];
+  for (const route of plan) {
+    const key = routeKey(route.serviceName, route.servicePort);
+    const live = remaining.get(key);
+    if (!live) {
+      rows.push({
+        status: 'NOT_APPLIED', key, routeId: route.id,
+        message: `${key} 在画布上存在，但尚未写入集群`,
+      });
+      continue;
+    }
+    remaining.delete(key);
+    const expected = new Map(route.backends.map(backend => [backend.name, backend.share] as const));
+    const actual = new Map(live.backends.map(backend => [backend.service, backend.weight] as const));
+    const sameBackends = expected.size === actual.size
+      && [...expected.keys()].every(name => actual.has(name));
+    const sameWeights = sameBackends
+      && [...expected].every(([name, share]) => Math.abs(share - (actual.get(name) ?? 0)) <= 1);
+    if (sameWeights) {
+      rows.push({
+        status: 'MATCH', key, routeId: route.id, appliedName: live.name,
+        message: `${key} 与已下发一致`,
+      });
+      continue;
+    }
+    const described = (entries: Iterable<[string, number]>) => {
+      const parts = [...entries].map(([name, share]) => `${name} ${share}%`);
+      return parts.length === 0 ? '无后端' : parts.join(' / ');
+    };
+    rows.push({
+      status: 'DRIFT', key, routeId: route.id, appliedName: live.name,
+      message: `${key} 画布为 ${described(expected)}，已下发为 ${described(actual)}`,
+    });
+  }
+  for (const route of remaining.values()) {
+    const key = routeKey(route.service, route.port);
+    rows.push({
+      status: 'STALE', key, appliedName: route.name,
+      message: `${key} 集群仍有该路由，但画布已不再声明`,
+    });
+  }
+  return rows;
+}

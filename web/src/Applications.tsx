@@ -8,7 +8,7 @@ import {
 } from '@xyflow/react';
 import { api, isMock } from './lib/api';
 import { createUuid } from './lib/uuid.ts';
-import { compileApplicationRoutePlan, validateRoutePlan, type RoutePlanRow } from './lib/application-routing.ts';
+import { compareRoutePlan, compileApplicationRoutePlan, validateRoutePlan, type RoutePlanRow } from './lib/application-routing.ts';
 import { buildManagedAppIndex, deriveNamespaceSelectorEdges } from './lib/namespace-graph.ts';
 import { NamespaceGraph } from './topology/NamespaceGraph.tsx';
 import { parseDocument, stringify as stringifyYaml } from 'yaml';
@@ -1717,6 +1717,12 @@ function ApplicationNetworkTopologyCanvas({
     (id) => visibleResources.find(resource => resource.id === id)?.name,
   ), [draft.trafficLinks, draft.nodes, visibleResources]);
   const routePlanIssues = useMemo(() => validateRoutePlan(routePlan), [routePlan]);
+  // What the cluster was actually told, versus what the canvas currently draws.
+  const routeDrift = useMemo(() => trafficRuntime?.routes
+    ? compareRoutePlan(routePlan, trafficRuntime.routes) : [], [routePlan, trafficRuntime?.routes]);
+  const driftByRoute = useMemo(() => new Map(routeDrift
+    .filter(row => row.routeId).map(row => [row.routeId as string, row])), [routeDrift]);
+  const staleRoutes = useMemo(() => routeDrift.filter(row => row.status === 'STALE'), [routeDrift]);
   const [routePlanOpen, setRoutePlanOpen] = useState(false);
 
   const updateLoadBalancerWeight = useCallback((nodeId: string, outputPort: string, weight: number) => {
@@ -2344,17 +2350,27 @@ function ApplicationNetworkTopologyCanvas({
           onClick={() => setRoutePlanOpen(open => !open)}>
           <span>路由计划</span><b>{routePlan.length} 组</b>
           {routePlanIssues.length > 0 && <em className="application-route-issue-count">{routePlanIssues.length} 个问题</em>}
+          {trafficRuntime?.routes && routeDrift.some(row => row.status === 'DRIFT') && <em className="application-route-drift-count">{routeDrift.filter(row => row.status === 'DRIFT').length} 组与已下发不一致</em>}
           <small>{routePlanOpen ? '收起 ▾' : '展开 ▴'}</small>
         </button>
         {routePlanOpen && <div className="application-route-plan-body">
           {routePlan.map(route => <div key={route.id} className="application-route-row">
             {route.callers.length > 0 && <span className="application-route-callers">{route.callers.join('、')} →</span>}
             <span className="application-route-entry">{route.serviceName}:{route.servicePort}</span>
+            {driftByRoute.get(route.id) && <span className={`application-route-sync sync-${driftByRoute.get(route.id)?.status.toLowerCase()}`}
+              title={driftByRoute.get(route.id)?.message}>
+              {driftByRoute.get(route.id)?.status === 'MATCH' ? '已同步'
+                : driftByRoute.get(route.id)?.status === 'DRIFT' ? '与集群不一致' : '未下发'}
+            </span>}
             <span className="application-route-arrow">⇒</span>
             {route.backends.length ? route.backends.map(backend => <span key={backend.name}
               className="application-route-backend">{backend.name} <b>{backend.share}%</b></span>)
               : <span className="application-route-missing">未连接后端 Service</span>}
           </div>)}
+          {staleRoutes.length > 0 && <ul className="application-route-issues">
+            {staleRoutes.map(row => <li key={row.key}>
+              <span>集群多余</span>{row.message}</li>)}
+          </ul>}
           {routePlanIssues.length > 0 && <ul className="application-route-issues">
             {routePlanIssues.map(issue => <li key={`${issue.code}-${issue.routeIds.join('-')}`}>
               <span>{issue.code === 'DUPLICATE_ENTRY' ? '重复入口'

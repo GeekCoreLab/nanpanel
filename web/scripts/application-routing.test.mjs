@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compileApplicationRoutePlan } from '../src/lib/application-routing.ts';
+import { compareRoutePlan, compileApplicationRoutePlan } from '../src/lib/application-routing.ts';
 
 const names = {
   'svc-orders': 'orders', 'svc-v1': 'orders-v1', 'svc-v2': 'orders-v2',
@@ -173,4 +173,74 @@ test('all-zero backends are reported once the backend count is satisfied', () =>
   ]);
   assert.deepEqual(issues.map(issue => issue.code), ['ZERO_WEIGHT']);
   assert.equal(issues[0].message, 'orders:80 的后端权重全为 0');
+});
+
+// ---- 画布与已下发路由的对账 -------------------------------------------------
+const planOf = (service, port, backends) => ({
+  id: `plan-${service}`, balancerId: `lb-${service}`, serviceName: service, servicePort: port,
+  totalWeight: backends.reduce((sum, [, share]) => sum + share, 0),
+  backends: backends.map(([name, share]) => ({ name, weight: share, share })),
+  callers: [],
+});
+const appliedOf = (name, service, port, backends) => ({
+  name, service, port,
+  backends: backends.map(([svc, weight]) => ({ service: svc, port: 8080, weight })),
+});
+
+test('a plan that matches the applied snapshot reports MATCH', () => {
+  const rows = compareRoutePlan(
+    [planOf('shop', 8080, [['api', 90], ['web', 10]])],
+    [appliedOf('np-route-1', 'shop', 8080, [['api', 90], ['web', 10]])],
+  );
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].status, 'MATCH');
+  assert.equal(rows[0].appliedName, 'np-route-1');
+});
+
+test('changed weights are reported as a drift with both sides spelled out', () => {
+  const rows = compareRoutePlan(
+    [planOf('shop', 8080, [['api', 90], ['web', 10]])],
+    [appliedOf('np-route-1', 'shop', 8080, [['api', 50], ['web', 50]])],
+  );
+  assert.equal(rows[0].status, 'DRIFT');
+  assert.match(rows[0].message, /api 90% \/ web 10%/);
+  assert.match(rows[0].message, /api 50% \/ web 50%/);
+});
+
+test('a canvas route that was never applied is NOT_APPLIED', () => {
+  const rows = compareRoutePlan([planOf('cart', 8080, [['api', 50], ['web', 50]])], []);
+  assert.equal(rows[0].status, 'NOT_APPLIED');
+});
+
+test('a cluster route the canvas dropped is STALE, and is not doubled', () => {
+  const rows = compareRoutePlan(
+    [planOf('cart', 8080, [['api', 50], ['web', 50]])],
+    [
+      appliedOf('np-route-cart', 'cart', 8080, [['api', 50], ['web', 50]]),
+      appliedOf('np-route-legacy', 'legacy', 8080, [['api', 100]]),
+    ],
+  );
+  assert.deepEqual(rows.map(row => row.status), ['MATCH', 'STALE']);
+  assert.match(rows[1].message, /legacy:8080/);
+});
+
+test('rounding within one point still counts as matching', () => {
+  const [row] = compareRoutePlan(
+    [planOf('shop', 8080, [['api', 33], ['web', 67]])],
+    [appliedOf('np-route-1', 'shop', 8080, [['api', 34], ['web', 66]])],
+  );
+  assert.equal(row.status, 'MATCH');
+  const [drift] = compareRoutePlan(
+    [planOf('shop', 8080, [['api', 33], ['web', 67]])],
+    [appliedOf('np-route-1', 'shop', 8080, [['api', 60], ['web', 40]])],
+  );
+  assert.equal(drift.status, 'DRIFT');
+});
+
+test('a different backend set is a drift even when the totals match', () => {
+  const [row] = compareRoutePlan(
+    [planOf('shop', 8080, [['api', 50], ['web', 50]])],
+    [appliedOf('np-route-1', 'shop', 8080, [['api', 50], ['cache', 50]])],
+  );
+  assert.equal(row.status, 'DRIFT');
 });
