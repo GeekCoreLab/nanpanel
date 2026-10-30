@@ -113,3 +113,12 @@ Kubernetes YAML 仅接收 Deployment、Service 和 ServiceAccount，至少包含
 （因此生成的图与手工拖出来的图无法区分）。拒绝的情况与后端协调器一致：无后端、后端超过 3 个、
 重复后端、入口同时作为后端、端口非法。生成的草稿经 `compileApplicationRoutePlan` 与
 `validateRoutePlan` 校验无问题（有单测锁定）。
+
+## 计划行 ↔ 画布高亮
+
+路由计划里的每一行都可以点击：面板会用 `routePlanTargets(row)` 把该行映射回它来自的画布对象
+（入口 Service、分配器、后端 Service 与三条连线）并高亮，再点一次取消。
+
+- 映射是纯函数，`RoutePlanRow` 现在携带 `serviceId`、`balancerId`，`backends[]` 携带 `id` 与 `linkId`，
+  因此不需要按名字猜节点（同名跨 Kind 也不会错配）。
+- 只改变样式，不改模型、不发请求：高亮态存在前端，刷新即消失。
