@@ -214,9 +214,9 @@ public class HostHelperOperationResource {
     String reason = input.reason() == null ? "" : input.reason().trim();
     int timeoutSeconds = input.timeoutSeconds() == null ? defaultTimeout(input.capability())
         : input.timeoutSeconds();
-    int maximumTimeoutSeconds = Set.of("k3s.install", "k3s.upgrade", "kubeedge.edgecore.join")
-        .contains(input.capability())
-        ? 600 : 300;
+    // Backups and restores move real data and legitimately take longer than a 5-minute cap.
+    int maximumTimeoutSeconds = Set.of("k3s.install", "k3s.upgrade", "kubeedge.edgecore.join",
+        "backup.create", "backup.restore").contains(input.capability()) ? 600 : 300;
     if (reason.isEmpty() || reason.length() > 500 ||
         reason.chars().anyMatch(Character::isISOControl) ||
         timeoutSeconds < 5 || timeoutSeconds > maximumTimeoutSeconds || input.expectedGeneration() == null ||
