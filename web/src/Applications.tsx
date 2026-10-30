@@ -1717,6 +1717,21 @@ function ApplicationNetworkTopologyCanvas({
   const edges = useMemo(() => [...selectorEdges, ...deviceEdges, ...attachmentEdges, ...trafficEdges],
     [selectorEdges, deviceEdges, attachmentEdges, trafficEdges]);
 
+  // Unsaved canvas work: moved/enriched nodes, added nodes and edited YAML live only in this
+  // component, so a refresh would discard them silently. The existing dirty flag covers most
+  // mutations; additions and YAML edits are not all funnelled through it.
+  const unsaved = dirty || additions.length > 0 || Object.keys(changes).length > 0
+    || Object.keys(yamlSourceChanges).length > 0;
+  useEffect(() => {
+    if (!unsaved) return;
+    const warn = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [unsaved]);
+
   const routePlan = useMemo<RoutePlanRow[]>(() => compileApplicationRoutePlan(
     draft.trafficLinks, draft.nodes,
     (id) => visibleResources.find(resource => resource.id === id)?.name,
@@ -2518,6 +2533,9 @@ function ApplicationNetworkTopologyCanvas({
         </div>
         <button type="button" className="application-canvas-fab" aria-label="拓扑设置与运行时" title="拓扑设置"
           aria-expanded={settingsOpen} onClick={() => setSettingsOpen(true)}>⚙<span>拓扑设置</span></button>
+        {unsaved && <span className="application-dirty" role="status"
+          title="画布上的改动还没有提交到集群；刷新或关闭页面会丢失">
+          未保存的修改</span>}
         <button type="button" className="application-tool"
           title="导出当前资源源码与画布编译出的路由（不含运行时状态）"
           onClick={exportBundle}>⤓<span>导出清单</span></button>

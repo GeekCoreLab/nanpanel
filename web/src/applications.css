@@ -668,3 +668,4 @@ main:has(.applications-page)>footer{display:none}
 .react-flow__edge.route-highlight .react-flow__edge-path{stroke:#e879f9!important;stroke-width:3.5!important;filter:drop-shadow(0 0 4px rgba(232,121,249,.6))}
 .application-route-yaml{background:transparent;border:1px solid rgba(148,163,184,.35);color:#94a3b8;border-radius:5px;padding:0 6px;font-size:10px;margin-left:6px;cursor:pointer}
 .application-route-yaml:hover{border-color:#a56bc4;color:#e879f9}
+.application-dirty{font-size:11px;color:#fbbf24;background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.35);border-radius:999px;padding:2px 9px;align-self:center;white-space:nowrap}
