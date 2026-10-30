@@ -105,6 +105,9 @@ Kubernetes YAML 仅接收 Deployment、Service 和 ServiceAccount，至少包含
 2. 面板生成一个 `LOAD_BALANCER` 节点、一条 `ROUTE_ENTRY`（`route-output-<端口>` → `route-input`）与 N 条 `ROUTE_BACKEND`（`route-out-<n>` → `backend-input-<端口>`）；
 3. 权重按均分填好（100 除以 N，余数给前几个，总和恒为 100），随后可用画布滑杆微调。
 
+生成的分配器放在入口 Service 右侧的**第一个空位**（`findFreePosition` 网格扫描，已有节点不会被移动），
+手工拖入/添加的虚拟设备同样走这套避让，不再互相叠压。
+
 草稿不直接下发：仍是 `DRAFT`，需要保存后再走 `Apply Service 分流`。生成逻辑是纯函数
 `planRouteDraft`（`web/src/lib/application-routing.ts`），与拖拽生成连线的 handle 命名完全一致
 （因此生成的图与手工拖出来的图无法区分）。拒绝的情况与后端协调器一致：无后端、后端超过 3 个、
