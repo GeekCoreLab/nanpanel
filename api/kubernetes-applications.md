@@ -122,3 +122,15 @@ Kubernetes YAML 仅接收 Deployment、Service 和 ServiceAccount，至少包含
 - 映射是纯函数，`RoutePlanRow` 现在携带 `serviceId`、`balancerId`，`backends[]` 携带 `id` 与 `linkId`，
   因此不需要按名字猜节点（同名跨 Kind 也不会错配）。
 - 只改变样式，不改模型、不发请求：高亮态存在前端，刷新即消失。
+
+## 路由主体预览
+
+路由计划的每一行都有 `YAML` 按钮，打开该路由将要写入的 **VirtualService 主体**：
+
+- `hosts`：`<service>.<namespace>.svc.cluster.local`（namespace 为空时用裸服务名）；
+- `gateways: ["mesh"]`、`http[0].match[0].port` 为入口端口；
+- `http[0].route[]`：每个后端的 `destination.host`/`port.number` 与 `weight`，**权重保证合计 100**
+  （画布百分比取整的余数补给第一个后端），`share` 为 0 的后端不会出现。
+
+资源名称、标签与拓扑注解由服务端按应用与版本生成，预览里显示为 `<server-generated>`——这段内容
+**不是**可以直接 `kubectl apply` 的文件，它是「面板会写什么」的说明。
