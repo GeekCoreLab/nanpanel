@@ -39,7 +39,7 @@ public class BackupResource {
   private static final ObjectMapper JSON = new ObjectMapper();
   private static final java.util.Set<String> BUSY = java.util.Set.of("PENDING", "RUNNING");
 
-  public record BackupRequest(String hostId, String source, String name) {}
+  public record BackupRequest(String hostId, String source, String name, String instanceId) {}
 
   public record RestoreRequest(String target, String sha256) {}
 
@@ -49,16 +49,23 @@ public class BackupResource {
   @Context io.vertx.core.http.HttpServerRequest http;
 
   @GET
-  public Map<String, Object> list() {
+  public Map<String, Object> list(@jakarta.ws.rs.QueryParam("instanceId") String instanceValue) {
     session();
     harvest();
-    var rows = store.transaction(c -> query(c, """
-        SELECT b.record_id, b.host_id, b.file_name, b.source, b.size_bytes, b.sha256, b.state,
-               b.operation_id, b.created_at, b.updated_at, h.hostname,
-               o.status AS operation_status
-        FROM backup_record b JOIN host h ON h.id = b.host_id
-        LEFT JOIN operation o ON o.id = b.operation_id
-        ORDER BY b.created_at DESC LIMIT 200"""));
+    UUID instanceId = instanceValue == null || instanceValue.isBlank()
+        ? null : uuid(instanceValue, "instanceId");
+    var rows = store.transaction(c -> {
+      String base = """
+          SELECT b.record_id, b.host_id, b.file_name, b.source, b.size_bytes, b.sha256, b.state,
+                 b.operation_id, b.instance_id, b.created_at, b.updated_at, h.hostname,
+                 o.status AS operation_status
+          FROM backup_record b JOIN host h ON h.id = b.host_id
+          LEFT JOIN operation o ON o.id = b.operation_id""";
+      return instanceId == null
+          ? query(c, base + " ORDER BY b.created_at DESC LIMIT 200")
+          : query(c, base + " WHERE b.instance_id=? ORDER BY b.created_at DESC LIMIT 200",
+              instanceId);
+    });
     List<Map<String, Object>> items = new ArrayList<>(rows.size());
     for (var row : rows) items.add(view(row));
     return Map.of("items", items);
@@ -80,6 +87,11 @@ public class BackupResource {
     payload.put("name", name);
     helperOperations.validateTargetAndPayload("backup.create", "", payload);
 
+    UUID instanceId = input.instanceId() == null || input.instanceId().isBlank()
+        ? null : uuid(input.instanceId(), "instanceId");
+    if (instanceId != null && !instanceBelongsTo(instanceId, hostId))
+      throw fail(422, "VALIDATION_FAILED", "该数据库实例不属于这台主机");
+
     UUID recordId = UUID.randomUUID();
     var helperRequest = new HostHelperOperationResource.HelperOperationRequest(
         "backup.create", "", payload, "备份 " + source, 600,
@@ -95,8 +107,9 @@ public class BackupResource {
     long now = System.currentTimeMillis();
     store.transaction(c -> {
       update(c, "INSERT INTO backup_record (record_id,host_id,file_name,source,state,"
-              + "operation_id,created_by,created_at,updated_at) VALUES (?,?,?,?,'DRAFT',?,?,?,?)",
-          recordId, hostId, "pending-" + recordId, source, operationId,
+              + "operation_id,instance_id,created_by,created_at,updated_at) "
+              + "VALUES (?,?,?,?,'DRAFT',?,?,?,?,?)",
+          recordId, hostId, "pending-" + recordId, source, operationId, instanceId,
           actor.get("user_id"), now, now);
       audit(c, String.valueOf(actor.get("user_id")), "backup.create", "backup_record",
           recordId.toString(), "SUCCEEDED", clientIp(), "创建备份 " + name + " ← " + source);
@@ -221,7 +234,7 @@ public class BackupResource {
   private Map<String, Object> record(UUID recordId) {
     var rows = store.transaction(c -> query(c, """
         SELECT b.record_id, b.host_id, b.file_name, b.source, b.size_bytes, b.sha256, b.state,
-               b.operation_id, b.created_at, b.updated_at, h.hostname,
+               b.operation_id, b.instance_id, b.created_at, b.updated_at, h.hostname,
                o.status AS operation_status
         FROM backup_record b JOIN host h ON h.id = b.host_id
         LEFT JOIN operation o ON o.id = b.operation_id WHERE b.record_id=?""", recordId));
@@ -247,9 +260,17 @@ public class BackupResource {
     item.put("operationStatus", operationStatus);
     item.put("operationId", row.get("operation_id") == null ? null
         : String.valueOf(row.get("operation_id")));
+    item.put("instanceId", row.get("instance_id") == null ? null
+        : String.valueOf(row.get("instance_id")));
     item.put("createdAt", ((Number) row.get("created_at")).longValue());
     item.put("updatedAt", ((Number) row.get("updated_at")).longValue());
     return item;
+  }
+
+  private boolean instanceBelongsTo(UUID instanceId, UUID hostId) {
+    var rows = store.transaction(c -> query(c,
+        "SELECT host_id FROM database_instance WHERE instance_id=?", instanceId));
+    return !rows.isEmpty() && String.valueOf(rows.getFirst().get("host_id")).equals(hostId.toString());
   }
 
   private Map<String, Object> host(UUID hostId) {

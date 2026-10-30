@@ -54,4 +54,5 @@
 <changeSet id="052-host-metric-samples" author="nanpanel"><sqlFile path="052-host-metric-samples.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE host_metric_sample;</sql></rollback></changeSet>
 <changeSet id="053-backup-records" author="nanpanel"><sqlFile path="053-backup-records.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE backup_record;</sql></rollback></changeSet>
 <changeSet id="054-database-instances" author="nanpanel"><sqlFile path="054-database-instances.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE database_instance;</sql></rollback></changeSet>
+<changeSet id="055-backup-instance-link" author="nanpanel"><sqlFile path="055-backup-instance-link.sql" relativeToChangelogFile="true"/><rollback><sql>ALTER TABLE backup_record DROP COLUMN instance_id;</sql></rollback></changeSet>
 </databaseChangeLog>

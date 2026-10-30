@@ -222,6 +222,70 @@ class BackupResourceTest {
         .body("code", equalTo("BACKUP_NOT_FOUND"));
   }
 
+  private UUID seedInstance(UUID hostId) {
+    UUID instanceId = UUID.randomUUID();
+    long now = System.currentTimeMillis();
+    String container = "npdb-" + instanceId.toString().substring(0, 8);
+    store.transaction(c -> {
+      AuthStore.update(c, "INSERT INTO database_instance (instance_id,host_id,engine,"
+              + "engine_version,container_name,host_port,data_volume,database_name,state,"
+              + "created_by,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,'APPLIED',?,?,?)",
+          instanceId, hostId, "mysql", "8.4", container, 13306, container, "nanpanel",
+          adminId(), now, now);
+      return null;
+    });
+    return instanceId;
+  }
+
+  private void seedRecord(UUID hostId, UUID instanceId, String file) {
+    long now = System.currentTimeMillis();
+    store.transaction(c -> {
+      AuthStore.update(c, "INSERT INTO backup_record (record_id,host_id,file_name,source,state,"
+              + "instance_id,created_by,created_at,updated_at) VALUES (?,?,?,?,'APPLIED',?,?,?,?)",
+          UUID.randomUUID(), hostId, file, "/var/lib/mysql", instanceId, adminId(), now, now);
+      return null;
+    });
+  }
+
+  @Test
+  void aBackupCanBeAttachedToAnInstanceAndFilteredByIt() {
+    resetAdmin();
+    resetBackups();
+    Session session = login();
+    UUID hostA = seedHost("db-host-a");
+    UUID hostB = seedHost("db-host-b");
+    UUID instance = seedInstance(hostA);
+    seedRecord(hostA, instance, "db-a-20261030T120000Z.tar.gz");
+    seedRecord(hostA, null, "host-wide-20261030T120500Z.tar.gz");
+
+    given().cookie("nanpanel_session", session.cookie()).get("/api/v1/backups")
+        .then().statusCode(200).body("items", hasSize(2));
+    given().cookie("nanpanel_session", session.cookie())
+        .get("/api/v1/backups?instanceId=" + instance)
+        .then().statusCode(200).body("items", hasSize(1))
+        .body("items[0].instanceId", equalTo(instance.toString()))
+        .body("items[0].file", equalTo("db-a-20261030T120000Z.tar.gz"));
+
+    // An instance on another host is a caller mistake, not a silent cross-host link.
+    given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.token())
+        .header("Idempotency-Key", UUID.randomUUID().toString())
+        .contentType("application/json")
+        .body("{\"hostId\":\"" + hostB + "\",\"source\":\"/var/lib/mysql\","
+            + "\"name\":\"db\",\"instanceId\":\"" + instance + "\"}")
+        .post("/api/v1/backups").then().statusCode(422)
+        .body("code", equalTo("VALIDATION_FAILED"));
+    // Same host, unknown instance id: rejected rather than stored as a dangling link.
+    given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.token())
+        .header("Idempotency-Key", UUID.randomUUID().toString())
+        .contentType("application/json")
+        .body("{\"hostId\":\"" + hostA + "\",\"source\":\"/var/lib/mysql\","
+            + "\"name\":\"db\",\"instanceId\":\"" + UUID.randomUUID() + "\"}")
+        .post("/api/v1/backups").then().statusCode(422)
+        .body("code", equalTo("VALIDATION_FAILED"));
+  }
+
   @Test
   void aPendingRecordCannotBeRestored() {
     resetAdmin();

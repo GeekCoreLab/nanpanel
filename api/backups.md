@@ -6,8 +6,8 @@
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/v1/backups` | 记录列表（含主机名、状态、`operationStatus`） |
-| POST | `/api/v1/backups` | `{hostId, source, name}` → 202，下发 `backup.create` |
+| GET | `/api/v1/backups` | 记录列表（含主机名、状态、`operationStatus`）；`?instanceId=` 只看某个数据库实例 |
+| POST | `/api/v1/backups` | `{hostId, source, name, instanceId?}` → 202，下发 `backup.create` |
 | POST | `/api/v1/backups/{id}/restore` | `{target, sha256?}` → 下发 `backup.restore` |
 | DELETE | `/api/v1/backups/{id}` | 下发 `backup.delete` 后删除记录 |
 
@@ -34,3 +34,11 @@ SHA-256（来自 `backup.create` 操作的结果）。因此：
 - 主机会话正常：先下发 `backup.delete`，再删除记录。
 - **主机离线：返回 503 且保留记录**——文件还在主机上，不能说已删除。
 - 尚未产出文件（`pending-…`）的记录没有可删的归档，直接删除记录并返回 204。
+
+## 与数据库实例的关联
+
+`instanceId` 是可选的：带上它，这条备份就计入该实例的备份历史（`GET /api/v1/backups?instanceId=…`），
+控制台的实例行可以直接看到自己的备份并在原处恢复/删除。
+
+约束只有一条但很重要：**实例必须属于同一台主机**。跨主机的 `instanceId` 与不存在的实例都返回
+`422 VALIDATION_FAILED`，不会存成悬空引用——否则一份备份会挂在一台根本没跑那个数据库的主机上。
