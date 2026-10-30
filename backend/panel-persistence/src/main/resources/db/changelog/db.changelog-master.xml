@@ -51,4 +51,5 @@
 <changeSet id="049-alert-channels" author="nanpanel"><sqlFile path="049-alert-channels.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE alert_firing_state; ALTER TABLE alert_rule DROP COLUMN channel_id; DROP TABLE alert_channel;</sql></rollback></changeSet>
 <changeSet id="050-alert-events" author="nanpanel"><sqlFile path="050-alert-events.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE alert_event; ALTER TABLE alert_firing_state DROP COLUMN detail; ALTER TABLE alert_firing_state DROP COLUMN condition_kind; ALTER TABLE alert_firing_state DROP COLUMN severity; ALTER TABLE alert_firing_state DROP COLUMN rule_name; ALTER TABLE alert_channel DROP COLUMN notify_recovery;</sql></rollback></changeSet>
 <changeSet id="051-cron-jobs" author="nanpanel"><sqlFile path="051-cron-jobs.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE cron_job;</sql></rollback></changeSet>
+<changeSet id="052-host-metric-samples" author="nanpanel"><sqlFile path="052-host-metric-samples.sql" relativeToChangelogFile="true"/><rollback><sql>DROP TABLE host_metric_sample;</sql></rollback></changeSet>
 </databaseChangeLog>

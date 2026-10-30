@@ -75,6 +75,8 @@ NaNPanel 是 **Java 主控 + Rust 边缘** 的混合云基础设施控制面。�
 
 - [x] 主机指标能力层（2026-10-30）：Rust Helper 新增 `metrics.read`——只读 `/proc/stat`、`meminfo`、`loadavg`、`uptime`，返回**原始计数器**（CPU 百分比由控制面按两次采样差值计算，单次采样不会被误当百分比），老内核缺 `MemAvailable`/`iowait` 等字段时回退而不是填 0 造假；缺失文件直接拒绝而非零填充。Agent 两层与控制面均加了「无 target、无载荷」校验。Rust 89 项（+7）、Java 156 项（+1）全绿；采样表与图表为下一段。
 
+- [x] 主机指标采样与图表（2026-10-30）：迁移 052 `host_metric_sample`（原始计数器 + `operation_id` 唯一），`MetricsSampler` 每 30 秒按能力挑主机、按窗口幂等下发 `metrics.read`、把已成功的操作各采样一次、裁剪 7 天；`GET /api/v1/hosts/{id}/metrics` 用相邻样本差值算 CPU 百分比（首点/倒退/零增量一律 `null` 而不是 0），控制台新增「监控」页（CPU/内存/负载三张 sparkline，缺口如实断开）。Java 164 项（+8）、Web 82 项（+9）全绿。真机采样未验收；无磁盘时间序列。
+
 ### P7｜应用商店与一键部署
 
 > **进度（2026-10-30）**：应用目录只读后端已落地（`AppStoreCatalog` + `GET /api/v1/app-store/catalog` 与 `.../{appId}`）。为打通真实一键部署，已把 `container.deploy` 从「image+单 loopback 端口」扩展为支持 **环境变量、命名数据卷、内存上限与有状态安全profile**：后端 `HostHelperOperationResource` 校验、Agent daemon（client/gateway）校验、Rust `privileged-helper` 解析与 `docker/podman run` 参数（`--env`/`--volume`/`--memory`，有状态时去掉 `--read-only` 并授予 CHOWN/DAC_OVERRIDE/FOWNER/SETUID/SETGID 最小初始化能力）均已实现，附后端 4 项定向测试 + Rust 40 项 helper 测试（含新增 payload 约束测试）；控制台新增「应用商店」页（读目录 + 选主机 + 端口/环境变量/数据卷/内存/有状态表单 → 一键提交 `container.deploy`）。应用画布左下角新增实时「路由计划」摘要：把拖拽出的 Service→流量分配器→后端 Service 与归一化权重编译成可读视图（编译逻辑抽出为纯函数 `web/src/lib/application-routing.ts`，含 7 项单测），并支持在画布内直接「写入 Istio 路由 / Verify / 恢复」，强化「拖拽即路由、不手写 Istio/不另建 API 网关」的差异点。另新增 `container.remove`（容器卸载）类型化 Helper 能力，贯通后端/Agent/Helper 与主机详情面板；仅执行 `rm --force`，命名数据卷默认保留（数据安全优先）。新增只读 `GET /api/v1/app-store/deployments`，从成功的 `container.deploy` 操作派生「已部署容器」清单（排除被再次部署或成功 `container.remove` 取代的记录），应用商店页据此显示「已部署容器」并支持一键卸载（复用已测试的容器卸载链路）。剩余：真实 Docker/Podman 主机上一键装/升/卸验收、部署与卸载后的状态自动对账、卷保留策略的显式删除。
