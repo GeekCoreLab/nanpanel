@@ -1007,8 +1007,12 @@ fn valid_dispatch_target(capability: &str, target: &str) -> bool {
         "cron.write" | "cron.remove" => valid_cron_target(target),
         "systemd.restart" | "systemd.journal.read" => valid_service_unit(target),
         "file.write.protected" => valid_file_target(target),
-        "container.logs" | "container.start" | "container.stop" | "container.deploy"
-        | "container.remove" => valid_container_target(target),
+        "container.logs"
+        | "container.start"
+        | "container.stop"
+        | "container.deploy"
+        | "container.remove"
+        | "container.volume.path" => valid_container_target(target),
         "network.firewall.expose" => valid_container_target(target),
         "network.topology.reconcile" | "network.topology.capture" => valid_topology_uuid(target),
         _ => false,
@@ -1091,6 +1095,7 @@ fn valid_dispatch_payload(capability: &str, payload: Option<&str>) -> bool {
             | "container.stop"
             | "container.deploy"
             | "container.remove"
+            | "container.volume.path"
             | "nginx.route.remove"
             | "cron.remove",
             None,

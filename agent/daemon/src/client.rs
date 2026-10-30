@@ -748,6 +748,7 @@ async fn connect_once(
                                 | "container.stop"
                                 | "container.deploy"
                                 | "container.remove"
+                                | "container.volume.path"
                                 | "network.firewall.expose"
                                 | "network.topology.reconcile"
                                 | "network.topology.capture"
@@ -1724,9 +1725,11 @@ fn valid_control(capability: &str, target: &str, payload_json: &str) -> bool {
                 && serde_json::from_str::<serde_json::Value>(payload_json)
                     .is_ok_and(|value| value.is_object())
         }
-        "container.logs" | "container.start" | "container.stop" | "container.remove" => {
-            valid_container_target(target) && !has_payload
-        }
+        "container.logs"
+        | "container.start"
+        | "container.stop"
+        | "container.remove"
+        | "container.volume.path" => valid_container_target(target) && !has_payload,
         "container.deploy" => {
             valid_container_target(target)
                 && (!has_payload

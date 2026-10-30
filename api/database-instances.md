@@ -12,6 +12,7 @@
 | GET | `/api/v1/database-instances` | 实例列表（主机名、端口、数据卷、状态、`operationStatus`） |
 | POST | `/api/v1/database-instances` | `{hostId, engine, port?, memoryMb?}` → 202，**响应里含一次性口令** |
 | GET | `/api/v1/database-instances/{id}/connection` | 连接信息；**永不返回口令** |
+| POST | `/api/v1/database-instances/{id}/volume` | 下发 `container.volume.path`，返回 `{operationId}` |
 | DELETE | `/api/v1/database-instances/{id}` | 下发 `container.remove` 后删除记录 |
 
 `GET` 需 `host.read`，其余需 `host.write`；写操作需 `Idempotency-Key`，全部写审计。
@@ -47,3 +48,11 @@
 - 主机没有 Agent：返回 `503 AGENT_OFFLINE`，**不留下记录**（没有部署就没有实例）；
 - 删除时主机不可达：返回 `503` 且**保留记录**——容器可能还在跑，面板不能假装删掉了；
 - 状态按关联操作派生：`PENDING`/`RUNNING` 显示部署中，`FAILED` → 失败，`UNKNOWN` → 状态未定。
+
+## 数据卷的真实位置由主机回答
+
+实例的数据在**命名卷**里（`npdb-<8hex>`），而 Docker 与 Podman 的卷目录不同，改了 data-root 也会变。
+所以面板**不拼路径**：`POST /{id}/volume` 让 Helper 执行 `volume inspect` 取 `Mountpoint`，结果随操作返回。
+
+Helper 侧还会拒绝「看起来像路径但不是可用目录」的结果——非绝对路径、含 `..`、不存在、不是目录，一律
+`DENIED`。这样后续把挂载点交给 `backup.create` 打包时，打包的一定是真实的数据目录。

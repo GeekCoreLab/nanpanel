@@ -456,13 +456,14 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
         let parsed = serde_json::from_str::<Request>(&line);
         let response = match parsed {
             Ok(request) => {
-                let result = if peer.uid() != runtime.allowed_uid {
-                    Err("caller identity is not authorized".to_owned())
-                } else {
-                    match validate_envelope(&request) {
-                        Err(error) => Err(error),
-                        Ok(()) => {
-                            match validate_payload_presence(&request).and_then(|()| {
+                let result =
+                    if peer.uid() != runtime.allowed_uid {
+                        Err("caller identity is not authorized".to_owned())
+                    } else {
+                        match validate_envelope(&request) {
+                            Err(error) => Err(error),
+                            Ok(()) => {
+                                match validate_payload_presence(&request).and_then(|()| {
                                 validate_capability_target(
                                     &request.capability,
                                     &request.target,
@@ -545,7 +546,8 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                         .await
                                     }
                                     "container.logs" | "container.start" | "container.stop"
-                                    | "container.deploy" | "container.remove" => {
+                                    | "container.deploy" | "container.remove"
+                                    | "container.volume.path" => {
                                         manage_container(
                                             &request,
                                             runtime
@@ -651,9 +653,9 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                     _ => Err("unsupported capability".to_owned()),
                                 },
                             }
+                            }
                         }
-                    }
-                };
+                    };
                 match result {
                     Ok(result) => {
                         let audit_target = audit_target(&request);
@@ -812,6 +814,7 @@ fn validate_capability_target(
         {
             Ok(())
         }
+        "container.volume.path" if valid_volume_name(target) && has_container_runtime => Ok(()),
         "network.firewall.expose"
             if network_operations_available && valid_network_rule_name(target) =>
         {
@@ -2842,6 +2845,18 @@ async fn manage_container(
             }
             args.push(requested_spec.image);
         }
+        "container.volume.path" => {
+            if request.payload_json.is_some() || !valid_volume_name(&request.target) {
+                return Err("DENIED: container volume target or payload is invalid".to_owned());
+            }
+            args.extend([
+                "volume".to_owned(),
+                "inspect".to_owned(),
+                "--format".to_owned(),
+                VOLUME_INSPECT_FORMAT.to_owned(),
+                request.target.clone(),
+            ]);
+        }
         _ => return Err("DENIED: unsupported container capability".to_owned()),
     }
     let timeout = if request.capability == "container.logs" {
@@ -2849,7 +2864,44 @@ async fn manage_container(
     } else {
         Duration::from_secs(60)
     };
-    run_fixed_command(runtime, &args, timeout).await
+    let output = run_fixed_command(runtime, &args, timeout).await?;
+    if request.capability == "container.volume.path" {
+        return volume_path_result(&request.target, &output);
+    }
+    Ok(output)
+}
+
+/// Asked of the runtime so the panel never guesses where a named volume lives: Docker and
+/// Podman disagree, and a changed data-root moves every path.
+const VOLUME_INSPECT_FORMAT: &str = "{{.Name}}\u{1f}{{.Driver}}\u{1f}{{.Mountpoint}}";
+
+/// Turns `volume inspect` output into a typed result, refusing anything that is not an existing
+/// absolute directory — a mountpoint is handed to a backup archiver, so a bogus one must fail here.
+fn volume_path_result(volume: &str, output: &str) -> std::result::Result<String, String> {
+    let mut fields = output.trim().split('\u{1f}');
+    let name = fields
+        .next()
+        .ok_or_else(|| "FAILED: volume inspect returned nothing".to_owned())?;
+    let driver = fields.next().unwrap_or_default().trim();
+    let mountpoint = fields.next().unwrap_or_default().trim();
+    let trailing = fields.next();
+    if name != volume || trailing.is_some() || mountpoint.is_empty() {
+        return Err("FAILED: volume inspect returned an unexpected shape".to_owned());
+    }
+    if !mountpoint.starts_with('/') || mountpoint.contains("..") {
+        return Err("DENIED: volume mountpoint is not an absolute, normalized path".to_owned());
+    }
+    match std::fs::metadata(mountpoint) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => return Err("DENIED: volume mountpoint is not a directory".to_owned()),
+        Err(_) => return Err("DENIED: volume mountpoint does not exist".to_owned()),
+    }
+    Ok(format!(
+        "{{\"volume\":{},\"driver\":{},\"mountpoint\":{}}}",
+        serde_json::Value::String(name.to_owned()),
+        serde_json::Value::String(driver.to_owned()),
+        serde_json::Value::String(mountpoint.to_owned())
+    ))
 }
 
 fn parse_payload<T>(request: &Request) -> std::result::Result<T, String>
@@ -4140,6 +4192,41 @@ mod tests {
             .is_ok()
         );
         Ok(())
+    }
+
+    #[test]
+    fn volume_path_result_reports_an_existing_absolute_directory() {
+        let dir = std::env::temp_dir().join(format!("np-volume-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let output = format!("npdb-abc1234\u{1f}local\u{1f}{}", dir.display());
+        let result = volume_path_result("npdb-abc1234", &output).unwrap();
+        assert!(result.contains("\"driver\":\"local\""));
+        assert!(result.contains(&format!("\"mountpoint\":\"{}\"", dir.display())));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn volume_path_result_refuses_a_path_that_is_not_usable() {
+        let dir = std::env::temp_dir().join(format!("np-volume-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("data");
+        std::fs::write(&file, b"x").unwrap();
+        let file_output = format!("v1\u{1f}local\u{1f}{}", file.display());
+        assert!(volume_path_result("v1", &file_output).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+        // Relative, traversing and missing paths are all refused.
+        assert!(volume_path_result("v1", "v1\u{1f}local\u{1f}relative/path").is_err());
+        assert!(volume_path_result("v1", "v1\u{1f}local\u{1f}/srv/../etc").is_err());
+        assert!(volume_path_result("v1", "v1\u{1f}local\u{1f}/definitely/not/here").is_err());
+        // The name must match what was asked for, and no extra fields may appear.
+        let dir2 = std::env::temp_dir().join(format!("np-volume-2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir2).unwrap();
+        let other = format!("other\u{1f}local\u{1f}{}", dir2.display());
+        assert!(volume_path_result("v1", &other).is_err());
+        let extra = format!("v1\u{1f}local\u{1f}{}\u{1f}extra", dir2.display());
+        assert!(volume_path_result("v1", &extra).is_err());
+        std::fs::remove_dir_all(&dir2).ok();
+        assert!(volume_path_result("v1", "").is_err());
     }
 
     #[test]
