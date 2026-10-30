@@ -78,11 +78,13 @@ export function validateRoutePlan(plan: readonly RoutePlanRow[]): RoutePlanIssue
   return issues;
 }
 
-export type RoutePlanBackend = { name: string; weight: number; share: number };
+export type RoutePlanBackend = { name: string; weight: number; share: number; id: string; linkId: string };
 
 export type RoutePlanRow = {
+  /** The ROUTE_ENTRY link id. */
   id: string;
   balancerId: string;
+  serviceId: string;
   serviceName: string;
   servicePort: number;
   totalWeight: number;
@@ -110,11 +112,13 @@ export function compileApplicationRoutePlan(
         return {
           name: resourceName(link.targetId) ?? 'Service',
           weight: weights.get(outputPort) ?? DEFAULT_WEIGHT,
+          id: link.targetId,
+          linkId: link.id,
         };
       });
     const totalWeight = backends.reduce((sum, backend) => sum + backend.weight, 0);
     return {
-      id: entry.id, balancerId: entry.targetId, serviceName,
+      id: entry.id, balancerId: entry.targetId, serviceId: entry.sourceId, serviceName,
       servicePort: entry.servicePort, totalWeight,
       backends: backends.map(backend => ({
         ...backend,
@@ -298,4 +302,19 @@ export function planRouteDraft(request: RouteDraftRequest): RouteDraftResult {
       links,
     },
   };
+}
+
+export type RoutePlanTargets = { nodeIds: string[]; linkIds: string[] };
+
+/**
+ * Maps a compiled plan row back onto the canvas objects it came from, so clicking a row can
+ * highlight exactly the entry Service, the balancer and the backend Services with their
+ * links. Pure: the UI only has to style what this returns.
+ */
+export function routePlanTargets(row: RoutePlanRow): RoutePlanTargets {
+  const nodeIds = [row.serviceId, row.balancerId,
+    ...row.backends.map(backend => backend.id)].filter((id): id is string => !!id);
+  const linkIds = [row.id, ...row.backends.map(backend => backend.linkId)]
+    .filter((id): id is string => !!id);
+  return { nodeIds: [...new Set(nodeIds)], linkIds: [...new Set(linkIds)] };
 }

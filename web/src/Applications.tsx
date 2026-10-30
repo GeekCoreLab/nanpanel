@@ -9,7 +9,7 @@ import {
 import { api, isMock } from './lib/api';
 import { createUuid } from './lib/uuid.ts';
 import { findFreePosition } from './lib/canvas-layout.ts';
-import { compareRoutePlan, compileApplicationRoutePlan, MAX_ROUTE_BACKENDS, planRouteDraft, validateRoutePlan, type RoutePlanRow } from './lib/application-routing.ts';
+import { compareRoutePlan, compileApplicationRoutePlan, MAX_ROUTE_BACKENDS, planRouteDraft, routePlanTargets, validateRoutePlan, type RoutePlanRow } from './lib/application-routing.ts';
 import { buildManagedAppIndex, deriveNamespaceSelectorEdges } from './lib/namespace-graph.ts';
 import { NamespaceGraph } from './topology/NamespaceGraph.tsx';
 import { parseDocument, stringify as stringifyYaml } from 'yaml';
@@ -1725,6 +1725,11 @@ function ApplicationNetworkTopologyCanvas({
     .filter(row => row.routeId).map(row => [row.routeId as string, row])), [routeDrift]);
   const staleRoutes = useMemo(() => routeDrift.filter(row => row.status === 'STALE'), [routeDrift]);
   const [routePlanOpen, setRoutePlanOpen] = useState(false);
+  const [highlightedRoute, setHighlightedRoute] = useState<string | null>(null);
+  const routeTargets = useMemo(() => {
+    const row = routePlan.find(candidate => candidate.id === highlightedRoute);
+    return row ? routePlanTargets(row) : null;
+  }, [routePlan, highlightedRoute]);
   const [routeDraftOpen, setRouteDraftOpen] = useState(false);
   const [routeDraftEntry, setRouteDraftEntry] = useState('');
   const [routeDraftBackendIds, setRouteDraftBackendIds] = useState<string[]>([]);
@@ -1884,6 +1889,21 @@ function ApplicationNetworkTopologyCanvas({
     });
   }, [loading, visibleResources, draft.nodes, yamlSourceChanges, changes, additions, saving, busy, hasDraft,
     edges, setNodes, updateLoadBalancerWeight]);
+
+  // Selecting a plan row marks the objects it came from, so the text and the picture agree.
+  const highlightedNodeIds = useMemo(() => new Set(routeTargets?.nodeIds ?? []),
+    [routeTargets]);
+  const highlightedLinkIds = useMemo(() => new Set(routeTargets?.linkIds ?? []),
+    [routeTargets]);
+  const styledNodes = useMemo(() => highlightedNodeIds.size === 0 ? nodes
+    : nodes.map(node => highlightedNodeIds.has(node.id)
+      ? { ...node, className: [node.className, 'route-highlight'].filter(Boolean).join(' ') }
+      : node), [nodes, highlightedNodeIds]);
+  const styledEdges = useMemo(() => highlightedLinkIds.size === 0 ? edges
+    : edges.map(edge => highlightedLinkIds.has(edge.id)
+      ? { ...edge, className: [edge.className, 'route-highlight'].filter(Boolean).join(' '),
+          zIndex: 10 }
+      : edge), [edges, highlightedLinkIds]);
 
   useEffect(() => {
     if (loading || !nodes.length || hasFittedInitialViewport.current) return;
@@ -2309,7 +2329,7 @@ function ApplicationNetworkTopologyCanvas({
   return <section className="application-network-card">
     <div className="application-network-canvas" ref={canvasRef}>
       <TopologyCanvas<ApplicationNetworkFlowNode, Edge>
-        nodes={nodes} edges={edges} nodeTypes={applicationNetworkNodeTypes}
+        nodes={styledNodes} edges={styledEdges} nodeTypes={applicationNetworkNodeTypes}
         onNodesChange={onFlowNodesChange} onConnect={connect}
         onNodeClick={(_, node) => {
           if (node.type === 'application' && node.data.resource.kind === 'Deployment'
@@ -2465,7 +2485,16 @@ function ApplicationNetworkTopologyCanvas({
           <small>{routePlanOpen ? '收起 ▾' : '展开 ▴'}</small>
         </button>
         {routePlanOpen && <div className="application-route-plan-body">
-          {routePlan.map(route => <div key={route.id} className="application-route-row">
+          {routePlan.map(route => <div key={route.id}
+            className={`application-route-row ${highlightedRoute === route.id ? 'highlighted' : ''}`}
+            role="button" tabIndex={0} aria-pressed={highlightedRoute === route.id}
+            title="点击在画布上高亮这条路由"
+            onClick={() => setHighlightedRoute(current => current === route.id ? null : route.id)}
+            onKeyDown={event => {
+              if (event.key !== 'Enter' && event.key !== ' ') return;
+              event.preventDefault();
+              setHighlightedRoute(current => current === route.id ? null : route.id);
+            }}>
             {route.callers.length > 0 && <span className="application-route-callers">{route.callers.join('、')} →</span>}
             <span className="application-route-entry">{route.serviceName}:{route.servicePort}</span>
             {driftByRoute.get(route.id) && <span className={`application-route-sync sync-${driftByRoute.get(route.id)?.status.toLowerCase()}`}

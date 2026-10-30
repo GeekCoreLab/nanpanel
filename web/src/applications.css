@@ -660,3 +660,9 @@ main:has(.applications-page)>footer{display:none}
 .application-route-draft-backends label{display:flex;align-items:center;gap:6px;padding:5px 9px;border:1px solid var(--border,rgba(148,163,184,.22));border-radius:6px;font-size:12px;cursor:pointer}
 .application-route-draft-backends label.checked{border-color:#a56bc4;background:rgba(165,107,196,.14)}
 .application-route-draft-actions{display:flex;gap:8px;margin-top:14px}
+.application-route-row{cursor:pointer;border-radius:6px;transition:background .12s ease}
+.application-route-row:hover{background:rgba(165,107,196,.08)}
+.application-route-row.highlighted{background:rgba(165,107,196,.16);outline:1px solid rgba(165,107,196,.5)}
+.react-flow__node.route-highlight .application-network-device,
+.react-flow__node.route-highlight .application-resource-card{border-color:#a56bc4!important;box-shadow:0 0 0 2px rgba(165,107,196,.45)!important}
+.react-flow__edge.route-highlight .react-flow__edge-path{stroke:#e879f9!important;stroke-width:3.5!important;filter:drop-shadow(0 0 4px rgba(232,121,249,.6))}

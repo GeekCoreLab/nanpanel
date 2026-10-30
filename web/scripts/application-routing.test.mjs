@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compareRoutePlan, compileApplicationRoutePlan, planRouteDraft, validateRoutePlan } from '../src/lib/application-routing.ts';
+import { compareRoutePlan, compileApplicationRoutePlan, planRouteDraft, routePlanTargets, validateRoutePlan } from '../src/lib/application-routing.ts';
 
 const names = {
   'svc-orders': 'orders', 'svc-v1': 'orders-v1', 'svc-v2': 'orders-v2',
@@ -38,9 +38,10 @@ test('compiles a weighted route with normalized percentages and callers', () => 
   assert.equal(row.serviceName, 'orders');
   assert.equal(row.servicePort, 80);
   assert.equal(row.totalWeight, 100);
+  // Backends now carry canvas ids too, so a plan row can be mapped back onto the graph.
   assert.deepEqual(row.backends, [
-    { name: 'orders-v1', weight: 80, share: 80 },
-    { name: 'orders-v2', weight: 20, share: 20 },
+    { name: 'orders-v1', weight: 80, share: 80, id: 'svc-v1', linkId: 'b1' },
+    { name: 'orders-v2', weight: 20, share: 20, id: 'svc-v2', linkId: 'b2' },
   ]);
   assert.deepEqual(row.callers, ['orders-deployment']);
 });
@@ -62,7 +63,8 @@ test('zero total weight yields zero shares instead of dividing by zero', () => {
     resourceName,
   );
   assert.equal(plan[0].totalWeight, 0);
-  assert.deepEqual(plan[0].backends, [{ name: 'orders-v1', weight: 0, share: 0 }]);
+  assert.deepEqual(plan[0].backends,
+    [{ name: 'orders-v1', weight: 0, share: 0, id: 'svc-v1', linkId: 'b1' }]);
 });
 
 test('a route entry without a backend is reported as empty', () => {
@@ -322,4 +324,35 @@ test('the generated draft compiles into a plan the validator accepts', () => {
   assert.deepEqual(rows[0].backends.map(backend => [backend.name, backend.share]),
     [['api', 50], ['web', 50]]);
   assert.deepEqual(validateRoutePlan(rows), []);
+});
+
+// ---- 计划行 → 画布对象映射 --------------------------------------------------
+test('a plan row maps back to its entry, balancer and backend objects', () => {
+  const { draft } = planRouteDraft(draftRequest());
+  const names = { 'svc-shop': 'shop', 'svc-api': 'api', 'svc-web': 'web' };
+  const rows = compileApplicationRoutePlan(draft.links, [{
+    id: draft.loadBalancerId,
+    loadBalancerConfiguration: { outputWeights: draft.weights },
+  }], id => names[id]);
+
+  const targets = routePlanTargets(rows[0]);
+  assert.deepEqual(targets.nodeIds, ['svc-shop', draft.loadBalancerId, 'svc-api', 'svc-web']);
+  assert.deepEqual(targets.linkIds, draft.links.map(link => link.id));
+  // The compiled row keeps the ids the canvas needs, not just display names.
+  assert.equal(rows[0].serviceId, 'svc-shop');
+  assert.deepEqual(rows[0].backends.map(backend => backend.id), ['svc-api', 'svc-web']);
+});
+
+test('targets are deduplicated so a shared node is not highlighted twice', () => {
+  const targets = routePlanTargets({
+    id: 'entry-link', balancerId: 'lb-1', serviceId: 'svc-a', serviceName: 'a', servicePort: 80,
+    totalWeight: 100,
+    backends: [
+      { name: 'b', weight: 50, share: 50, id: 'svc-b', linkId: 'lb-1-out-1' },
+      { name: 'c', weight: 50, share: 50, id: 'svc-c', linkId: 'lb-1-out-2' },
+    ],
+    callers: [],
+  });
+  assert.deepEqual(targets.nodeIds, ['svc-a', 'lb-1', 'svc-b', 'svc-c']);
+  assert.deepEqual(targets.linkIds, ['entry-link', 'lb-1-out-1', 'lb-1-out-2']);
 });
