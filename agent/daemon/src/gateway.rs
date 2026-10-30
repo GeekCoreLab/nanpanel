@@ -985,7 +985,7 @@ fn valid_dispatch_target(capability: &str, target: &str) -> bool {
         "nginx.route.set" => valid_nginx_route_target(target),
         "nginx.route.remove" => valid_nginx_route_target(target),
         "nginx.tls.install" => valid_tls_name(target),
-        "cron.list" => target.is_empty(),
+        "cron.list" | "metrics.read" => target.is_empty(),
         "cron.write" | "cron.remove" => valid_cron_target(target),
         "systemd.restart" | "systemd.journal.read" => valid_service_unit(target),
         "file.write.protected" => valid_file_target(target),
@@ -1079,7 +1079,7 @@ fn valid_dispatch_payload(capability: &str, payload: Option<&str>) -> bool {
         ) => true,
         ("cron.write", Some(json)) => serde_json::from_str::<CronJobPayload>(json)
             .is_ok_and(|payload| valid_cron_job_payload(&payload)),
-        ("cron.list", None) => true,
+        ("cron.list" | "metrics.read", None) => true,
         _ => false,
     }
 }

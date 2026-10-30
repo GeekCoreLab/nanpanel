@@ -1,5 +1,5 @@
 use nanpanel_privileged_helper::{
-    CronConfig, HelperConfig, NginxRouteConfig, apply_network_firewall_rule,
+    CronConfig, HelperConfig, MetricsConfig, NginxRouteConfig, apply_network_firewall_rule,
     rollback_network_firewall_rule, serve,
 };
 
@@ -106,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
     let service = parse_service_args(first, args)?;
     let routes = NginxRouteConfig::from_environment()?;
     let cron = CronConfig::from_environment()?;
+    let metrics = MetricsConfig::from_environment()?;
     serve(
         HelperConfig::new(
             service.socket,
@@ -117,7 +118,8 @@ async fn main() -> anyhow::Result<()> {
             service.agent_binary,
         )?
         .with_nginx_routes(routes)
-        .with_cron(cron),
+        .with_cron(cron)
+        .with_metrics(metrics),
     )
     .await
 }

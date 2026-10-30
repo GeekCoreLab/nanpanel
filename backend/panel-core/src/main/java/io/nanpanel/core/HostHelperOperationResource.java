@@ -47,7 +47,7 @@ public class HostHelperOperationResource {
       "network.topology.reconcile", "network.topology.capture",
       "file.list", "file.read", "file.write", "file.delete", "k3s.preflight", "k3s.install",
       "k3s.upgrade", "kubeedge.edgecore.join", "nginx.route.set", "nginx.route.remove",
-      "nginx.tls.install", "cron.list", "cron.write", "cron.remove");
+      "nginx.tls.install", "cron.list", "cron.write", "cron.remove", "metrics.read");
   private static final java.util.regex.Pattern CRON_JOB_NAME =
       java.util.regex.Pattern.compile("nanpanel-[a-z]([a-z0-9-]{0,30}[a-z0-9])?");
   private static final java.util.regex.Pattern CRON_FIELD =
@@ -456,7 +456,7 @@ public class HostHelperOperationResource {
   void validateTargetAndPayload(String capability, String target, JsonNode payload) {
     boolean validTarget = switch (capability) {
       case "package.install", "container.list", "k3s.preflight", "k3s.install", "k3s.upgrade",
-          "kubeedge.edgecore.join", "cron.list" -> target.isEmpty();
+          "kubeedge.edgecore.join", "cron.list", "metrics.read" -> target.isEmpty();
       case "file.write.protected" -> FILE_NAME.matcher(target).matches();
       case "file.list" -> validHostPath(target, true);
       case "file.read", "file.write", "file.delete" -> validHostPath(target, false);

@@ -745,6 +745,7 @@ async fn connect_once(
                                 | "cron.list"
                                 | "cron.write"
                                 | "cron.remove"
+                                | "metrics.read"
                         )
                     {
                         capabilities.push(capability);
@@ -1818,6 +1819,7 @@ fn valid_control(capability: &str, target: &str, payload_json: &str) -> bool {
         }
         "nginx.route.remove" => valid_nginx_route_target(target) && !has_payload,
         "cron.list" => target.is_empty() && !has_payload,
+        "metrics.read" => target.is_empty() && !has_payload,
         "cron.write" => {
             valid_cron_target(target)
                 && has_payload
