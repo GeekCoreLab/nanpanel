@@ -73,12 +73,19 @@ TLS 终止已支持（手工证书）：`POST /{siteId}/tls` 经 `nginx.tls.inst
 
 ## 状态
 
+`state` 是**报告值**，由记录保存的意图状态加上最近一次关联 Operation 的终态派生——避免「主机执行失败、面板却显示已生效」。
+
 - `DRAFT`：已登记，未下发。
-- `APPLIED`：已下发到受管 Nginx（不保证已通过健康探测）。
+- `APPLIED`：已下发且被 Helper 接受（不保证已通过健康探测）。
 - `DISABLED`：已撤回受管路由文件；可再次 `apply` 启用。
+- `FAILED`：最近一次 `apply`/`disable` 在主机上**执行失败**（记录仍存 `APPLIED`，关联 Operation 为 `FAILED`）。此时路由并未生效，可重新 `apply`、编辑或删除。
+- `UNKNOWN`：Helper 无法确认结果（reload 与还原双双失败），路由可能仍在服务；必须 `disable` 后才能编辑或删除。
+
+响应同时返回 `operationStatus`（`PENDING` / `RUNNING` / `SUCCEEDED` / `FAILED` / `UNKNOWN` / `null`）与 `operationId`；`PENDING`/`RUNNING` 表示指令已下发、主机尚未回报，控制台显示「处理中」徽章而不是谎报完成。
+
+阻止编辑/删除的状态是 `APPLIED` 与 `UNKNOWN`（需先 `disable`）。
 
 TLS 状态不在 `state` 里：`tlsName` 非空表示已在该主机安装证书材料（路由是否已按 HTTPS 下发仍看 `state` 与 `apply` 结果）。
-- `FAILED`：最近一次下发失败。
 
 站点记录保存在 `reverse_proxy_site` 表（迁移 `044-reverse-proxy-sites.sql`），同一 `(host_id, domain, listen_port)` 唯一。
 
@@ -86,7 +93,7 @@ TLS 状态不在 `state` 里：`tlsName` 非空表示已在该主机安装证书
 
 `PUT /api/v1/reverse-proxy-sites/{siteId}` 接受与创建相同的字段：
 
-- 仅 `DRAFT` / `FAILED` / `DISABLED` 状态可改；`APPLIED` 返回 `409 SITE_APPLIED`（先 `disable`，避免改动与主机上正在服务的路由不一致）。
+- 仅 `DRAFT` / `FAILED` / `DISABLED` 状态可改；`APPLIED` / `UNKNOWN` 返回 `409 SITE_APPLIED`（先 `disable`，避免改动与主机上正在服务的路由不一致）。
 - **不能更换主机**：`hostId` 与现记录不同时返回 422。
 - 修改后仍用下发时的同一校验器校验；若站点已安装证书，校验载荷会带上现有的 `tls` 名称。
 - 与其它站点域名/端口冲突返回 `409 SITE_CONFLICT`。

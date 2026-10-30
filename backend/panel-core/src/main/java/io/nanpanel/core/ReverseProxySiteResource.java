@@ -24,6 +24,7 @@ import jakarta.ws.rs.core.Response;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -38,6 +39,8 @@ public class ReverseProxySiteResource {
   @Inject AuthStore store;
   @Inject HostHelperOperationResource helperOperations;
   private static final ObjectMapper JSON = new ObjectMapper();
+  /** States that force a disable before a site record can be edited or deleted. */
+  private static final Set<String> SERVING = Set.of("APPLIED", "UNKNOWN");
   @Context jakarta.ws.rs.container.ContainerRequestContext request;
   @Context io.vertx.core.http.HttpServerRequest http;
 
@@ -67,8 +70,9 @@ public class ReverseProxySiteResource {
     var rows = store.transaction(c -> query(c, """
         SELECT s.site_id, s.host_id, h.hostname, s.domain, s.listen_address, s.listen_port,
                s.upstream_port, s.health_path, s.tls_name, s.state, s.operation_id,
-               s.created_at, s.updated_at
+               s.created_at, s.updated_at, o.status AS operation_status
         FROM reverse_proxy_site s JOIN host h ON h.id = s.host_id
+        LEFT JOIN operation o ON o.id = s.operation_id
         ORDER BY s.created_at DESC LIMIT 200"""));
     var items = new ArrayList<Map<String, Object>>(rows.size());
     for (var row : rows) items.add(siteMap(row));
@@ -120,8 +124,8 @@ public class ReverseProxySiteResource {
     session();
     UUID siteId = uuidText(siteValue, "siteId");
     Map<String, Object> site = loadSite(siteId);
-    if ("APPLIED".equals(String.valueOf(site.get("state")))) {
-      throw fail(409, "SITE_APPLIED", "站点已生效，需先停用后再修改");
+    if (SERVING.contains(String.valueOf(site.get("state")))) {
+      throw fail(409, "SITE_APPLIED", "站点已生效或状态未定，需先停用后再修改");
     }
     if (input == null) throw fail(422, "VALIDATION_FAILED", "站点参数缺失");
     if (input.hostId() != null && !input.hostId().isBlank()
@@ -291,7 +295,7 @@ public class ReverseProxySiteResource {
     String actor = actorId();
     UUID siteId = uuidText(siteValue, "siteId");
     Map<String, Object> site = loadSite(siteId);
-    if ("APPLIED".equals(String.valueOf(site.get("state")))) {
+    if (SERVING.contains(String.valueOf(site.get("state")))) {
       throw fail(409, "SITE_APPLIED", "站点已生效，需先在主机上覆盖或恢复受管路由后再删除");
     }
     store.transaction(c -> {
@@ -307,8 +311,9 @@ public class ReverseProxySiteResource {
     var rows = store.transaction(c -> query(c, """
         SELECT s.site_id, s.host_id, h.hostname, s.domain, s.listen_address, s.listen_port,
                s.upstream_port, s.health_path, s.tls_name, s.state, s.operation_id,
-               s.created_at, s.updated_at
-        FROM reverse_proxy_site s JOIN host h ON h.id = s.host_id WHERE s.site_id = ?""", siteId));
+               s.created_at, s.updated_at, o.status AS operation_status
+        FROM reverse_proxy_site s JOIN host h ON h.id = s.host_id
+        LEFT JOIN operation o ON o.id = s.operation_id WHERE s.site_id = ?""", siteId));
     if (rows.isEmpty()) throw fail(404, "SITE_NOT_FOUND", "站点不存在");
     return siteMap(rows.get(0));
   }
@@ -324,6 +329,18 @@ public class ReverseProxySiteResource {
     return ((Number) rows.get(0).get("generation")).longValue();
   }
 
+  /**
+   * The stored state records what the panel asked the host to do; the linked operation
+   * records what the host actually did. A terminal failure must never be reported as
+   * APPLIED, otherwise the console claims a route is serving when it is not.
+   */
+  static String reportedState(String stored, String operationStatus) {
+    if (operationStatus == null) return stored;
+    if ("FAILED".equals(operationStatus)) return "FAILED";
+    if ("UNKNOWN".equals(operationStatus)) return "UNKNOWN";
+    return stored;
+  }
+
   private static Map<String, Object> siteMap(Map<String, Object> row) {
     Map<String, Object> item = new LinkedHashMap<>();
     item.put("id", String.valueOf(row.get("site_id")));
@@ -335,7 +352,10 @@ public class ReverseProxySiteResource {
     item.put("upstreamPort", ((Number) row.get("upstream_port")).intValue());
     item.put("healthPath", String.valueOf(row.get("health_path")));
     item.put("tlsName", row.get("tls_name") == null ? null : String.valueOf(row.get("tls_name")));
-    item.put("state", String.valueOf(row.get("state")));
+    String operationStatus = row.get("operation_status") == null
+        ? null : String.valueOf(row.get("operation_status"));
+    item.put("state", reportedState(String.valueOf(row.get("state")), operationStatus));
+    item.put("operationStatus", operationStatus);
     item.put("operationId", row.get("operation_id") == null ? null
         : String.valueOf(row.get("operation_id")));
     item.put("createdAt", ((Number) row.get("created_at")).longValue());
