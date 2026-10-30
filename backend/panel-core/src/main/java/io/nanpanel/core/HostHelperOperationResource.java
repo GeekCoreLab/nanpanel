@@ -967,7 +967,8 @@ public class HostHelperOperationResource {
         "LEFT JOIN panel_user u ON u.id=o.requested_by";
   }
 
-  private Map<String, Object> view(Map<String, Object> row) {
+  /** Shared with {@link OperationsResource} so the platform-wide list and the host list agree. */
+  Map<String, Object> view(Map<String, Object> row) {
     var value = new LinkedHashMap<String, Object>();
     value.put("id", String.valueOf(row.get("id")));
     value.put("kind", row.get("kind"));

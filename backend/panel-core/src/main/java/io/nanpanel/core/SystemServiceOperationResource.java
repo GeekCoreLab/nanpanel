@@ -45,6 +45,10 @@ public class SystemServiceOperationResource {
   private static final HttpClient CONTROL_CLIENT = HttpClient.newBuilder()
       .connectTimeout(Duration.ofSeconds(2)).build();
   private static final Set<String> ACTIVE_STATUSES = Set.of("PENDING", "RUNNING", "UNKNOWN");
+  private static final Set<String> ACTIVE_STATUSES_ALL =
+      Set.of("PENDING", "RUNNING", "SUCCEEDED", "FAILED", "UNKNOWN", "CANCELLED");
+  private static final java.util.regex.Pattern CAPABILITY =
+      java.util.regex.Pattern.compile("[a-z][a-z0-9]*(\\.[a-z][a-z0-9]*){1,4}");
 
   @Inject AuthStore store;
   @Inject ObjectMapper mapper;
@@ -395,45 +399,76 @@ public class SystemServiceOperationResource {
   public Response list(@QueryParam("limit") Integer requestedLimit,
                        @QueryParam("cursor") String cursor,
                        @QueryParam("hostId") String hostValue,
-                       @QueryParam("status") String status) {
+                       @QueryParam("status") String status,
+                       @QueryParam("capability") String capability) {
     actorId();
     int limit = requestedLimit == null ? 20 : requestedLimit;
     if (limit < 1 || limit > 100)
       throw fail(400, "VALIDATION_FAILED", "limit 须为 1–100");
     UUID host = hostValue == null ? null : uuid(hostValue, "hostId");
-    if (status != null && !Set.of("PENDING", "RUNNING", "SUCCEEDED", "FAILED", "CANCELLED", "UNKNOWN").contains(status))
+    if (status != null && !ACTIVE_STATUSES_ALL.contains(status))
       throw fail(400, "VALIDATION_FAILED", "无效操作状态");
-    UUID after = decodeCursor(cursor, host, status);
+    if (capability != null && !CAPABILITY.matcher(capability).matches())
+      throw fail(400, "VALIDATION_FAILED", "无效能力名称");
+    After after = decodeCursor(cursor, host, status, capability);
     return store.transaction(c -> {
       markExpired(c);
       var clauses = new ArrayList<String>();
       var values = new ArrayList<Object>();
       if (host != null) { clauses.add("o.host_id=?"); values.add(host); }
       if (status != null) { clauses.add("o.status=?"); values.add(status); }
-      if (after != null) { clauses.add("o.id>?"); values.add(after); }
+      if (capability != null) { clauses.add("o.capability=?"); values.add(capability); }
+      if (after != null) {
+        // Newest first, with the id as the tie-break so a page boundary cannot repeat rows.
+        clauses.add("(o.created_at<? OR (o.created_at=? AND o.id<?))");
+        values.add(after.at());
+        values.add(after.at());
+        values.add(after.id());
+      }
       String where = clauses.isEmpty() ? "" : " WHERE " + String.join(" AND ", clauses);
       values.add(limit + 1);
-      var rows = query(c, operationSelect() + where + " ORDER BY o.id LIMIT ?", values.toArray());
+      var rows = query(c, operationSelect() + where
+          + " ORDER BY o.created_at DESC, o.id DESC LIMIT ?", values.toArray());
       boolean more = rows.size() > limit;
       var selected = rows.stream().limit(limit).toList();
       var body = new LinkedHashMap<String, Object>();
       body.put("items", selected.stream().map(this::view).toList());
       String next = null;
       if (more) {
-        String payload = String.join("|", String.valueOf(selected.getLast().get("id")),
-            host == null ? "" : host.toString(), status == null ? "" : status);
+        var last = selected.getLast();
+        String payload = String.join("|",
+            instant(last.get("created_at")) == null ? "0"
+                : String.valueOf(instant(last.get("created_at")).toEpochMilli()),
+            String.valueOf(last.get("id")),
+            host == null ? "" : host.toString(),
+            status == null ? "" : status,
+            capability == null ? "" : capability);
         next = Base64.getUrlEncoder().withoutPadding().encodeToString(
             payload.getBytes(StandardCharsets.UTF_8));
       }
       body.put("nextCursor", next);
+      body.put("limit", limit);
+      body.put("statuses", ACTIVE_STATUSES_ALL.stream().sorted().toList());
+      body.put("capabilities", capabilitiesInUse(c));
       return Response.ok(body).build();
     });
   }
 
+  private List<String> capabilitiesInUse(java.sql.Connection c) throws Exception {
+    return query(c, "SELECT DISTINCT capability FROM operation WHERE capability IS NOT NULL "
+            + "ORDER BY capability LIMIT 64")
+        .stream().map(row -> String.valueOf(row.get("capability"))).toList();
+  }
+
+  /** Keyset position: newest first, so the cursor carries both the time and the id. */
+  private record After(java.sql.Timestamp at, UUID id) {}
+
   private String operationSelect() {
-    return "SELECT o.*,s.unit_name,u.username AS requested_by_name FROM operation o " +
-        "LEFT JOIN system_service_observation s ON s.id=o.service_id " +
-        "LEFT JOIN panel_user u ON u.id=o.requested_by";
+    return "SELECT o.*,s.unit_name,u.username AS requested_by_name,h.hostname AS hostname "
+        + "FROM operation o "
+        + "LEFT JOIN system_service_observation s ON s.id=o.service_id "
+        + "LEFT JOIN panel_user u ON u.id=o.requested_by "
+        + "LEFT JOIN host h ON h.id=o.host_id";
   }
 
   private void reconcileSshAgentInstall(java.sql.Connection c, UUID operationId) throws Exception {
@@ -465,6 +500,7 @@ public class SystemServiceOperationResource {
     value.put("id", String.valueOf(row.get("id")));
     value.put("kind", row.get("kind"));
     value.put("hostId", row.get("host_id") == null ? null : String.valueOf(row.get("host_id")));
+    value.put("hostname", row.get("hostname") == null ? null : String.valueOf(row.get("hostname")));
     value.put("agentId", row.get("agent_id") == null ? null : String.valueOf(row.get("agent_id")));
     value.put("serviceId", row.get("service_id") == null ? null : String.valueOf(row.get("service_id")));
     value.put("capability", row.get("capability"));
@@ -519,14 +555,17 @@ public class SystemServiceOperationResource {
         error, java.sql.Timestamp.from(Instant.now()), java.sql.Timestamp.from(Instant.now()));
   }
 
-  private UUID decodeCursor(String cursor, UUID host, String status) {
+  private After decodeCursor(String cursor, UUID host, String status, String capability) {
     if (cursor == null) return null;
     try {
       String decoded = new String(Base64.getUrlDecoder().decode(cursor), StandardCharsets.UTF_8);
       String[] parts = decoded.split("\\|", -1);
-      if (parts.length != 3 || !parts[1].equals(host == null ? "" : host.toString()) ||
-          !parts[2].equals(status == null ? "" : status)) throw new IllegalArgumentException();
-      return uuid(parts[0], "cursor");
+      if (parts.length != 5 || !parts[2].equals(host == null ? "" : host.toString()) ||
+          !parts[3].equals(status == null ? "" : status) ||
+          !parts[4].equals(capability == null ? "" : capability))
+        throw new IllegalArgumentException();
+      long millis = Long.parseLong(parts[0]);
+      return new After(new java.sql.Timestamp(millis), uuid(parts[1], "cursor"));
     } catch (RuntimeException e) {
       throw fail(400, "INVALID_CURSOR", "分页游标无效或筛选条件已变化");
     }

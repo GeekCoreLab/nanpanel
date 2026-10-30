@@ -47,7 +47,7 @@ Kubernetes 工作负载应用、YAML 派生拓扑、版本草稿、资源级 dif
 | POST | `/api/v1/hosts/{hostId}/ssh/systemd/journal` | 使用主机资产 SSH 配置执行固定、有行数和字节上限的 journal 查询 |
 | POST | `/api/v1/hosts/{hostId}/ssh/systemd/restart` | 使用主机资产 SSH 配置执行固定 systemd 重启及 active 校验 |
 | POST | `/api/v1/hosts/{hostId}/ssh/agent/install` | 使用资产 SSH 配置、一次性 enrollment token 和镜像内固定安装脚本初始化 Agent |
-| GET | `/api/v1/operations` | 操作列表，支持主机、状态筛选 |
+| GET | `/api/v1/operations` | 平台级任务列表（**按创建时间倒序**，键集分页）。查询参数：`status`、`capability`、`hostId`、`limit`（1–100，默认 20）、`cursor`。响应含 `nextCursor`、`limit`、`statuses`、`capabilities`（当前库中实际出现过的能力，供控制台做筛选项），每条任务带 `hostname`。游标绑定筛选条件，条件变化返回 400 `INVALID_CURSOR` |
 | GET | `/api/v1/operations/{operationId}` | 查询执行与验证结果 |
 
 这里的 `SystemService` 是主机 systemd unit，与平台逻辑服务 `Service` 分开。URL 使用平台 UUID，服务端解析受管 unit，不接受任意命令或客户端指定的主机身份。
