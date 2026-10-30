@@ -180,6 +180,32 @@ class DatabaseInstanceTest {
   }
 
   @Test
+  void theVolumePathIsAskedOfTheHostInsteadOfGuessed() {
+    reset();
+    Session session = login();
+    UUID hostId = seedHost("db-host-6");
+    UUID instanceId = seedInstance(hostId, "mysql", 13306);
+    // No agent: the request is accepted as a dispatch and fails at the transport, loudly.
+    given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.token())
+        .header("Idempotency-Key", UUID.randomUUID().toString())
+        .post("/api/v1/database-instances/" + instanceId + "/volume")
+        .then().statusCode(503)
+        .body("code", equalTo("AGENT_OFFLINE"));
+    // Without an idempotency key the dispatch is refused before anything is recorded.
+    given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.token())
+        .post("/api/v1/database-instances/" + instanceId + "/volume")
+        .then().statusCode(400);
+    given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.token())
+        .header("Idempotency-Key", UUID.randomUUID().toString())
+        .post("/api/v1/database-instances/" + UUID.randomUUID() + "/volume")
+        .then().statusCode(404)
+        .body("code", equalTo("DATABASE_NOT_FOUND"));
+  }
+
+  @Test
   void aPortCannotBeSharedByTwoInstances() {
     reset();
     Session session = login();

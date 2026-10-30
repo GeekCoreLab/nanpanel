@@ -43,6 +43,7 @@ public class HostHelperOperationResource {
   private static final Set<String> CAPABILITIES = Set.of(
       "package.install", "file.write.protected", "container.list", "container.logs",
       "container.start", "container.stop", "container.deploy", "container.remove",
+      "container.volume.path",
       "network.firewall.expose",
       "network.topology.reconcile", "network.topology.capture",
       "file.list", "file.read", "file.write", "file.delete", "k3s.preflight", "k3s.install",
@@ -467,7 +468,7 @@ public class HostHelperOperationResource {
       case "file.list" -> validHostPath(target, true);
       case "file.read", "file.write", "file.delete" -> validHostPath(target, false);
       case "container.logs", "container.start", "container.stop", "container.deploy",
-          "container.remove" ->
+          "container.remove", "container.volume.path" ->
           CONTAINER_NAME.matcher(target).matches();
       case "network.firewall.expose" -> NETWORK_RULE_NAME.matcher(target).matches();
       case "network.topology.reconcile", "network.topology.capture" -> UUID_TEXT.matcher(target).matches();

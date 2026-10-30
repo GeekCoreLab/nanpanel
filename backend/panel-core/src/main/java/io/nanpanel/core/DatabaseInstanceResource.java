@@ -201,6 +201,27 @@ public class DatabaseInstanceResource {
     return body;
   }
 
+  /**
+   * Where this instance's named volume actually lives on the host. Docker and Podman disagree
+   * and a changed data-root moves the path, so the panel asks the runtime instead of guessing;
+   * the returned operation carries the answer.
+   */
+  @POST
+  @Path("{instanceId}/volume")
+  public Map<String, Object> volume(@PathParam("instanceId") String instanceValue,
+      @HeaderParam("Idempotency-Key") String idempotencyKey) {
+    var actor = session();
+    Map<String, Object> row = record(uuid(instanceValue, "instanceId"));
+    String volume = String.valueOf(row.get("dataVolume"));
+    UUID hostId = UUID.fromString(String.valueOf(row.get("hostId")));
+    var helperRequest = new HostHelperOperationResource.HelperOperationRequest(
+        "container.volume.path", volume, null, "读取数据卷挂载点 " + volume, 60,
+        hostGeneration(hostId));
+    Response submitted = helperOperations.submitAs(hostId, idempotencyKey, helperRequest,
+        String.valueOf(actor.get("user_id")), clientIp());
+    return Map.of("operationId", String.valueOf(operationId(submitted)), "volume", volume);
+  }
+
   @DELETE
   @Path("{instanceId}")
   public Response delete(@PathParam("instanceId") String instanceValue,
