@@ -1,0 +1,8 @@
+.metrics-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px;margin-top:12px}
+.metrics-card{border:1px solid var(--border,rgba(148,163,184,.16));border-radius:10px;padding:12px}
+.metrics-card-heading{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:8px;font-size:13px}
+.metrics-card-heading span{font-size:18px;font-weight:600;font-variant-numeric:tabular-nums}
+.metrics-spark{width:100%;height:64px;display:block}
+.metrics-spark-grid{stroke:rgba(148,163,184,.22);stroke-dasharray:3 4;stroke-width:1}
+.metrics-empty{margin:0;padding:18px 0;text-align:center;color:var(--muted,#94a3b8);font-size:12px}
+.metrics-note{margin:12px 2px 0;font-size:12px}
