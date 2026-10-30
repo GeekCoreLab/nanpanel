@@ -68,6 +68,7 @@ NaNPanel 是 **Java 主控 + Rust 边缘** 的混合云基础设施控制面。�
 - [x] 站点实体：域名、上游（本机 loopback 端口）、监听地址/端口、健康检查路径，编译为受管 Nginx 路由（复用 P5 `nginx.route.set`）。控制台「网站」页支持登记、下发（应用）、删除记录。
 - [x] 手工证书 TLS 终止：`nginx.tls.install` 写入主机受管证书目录（0600、root 拥有，Core 不存私钥），`nginx.route.set` 支持 `tls` 渲染 `listen …:443 ssl`、探测走 HTTPS；站点已接入：`POST /{siteId}/tls` + 网站页「HTTPS」按钮（粘贴证书/私钥后自动重新下发）。
 - [ ] acme/Let's Encrypt 证书申请与自动续期。
+- [x] 任务中心：`GET /api/v1/operations` 改为**按创建时间倒序**的键集分页（原先按 UUID 排序，列表顺序与时间无关），新增 `capability` 筛选、`hostname` 关联、以及 `statuses`/`capabilities` 筛选项词表；控制台「操作任务」页可按能力过滤、显示主机名与失败原因。键集游标绑定筛选条件，条件变更返回 400。集成测试覆盖倒序、三种筛选、翻页不重不漏、游标与筛选绑定。
 - [x] 站点状态诚实化：列表/详情按关联 Operation 终态派生 `FAILED`/`UNKNOWN`（不再在主机执行失败时谎报 `APPLIED`），并返回 `operationStatus` 供控制台显示「处理中」；`FAILED` 站点可重新应用/编辑/删除，`UNKNOWN` 仍需先停用。集成测试用真实 Operation 行验证三种派生。
 - [x] 站点启停：`disable` 经 `nginx.route.remove` 撤回受管路由（失败自动还原、幂等、失败不改状态），`apply` 即启用；未生效站点可 `PUT` 修改后重新应用（`APPLIED` 需先停用、不可更换主机）；与 P7 一键绑定域名（部署元数据记录发布端口，网站表单可「从已部署容器带入」主机与上游端口）。
 - [ ] 站点健康探测与配置回滚（多次应用的历史版本）。
