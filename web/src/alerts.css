@@ -22,3 +22,7 @@
 .alerts-severity-critical{background:#fdeceb;color:#b23b36}
 .alerts-severity-warning{background:#fdf4e5;color:#9a6b1f}
 @media (max-width:900px){.alerts-grid{grid-template-columns:1fr}}
+.alerts-channels{grid-column:1/-1}
+.alerts-channels li .alerts-item-copy small{display:block}
+.alerts-channel-form{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-top:12px;padding-top:12px;border-top:1px solid var(--border,rgba(148,163,184,.16))}
+.alerts-channel-form .field{flex:1 1 220px;margin:0}

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { api, isMock } from './lib/api';
 import type {
-  AlertCondition, AlertRule, AlertRuleList, FiringAlertList, Host, HostPage,
+  AlertChannel, AlertChannelList, AlertCondition, AlertRule, AlertRuleList, FiringAlertList,
+  Host, HostPage,
 } from './lib/types';
 import './alerts.css';
 
@@ -29,17 +30,23 @@ export function Alerts({ notify }: { notify: (message: string) => void }) {
   const [hostId, setHostId] = useState('');
   const [unitName, setUnitName] = useState('');
   const [severity, setSeverity] = useState<'WARNING' | 'CRITICAL'>('WARNING');
+  const [channels, setChannels] = useState<AlertChannel[]>([]);
+  const [channelId, setChannelId] = useState('');
+  const [channelName, setChannelName] = useState('');
+  const [channelUrl, setChannelUrl] = useState('');
 
   const load = useCallback(async () => {
     if (isMock) return;
     setLoading(true);
     try {
-      const [ruleResult, alertResult] = await Promise.all([
+      const [ruleResult, alertResult, channelResult] = await Promise.all([
         api<AlertRuleList>('/alert-rules', 'GET', undefined, {}, true),
         api<FiringAlertList>('/alerts', 'GET', undefined, {}, true),
+        api<AlertChannelList>('/alert-channels', 'GET', undefined, {}, true),
       ]);
       setRules(ruleResult.data.items);
       setFiring(alertResult.data);
+      setChannels(channelResult.data.items);
       setError('');
     } catch (cause) {
       setError((cause as Error).message);
@@ -67,10 +74,57 @@ export function Alerts({ notify }: { notify: (message: string) => void }) {
         hostId: hostId || null,
         unitName: condition === 'SERVICE_INACTIVE' ? unitName.trim() : null,
         severity,
+        channelId: channelId || null,
       }, {}, true);
       notify(`告警规则「${name.trim()}」已创建`);
       setName('');
       setUnitName('');
+      await load();
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function createChannel(event: FormEvent) {
+    event.preventDefault();
+    if (isMock) return;
+    setBusy('channel');
+    try {
+      await api<AlertChannel>('/alert-channels', 'POST', {
+        name: channelName.trim(), url: channelUrl.trim(),
+      }, {}, true);
+      notify(`通知渠道「${channelName.trim()}」已创建`);
+      setChannelName('');
+      setChannelUrl('');
+      await load();
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function testChannel(channel: AlertChannel) {
+    setBusy(`test:${channel.id}`);
+    try {
+      await api(`/alert-channels/${channel.id}/test`, 'POST', undefined, {}, true);
+      notify(`测试通知已投递到「${channel.name}」`);
+    } catch (cause) {
+      setError(`测试投递失败：${(cause as Error).message}`);
+    } finally {
+      setBusy('');
+      await load();
+    }
+  }
+
+  async function removeChannel(channel: AlertChannel) {
+    if (!window.confirm(`删除通知渠道「${channel.name}」？绑定它的规则将不再通知。`)) return;
+    setBusy(channel.id);
+    try {
+      await api(`/alert-channels/${channel.id}`, 'DELETE', undefined, {}, true);
+      notify(`通知渠道「${channel.name}」已删除`);
       await load();
     } catch (cause) {
       setError((cause as Error).message);
@@ -124,6 +178,11 @@ export function Alerts({ notify }: { notify: (message: string) => void }) {
             <option value="WARNING">警告</option>
             <option value="CRITICAL">严重</option>
           </select></label>
+        <label className="field"><span>通知渠道（可选）</span>
+          <select value={channelId} onChange={event => setChannelId(event.target.value)}>
+            <option value="">不通知</option>
+            {channels.map(channel => <option key={channel.id} value={channel.id}>{channel.name}</option>)}
+          </select></label>
         <button className="primary" type="submit" disabled={isMock || busy === 'create'}>
           {busy === 'create' ? '创建中…' : '创建规则'}</button>
       </form>
@@ -153,13 +212,45 @@ export function Alerts({ notify }: { notify: (message: string) => void }) {
               <strong>{rule.name}</strong>
               <small>{CONDITION_LABELS[rule.condition] ?? rule.condition}
                 {rule.unitName ? ` · ${rule.unitName}` : ''}
-                {rule.hostname ? ` · ${rule.hostname}` : ' · 全部主机'}</small>
+                {rule.hostname ? ` · ${rule.hostname}` : ' · 全部主机'}
+                {rule.channelName ? ` · 通知 ${rule.channelName}` : ' · 仅控制台可见'}</small>
             </div>
             <span className={`alerts-severity alerts-severity-${rule.severity.toLowerCase()}`}>
               {SEVERITY_LABELS[rule.severity] ?? rule.severity}</span>
             <button type="button" className="secondary" disabled={isMock || busy === rule.id}
               onClick={() => void remove(rule)}>删除</button>
           </li>)}</ul>
+        </div>
+
+        <div className="card alerts-channels">
+          <div className="alerts-card-heading"><h3>通知渠道</h3><span>{channels.length}</span></div>
+          {channels.length === 0 && <p className="application-muted">
+            尚未配置渠道。没有渠道时告警只在控制台可见，不会通知任何人。</p>}
+          <ul>{channels.map(channel => <li key={channel.id}>
+            <div className="alerts-item-copy">
+              <strong>{channel.name}</strong>
+              <small className="mono">{channel.url}</small>
+              <small>{channel.enabled ? '已启用' : '已停用'} · 被 {channel.ruleCount} 条规则使用
+                {channel.lastStatus ? ` · 上次投递 ${channel.lastStatus === 'SUCCEEDED' ? '成功' : '失败'}`
+                  : ' · 尚未投递'}
+                {channel.lastError ? `（${channel.lastError}）` : ''}</small>
+            </div>
+            <button type="button" className="secondary" disabled={isMock || busy !== ''}
+              onClick={() => void testChannel(channel)}>
+              {busy === `test:${channel.id}` ? '投递中…' : '测试'}</button>
+            <button type="button" className="danger" disabled={isMock || busy !== ''}
+              onClick={() => void removeChannel(channel)}>删除</button>
+          </li>)}</ul>
+          <form className="alerts-channel-form" onSubmit={createChannel}>
+            <label className="field"><span>名称</span>
+              <input value={channelName} onChange={event => setChannelName(event.target.value)}
+                required maxLength={120} placeholder="例如：值班群 Webhook" /></label>
+            <label className="field"><span>Webhook 地址</span>
+              <input value={channelUrl} onChange={event => setChannelUrl(event.target.value)}
+                required maxLength={500} placeholder="https://example.com/hooks/nanpanel" /></label>
+            <button className="secondary" type="submit" disabled={isMock || busy === 'channel'}>
+              {busy === 'channel' ? '创建中…' : '添加渠道'}</button>
+          </form>
         </div>
       </div>
     </div>

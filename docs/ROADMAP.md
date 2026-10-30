@@ -54,6 +54,8 @@ NaNPanel 是 **Java 主控 + Rust 边缘** 的混合云基础设施控制面。�
 
 - [x] 容器页（2026-10-30）：控制台新增「容器」，复用既有 `container.list/logs/start/stop/remove` 能力列容器、启停、看日志、移除（移除二次确认，只 `rm --force`、保留命名数据卷）；列表由 `docker ps --all` 输出解析，纯函数 + 4 项单测覆盖空行/CRLF、暂停态不误判为运行、Exited/Created/Restarting 分类。**运行时验收需真实主机**。
 
+- [x] 告警通知（2026-10-30）：新增 Webhook 通知渠道（迁移 049：`alert_channel` + `alert_rule.channel_id` + `alert_firing_state`），规则可绑定渠道；`AlertNotifier` 每 60s 求值一次，按「规则+主机+明细」去重，只对新进入告警的对象投递，失败不记去重键（下一轮重试），恢复后清除状态（再次告警会重新通知）。渠道 CRUD + `POST /{id}/test` 连通性测试，投递结果写回 `lastStatus`/`lastError`。控制台告警页新增渠道卡片与规则绑定下拉。集成测试用内嵌 HTTP 服务验证载荷、去重、恢复后重发、失败重试与 502 报告。
+
 ### P7｜应用商店与一键部署
 
 > **进度（2026-10-30）**：应用目录只读后端已落地（`AppStoreCatalog` + `GET /api/v1/app-store/catalog` 与 `.../{appId}`）。为打通真实一键部署，已把 `container.deploy` 从「image+单 loopback 端口」扩展为支持 **环境变量、命名数据卷、内存上限与有状态安全profile**：后端 `HostHelperOperationResource` 校验、Agent daemon（client/gateway）校验、Rust `privileged-helper` 解析与 `docker/podman run` 参数（`--env`/`--volume`/`--memory`，有状态时去掉 `--read-only` 并授予 CHOWN/DAC_OVERRIDE/FOWNER/SETUID/SETGID 最小初始化能力）均已实现，附后端 4 项定向测试 + Rust 40 项 helper 测试（含新增 payload 约束测试）；控制台新增「应用商店」页（读目录 + 选主机 + 端口/环境变量/数据卷/内存/有状态表单 → 一键提交 `container.deploy`）。应用画布左下角新增实时「路由计划」摘要：把拖拽出的 Service→流量分配器→后端 Service 与归一化权重编译成可读视图（编译逻辑抽出为纯函数 `web/src/lib/application-routing.ts`，含 7 项单测），并支持在画布内直接「写入 Istio 路由 / Verify / 恢复」，强化「拖拽即路由、不手写 Istio/不另建 API 网关」的差异点。另新增 `container.remove`（容器卸载）类型化 Helper 能力，贯通后端/Agent/Helper 与主机详情面板；仅执行 `rm --force`，命名数据卷默认保留（数据安全优先）。新增只读 `GET /api/v1/app-store/deployments`，从成功的 `container.deploy` 操作派生「已部署容器」清单（排除被再次部署或成功 `container.remove` 取代的记录），应用商店页据此显示「已部署容器」并支持一键卸载（复用已测试的容器卸载链路）。剩余：真实 Docker/Podman 主机上一键装/升/卸验收、部署与卸载后的状态自动对账、卷保留策略的显式删除。
