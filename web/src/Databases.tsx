@@ -4,6 +4,7 @@ import { createUuid } from './lib/uuid.ts';
 import type {
   DatabaseInstance, DatabaseList, Host, HostPage, HostHelperOperationRequest, Operation,
 } from './lib/types';
+import { ManagedDatabases } from './ManagedDatabases';
 import './databases.css';
 
 /**
@@ -66,8 +67,9 @@ export function Databases({ notify }: { notify: (message: string) => void }) {
   }
 
   return <section className="databases-workspace">
+    <ManagedDatabases notify={notify} />
     <header className="databases-header">
-      <div><h2>数据库</h2>
+      <div><h2>已发现的数据库容器</h2>
         <p>已部署的 MySQL / MariaDB / PostgreSQL / Redis / MongoDB 容器会在这里显示引擎、端口与连接地址。实例通过应用商店一键部署，卸载复用容器移除链路（命名数据卷保留）。SQL 执行、备份与恢复需要真实主机，尚未实现。</p></div>
     </header>
     {error && <div className="alert error" role="alert">{error}</div>}
