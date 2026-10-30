@@ -13,6 +13,9 @@ import { compareRoutePlan, compileApplicationRoutePlan, MAX_ROUTE_BACKENDS, plan
 import { buildManagedAppIndex, deriveNamespaceSelectorEdges } from './lib/namespace-graph.ts';
 import { buildRouteBody } from './lib/route-manifest.ts';
 import { buildApplicationBundle } from './lib/application-manifest.ts';
+import {
+  buildRouteSnapshot, describeRouteChange, diffRouteSnapshots, type RouteSnapshot,
+} from './lib/route-snapshot.ts';
 import { NamespaceGraph } from './topology/NamespaceGraph.tsx';
 import { parseDocument, stringify as stringifyYaml } from 'yaml';
 import { connectionError, createTopologyNode, draftError, nodePresets, topologyPhysicalPortKey, validNodeShape } from './lib/topology-model';
@@ -1399,6 +1402,33 @@ function layoutApplicationTopology(nodes: TopologyLayoutNode[], edges: Edge[]) {
   return positions;
 }
 
+type StoredRouteSnapshot = { savedAt: number; snapshot: RouteSnapshot };
+
+function snapshotKey(applicationId: string) {
+  return `nanpanel.route-snapshot.${applicationId}`;
+}
+
+/** Snapshots live in the browser: they are an editing aid, not cluster state. */
+function readRouteSnapshot(applicationId: string): StoredRouteSnapshot | null {
+  try {
+    const raw = window.localStorage.getItem(snapshotKey(applicationId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StoredRouteSnapshot;
+    return Array.isArray(parsed?.snapshot?.routes) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeRouteSnapshot(applicationId: string, value: StoredRouteSnapshot | null) {
+  try {
+    if (value === null) window.localStorage.removeItem(snapshotKey(applicationId));
+    else window.localStorage.setItem(snapshotKey(applicationId), JSON.stringify(value));
+  } catch {
+    // Storage can be unavailable (private mode, quota); the panel simply keeps no snapshot.
+  }
+}
+
 function ApplicationNetworkTopologyCanvas({
   applicationId, namespace, resources, topologyEdges, yamlSourceChanges, changes, additions,
   hasDraft, currentDraft, busy, onResourceYamlSave, onResourceUpdate, onAdditionChange,
@@ -1732,11 +1762,17 @@ function ApplicationNetworkTopologyCanvas({
     return () => window.removeEventListener('beforeunload', warn);
   }, [unsaved]);
 
+  const [routeSnapshot, setRouteSnapshot] = useState<StoredRouteSnapshot | null>(
+    () => readRouteSnapshot(applicationId));
   const routePlan = useMemo<RoutePlanRow[]>(() => compileApplicationRoutePlan(
     draft.trafficLinks, draft.nodes,
     (id) => visibleResources.find(resource => resource.id === id)?.name,
   ), [draft.trafficLinks, draft.nodes, visibleResources]);
   const routePlanIssues = useMemo(() => validateRoutePlan(routePlan), [routePlan]);
+  const snapshotChanges = useMemo(() => routeSnapshot
+    ? diffRouteSnapshots(routeSnapshot.snapshot, buildRouteSnapshot(routePlan)) : [],
+  [routeSnapshot, routePlan]);
+  useEffect(() => { setRouteSnapshot(readRouteSnapshot(applicationId)); }, [applicationId]);
 
   const exportBundle = useCallback(() => {
     const bundle = buildApplicationBundle({
@@ -2542,6 +2578,9 @@ function ApplicationNetworkTopologyCanvas({
       </div>
       {routePlan.length > 0 && <div className={`application-route-plan ${routePlanOpen ? 'open' : ''}`}
         role="region" aria-label="拖拽路由计划">
+        {routeSnapshot && snapshotChanges.length > 0 && <em className="application-route-snapshot-count"
+          title={`与 ${new Date(routeSnapshot.savedAt).toLocaleString()} 保存的快照相比`}>
+          {snapshotChanges.length} 处与快照不同</em>}
         <button type="button" className="application-route-plan-toggle" aria-expanded={routePlanOpen}
           onClick={() => setRoutePlanOpen(open => !open)}>
           <span>路由计划</span><b>{routePlan.length} 组</b>
@@ -2549,7 +2588,28 @@ function ApplicationNetworkTopologyCanvas({
           {trafficRuntime?.routes && routeDrift.some(row => row.status === 'DRIFT') && <em className="application-route-drift-count">{routeDrift.filter(row => row.status === 'DRIFT').length} 组与已下发不一致</em>}
           <small>{routePlanOpen ? '收起 ▾' : '展开 ▴'}</small>
         </button>
+        <button type="button" className="application-route-snapshot-save"
+          title="把当前路由计划存为对比基准（只存浏览器，不影响集群）"
+          onClick={() => {
+            const value = { savedAt: Date.now(), snapshot: buildRouteSnapshot(routePlan) };
+            writeRouteSnapshot(applicationId, value);
+            setRouteSnapshot(value);
+            setMessage(`已保存路由快照：${routePlan.length} 组`);
+          }}>存快照</button>
         {routePlanOpen && <div className="application-route-plan-body">
+          {routeSnapshot && <div className="application-route-snapshot">
+            <div className="application-route-snapshot-head">
+              <span>与快照对比（{new Date(routeSnapshot.savedAt).toLocaleString()}）</span>
+              <button type="button" className="link"
+                onClick={() => { writeRouteSnapshot(applicationId, null); setRouteSnapshot(null); }}>
+                清除快照</button>
+            </div>
+            {snapshotChanges.length === 0
+              ? <p className="muted">与快照一致。</p>
+              : <ul>{snapshotChanges.map((change, index) =>
+                <li key={`${change.kind}-${change.routeId}-${index}`}>
+                  {describeRouteChange(change)}</li>)}</ul>}
+          </div>}
           {routePlan.map(route => <div key={route.id}
             className={`application-route-row ${highlightedRoute === route.id ? 'highlighted' : ''}`}
             role="button" tabIndex={0} aria-pressed={highlightedRoute === route.id}

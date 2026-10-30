@@ -669,3 +669,9 @@ main:has(.applications-page)>footer{display:none}
 .application-route-yaml{background:transparent;border:1px solid rgba(148,163,184,.35);color:#94a3b8;border-radius:5px;padding:0 6px;font-size:10px;margin-left:6px;cursor:pointer}
 .application-route-yaml:hover{border-color:#a56bc4;color:#e879f9}
 .application-dirty{font-size:11px;color:#fbbf24;background:rgba(251,191,36,.12);border:1px solid rgba(251,191,36,.35);border-radius:999px;padding:2px 9px;align-self:center;white-space:nowrap}
+.application-route-snapshot-count{font-size:11px;color:#38bdf8;font-style:normal;margin-right:8px}
+.application-route-snapshot-save{background:transparent;border:1px solid rgba(56,189,248,.4);color:#38bdf8;border-radius:6px;padding:2px 9px;font-size:11px;cursor:pointer}
+.application-route-snapshot-save:hover{background:rgba(56,189,248,.12)}
+.application-route-snapshot{border-bottom:1px solid rgba(148,163,184,.2);padding:8px 12px}
+.application-route-snapshot-head{display:flex;justify-content:space-between;font-size:11px;color:#94a3b8;margin-bottom:4px}
+.application-route-snapshot ul{margin:0;padding-left:16px;font-size:12px;color:#cbd5e1}

@@ -146,3 +146,17 @@ Kubernetes YAML 仅接收 Deployment、Service 和 ServiceAccount，至少包含
 没有源码的「待添加」对象不会凭空生成，导出时会统计并列出被跳过的条目（例如 `Service/pending`）。
 `VirtualService` 名称在导出中为 `np-route-<service>` 占位——实际下发名由服务端生成，因此这份文件
 用于归档 / GitOps 比对与迁移，不保证与集群内现有对象逐字节一致。
+
+## 路由快照对比
+
+画布是活的编辑面，而「上周这组路由是怎么分的权重」用 YAML 差异很难回答。路由计划面板的「存快照」
+把当前计划（入口、端口、每个后端的权重）存进**浏览器 localStorage**（键 `nanpanel.route-snapshot.<应用 id>`），
+之后每次展开面板都会与它逐项比较：
+
+- `ADDED` / `REMOVED`：整组路由出现或消失；
+- `ENTRY_PORT`：入口端口改变（前后值都给出）；
+- `BACKEND_ADDED` / `BACKEND_REMOVED`；
+- `WEIGHT`：某个后端权重从 a% 变成 b%。
+
+快照只存在浏览器里、**不写集群也不进数据库**，因此它是个人的编辑辅助，不是审计证据；换机器或清缓存就没了。
+后端只改端口不算变化（权重与组成没变，路由等价）。
