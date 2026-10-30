@@ -8,6 +8,7 @@ import {
 } from '@xyflow/react';
 import { api, isMock } from './lib/api';
 import { createUuid } from './lib/uuid.ts';
+import { findFreePosition } from './lib/canvas-layout.ts';
 import { compareRoutePlan, compileApplicationRoutePlan, MAX_ROUTE_BACKENDS, planRouteDraft, validateRoutePlan, type RoutePlanRow } from './lib/application-routing.ts';
 import { buildManagedAppIndex, deriveNamespaceSelectorEdges } from './lib/namespace-graph.ts';
 import { NamespaceGraph } from './topology/NamespaceGraph.tsx';
@@ -1755,7 +1756,12 @@ function ApplicationNetworkTopologyCanvas({
       setRouteDraftError(result.message);
       return;
     }
-    const node = createTopologyNode('LOAD_BALANCER', canvasCenter());
+    const entryNode = nodes.find(candidate => candidate.id === entry.id);
+    const origin = entryNode
+      ? { x: entryNode.position.x + (entryNode.width ?? 240) + 40, y: entryNode.position.y }
+      : canvasCenter();
+    const node = createTopologyNode('LOAD_BALANCER',
+      freeCanvasPosition({ width: 260, height: 220 }, origin));
     const used = new Set(draft.nodes.filter(item => item.kind === 'LOAD_BALANCER').map(item => item.name));
     let index = 1;
     while (used.has(`流量分配器 ${index}`)) index++;
@@ -2129,13 +2135,24 @@ function ApplicationNetworkTopologyCanvas({
     setMessage(`已将 ${application.data.resource.name} 接入虚拟设备；保存关系不会自动改动 Pod 网络。`);
   }
 
+  /** Adds a node into the first free slot instead of stacking it on whatever is already there. */
+  function freeCanvasPosition(size: { width: number; height: number },
+    origin: { x: number; y: number }) {
+    const occupied = nodes.map(node => ({
+      x: node.position.x, y: node.position.y,
+      width: node.width ?? 240, height: node.height ?? 172,
+    }));
+    return findFreePosition(occupied, size, origin);
+  }
+
   function addDevice(kind: TopologyNodeKind, at?: { x: number; y: number }) {
     if (saving || busy) return;
     const used = new Set(draft.nodes.filter(node => node.kind === kind).map(node => node.name));
     const prefix = nodePresets[kind].name;
     let index = 1;
     while (used.has(`${prefix} ${index}`)) index++;
-    const point = at ?? menu?.point ?? canvasCenter();
+    const point = freeCanvasPosition({ width: 240, height: 200 },
+      at ?? menu?.point ?? canvasCenter());
     const model = createTopologyNode(kind, point);
     model.name = `${prefix} ${index}`;
     setDraft(current => ({ ...current, nodes: [...current.nodes, model] }));
