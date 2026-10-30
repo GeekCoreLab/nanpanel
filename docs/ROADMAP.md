@@ -130,3 +130,10 @@ NaNPanel 是 **Java 主控 + Rust 边缘** 的混合云基础设施控制面。�
 - 每个新模块都通过既有 Provider/Operation/审计通道落地，不绕过能力边界：普通用户 Agent + root Helper，固定类型与参数校验，不接受任意 Shell。
 - 一键部署、数据库、计划任务均复用 现有 幂等 Operation + Helper 类型化能力 + mTLS Agent；业务数据面与 Core 控制面分离。
 - Secret/证书/令牌沿用 Kubernetes credential key 的 AES-GCM 加密与用途绑定，不新增明文存储。
+## 已知问题
+
+- **全量测试偶发中断（未复现）**：`panel-core` 全量运行曾出现一次「64 个用例后 BUILD FAILURE」，当时输出的用例全部通过、
+  且无 forked VM/OOM/端口占用等标记；随后连续三次完整运行均 165 项全绿。若再次出现，请保留完整日志并检查
+  `target/surefire-reports` 中被中断的测试类。
+- **测试库共享**：多个集成测试共用同一个 H2 内存库，因此每个用例在开头都会重置管理员口令并清理自己的数据；
+  新增测试时请沿用 `resetAdmin()` + 清理自身数据的方式，否则会互相干扰。
