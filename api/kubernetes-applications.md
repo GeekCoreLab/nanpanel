@@ -96,3 +96,17 @@ Kubernetes YAML 仅接收 Deployment、Service 和 ServiceAccount，至少包含
 - 画布有、集群没有为 `NOT_APPLIED`；完全一致为 `MATCH`。
 
 比较由纯函数 `compareRoutePlan`（`web/src/lib/application-routing.ts`）完成，权重允许 ±1 个百分点的取整误差。对账**只读**：不主动改集群，也不隐藏未知路由。
+
+## 一键生成路由草稿
+
+画布右下角「生成路由」把已有 Service 直接变成一条可编辑的加权路由，省掉「放三个节点 + 连三条线」：
+
+1. 选择入口 Service（只列出带 HTTP 端口的 Service）与 2–3 个后端 Service；
+2. 面板生成一个 `LOAD_BALANCER` 节点、一条 `ROUTE_ENTRY`（`route-output-<端口>` → `route-input`）与 N 条 `ROUTE_BACKEND`（`route-out-<n>` → `backend-input-<端口>`）；
+3. 权重按均分填好（100 除以 N，余数给前几个，总和恒为 100），随后可用画布滑杆微调。
+
+草稿不直接下发：仍是 `DRAFT`，需要保存后再走 `Apply Service 分流`。生成逻辑是纯函数
+`planRouteDraft`（`web/src/lib/application-routing.ts`），与拖拽生成连线的 handle 命名完全一致
+（因此生成的图与手工拖出来的图无法区分）。拒绝的情况与后端协调器一致：无后端、后端超过 3 个、
+重复后端、入口同时作为后端、端口非法。生成的草稿经 `compileApplicationRoutePlan` 与
+`validateRoutePlan` 校验无问题（有单测锁定）。

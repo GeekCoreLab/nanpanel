@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compareRoutePlan, compileApplicationRoutePlan } from '../src/lib/application-routing.ts';
+import { compareRoutePlan, compileApplicationRoutePlan, planRouteDraft, validateRoutePlan } from '../src/lib/application-routing.ts';
 
 const names = {
   'svc-orders': 'orders', 'svc-v1': 'orders-v1', 'svc-v2': 'orders-v2',
@@ -111,7 +111,6 @@ test('backends and calls without a route entry produce no plan row', () => {
   );
   assert.equal(plan.length, 0);
 });
-import { validateRoutePlan } from '../src/lib/application-routing.ts';
 
 const planRow = (id, serviceName, servicePort, backends, totalWeight, balancerId) => ({
   id, balancerId: balancerId ?? `lb-${id}`, serviceName, servicePort, totalWeight,
@@ -243,4 +242,84 @@ test('a different backend set is a drift even when the totals match', () => {
     [appliedOf('np-route-1', 'shop', 8080, [['api', 50], ['cache', 50]])],
   );
   assert.equal(row.status, 'DRIFT');
+});
+
+// ---- 一键生成路由草稿 -------------------------------------------------------
+const draftRequest = (overrides = {}) => ({
+  loadBalancerId: 'lb-new', loadBalancerName: '流量分配器 1',
+  entry: { serviceId: 'svc-shop', port: 8080 },
+  backends: [{ serviceId: 'svc-api', port: 8080 }, { serviceId: 'svc-web', port: 8081 }],
+  newLinkId: (() => { let n = 0; return () => `link-${++n}`; })(),
+  ...overrides,
+});
+
+test('a two-backend draft splits the weight evenly and wires the canvas handles', () => {
+  const result = planRouteDraft(draftRequest());
+  assert.equal(result.ok, true);
+  const { draft } = result;
+  assert.deepEqual(draft.weights, [
+    { outputPort: 'out-1', weight: 50 },
+    { outputPort: 'out-2', weight: 50 },
+  ]);
+  assert.equal(draft.links.length, 3);
+  const [entryLink, ...backendLinks] = draft.links;
+  assert.equal(entryLink.type, 'ROUTE_ENTRY');
+  assert.equal(entryLink.sourceId, 'svc-shop');
+  assert.equal(entryLink.sourceHandle, 'route-output-8080');
+  assert.equal(entryLink.targetId, 'lb-new');
+  assert.equal(entryLink.targetHandle, 'route-input');
+  assert.equal(entryLink.servicePort, 8080);
+  assert.deepEqual(backendLinks.map(link => link.sourceHandle), ['route-out-1', 'route-out-2']);
+  assert.deepEqual(backendLinks.map(link => link.targetId), ['svc-api', 'svc-web']);
+  assert.deepEqual(backendLinks.map(link => link.targetHandle),
+    ['backend-input-8080', 'backend-input-8081']);
+  assert.deepEqual(backendLinks.map(link => link.servicePort), [8080, 8081]);
+});
+
+test('an odd split still totals 100, with the remainder on the first outputs', () => {
+  const { draft } = planRouteDraft(draftRequest({
+    backends: [
+      { serviceId: 'svc-api', port: 8080 },
+      { serviceId: 'svc-web', port: 8081 },
+      { serviceId: 'svc-jobs', port: 8082 },
+    ],
+  }));
+  assert.deepEqual(draft.weights.map(item => item.weight), [34, 33, 33]);
+  assert.equal(draft.weights.reduce((sum, item) => sum + item.weight, 0), 100);
+});
+
+test('a draft refuses what the canvas and the server would reject', () => {
+  assert.equal(planRouteDraft(draftRequest({ backends: [] })).code, 'NO_BACKENDS');
+  assert.equal(planRouteDraft(draftRequest({
+    backends: [
+      { serviceId: 'a', port: 8080 }, { serviceId: 'b', port: 8080 },
+      { serviceId: 'c', port: 8080 }, { serviceId: 'd', port: 8080 },
+    ],
+  })).code, 'TOO_MANY_BACKENDS');
+  assert.equal(planRouteDraft(draftRequest({
+    backends: [{ serviceId: 'svc-api', port: 8080 }, { serviceId: 'svc-api', port: 8081 }],
+  })).code, 'DUPLICATE_BACKEND');
+  assert.equal(planRouteDraft(draftRequest({
+    backends: [{ serviceId: 'svc-shop', port: 8080 }, { serviceId: 'svc-api', port: 8080 }],
+  })).code, 'ENTRY_AS_BACKEND');
+  assert.equal(planRouteDraft(draftRequest({ entry: { serviceId: 'svc-shop', port: 0 } })).code,
+    'INVALID_PORT');
+  const refused = planRouteDraft(draftRequest({ backends: [] }));
+  assert.equal(refused.ok, false);
+  assert.match(refused.message, /后端/);
+});
+
+test('the generated draft compiles into a plan the validator accepts', () => {
+  const { draft } = planRouteDraft(draftRequest());
+  const balancer = {
+    id: draft.loadBalancerId,
+    loadBalancerConfiguration: { outputWeights: draft.weights },
+  };
+  const names = { 'svc-shop': 'shop', 'svc-api': 'api', 'svc-web': 'web' };
+  const rows = compileApplicationRoutePlan(draft.links, [balancer], id => names[id]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].serviceName, 'shop');
+  assert.deepEqual(rows[0].backends.map(backend => [backend.name, backend.share]),
+    [['api', 50], ['web', 50]]);
+  assert.deepEqual(validateRoutePlan(rows), []);
 });

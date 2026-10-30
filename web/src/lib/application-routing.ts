@@ -16,6 +16,7 @@ export type TrafficLinkLike = {
   targetId: string;
   targetHandle: string;
   servicePort: number;
+  protocol?: 'HTTP';
 };
 
 export type LoadBalancerNodeLike = {
@@ -202,4 +203,99 @@ export function compareRoutePlan(
     });
   }
   return rows;
+}
+
+export type RouteDraftBackend = { serviceId: string; port: number };
+
+export type RouteDraftRequest = {
+  loadBalancerId: string;
+  loadBalancerName?: string;
+  entry: { serviceId: string; port: number };
+  backends: readonly RouteDraftBackend[];
+  newLinkId: () => string;
+};
+
+export type RouteDraft = {
+  loadBalancerId: string;
+  loadBalancerName: string;
+  weights: { outputPort: string; weight: number }[];
+  links: TrafficLinkLike[];
+};
+
+export type RouteDraftRefusal = {
+  ok: false;
+  code: 'NO_BACKENDS' | 'TOO_MANY_BACKENDS' | 'DUPLICATE_BACKEND' | 'ENTRY_AS_BACKEND' | 'INVALID_PORT';
+  message: string;
+};
+
+export type RouteDraftResult = { ok: true; draft: RouteDraft } | RouteDraftRefusal;
+
+/** A LOAD_BALANCER has three outputs, so three backends is the canvas maximum. */
+export const MAX_ROUTE_BACKENDS = 3;
+
+/**
+ * Builds the canvas objects for a weighted route from Services that already exist:
+ * entry Service → LOAD_BALANCER → backends. This is what makes "drag to route" cheap —
+ * the operator picks Services and the panel draws the plumbing with an even split that
+ * can then be tuned with the weight sliders. Pure, so the handle names and the weight
+ * split are unit-tested against the same conventions the drop handler produces.
+ */
+export function planRouteDraft(request: RouteDraftRequest): RouteDraftResult {
+  const { entry, backends } = request;
+  if (!Number.isInteger(entry.port) || entry.port < 1 || entry.port > 65535) {
+    return { ok: false, code: 'INVALID_PORT', message: '入口 Service 端口无效' };
+  }
+  if (backends.length === 0) {
+    return { ok: false, code: 'NO_BACKENDS', message: '至少选择一个后端 Service' };
+  }
+  if (backends.length > MAX_ROUTE_BACKENDS) {
+    return { ok: false, code: 'TOO_MANY_BACKENDS',
+      message: `一个流量分配器最多 ${MAX_ROUTE_BACKENDS} 个后端` };
+  }
+  const seen = new Set<string>();
+  for (const backend of backends) {
+    if (!Number.isInteger(backend.port) || backend.port < 1 || backend.port > 65535) {
+      return { ok: false, code: 'INVALID_PORT', message: '后端 Service 端口无效' };
+    }
+    if (backend.serviceId === entry.serviceId) {
+      return { ok: false, code: 'ENTRY_AS_BACKEND', message: '入口 Service 不能同时作为后端' };
+    }
+    if (seen.has(backend.serviceId)) {
+      return { ok: false, code: 'DUPLICATE_BACKEND', message: '同一个后端 Service 只能出现一次' };
+    }
+    seen.add(backend.serviceId);
+  }
+
+  // Even split with the remainder on the first outputs, so the weights always total 100.
+  const base = Math.floor(100 / backends.length);
+  const remainder = 100 - base * backends.length;
+  const weights = backends.map((_, index) => ({
+    outputPort: `out-${index + 1}`,
+    weight: base + (index < remainder ? 1 : 0),
+  }));
+
+  const links: TrafficLinkLike[] = [{
+    id: request.newLinkId(), type: 'ROUTE_ENTRY',
+    sourceId: entry.serviceId, sourceHandle: `route-output-${entry.port}`,
+    targetId: request.loadBalancerId, targetHandle: 'route-input',
+    protocol: 'HTTP', servicePort: entry.port,
+  }];
+  backends.forEach((backend, index) => {
+    links.push({
+      id: request.newLinkId(), type: 'ROUTE_BACKEND',
+      sourceId: request.loadBalancerId, sourceHandle: `route-out-${index + 1}`,
+      targetId: backend.serviceId, targetHandle: `backend-input-${backend.port}`,
+      protocol: 'HTTP', servicePort: backend.port,
+    });
+  });
+
+  return {
+    ok: true,
+    draft: {
+      loadBalancerId: request.loadBalancerId,
+      loadBalancerName: request.loadBalancerName ?? '流量分配器',
+      weights,
+      links,
+    },
+  };
 }

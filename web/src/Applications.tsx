@@ -8,7 +8,7 @@ import {
 } from '@xyflow/react';
 import { api, isMock } from './lib/api';
 import { createUuid } from './lib/uuid.ts';
-import { compareRoutePlan, compileApplicationRoutePlan, validateRoutePlan, type RoutePlanRow } from './lib/application-routing.ts';
+import { compareRoutePlan, compileApplicationRoutePlan, MAX_ROUTE_BACKENDS, planRouteDraft, validateRoutePlan, type RoutePlanRow } from './lib/application-routing.ts';
 import { buildManagedAppIndex, deriveNamespaceSelectorEdges } from './lib/namespace-graph.ts';
 import { NamespaceGraph } from './topology/NamespaceGraph.tsx';
 import { parseDocument, stringify as stringifyYaml } from 'yaml';
@@ -1724,6 +1724,55 @@ function ApplicationNetworkTopologyCanvas({
     .filter(row => row.routeId).map(row => [row.routeId as string, row])), [routeDrift]);
   const staleRoutes = useMemo(() => routeDrift.filter(row => row.status === 'STALE'), [routeDrift]);
   const [routePlanOpen, setRoutePlanOpen] = useState(false);
+  const [routeDraftOpen, setRouteDraftOpen] = useState(false);
+  const [routeDraftEntry, setRouteDraftEntry] = useState('');
+  const [routeDraftBackendIds, setRouteDraftBackendIds] = useState<string[]>([]);
+  const [routeDraftError, setRouteDraftError] = useState('');
+  // Only HTTP Services can take part in a weighted route (the backend reconciler agrees).
+  const routedServices = useMemo(() => visibleResources
+    .filter(resource => resource.kind === 'Service'
+      && resource.servicePorts.some(port => isHttpTrafficPort(port))), [visibleResources]);
+  const httpPortOf = (resource: { servicePorts: { port: number; name?: string | null; protocol?: string | null }[] }) =>
+    resource.servicePorts.find(port => isHttpTrafficPort(port as never))?.port ?? 0;
+
+  function generateRouteDraft() {
+    const entry = routedServices.find(resource => resource.id === routeDraftEntry);
+    if (!entry) {
+      setRouteDraftError('请选择入口 Service');
+      return;
+    }
+    const backends = routeDraftBackendIds
+      .map(id => routedServices.find(resource => resource.id === id))
+      .filter((resource): resource is (typeof routedServices)[number] => !!resource)
+      .map(resource => ({ serviceId: resource.id, port: httpPortOf(resource) }));
+    const result = planRouteDraft({
+      loadBalancerId: createUuid(),
+      entry: { serviceId: entry.id, port: httpPortOf(entry) },
+      backends,
+      newLinkId: createUuid,
+    });
+    if (!result.ok) {
+      setRouteDraftError(result.message);
+      return;
+    }
+    const node = createTopologyNode('LOAD_BALANCER', canvasCenter());
+    const used = new Set(draft.nodes.filter(item => item.kind === 'LOAD_BALANCER').map(item => item.name));
+    let index = 1;
+    while (used.has(`流量分配器 ${index}`)) index++;
+    node.name = `流量分配器 ${index}`;
+    node.id = result.draft.loadBalancerId;
+    node.loadBalancerConfiguration = { outputWeights: result.draft.weights };
+    setDraft(current => ({
+      ...current,
+      nodes: [...current.nodes, node],
+      // The draft always emits HTTP links, which is exactly what the topology model stores.
+      trafficLinks: [...current.trafficLinks, ...result.draft.links.map(link => ({ ...link, protocol: 'HTTP' as const }))],
+    }));
+    setDirty(true);
+    setRouteDraftOpen(false);
+    setRouteDraftError('');
+    setMessage(`已生成路由草稿：${entry.name} → ${result.draft.loadBalancerName} → ${backends.length} 个后端；保存后仍可在画布上调权重。`);
+  }
 
   const updateLoadBalancerWeight = useCallback((nodeId: string, outputPort: string, weight: number) => {
     if (saving || busy || !Number.isInteger(weight) || weight < 0 || weight > 100) return;
@@ -2326,6 +2375,51 @@ function ApplicationNetworkTopologyCanvas({
         </>}
       </aside>}
       <div className="application-floating-tool-stack">
+        <button type="button" className="application-canvas-fab" aria-label="从现有 Service 生成加权路由"
+          title={routedServices.length < 3 ? '至少需要三个带 HTTP 端口的 Service（一个入口、两个后端）'
+            : '从现有 Service 生成路由草稿'}
+          disabled={saving || busy || routedServices.length < 3}
+          onClick={() => {
+            setRouteDraftOpen(true);
+            setRouteDraftEntry(routedServices[0]?.id ?? '');
+            setRouteDraftBackendIds([]);
+            setRouteDraftError('');
+          }}>⇄<span>生成路由</span></button>
+        {routeDraftOpen && <div className="modal-backdrop" role="presentation">
+          <div className="modal application-route-draft" role="dialog" aria-label="生成路由草稿">
+            <div className="card-title"><h2>生成路由草稿</h2>
+              <button className="icon-button" aria-label="关闭生成路由"
+                onClick={() => setRouteDraftOpen(false)}>×</button></div>
+            <p className="muted">选择一个入口 Service 与 2–{MAX_ROUTE_BACKENDS} 个后端 Service，
+              面板会画出「入口 → 流量分配器 → 后端」的连线并按均分填好权重；保存后仍可在画布上用滑杆调整。</p>
+            <label className="field"><span>入口 Service</span>
+              <select value={routeDraftEntry} onChange={event => setRouteDraftEntry(event.target.value)}>
+                {routedServices.map(resource => <option key={resource.id} value={resource.id}>
+                  {resource.name}:{httpPortOf(resource)}
+                </option>)}
+              </select></label>
+            <span className="field-label">后端 Service（至少两个）</span>
+            <div className="application-route-draft-backends">
+              {routedServices.filter(resource => resource.id !== routeDraftEntry).map(resource => {
+                const checked = routeDraftBackendIds.includes(resource.id);
+                return <label key={resource.id} className={checked ? 'checked' : ''}>
+                  <input type="checkbox" checked={checked}
+                    disabled={!checked && routeDraftBackendIds.length >= MAX_ROUTE_BACKENDS}
+                    onChange={event => setRouteDraftBackendIds(current => event.target.checked
+                      ? [...current, resource.id]
+                      : current.filter(id => id !== resource.id))} />
+                  <span>{resource.name}:{httpPortOf(resource)}</span>
+                </label>;
+              })}
+            </div>
+            {routeDraftError && <div className="alert error" role="alert">{routeDraftError}</div>}
+            <div className="application-route-draft-actions">
+              <button className="primary" type="button" disabled={saving || busy}
+                onClick={generateRouteDraft}>生成草稿</button>
+              <button className="secondary" type="button" onClick={() => setRouteDraftOpen(false)}>取消</button>
+            </div>
+          </div>
+        </div>}
         <div className="application-node-menu-wrap">
           <button type="button" className="application-canvas-fab primary" aria-label="添加拓扑节点" title="添加节点"
             aria-haspopup="menu" aria-expanded={nodeMenuOpen} disabled={saving || busy}
