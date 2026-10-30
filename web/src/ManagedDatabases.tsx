@@ -7,6 +7,24 @@ import type {
 } from './lib/types';
 import './managed-databases.css';
 
+type OperationRow = {
+  id: string; capability: string; status: string;
+  result?: { output?: string } | null;
+  error?: Record<string, unknown> | null;
+};
+
+/** The helper answers with a JSON string inside the operation result. */
+function mountpointOf(operation: OperationRow): string | null {
+  const raw = operation.result?.output;
+  if (typeof raw !== 'string') return null;
+  try {
+    const parsed = JSON.parse(raw) as { mountpoint?: string };
+    return typeof parsed.mountpoint === 'string' ? parsed.mountpoint : null;
+  } catch {
+    return null;
+  }
+}
+
 const STATE_LABELS: Record<string, string> = {
   DRAFT: '部署中', APPLIED: '运行中', FAILED: '失败', UNKNOWN: '状态未定',
 };
@@ -27,6 +45,7 @@ export function ManagedDatabases({ notify }: { notify: (message: string) => void
   const [error, setError] = useState('');
   const [created, setCreated] = useState<ManagedDatabaseCreated | null>(null);
   const [connection, setConnection] = useState<ManagedDatabaseConnection | null>(null);
+  const [volume, setVolume] = useState<{ instance: ManagedDatabase; path: string } | null>(null);
 
   const load = useCallback(async () => {
     if (isMock) return;
@@ -81,6 +100,59 @@ export function ManagedDatabases({ notify }: { notify: (message: string) => void
       const result = await api<ManagedDatabaseConnection>(
         `/database-instances/${instance.id}/connection`, 'GET', undefined, {}, true);
       setConnection(result.data);
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  /**
+   * The mountpoint only exists on the host, so this dispatches an inspection and waits for its
+   * operation instead of building a path the panel cannot know.
+   */
+  async function resolveVolume(instance: ManagedDatabase) {
+    if (isMock) return;
+    setBusy(`volume:${instance.id}`);
+    setError('');
+    try {
+      const submitted = await api<{ operationId: string }>(
+        `/database-instances/${instance.id}/volume`, 'POST', undefined,
+        { 'Idempotency-Key': createUuid() }, true);
+      const operationId = submitted.data.operationId;
+      for (let attempt = 0; attempt < 15; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        const listed = await api<{ items: OperationRow[] }>(
+          '/operations?capability=container.volume.path&limit=20', 'GET', undefined, {}, true);
+        const operation = listed.data.items.find(item => item.id === operationId);
+        if (!operation) continue;
+        if (operation.status === 'SUCCEEDED') {
+          const path = mountpointOf(operation);
+          if (!path) throw new Error('主机返回了无法解析的卷信息');
+          setVolume({ instance, path });
+          return;
+        }
+        if (operation.status === 'FAILED' || operation.status === 'UNKNOWN')
+          throw new Error(`读取挂载点失败：${JSON.stringify(operation.error ?? {})}`);
+      }
+      throw new Error('等待主机响应超时，请稍后在「操作任务」里查看结果');
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function backupInstance(instance: ManagedDatabase, source: string) {
+    if (isMock) return;
+    setBusy(`backup:${instance.id}`);
+    setError('');
+    try {
+      await api('/backups', 'POST', {
+        hostId: instance.hostId, source, name: instance.containerName,
+      }, { 'Idempotency-Key': createUuid() }, true);
+      notify(`已下发备份 ${instance.containerName}（数据卷目录）`);
+      setVolume(null);
     } catch (cause) {
       setError((cause as Error).message);
     } finally {
@@ -145,6 +217,9 @@ export function ManagedDatabases({ notify }: { notify: (message: string) => void
             {STATE_LABELS[instance.state] ?? instance.state}</span></td>
           <td className="backups-actions">
             <button className="link" disabled={busy !== ''} onClick={() => void showConnection(instance)}>连接</button>
+            <button className="link" disabled={busy !== ''}
+              title="向主机询问命名卷的真实挂载点，并可从那里创建备份"
+              onClick={() => void resolveVolume(instance)}>数据卷</button>
             <button className="link" disabled={busy !== ''} onClick={() => void remove(instance)}>删除</button>
           </td>
         </tr>)}</tbody>
@@ -166,6 +241,22 @@ export function ManagedDatabases({ notify }: { notify: (message: string) => void
           notify('已复制连接信息');
         }}>复制</button>
         <button className="secondary" onClick={() => setCreated(null)}>我已保存</button>
+      </div>
+    </div></div>}
+    {volume && <div className="modal-backdrop"><div className="modal" role="dialog" aria-label="数据卷位置">
+      <div className="card-title"><h2>{volume.instance.containerName} 的数据卷</h2>
+        <button className="icon-button" aria-label="关闭数据卷" onClick={() => setVolume(null)}>×</button></div>
+      <p className="muted">这个路径由主机上的 <code>volume inspect</code> 返回，面板不拼接、不推测。</p>
+      <dl className="managed-credentials">
+        <div><dt>挂载点</dt><dd className="mono">{volume.path}</dd></div>
+        <div><dt>卷名</dt><dd className="mono">{volume.instance.dataVolume}</dd></div>
+      </dl>
+      <div className="alert">备份会把整个数据目录打包；正在写入的数据库文件可能不一致，恢复前请在主机上确认服务已停止。</div>
+      <div className="form-actions">
+        <button className="primary" disabled={busy !== ''}
+          onClick={() => void backupInstance(volume.instance, volume.path)}>
+          {busy.startsWith('backup:') ? '下发中…' : '备份这个目录'}</button>
+        <button className="secondary" onClick={() => setVolume(null)}>关闭</button>
       </div>
     </div></div>}
     {connection && <div className="modal-backdrop"><div className="modal" role="dialog" aria-label="连接信息">
