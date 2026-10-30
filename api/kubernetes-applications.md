@@ -78,3 +78,21 @@ Kubernetes YAML 仅接收 Deployment、Service 和 ServiceAccount，至少包含
 | POST | `/api/v1/kubernetes/applications/{applicationId}/versions/{version}/deploy` | 显式确认部署指定草稿 |
 
 所有路由使用活动管理员 Cookie 会话；写请求需要 CSRF。受限 API Key 不包含这些管理权限。
+
+## 已下发路由对账
+
+`GET /api/v1/kubernetes/applications/{applicationId}/network-topology/traffic-runtime` 除状态外还返回 `routes`——**从保存的快照里读回**的加权路由：
+
+```json
+{"routes":[{"name":"np-route-…","service":"shop","port":8080,
+            "backends":[{"service":"api","port":8080,"weight":90},
+                        {"service":"web","port":8081,"weight":10}]}]}
+```
+
+这是「集群被告知了什么」，与画布上的期望状态对比即可发现两类漂移：
+
+- **画布改了权重但没下发**（`DRIFT`）——面板显示双方权重，例如「画布为 api 90% / web 10%，已下发为 api 50% / web 50%」。
+- **集群仍有画布已删除的路由**（`STALE`）——画布上没有任何行，说明需要在集群侧清理（用「恢复」撤销或重新 Apply）。
+- 画布有、集群没有为 `NOT_APPLIED`；完全一致为 `MATCH`。
+
+比较由纯函数 `compareRoutePlan`（`web/src/lib/application-routing.ts`）完成，权重允许 ±1 个百分点的取整误差。对账**只读**：不主动改集群，也不隐藏未知路由。

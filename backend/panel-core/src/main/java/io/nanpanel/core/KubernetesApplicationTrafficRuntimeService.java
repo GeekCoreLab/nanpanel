@@ -42,7 +42,14 @@ public class KubernetesApplicationTrafficRuntimeService {
   @Inject ObjectMapper mapper;
 
   public record RuntimeView(String applicationId, String revisionId, long generation,
-      String state, String detail, Instant updatedAt, Instant appliedAt) {}
+      String state, String detail, Instant updatedAt, Instant appliedAt,
+      List<AppliedRoute> routes) {}
+
+  /** One weighted route as it was actually written to the cluster. */
+  public record AppliedRoute(String name, String service, int port,
+      List<AppliedBackend> backends) {}
+
+  public record AppliedBackend(String service, int port, int weight) {}
   private record App(UUID id, UUID clusterId, String namespace, String state) {}
   private record RoutePlan(String name, JsonNode resource) {}
   private record CreatedRoute(String name, String uid) {}
@@ -682,6 +689,47 @@ public class KubernetesApplicationTrafficRuntimeService {
     });
   }
 
+  /**
+   * Reads the weighted routes back out of the stored snapshot so the canvas can compare
+   * what it draws with what the cluster was actually told. Pure and static: the console
+   * needs this offline, and it must never require a live cluster connection.
+   */
+  /** Snapshot parsing is static so drift detection never depends on injected state. */
+  private static final com.fasterxml.jackson.databind.ObjectMapper SNAPSHOT_JSON =
+      new com.fasterxml.jackson.databind.ObjectMapper();
+
+  static List<AppliedRoute> appliedRoutes(String snapshotJson) {
+    List<AppliedRoute> routes = new ArrayList<>();
+    if (snapshotJson == null || snapshotJson.isBlank()) return routes;
+    JsonNode snapshot;
+    try {
+      snapshot = SNAPSHOT_JSON.readTree(snapshotJson);
+    } catch (IOException failure) {
+      throw fail(500, "APPLICATION_TRAFFIC_RUNTIME_CORRUPT", "保存的 Service 路由快照无法读取");
+    }
+    for (JsonNode route : snapshot.path("routes")) {
+      JsonNode spec = route.path("resource").path("spec");
+      JsonNode http = spec.path("http").path(0);
+      List<AppliedBackend> backends = new ArrayList<>();
+      for (JsonNode destination : http.path("route")) {
+        backends.add(new AppliedBackend(
+            shortName(destination.path("destination").path("host").asText()),
+            destination.path("destination").path("port").path("number").asInt(0),
+            destination.path("weight").asInt(0)));
+      }
+      routes.add(new AppliedRoute(route.path("name").asText(),
+          shortName(spec.path("hosts").path(0).asText()),
+          http.path("match").path(0).path("port").asInt(0), List.copyOf(backends)));
+    }
+    return List.copyOf(routes);
+  }
+
+  /** Istio hosts are fully qualified ("svc.ns.svc.cluster.local"); the canvas uses bare names. */
+  private static String shortName(String host) {
+    int dot = host.indexOf('.');
+    return dot < 0 ? host : host.substring(0, dot);
+  }
+
   private RuntimeSnapshot snapshot(Map<String, Object> row) {
     try {
       return mapper.readValue(String.valueOf(row.get("runtime_snapshot")), RuntimeSnapshot.class);
@@ -704,7 +752,8 @@ public class KubernetesApplicationTrafficRuntimeService {
         String.valueOf(row.get("revision_id")), number(row, "generation"),
         String.valueOf(row.get("state")), row.get("detail") == null ? null : String.valueOf(row.get("detail")),
         Instant.ofEpochMilli(number(row, "updated_at")), row.get("applied_at") == null ? null
-            : Instant.ofEpochMilli(number(row, "applied_at")));
+            : Instant.ofEpochMilli(number(row, "applied_at")),
+        appliedRoutes(String.valueOf(row.get("runtime_snapshot"))));
   }
 
   private App app(UUID applicationId) {
