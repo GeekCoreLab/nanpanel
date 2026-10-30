@@ -16,8 +16,8 @@
         <sql>CREATE TABLE agent (id UUID PRIMARY KEY, host_id UUID NOT NULL REFERENCES host(id), cert_identity VARCHAR(255) NOT NULL UNIQUE, version VARCHAR(64), last_seen TIMESTAMP WITH TIME ZONE, cert_fingerprint CHAR(64));</sql>
         <sql>CREATE TABLE operation (id UUID PRIMARY KEY, idempotency_key VARCHAR(128) NOT NULL UNIQUE, phase VARCHAR(32) NOT NULL, status VARCHAR(16) NOT NULL DEFAULT 'PENDING', error TEXT, created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP);</sql>
         <sql>CREATE TABLE agent_enrollment (id UUID PRIMARY KEY, host_id UUID NOT NULL REFERENCES host(id), agent_id UUID NOT NULL UNIQUE REFERENCES agent(id), token_hash CHAR(64) NOT NULL UNIQUE, expires_at TIMESTAMP WITH TIME ZONE NOT NULL, consumed_at TIMESTAMP WITH TIME ZONE, created_by VARCHAR(36) NOT NULL REFERENCES panel_user(id), created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP);</sql>
-        <sql>CREATE TABLE platform_settings (id INTEGER PRIMARY KEY, site_name VARCHAR(100), default_timezone VARCHAR(64), host_offline_after_seconds INTEGER, operation_retention_days INTEGER, updated_at BIGINT, updated_by UUID);</sql>
-        <sql>INSERT INTO platform_settings VALUES (1, 'NaNPanel', 'Asia/Shanghai', 90, 30, 0, NULL);</sql>
+        <sql>CREATE TABLE platform_settings (id INTEGER PRIMARY KEY, site_name VARCHAR(100), default_timezone VARCHAR(64), host_offline_after_seconds INTEGER, operation_retention_days INTEGER, updated_at BIGINT, updated_by UUID, version INTEGER NOT NULL DEFAULT 1);</sql>
+        <sql>INSERT INTO platform_settings (id,site_name,default_timezone,host_offline_after_seconds,operation_retention_days,updated_at,updated_by,version) VALUES (1, 'NaNPanel', 'Asia/Shanghai', 90, 30, 0, NULL, 1);</sql>
     </changeSet>
     <changeSet id="agent-helper-control-test" author="nanpanel">
         <sqlFile path="db/changelog/007-agent-helper-control.sql"/>

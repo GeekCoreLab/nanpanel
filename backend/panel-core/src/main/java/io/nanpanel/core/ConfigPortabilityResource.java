@@ -59,6 +59,7 @@ public class ConfigPortabilityResource {
     ObjectNode root = JSON.createObjectNode();
     root.put("version", VERSION);
     root.put("exportedAt", Instant.now().toString());
+    root.set("settings", store.transaction(c -> settings(c)));
     root.set("alertChannels", store.transaction(c -> channels(c)));
     root.set("alertRules", store.transaction(c -> rules(c)));
     root.set("sites", store.transaction(c -> sites(c)));
@@ -76,7 +77,8 @@ public class ConfigPortabilityResource {
   @POST
   @Path("import")
   @Consumes(MediaType.APPLICATION_JSON)
-  public Response importConfig(@QueryParam("strategy") String strategy, JsonNode body) {
+  public Response importConfig(@QueryParam("strategy") String strategy,
+      @QueryParam("dryRun") boolean dryRun, JsonNode body) {
     var actor = session();
     String mode = strategy == null || strategy.isBlank() ? "skip"
         : strategy.trim().toLowerCase(java.util.Locale.ROOT);
@@ -96,8 +98,45 @@ public class ConfigPortabilityResource {
     String actorId = String.valueOf(actor.get("user_id"));
     long now = System.currentTimeMillis();
     List<Map<String, Object>> failed = new ArrayList<>();
+    Map<String, UUID> channelIds = new LinkedHashMap<>();
     int imported = 0;
     int skipped = 0;
+
+    // Settings are single-valued: only "overwrite" replaces them, "skip" keeps the local ones.
+    ObjectNode settings = payload.path("settings").isObject()
+        ? (ObjectNode) payload.path("settings") : null;
+    if (settings != null && !settings.isEmpty()) {
+      String siteName = text(settings.path("siteName"));
+      String timezone = text(settings.path("defaultTimezone"));
+      int offlineAfter = settings.path("hostOfflineAfterSeconds").asInt(0);
+      int retentionDays = settings.path("operationRetentionDays").asInt(0);
+      boolean settingsExist = !store.transaction(c -> query(c,
+          "SELECT id FROM platform_settings WHERE id=1")).isEmpty();
+      if (!validSettings(siteName, timezone, offlineAfter, retentionDays)) {
+        failed.add(failure("settings", siteName, "平台设置字段无效"));
+      } else if (mode.equals("skip") && settingsExist) {
+        skipped++;
+      } else {
+        if (!dryRun) {
+          store.transaction(c -> {
+            var rows = query(c, "SELECT id FROM platform_settings WHERE id=1");
+            if (rows.isEmpty()) {
+              update(c, "INSERT INTO platform_settings (id,site_name,default_timezone,"
+                  + "host_offline_after_seconds,operation_retention_days,updated_at,updated_by,"
+                  + "version) VALUES (1,?,?,?,?,?,?,1)",
+                  siteName, timezone, offlineAfter, retentionDays, now, actorId);
+            } else {
+              update(c, "UPDATE platform_settings SET site_name=?, default_timezone=?, "
+                      + "host_offline_after_seconds=?, operation_retention_days=?, updated_at=?, "
+                      + "updated_by=?, version=version+1 WHERE id=1",
+                  siteName, timezone, offlineAfter, retentionDays, now, actorId);
+            }
+            return null;
+          });
+        }
+        imported++;
+      }
+    }
 
     // Channels first: rules reference them by name.
     for (JsonNode item : payload.path("alertChannels")) {
@@ -107,8 +146,13 @@ public class ConfigPortabilityResource {
         failed.add(failure("channel", name, "名称或 Webhook 地址无效"));
         continue;
       }
-      boolean exists = !store.transaction(c -> query(c,
-          "SELECT channel_id FROM alert_channel WHERE name=?", name)).isEmpty();
+      var existingChannel = store.transaction(c -> query(c,
+          "SELECT channel_id FROM alert_channel WHERE name=?", name));
+      boolean exists = !existingChannel.isEmpty();
+      UUID channelId = exists
+          ? UUID.fromString(String.valueOf(existingChannel.getFirst().get("channel_id")))
+          : UUID.randomUUID();
+      channelIds.put(name, channelId);
       if (exists && mode.equals("skip")) {
         skipped++;
         continue;
@@ -116,17 +160,20 @@ public class ConfigPortabilityResource {
       boolean enabled = !item.path("enabled").isBoolean() || item.path("enabled").asBoolean();
       boolean notifyRecovery = !item.path("notifyRecovery").isBoolean()
           || item.path("notifyRecovery").asBoolean();
-      store.transaction(c -> {
-        if (exists) {
-          update(c, "UPDATE alert_channel SET url=?, enabled=?, notify_recovery=?, updated_at=? "
-              + "WHERE name=?", url, enabled, notifyRecovery, now, name);
-        } else {
-          update(c, "INSERT INTO alert_channel (channel_id,name,kind,url,enabled,created_by,"
-                  + "created_at,updated_at,notify_recovery) VALUES (?,?,?,?,?,?,?,?,?)",
-              UUID.randomUUID(), name, "WEBHOOK", url, enabled, actorId, now, now, notifyRecovery);
-        }
-        return null;
-      });
+      final UUID savedChannel = channelId;
+      if (!dryRun) {
+        store.transaction(c -> {
+          if (exists) {
+            update(c, "UPDATE alert_channel SET url=?, enabled=?, notify_recovery=?, updated_at=? "
+                + "WHERE name=?", url, enabled, notifyRecovery, now, name);
+          } else {
+            update(c, "INSERT INTO alert_channel (channel_id,name,kind,url,enabled,created_by,"
+                    + "created_at,updated_at,notify_recovery) VALUES (?,?,?,?,?,?,?,?,?)",
+                savedChannel, name, "WEBHOOK", url, enabled, actorId, now, now, notifyRecovery);
+          }
+          return null;
+        });
+      }
       imported++;
     }
 
@@ -157,20 +204,22 @@ public class ConfigPortabilityResource {
         skipped++;
         continue;
       }
-      store.transaction(c -> {
-        if (existing != null) {
-          update(c, "UPDATE reverse_proxy_site SET listen_address=?, upstream_port=?, "
-              + "health_path=?, updated_at=? WHERE site_id=?",
-              address, upstreamPort, health, now, existing);
-        } else {
-          update(c, "INSERT INTO reverse_proxy_site (site_id,host_id,domain,listen_address,"
-                  + "listen_port,upstream_port,health_path,state,created_by,created_at,updated_at) "
-                  + "VALUES (?,?,?,?,?,?,?,'DRAFT',?,?,?)",
-              UUID.randomUUID(), hostId, domain, address, listenPort, upstreamPort, health,
-              actorId, now, now);
-        }
-        return null;
-      });
+      if (!dryRun) {
+        store.transaction(c -> {
+          if (existing != null) {
+            update(c, "UPDATE reverse_proxy_site SET listen_address=?, upstream_port=?, "
+                + "health_path=?, updated_at=? WHERE site_id=?",
+                address, upstreamPort, health, now, existing);
+          } else {
+            update(c, "INSERT INTO reverse_proxy_site (site_id,host_id,domain,listen_address,"
+                    + "listen_port,upstream_port,health_path,state,created_by,created_at,updated_at) "
+                    + "VALUES (?,?,?,?,?,?,?,'DRAFT',?,?,?)",
+                UUID.randomUUID(), hostId, domain, address, listenPort, upstreamPort, health,
+                actorId, now, now);
+          }
+          return null;
+        });
+      }
       imported++;
     }
 
@@ -198,13 +247,17 @@ public class ConfigPortabilityResource {
       UUID channelId = null;
       String channelName = text(item.path("channelName"));
       if (channelName != null && !channelName.isBlank()) {
-        var channelRows = store.transaction(c -> query(c,
-            "SELECT channel_id FROM alert_channel WHERE name=?", channelName));
-        if (channelRows.isEmpty()) {
-          failed.add(failure("rule", name, "通知渠道 " + channelName + " 不存在"));
-          continue;
+        // Channels created earlier in this same import count, including in a dry run.
+        channelId = channelIds.get(channelName);
+        if (channelId == null) {
+          var channelRows = store.transaction(c -> query(c,
+              "SELECT channel_id FROM alert_channel WHERE name=?", channelName));
+          if (channelRows.isEmpty()) {
+            failed.add(failure("rule", name, "通知渠道 " + channelName + " 不存在"));
+            continue;
+          }
+          channelId = UUID.fromString(String.valueOf(channelRows.getFirst().get("channel_id")));
         }
-        channelId = UUID.fromString(String.valueOf(channelRows.getFirst().get("channel_id")));
       }
       String unitName = "SERVICE_INACTIVE".equals(condition) ? text(item.path("unitName")) : null;
       boolean enabled = !item.path("enabled").isBoolean() || item.path("enabled").asBoolean();
@@ -219,20 +272,22 @@ public class ConfigPortabilityResource {
       final UUID ruleHost = hostId;
       final UUID ruleChannel = channelId;
       final String ruleUnit = unitName;
-      store.transaction(c -> {
-        if (existingRule != null) {
-          update(c, "UPDATE alert_rule SET condition_kind=?, host_id=?, unit_name=?, severity=?, "
-                  + "enabled=?, channel_id=? WHERE rule_id=?",
-              condition, ruleHost, ruleUnit, severity, enabled, ruleChannel, existingRule);
-        } else {
-          update(c, "INSERT INTO alert_rule (rule_id,name,condition_kind,host_id,unit_name,"
-                  + "severity,enabled,created_by,created_at,channel_id) "
-                  + "VALUES (?,?,?,?,?,?,?,?,?,?)",
-              UUID.randomUUID(), name, condition, ruleHost, ruleUnit, severity, enabled,
-              actorId, now, ruleChannel);
-        }
-        return null;
-      });
+      if (!dryRun) {
+        store.transaction(c -> {
+          if (existingRule != null) {
+            update(c, "UPDATE alert_rule SET condition_kind=?, host_id=?, unit_name=?, severity=?, "
+                    + "enabled=?, channel_id=? WHERE rule_id=?",
+                condition, ruleHost, ruleUnit, severity, enabled, ruleChannel, existingRule);
+          } else {
+            update(c, "INSERT INTO alert_rule (rule_id,name,condition_kind,host_id,unit_name,"
+                    + "severity,enabled,created_by,created_at,channel_id) "
+                    + "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                UUID.randomUUID(), name, condition, ruleHost, ruleUnit, severity, enabled,
+                actorId, now, ruleChannel);
+          }
+          return null;
+        });
+      }
       imported++;
     }
 
@@ -240,18 +295,35 @@ public class ConfigPortabilityResource {
     final int skippedCount = skipped;
     final int failedCount = failed.size();
     final String outcome = failedCount == 0 ? "SUCCEEDED" : "FAILED";
-    final String summary = "导入面板配置：成功 " + importedCount + "，跳过 " + skippedCount
-        + "，失败 " + failedCount + "（策略 " + mode + "）";
+    final String summary = (dryRun ? "预演导入面板配置：" : "导入面板配置：")
+        + "成功 " + importedCount + "，跳过 " + skippedCount + "，失败 " + failedCount
+        + "（策略 " + mode + "）";
     store.transaction(c -> {
       audit(c, actorId, "config.import", "panel_config", null, outcome, clientIp(), summary);
       return null;
     });
     Map<String, Object> report = new LinkedHashMap<>();
     report.put("strategy", mode);
+    report.put("dryRun", dryRun);
     report.put("imported", imported);
     report.put("skipped", skipped);
     report.put("failed", failed);
     return Response.ok(report).build();
+  }
+
+  /** Control-plane settings travel with the rest, so a rebuilt panel is not half configured. */
+  private ObjectNode settings(java.sql.Connection c) throws Exception {
+    ObjectNode item = JSON.createObjectNode();
+    var rows = query(c, "SELECT site_name, default_timezone, host_offline_after_seconds, "
+        + "operation_retention_days FROM platform_settings WHERE id=1");
+    if (rows.isEmpty()) return item;
+    var row = rows.getFirst();
+    item.put("siteName", String.valueOf(row.get("site_name")));
+    item.put("defaultTimezone", String.valueOf(row.get("default_timezone")));
+    item.put("hostOfflineAfterSeconds",
+        ((Number) row.get("host_offline_after_seconds")).intValue());
+    item.put("operationRetentionDays", ((Number) row.get("operation_retention_days")).intValue());
+    return item;
   }
 
   private ArrayNode channels(java.sql.Connection c) throws Exception {
@@ -341,6 +413,18 @@ public class ConfigPortabilityResource {
     return name != null && !name.isBlank() && name.length() <= 120
         && url != null && (url.startsWith("http://") || url.startsWith("https://"))
         && url.length() <= 500;
+  }
+
+  private static boolean validSettings(String siteName, String timezone, int offlineAfter,
+      int retentionDays) {
+    if (siteName == null || siteName.isBlank() || siteName.length() > 100) return false;
+    if (timezone == null || timezone.isBlank()) return false;
+    try {
+      java.time.ZoneId.of(timezone);
+    } catch (RuntimeException invalid) {
+      return false;
+    }
+    return offlineAfter >= 30 && offlineAfter <= 600 && retentionDays >= 7 && retentionDays <= 365;
   }
 
   private static boolean validSite(String hostname, String domain, int listenPort, int upstreamPort,

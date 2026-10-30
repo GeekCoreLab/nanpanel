@@ -98,6 +98,10 @@ class ConfigPortabilityTest {
     UUID channelId = UUID.randomUUID();
     long now = System.currentTimeMillis();
     store.transaction(c -> {
+      AuthStore.update(c, "INSERT INTO platform_settings (id,site_name,default_timezone,"
+              + "host_offline_after_seconds,operation_retention_days,updated_at,updated_by,version) "
+              + "VALUES (1,'生产面板','Asia/Shanghai',90,30,?,?,1)",
+          now, UUID.fromString(adminId()));
       AuthStore.update(c, "INSERT INTO host (id,hostname,capabilities,status,created_at) "
           + "VALUES (?,?,'[]','ONLINE',?)", hostId, "web-01", Timestamp.from(Instant.now()));
       AuthStore.update(c, "INSERT INTO alert_channel (channel_id,name,kind,url,enabled,created_by,"
@@ -128,6 +132,7 @@ class ConfigPortabilityTest {
       AuthStore.update(c, "DELETE FROM alert_rule");
       AuthStore.update(c, "DELETE FROM reverse_proxy_site");
       AuthStore.update(c, "DELETE FROM alert_channel");
+      AuthStore.update(c, "DELETE FROM platform_settings");
       return null;
     });
   }
@@ -177,7 +182,7 @@ class ConfigPortabilityTest {
         .contentType("application/json").body(document.toString())
         .post("/api/v1/config/import").then().statusCode(200)
         .body("strategy", equalTo("skip"))
-        .body("imported", equalTo(3))
+        .body("imported", equalTo(4))
         .body("skipped", equalTo(0))
         .body("failed", org.hamcrest.Matchers.hasSize(0));
     given().cookie("nanpanel_session", session.cookie()).get("/api/v1/reverse-proxy-sites")
@@ -193,7 +198,7 @@ class ConfigPortabilityTest {
         .header("X-CSRF-Token", session.token())
         .contentType("application/json").body(document.toString())
         .post("/api/v1/config/import").then().statusCode(200)
-        .body("imported", equalTo(0)).body("skipped", equalTo(3));
+        .body("imported", equalTo(0)).body("skipped", equalTo(4));
 
     // Overwrite applies the document's values, once its checksum is recomputed.
     ObjectNode changed = document.deepCopy();
@@ -203,7 +208,7 @@ class ConfigPortabilityTest {
         .header("X-CSRF-Token", session.token())
         .contentType("application/json").body(changed.toString())
         .post("/api/v1/config/import?strategy=overwrite").then().statusCode(200)
-        .body("strategy", equalTo("overwrite")).body("imported", equalTo(3));
+        .body("strategy", equalTo("overwrite")).body("imported", equalTo(4));
     given().cookie("nanpanel_session", session.cookie()).get("/api/v1/reverse-proxy-sites")
         .then().statusCode(200).body("items[0].upstreamPort", equalTo(9000));
 
@@ -229,7 +234,7 @@ class ConfigPortabilityTest {
         .header("X-CSRF-Token", session.token())
         .contentType("application/json").body(document.toString())
         .post("/api/v1/config/import").then().statusCode(200)
-        .body("imported", equalTo(2))
+        .body("imported", equalTo(3))
         .body("failed[0].kind", equalTo("site"))
         .body("failed[0].name", equalTo("shop.example.com"));
     assertTrue(store.transaction(c -> AuthStore.query(c,
@@ -240,5 +245,59 @@ class ConfigPortabilityTest {
     ObjectNode copy = document.deepCopy();
     copy.remove("checksum");
     return copy;
+  }
+
+  @Test
+  void aDryRunReportsWithoutWritingAnything() throws Exception {
+    resetAdmin();
+    Session session = login();
+    seed();
+    ObjectNode document = (ObjectNode) JSON.readTree(
+        given().cookie("nanpanel_session", session.cookie())
+            .get("/api/v1/config/export").then().statusCode(200).extract().asString());
+    wipe();
+
+    // The preview counts exactly what the real run would do, but touches nothing.
+    given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.token())
+        .contentType("application/json").body(document.toString())
+        .post("/api/v1/config/import?dryRun=true").then().statusCode(200)
+        .body("dryRun", equalTo(true))
+        .body("imported", equalTo(4))
+        .body("skipped", equalTo(0))
+        .body("failed", org.hamcrest.Matchers.hasSize(0));
+    assertTrue(store.transaction(c -> AuthStore.query(c, "SELECT site_id FROM reverse_proxy_site"))
+        .isEmpty());
+    assertTrue(store.transaction(c -> AuthStore.query(c, "SELECT channel_id FROM alert_channel"))
+        .isEmpty());
+    assertTrue(store.transaction(c -> AuthStore.query(c, "SELECT rule_id FROM alert_rule")).isEmpty());
+    assertTrue(store.transaction(c -> AuthStore.query(c, "SELECT id FROM platform_settings"))
+        .isEmpty());
+
+    // A channel created earlier in the same document still satisfies a rule in a dry run.
+    ObjectNode withNewChannel = document.deepCopy();
+    ObjectNode channel = ((ArrayNode) withNewChannel.path("alertChannels")).addObject();
+    channel.put("name", "新渠道");
+    channel.put("url", "https://example.com/new");
+    channel.put("enabled", true);
+    channel.put("notifyRecovery", true);
+    ((ObjectNode) ((ArrayNode) withNewChannel.path("alertRules")).get(0)).put("channelName", "新渠道");
+    withNewChannel.put("checksum", ConfigPortabilityResource.checksum(withoutChecksum(withNewChannel)));
+    given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.token())
+        .contentType("application/json").body(withNewChannel.toString())
+        .post("/api/v1/config/import?dryRun=true").then().statusCode(200)
+        .body("imported", equalTo(5))
+        .body("failed", org.hamcrest.Matchers.hasSize(0));
+
+    // And the real run then behaves exactly like the preview said it would.
+    given().cookie("nanpanel_session", session.cookie())
+        .header("X-CSRF-Token", session.token())
+        .contentType("application/json").body(withNewChannel.toString())
+        .post("/api/v1/config/import").then().statusCode(200)
+        .body("dryRun", equalTo(false))
+        .body("imported", equalTo(5));
+    given().cookie("nanpanel_session", session.cookie()).get("/api/v1/alert-rules")
+        .then().statusCode(200).body("items[0].channelName", equalTo("新渠道"));
   }
 }
