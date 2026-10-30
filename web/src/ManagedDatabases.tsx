@@ -2,8 +2,8 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { api, isMock } from './lib/api';
 import { createUuid } from './lib/uuid.ts';
 import type {
-  DatabaseEngineOption, Host, HostPage, ManagedDatabase, ManagedDatabaseConnection,
-  ManagedDatabaseCreated, ManagedDatabaseList,
+  BackupList, BackupRecord, DatabaseEngineOption, Host, HostPage, ManagedDatabase,
+  ManagedDatabaseConnection, ManagedDatabaseCreated, ManagedDatabaseList,
 } from './lib/types';
 import './managed-databases.css';
 
@@ -46,6 +46,7 @@ export function ManagedDatabases({ notify }: { notify: (message: string) => void
   const [created, setCreated] = useState<ManagedDatabaseCreated | null>(null);
   const [connection, setConnection] = useState<ManagedDatabaseConnection | null>(null);
   const [volume, setVolume] = useState<{ instance: ManagedDatabase; path: string } | null>(null);
+  const [history, setHistory] = useState<{ instance: ManagedDatabase; items: BackupRecord[] } | null>(null);
 
   const load = useCallback(async () => {
     if (isMock) return;
@@ -150,9 +151,55 @@ export function ManagedDatabases({ notify }: { notify: (message: string) => void
     try {
       await api('/backups', 'POST', {
         hostId: instance.hostId, source, name: instance.containerName,
+        instanceId: instance.id,
       }, { 'Idempotency-Key': createUuid() }, true);
       notify(`已下发备份 ${instance.containerName}（数据卷目录）`);
       setVolume(null);
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function openHistory(instance: ManagedDatabase) {
+    if (isMock) return;
+    setBusy(`history:${instance.id}`);
+    setError('');
+    try {
+      const result = await api<BackupList>(
+        `/backups?instanceId=${instance.id}`, 'GET', undefined, {}, true);
+      setHistory({ instance, items: result.data.items });
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function restoreRecord(record: BackupRecord) {
+    const target = window.prompt(
+      `把 ${record.file} 恢复到哪个空目录？（绝对路径；目录必须已存在且为空）`, '/srv/restore');
+    if (!target) return;
+    setBusy(`restore:${record.id}`);
+    try {
+      await api(`/backups/${record.id}/restore`, 'POST', { target: target.trim() },
+        { 'Idempotency-Key': createUuid() }, true);
+      notify(`已下发恢复到 ${target.trim()}`);
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function deleteRecord(record: BackupRecord) {
+    if (!window.confirm(`删除备份 ${record.file}？主机上的归档也会被删除。`)) return;
+    setBusy(`delete:${record.id}`);
+    try {
+      await api(`/backups/${record.id}`, 'DELETE', undefined,
+        { 'Idempotency-Key': createUuid() }, true);
+      if (history) await openHistory(history.instance);
     } catch (cause) {
       setError((cause as Error).message);
     } finally {
@@ -220,6 +267,8 @@ export function ManagedDatabases({ notify }: { notify: (message: string) => void
             <button className="link" disabled={busy !== ''}
               title="向主机询问命名卷的真实挂载点，并可从那里创建备份"
               onClick={() => void resolveVolume(instance)}>数据卷</button>
+            <button className="link" disabled={busy !== ''}
+              onClick={() => void openHistory(instance)}>备份</button>
             <button className="link" disabled={busy !== ''} onClick={() => void remove(instance)}>删除</button>
           </td>
         </tr>)}</tbody>
@@ -258,6 +307,30 @@ export function ManagedDatabases({ notify }: { notify: (message: string) => void
           {busy.startsWith('backup:') ? '下发中…' : '备份这个目录'}</button>
         <button className="secondary" onClick={() => setVolume(null)}>关闭</button>
       </div>
+    </div></div>}
+    {history && <div className="modal-backdrop"><div className="modal role-editor" role="dialog"
+      aria-label="实例备份历史">
+      <div className="card-title"><h2>{history.instance.containerName} 的备份</h2>
+        <button className="icon-button" aria-label="关闭备份历史" onClick={() => setHistory(null)}>×</button></div>
+      {history.items.length === 0
+        ? <p className="muted">这个实例还没有备份。用「数据卷」读出挂载点后即可备份它的数据目录。</p>
+        : <div className="table-wrap"><table>
+          <thead><tr><th>文件</th><th>大小</th><th>状态</th><th /></tr></thead>
+          <tbody>{history.items.map(record => <tr key={record.id}>
+            <td><b className="mono">{record.file}</b>
+              {record.sha256 && <small className="mono muted">{record.sha256.slice(0, 12)}…</small>}</td>
+            <td>{record.sizeBytes === null ? '—' : `${(record.sizeBytes / 1048576).toFixed(1)} MiB`}</td>
+            <td><span className={`backup-state state-${record.state.toLowerCase()}`}>
+              {record.state === 'APPLIED' ? '已完成' : record.state === 'FAILED' ? '失败'
+                : record.state === 'UNKNOWN' ? '状态未定' : '进行中'}</span></td>
+            <td className="backups-actions">
+              <button className="link" disabled={busy !== '' || record.state !== 'APPLIED'}
+                onClick={() => void restoreRecord(record)}>恢复</button>
+              <button className="link" disabled={busy !== ''}
+                onClick={() => void deleteRecord(record)}>删除</button>
+            </td>
+          </tr>)}</tbody>
+        </table></div>}
     </div></div>}
     {connection && <div className="modal-backdrop"><div className="modal" role="dialog" aria-label="连接信息">
       <div className="card-title"><h2>连接信息</h2>
