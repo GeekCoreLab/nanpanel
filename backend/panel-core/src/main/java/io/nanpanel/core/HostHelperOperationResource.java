@@ -47,7 +47,11 @@ public class HostHelperOperationResource {
       "network.topology.reconcile", "network.topology.capture",
       "file.list", "file.read", "file.write", "file.delete", "k3s.preflight", "k3s.install",
       "k3s.upgrade", "kubeedge.edgecore.join", "nginx.route.set", "nginx.route.remove",
-      "nginx.tls.install");
+      "nginx.tls.install", "cron.list", "cron.write", "cron.remove");
+  private static final java.util.regex.Pattern CRON_JOB_NAME =
+      java.util.regex.Pattern.compile("nanpanel-[a-z]([a-z0-9-]{0,30}[a-z0-9])?");
+  private static final java.util.regex.Pattern CRON_FIELD =
+      java.util.regex.Pattern.compile("[0-9*/,-]{1,32}");
   private static final java.util.regex.Pattern PACKAGE_NAME =
       java.util.regex.Pattern.compile("[A-Za-z0-9][A-Za-z0-9+_.:-]{0,127}");
   private static final java.util.regex.Pattern FILE_NAME =
@@ -452,7 +456,7 @@ public class HostHelperOperationResource {
   void validateTargetAndPayload(String capability, String target, JsonNode payload) {
     boolean validTarget = switch (capability) {
       case "package.install", "container.list", "k3s.preflight", "k3s.install", "k3s.upgrade",
-          "kubeedge.edgecore.join" -> target.isEmpty();
+          "kubeedge.edgecore.join", "cron.list" -> target.isEmpty();
       case "file.write.protected" -> FILE_NAME.matcher(target).matches();
       case "file.list" -> validHostPath(target, true);
       case "file.read", "file.write", "file.delete" -> validHostPath(target, false);
@@ -463,6 +467,7 @@ public class HostHelperOperationResource {
       case "network.topology.reconcile", "network.topology.capture" -> UUID_TEXT.matcher(target).matches();
       case "nginx.route.set", "nginx.route.remove" -> NGINX_ROUTE_NAME.matcher(target).matches();
       case "nginx.tls.install" -> TLS_NAME.matcher(target).matches();
+      case "cron.write", "cron.remove" -> CRON_JOB_NAME.matcher(target).matches();
       default -> false;
     };
     if (!validTarget) throw fail(422, "VALIDATION_FAILED", "操作目标格式无效");
@@ -619,8 +624,42 @@ public class HostHelperOperationResource {
       validateTlsMaterial(payload);
       return;
     }
+    if (capability.equals("cron.write")) {
+      validateCronJob(payload);
+      return;
+    }
     if (payload != null && !payload.isNull())
       throw fail(422, "VALIDATION_FAILED", "该 Helper 操作不接受附加参数");
+  }
+
+  /**
+   * A managed cron entry: five schedule fields, a single-line command, and root as the only
+   * user (per-user cron files and their privileges are not modelled yet).
+   */
+  private void validateCronJob(JsonNode payload) {
+    if (payload == null || !payload.isObject())
+      throw fail(422, "VALIDATION_FAILED", "定时任务参数缺失");
+    Set<String> fields = fieldSet(payload);
+    if (!Set.of("schedule", "command").containsAll(fields)
+        || !Set.of("schedule", "command", "user").containsAll(fields))
+      throw fail(422, "VALIDATION_FAILED", "定时任务字段无效");
+    JsonNode schedule = payload.get("schedule");
+    JsonNode command = payload.get("command");
+    if (schedule == null || !schedule.isTextual() || command == null || !command.isTextual())
+      throw fail(422, "VALIDATION_FAILED", "计划与命令必须为文本");
+    String expression = schedule.asText().trim();
+    String[] parts = expression.split("\\s+");
+    if (parts.length != 5 || expression.length() > 128
+        || !java.util.Arrays.stream(parts).allMatch(part -> CRON_FIELD.matcher(part).matches()))
+      throw fail(422, "VALIDATION_FAILED", "计划必须是 5 段 [0-9*,-/] 表达式");
+    String commandText = command.asText().trim();
+    if (commandText.isEmpty() || commandText.length() > 900
+        || commandText.indexOf('\n') >= 0 || commandText.indexOf('\r') >= 0
+        || commandText.indexOf('\0') >= 0)
+      throw fail(422, "VALIDATION_FAILED", "命令必须是单行且不超过 900 字节");
+    JsonNode user = payload.get("user");
+    if (user != null && !user.isNull() && (!user.isTextual() || !"root".equals(user.asText())))
+      throw fail(422, "VALIDATION_FAILED", "受管定时任务只允许以 root 运行");
   }
 
   private void validateNetworkTopology(String target, JsonNode payload, boolean capture) {

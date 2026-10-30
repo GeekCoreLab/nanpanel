@@ -22,8 +22,10 @@ use tokio::io::AsyncReadExt;
 use tokio::net::{UnixListener, UnixStream};
 use tokio_util::codec::{Framed, LinesCodec};
 
+mod cron_jobs;
 mod nginx_routes;
 mod topology;
+pub use cron_jobs::CronConfig;
 pub use nginx_routes::NginxRouteConfig;
 
 const MAX_FRAME: usize = 512 * 1024;
@@ -79,6 +81,7 @@ pub struct HelperConfig {
     pub agent_binary: std::path::PathBuf,
     pub container_runtime: Option<std::path::PathBuf>,
     nginx_routes: Option<nginx_routes::NginxRouteConfig>,
+    cron: Option<cron_jobs::CronConfig>,
     network_operations_available: bool,
     topology_operations_available: bool,
     packet_capture_available: bool,
@@ -191,6 +194,7 @@ struct HelperRuntime {
     agent_binary: std::path::PathBuf,
     container_runtime: Option<Arc<std::path::PathBuf>>,
     nginx_routes: Option<Arc<NginxRouteConfig>>,
+    cron: Option<Arc<cron_jobs::CronConfig>>,
     network_operations_available: bool,
     topology_operations_available: bool,
     packet_capture_available: bool,
@@ -300,6 +304,7 @@ impl HelperConfig {
             agent_binary,
             container_runtime,
             nginx_routes: None,
+            cron: None,
             network_operations_available,
             topology_operations_available,
             packet_capture_available,
@@ -311,6 +316,11 @@ impl HelperConfig {
 
     pub fn with_nginx_routes(mut self, routes: Option<NginxRouteConfig>) -> Self {
         self.nginx_routes = routes;
+        self
+    }
+
+    pub fn with_cron(mut self, cron: Option<cron_jobs::CronConfig>) -> Self {
+        self.cron = cron;
         self
     }
 }
@@ -338,6 +348,7 @@ pub async fn serve(config: HelperConfig) -> Result<()> {
         agent_binary: config.agent_binary,
         container_runtime: config.container_runtime.map(Arc::new),
         nginx_routes: config.nginx_routes.map(Arc::new),
+        cron: config.cron.map(Arc::new),
         network_operations_available: config.network_operations_available,
         topology_operations_available: config.topology_operations_available,
         packet_capture_available: config.packet_capture_available,
@@ -438,6 +449,7 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                     runtime.topology_operations_available,
                                     runtime.netbird_binary.is_some(),
                                     runtime.nginx_routes.is_some(),
+                                    runtime.cron.is_some(),
                                 )
                             }) {
                                 Err(error) => Err(error),
@@ -463,6 +475,7 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                                 .is_some(),
                                             kubeedge_available: runtime.kubeedge_available,
                                             nginx_routes_available: runtime.nginx_routes.is_some(),
+                                            cron_available: runtime.cron.is_some(),
                                         })
                                     )
                                     .to_string()),
@@ -568,6 +581,30 @@ async fn handle(stream: UnixStream, runtime: Arc<HelperRuntime>) -> Result<()> {
                                                 .to_owned(),
                                         ),
                                     },
+                                    "cron.list" => match runtime.cron.as_deref() {
+                                        Some(cron) => cron.list_jobs(),
+                                        None => {
+                                            Err("DENIED: managed cron support is not configured"
+                                                .to_owned())
+                                        }
+                                    },
+                                    "cron.write" => match runtime.cron.as_deref() {
+                                        Some(cron) => cron.write_job(
+                                            &request.target,
+                                            request.payload_json.as_deref(),
+                                        ),
+                                        None => {
+                                            Err("DENIED: managed cron support is not configured"
+                                                .to_owned())
+                                        }
+                                    },
+                                    "cron.remove" => match runtime.cron.as_deref() {
+                                        Some(cron) => cron.remove_job(&request.target),
+                                        None => {
+                                            Err("DENIED: managed cron support is not configured"
+                                                .to_owned())
+                                        }
+                                    },
                                     "k3s.preflight" => k3s_preflight(&request),
                                     "k3s.install" => {
                                         k3s_install(&request, &runtime.host_root).await
@@ -671,6 +708,9 @@ fn validate_envelope(request: &Request) -> std::result::Result<(), String> {
     Ok(())
 }
 
+// The feature flags mirror the helper's capability set one-to-one; grouping them would just
+// move the same list somewhere else.
+#[allow(clippy::too_many_arguments)]
 fn validate_capability_target(
     capability: &str,
     target: &str,
@@ -679,6 +719,7 @@ fn validate_capability_target(
     topology_operations_available: bool,
     netbird_status_available: bool,
     nginx_routes_available: bool,
+    cron_available: bool,
 ) -> std::result::Result<(), String> {
     match capability {
         "helper.status" | "helper.capabilities" | "agent.update" if target.is_empty() => Ok(()),
@@ -700,6 +741,12 @@ fn validate_capability_target(
         "nginx.tls.install"
             if nginx_routes_available
                 && nginx_routes::NginxRouteConfig::validate_tls_target(target) =>
+        {
+            Ok(())
+        }
+        "cron.list" if target.is_empty() && cron_available => Ok(()),
+        "cron.write" | "cron.remove"
+            if cron_available && cron_jobs::CronConfig::validate_target(target) =>
         {
             Ok(())
         }
@@ -786,6 +833,7 @@ fn validate_payload_presence(request: &Request) -> std::result::Result<(), Strin
             | "kubeedge.edgecore.join"
             | "nginx.route.set"
             | "nginx.tls.install"
+            | "cron.write"
     );
     if required != request.payload_json.is_some() {
         return Err("DENIED: payload presence does not match capability schema".to_owned());
@@ -823,6 +871,7 @@ struct CapabilityState {
     netbird_status_available: bool,
     kubeedge_available: bool,
     nginx_routes_available: bool,
+    cron_available: bool,
 }
 
 fn available_capabilities(state: CapabilityState) -> Vec<&'static str> {
@@ -840,6 +889,9 @@ fn available_capabilities(state: CapabilityState) -> Vec<&'static str> {
         "file.write",
         "file.delete",
     ];
+    if state.cron_available {
+        capabilities.extend(["cron.list", "cron.write", "cron.remove"]);
+    }
     if state.has_container_runtime {
         capabilities.extend([
             "container.list",
@@ -3607,6 +3659,7 @@ mod tests {
             netbird_status_available: true,
             kubeedge_available: true,
             nginx_routes_available: true,
+            cron_available: true,
         }
     }
 
@@ -3714,6 +3767,7 @@ mod tests {
             validate_capability_target(
                 &request.capability,
                 &request.target,
+                false,
                 false,
                 false,
                 false,
@@ -3848,7 +3902,7 @@ mod tests {
             .as_millis() as i64;
         let validate = |capability, target, containers, firewall, nginx| {
             validate_capability_target(
-                capability, target, containers, firewall, false, false, nginx,
+                capability, target, containers, firewall, false, false, nginx, false,
             )
         };
         assert!(validate("agent.update", "", false, false, false).is_ok());
@@ -3987,6 +4041,7 @@ mod tests {
                 false,
                 false,
                 true,
+                false,
                 false
             )
             .is_ok()
@@ -3999,13 +4054,23 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 false
             )
             .is_err()
         );
         assert!(
-            validate_capability_target("k3s.preflight", "", false, false, false, false, false)
-                .is_ok()
+            validate_capability_target(
+                "k3s.preflight",
+                "",
+                false,
+                false,
+                false,
+                false,
+                false,
+                false
+            )
+            .is_ok()
         );
         Ok(())
     }
@@ -4080,6 +4145,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false
             )
             .is_ok()
         );
@@ -4092,6 +4158,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false
             )
             .is_err()
         );
@@ -4104,6 +4171,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false
             )
             .is_err()
         );
@@ -4150,6 +4218,7 @@ mod tests {
                 false,
                 false,
                 false,
+                false,
                 false
             )
             .is_err()
@@ -4160,6 +4229,7 @@ mod tests {
                 "ssh-temp",
                 false,
                 true,
+                false,
                 false,
                 false,
                 false

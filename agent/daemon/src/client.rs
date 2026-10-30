@@ -125,6 +125,15 @@ struct NginxRoutePayload {
     #[serde(default)]
     tls: Option<NginxRouteTls>,
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct CronJobPayload {
+    schedule: String,
+    command: String,
+    #[serde(default)]
+    user: Option<String>,
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct NginxRouteTls {
@@ -733,6 +742,9 @@ async fn connect_once(
                                 | "nginx.route.set"
                                 | "nginx.route.remove"
                                 | "nginx.tls.install"
+                                | "cron.list"
+                                | "cron.write"
+                                | "cron.remove"
                         )
                     {
                         capabilities.push(capability);
@@ -1805,6 +1817,14 @@ fn valid_control(capability: &str, target: &str, payload_json: &str) -> bool {
                     .is_ok_and(|payload| valid_nginx_route_payload(&payload))
         }
         "nginx.route.remove" => valid_nginx_route_target(target) && !has_payload,
+        "cron.list" => target.is_empty() && !has_payload,
+        "cron.write" => {
+            valid_cron_target(target)
+                && has_payload
+                && serde_json::from_str::<CronJobPayload>(payload_json)
+                    .is_ok_and(|payload| valid_cron_job_payload(&payload))
+        }
+        "cron.remove" => valid_cron_target(target) && !has_payload,
         "nginx.tls.install" => {
             valid_tls_name(target)
                 && has_payload
@@ -1921,6 +1941,39 @@ fn valid_k3s_token(token: &str) -> bool {
         && token
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+}
+
+fn valid_cron_target(target: &str) -> bool {
+    target.starts_with("nanpanel-")
+        && target.len() <= 42
+        && target.as_bytes().get(9).is_some_and(u8::is_ascii_lowercase)
+        && target
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        && !target.ends_with('-')
+}
+
+/// Mirrors the helper's rules: five fields of `[0-9*,-/]`, a single-line command, root only.
+fn valid_cron_job_payload(payload: &CronJobPayload) -> bool {
+    let schedule = payload.schedule.trim();
+    let fields = schedule.split_whitespace().collect::<Vec<_>>();
+    let command = payload.command.trim();
+    fields.len() == 5
+        && !schedule.is_empty()
+        && schedule.len() <= 128
+        && fields.iter().all(|field| {
+            !field.is_empty()
+                && field.len() <= 32
+                && field
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'*' | b'/' | b',' | b'-'))
+        })
+        && !command.is_empty()
+        && command.len() <= 900
+        && !command
+            .chars()
+            .any(|value| value == '\n' || value == '\r' || value == '\0')
+        && payload.user.as_deref().unwrap_or("root") == "root"
 }
 
 fn valid_nginx_route_target(target: &str) -> bool {
