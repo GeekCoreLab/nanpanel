@@ -1,0 +1,14 @@
+.cron-grid{display:grid;grid-template-columns:minmax(280px,360px) 1fr;gap:16px;align-items:start}
+@media (max-width:1100px){.cron-grid{grid-template-columns:1fr}}
+.cron-list-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.cron-state{border-radius:999px;padding:1px 8px;font-size:11px;margin-right:4px;white-space:nowrap}
+.cron-state.state-draft{background:rgba(148,163,184,.16);color:#94a3b8}
+.cron-state.state-applied{background:rgba(34,197,94,.14);color:#22c55e}
+.cron-state.state-disabled{background:rgba(148,163,184,.2);color:#cbd5e1}
+.cron-state.state-failed{background:rgba(239,68,68,.16);color:#ef4444}
+.cron-state.state-unknown{background:rgba(234,179,8,.16);color:#eab308}
+.cron-state.state-pending{background:rgba(56,189,248,.16);color:#38bdf8;animation:cron-pulse 1.6s ease-in-out infinite}
+@keyframes cron-pulse{0%,100%{opacity:1}50%{opacity:.55}}
+.cron-actions{white-space:nowrap}
+.cron-actions .link{margin-right:8px}
+.cron-note{margin:10px 2px 0;font-size:12px}
