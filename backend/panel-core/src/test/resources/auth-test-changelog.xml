@@ -137,6 +137,9 @@
         <sql>CREATE UNIQUE INDEX reverse_proxy_site_endpoint_unique ON reverse_proxy_site(host_id, domain, listen_port);</sql>
         <sql>CREATE INDEX reverse_proxy_site_host_idx ON reverse_proxy_site(host_id, created_at DESC);</sql>
     </changeSet>
+    <changeSet id="user-roles-test" author="nanpanel">
+        <sql>ALTER TABLE panel_user ADD COLUMN role_id VARCHAR(64) NOT NULL DEFAULT 'ADMIN';</sql>
+    </changeSet>
     <changeSet id="roles-test" author="nanpanel">
         <sql>CREATE TABLE panel_role (role_id VARCHAR(64) PRIMARY KEY, name VARCHAR(120) NOT NULL, builtin BOOLEAN NOT NULL DEFAULT FALSE, created_at BIGINT NOT NULL);</sql>
         <sql>CREATE TABLE panel_role_permission (role_id VARCHAR(64) NOT NULL REFERENCES panel_role(role_id) ON DELETE CASCADE, permission VARCHAR(120) NOT NULL, PRIMARY KEY (role_id, permission));</sql>

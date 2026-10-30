@@ -235,17 +235,41 @@ public class SessionFilter
                          .getBytes()))
       throw reject(r, "CSRF_REJECTED", "CSRF 上下文已失效",
                    "security.csrf.reject", "CSRF 校验拒绝写请求");
+    boolean apiKeyRequest = principal != null;
     if (!path.startsWith("api/v1/auth/")) {
+      String denial;
       try {
-        store.transaction(c -> {
+        denial = store.transaction(c -> {
           var u =
-              query(c, "SELECT status,must_change FROM panel_user WHERE id=?",
+              query(c, "SELECT status,must_change,role_id FROM panel_user WHERE id=?",
                     session.get("user_id"));
           if (u.isEmpty() || !"ACTIVE".equals(u.getFirst().get("status")))
             throw fail(401, "UNAUTHENTICATED", "账号已停用或会话已失效");
           if (Boolean.TRUE.equals(u.getFirst().get("must_change")))
             throw fail(403, "PASSWORD_CHANGE_REQUIRED", "请先修改初始密码");
-          return null;
+          // Bearer API keys already passed their scope check above.
+          if (apiKeyRequest)
+            return null;
+          String roleId = u.getFirst().get("role_id") == null
+              ? "ADMIN"
+              : String.valueOf(u.getFirst().get("role_id"));
+          String permission =
+              EndpointPermissions.permissionFor(r.getMethod(), "/" + path);
+          // ADMIN bypass keeps today's behaviour; an unmapped or PUBLIC endpoint is open.
+          if ("ADMIN".equals(roleId) || permission == null ||
+              EndpointPermissions.PUBLIC.equals(permission))
+            return null;
+          var granted = query(c,
+              "SELECT permission FROM panel_role_permission WHERE role_id=?", roleId);
+          if (granted.isEmpty())
+            return permission;
+          var statements = List.of(new AuthorizationPolicy.Statement(
+              AuthorizationPolicy.ALLOW,
+              granted.stream().map(row -> String.valueOf(row.get("permission"))).toList(),
+              List.of("*")));
+          return AuthorizationPolicy.permits(statements, permission, "*")
+              ? null
+              : permission;
         });
       } catch (WebApplicationException e) {
         limit("security:" + Objects.toString(clientIp(), "unknown"));
@@ -259,6 +283,16 @@ public class SessionFilter
           return null;
         });
         throw e;
+      }
+      if (denial != null) {
+        limit("security:" + Objects.toString(clientIp(), "unknown"));
+        store.transaction(c -> {
+          audit(c, String.valueOf(session.get("user_id")),
+                "security.permission.deny", "request", null, "DENIED", clientIp(),
+                "角色权限不足：" + denial);
+          return null;
+        });
+        throw fail(403, "PERMISSION_DENIED", "当前角色无权执行该操作");
       }
     }
   }

@@ -68,7 +68,8 @@ public class AdminUsersResource {
     value.put("id", row.get("id"));
     value.put("username", row.get("username"));
     value.put("displayName", row.get("display_name"));
-    value.put("roles", List.of("ADMIN"));
+    value.put("roles", List.of(row.get("role_id") == null ? "ADMIN"
+        : String.valueOf(row.get("role_id"))));
     value.put("status", row.get("status"));
     value.put("mustChangePassword", row.get("must_change"));
     value.put("createdAt", stamp(row.get("created_at")));

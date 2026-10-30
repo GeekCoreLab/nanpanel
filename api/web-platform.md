@@ -97,4 +97,18 @@ Cookie 生命周期与轮换设计参考 [OWASP Session Management](https://chea
 - `EndpointPermissionsTest` 通过反射扫描全部 `@Path` 资源，**任何没有映射的新端点都会让测试失败**（本轮就借此发现了四个此前遗漏的 bastion 端点）。
 - 同时断言：映射里出现的每个权限都必须在 `ADMIN` 权限表中声明，避免出现"能映射但无人拥有"的空权限。
 
-**当前仍未在任何端点强制鉴权**：`AuthorizationPolicy` / `RoleCatalog` / `EndpointPermissions` 三者齐备但未接线，因此现有行为零变化。
+### 强制方式（已接线）
+
+`SessionFilter` 在账号状态检查之后、资源执行之前判定权限：
+
+- `/api/v1/auth/*` 下的自助端点（登录、改密、`me`、会话、API 密钥）**不做权限判定**，保证受限角色仍能管理自己的会话。
+- Bearer API 密钥继续走其独立的作用域校验，不参与角色判定。
+- `PUBLIC` 端点与未映射端点放行；**`ADMIN` 恒通过**（迁移 048 前所有账号都回填为 `ADMIN`，因此升级不改变任何既有行为）。
+- 其它角色：从 `panel_role_permission` 读取该角色已授予的权限，交给 `AuthorizationPolicy` 判定；不通过返回 `403 PERMISSION_DENIED` 并写入 `security.permission.deny` 审计。
+- 角色权限以**数据库为准**（`panel_role_permission`），`RoleCatalog` 只负责首次播种，避免代码与库两套事实。
+
+### 尚未实现
+
+- 工作区/项目级隔离：资源目前都是平台级，`resource` 参数统一按 `*` 判定。
+- 界面上的角色管理与账号角色分配：`GET /api/v1/admin/roles` 只读，账号角色通过 `role_id` 直接落库。
+- 自定义角色（非内置）可以在库中创建并被正确判定，但还没有创建入口。
