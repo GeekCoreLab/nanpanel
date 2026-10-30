@@ -35,6 +35,11 @@ public final class RoleCatalog {
   private static final List<Role> ROLES = List.of(
       new Role("ADMIN", "平台管理员", ADMIN_PERMISSIONS));
 
+  /** Every permission the platform knows about; the vocabulary a custom role may draw from. */
+  public static List<String> vocabulary() {
+    return ADMIN_PERMISSIONS;
+  }
+
   public static List<Role> roles() {
     return ROLES;
   }

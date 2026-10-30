@@ -325,13 +325,132 @@ public class AdminUsersResource {
                  "密码须为 15–128 字符，且不能为常见密码");
   }
 
+  public record RoleRequest(String id, String name, List<String> permissions) {}
+
   @GET
   @Path("roles")
   public Object roles() {
     session();
     return Map.of("items", roleRepository.roles().stream()
-        .map(role -> Map.of("id", role.id(), "name", role.name(),
+            .map(role -> Map.of("id", role.id(), "name", role.name(),
+                "permissions", role.permissions()))
+            .toList(),
+        "vocabulary", RoleCatalog.vocabulary());
+  }
+
+  @POST
+  @Path("roles")
+  public Response createRole(RoleRequest input) {
+    var actor = session();
+    recent(actor);
+    roleRepository.roles(); // seeds the built-ins if this is the first role operation
+    String id = roleId(input == null ? null : input.id());
+    String name = roleName(input == null ? null : input.name());
+    List<String> permissions = rolePermissions(input == null ? null : input.permissions());
+    long now = System.currentTimeMillis();
+    store.transaction(c -> {
+      if (!query(c, "SELECT role_id FROM panel_role WHERE role_id=?", id).isEmpty())
+        throw fail(409, "ROLE_EXISTS", "角色标识已存在");
+      update(c, "INSERT INTO panel_role (role_id,name,builtin,created_at) VALUES (?,?,FALSE,?)",
+          id, name, now);
+      for (String permission : permissions)
+        update(c, "INSERT INTO panel_role_permission (role_id,permission) VALUES (?,?)",
+            id, permission);
+      audit(c, String.valueOf(actor.get("user_id")), "admin.role.create", "panel_role", id,
+          "SUCCEEDED", http.remoteAddress().host(), "创建角色 " + name);
+      return null;
+    });
+    return Response.status(201).entity(roleView(id)).build();
+  }
+
+  @PUT
+  @Path("roles/{roleId}")
+  public Response updateRole(@PathParam("roleId") String roleValue, RoleRequest input) {
+    var actor = session();
+    recent(actor);
+    roleRepository.roles();
+    String id = roleId(roleValue);
+    builtin(id);
+    String name = input == null || input.name() == null ? null : roleName(input.name());
+    List<String> permissions = input == null || input.permissions() == null ? null
+        : rolePermissions(input.permissions());
+    if (name == null && permissions == null)
+      throw fail(422, "VALIDATION_FAILED", "没有需要更新的字段");
+    store.transaction(c -> {
+      if (name != null) update(c, "UPDATE panel_role SET name=? WHERE role_id=?", name, id);
+      if (permissions != null) {
+        // Replace wholesale: a role edit is a statement about the whole permission set.
+        update(c, "DELETE FROM panel_role_permission WHERE role_id=?", id);
+        for (String permission : permissions)
+          update(c, "INSERT INTO panel_role_permission (role_id,permission) VALUES (?,?)",
+              id, permission);
+      }
+      audit(c, String.valueOf(actor.get("user_id")), "admin.role.update", "panel_role", id,
+          "SUCCEEDED", http.remoteAddress().host(), "更新角色 " + id);
+      return null;
+    });
+    return Response.ok(roleView(id)).build();
+  }
+
+  @DELETE
+  @Path("roles/{roleId}")
+  public Response deleteRole(@PathParam("roleId") String roleValue) {
+    var actor = session();
+    recent(actor);
+    roleRepository.roles();
+    String id = roleId(roleValue);
+    builtin(id);
+    store.transaction(c -> {
+      var users = query(c, "SELECT id FROM panel_user WHERE role_id=?", id);
+      if (!users.isEmpty())
+        throw fail(409, "ROLE_IN_USE", "仍有 " + users.size() + " 个账号使用该角色，请先改派");
+      update(c, "DELETE FROM panel_role_permission WHERE role_id=?", id);
+      update(c, "DELETE FROM panel_role WHERE role_id=?", id);
+      audit(c, String.valueOf(actor.get("user_id")), "admin.role.delete", "panel_role", id,
+          "SUCCEEDED", http.remoteAddress().host(), "删除角色 " + id);
+      return null;
+    });
+    return Response.noContent().build();
+  }
+
+  private Map<String, Object> roleView(String id) {
+    return roleRepository.roles().stream()
+        .filter(role -> role.id().equals(id))
+        .findFirst()
+        .<Map<String, Object>>map(role -> Map.of("id", role.id(), "name", role.name(),
             "permissions", role.permissions()))
-        .toList());
+        .orElseThrow(() -> fail(404, "ROLE_NOT_FOUND", "角色不存在"));
+  }
+
+  private static String roleId(String value) {
+    if (value == null || !value.matches("[A-Za-z][A-Za-z0-9_-]{1,63}"))
+      throw fail(422, "VALIDATION_FAILED", "角色标识需为 2–64 位字母、数字、下划线或连字符");
+    return value;
+  }
+
+  private static String roleName(String value) {
+    String name = value.trim();
+    if (name.isEmpty() || name.codePointCount(0, name.length()) > 120)
+      throw fail(422, "VALIDATION_FAILED", "角色名称需为 1–120 字符");
+    return name;
+  }
+
+  private static List<String> rolePermissions(List<String> values) {
+    if (values == null || values.isEmpty())
+      throw fail(422, "VALIDATION_FAILED", "至少需要一个权限");
+    var known = RoleCatalog.vocabulary();
+    for (String permission : values)
+      if (!known.contains(permission))
+        throw fail(422, "VALIDATION_FAILED", "未知权限：" + permission);
+    return List.copyOf(new java.util.LinkedHashSet<>(values));
+  }
+
+  /** The built-in administrator role is what guarantees the platform stays manageable. */
+  private void builtin(String id) {
+    var rows = store.transaction(c -> query(c,
+        "SELECT builtin FROM panel_role WHERE role_id=?", id));
+    if (rows.isEmpty()) throw fail(404, "ROLE_NOT_FOUND", "角色不存在");
+    if (Boolean.TRUE.equals(rows.getFirst().get("builtin")))
+      throw fail(409, "ROLE_BUILTIN", "内置角色不可修改或删除");
   }
 }
