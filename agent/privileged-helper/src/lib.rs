@@ -786,6 +786,7 @@ fn validate_capability_target(
         "backup.delete" if backup_available && backup::BackupConfig::validate_target(target) => {
             Ok(())
         }
+        "backup.restore" if target.is_empty() && backup_available => Ok(()),
         "cron.write" | "cron.remove"
             if cron_available && cron_jobs::CronConfig::validate_target(target) =>
         {
@@ -876,6 +877,7 @@ fn validate_payload_presence(request: &Request) -> std::result::Result<(), Strin
             | "nginx.tls.install"
             | "cron.write"
             | "backup.create"
+            | "backup.restore"
     );
     if required != request.payload_json.is_some() {
         return Err("DENIED: payload presence does not match capability schema".to_owned());
@@ -934,7 +936,12 @@ fn available_capabilities(state: CapabilityState) -> Vec<&'static str> {
         "file.delete",
     ];
     if state.backup_available {
-        capabilities.extend(["backup.list", "backup.create", "backup.delete"]);
+        capabilities.extend([
+            "backup.list",
+            "backup.create",
+            "backup.restore",
+            "backup.delete",
+        ]);
     }
     if state.metrics_available {
         capabilities.extend(["metrics.read"]);

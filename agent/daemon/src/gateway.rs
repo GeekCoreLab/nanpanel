@@ -783,6 +783,15 @@ struct BackupPayload {
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RestorePayload {
+    file: String,
+    target: String,
+    #[serde(default)]
+    sha256: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct CronJobPayload {
     schedule: String,
     command: String,
@@ -991,7 +1000,9 @@ fn valid_dispatch_target(capability: &str, target: &str) -> bool {
         "nginx.route.set" => valid_nginx_route_target(target),
         "nginx.route.remove" => valid_nginx_route_target(target),
         "nginx.tls.install" => valid_tls_name(target),
-        "cron.list" | "metrics.read" | "backup.list" | "backup.create" => target.is_empty(),
+        "cron.list" | "metrics.read" | "backup.list" | "backup.create" | "backup.restore" => {
+            target.is_empty()
+        }
         "backup.delete" => valid_backup_file(target),
         "cron.write" | "cron.remove" => valid_cron_target(target),
         "systemd.restart" | "systemd.journal.read" => valid_service_unit(target),
@@ -1089,6 +1100,8 @@ fn valid_dispatch_payload(capability: &str, payload: Option<&str>) -> bool {
         ("cron.list" | "metrics.read" | "backup.delete", None) => true,
         ("backup.create", Some(json)) => serde_json::from_str::<BackupPayload>(json)
             .is_ok_and(|payload| valid_backup_payload(&payload)),
+        ("backup.restore", Some(json)) => serde_json::from_str::<RestorePayload>(json)
+            .is_ok_and(|payload| valid_restore_payload(&payload)),
         _ => false,
     }
 }
@@ -1613,6 +1626,17 @@ fn valid_backup_file(target: &str) -> bool {
             .bytes()
             .enumerate()
             .all(|(index, byte)| index == 8 || index == 15 || byte.is_ascii_digit())
+}
+
+fn valid_restore_payload(payload: &RestorePayload) -> bool {
+    valid_backup_file(&payload.file)
+        && payload.target.starts_with('/')
+        && payload.target.len() <= 1024
+        && !payload.target.contains("..")
+        && payload
+            .sha256
+            .as_deref()
+            .is_none_or(|sha| sha.len() == 64 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 fn valid_backup_payload(payload: &BackupPayload) -> bool {

@@ -135,6 +135,15 @@ struct BackupPayload {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RestorePayload {
+    file: String,
+    target: String,
+    #[serde(default)]
+    sha256: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 struct CronJobPayload {
     schedule: String,
     command: String,
@@ -756,6 +765,7 @@ async fn connect_once(
                                 | "backup.list"
                                 | "backup.create"
                                 | "backup.delete"
+                                | "backup.restore"
                         )
                     {
                         capabilities.push(capability);
@@ -1838,6 +1848,12 @@ fn valid_control(capability: &str, target: &str, payload_json: &str) -> bool {
                     .is_ok_and(|payload| valid_backup_payload(&payload))
         }
         "backup.delete" => valid_backup_file(target) && !has_payload,
+        "backup.restore" => {
+            target.is_empty()
+                && has_payload
+                && serde_json::from_str::<RestorePayload>(payload_json)
+                    .is_ok_and(|payload| valid_restore_payload(&payload))
+        }
         "cron.write" => {
             valid_cron_target(target)
                 && has_payload
@@ -1983,6 +1999,17 @@ fn valid_backup_file(target: &str) -> bool {
             .bytes()
             .enumerate()
             .all(|(index, byte)| index == 8 || index == 15 || byte.is_ascii_digit())
+}
+
+fn valid_restore_payload(payload: &RestorePayload) -> bool {
+    valid_backup_file(&payload.file)
+        && payload.target.starts_with('/')
+        && payload.target.len() <= 1024
+        && !payload.target.contains("..")
+        && payload
+            .sha256
+            .as_deref()
+            .is_none_or(|sha| sha.len() == 64 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 fn valid_backup_payload(payload: &BackupPayload) -> bool {

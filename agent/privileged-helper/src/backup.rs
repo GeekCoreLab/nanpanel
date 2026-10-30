@@ -29,6 +29,14 @@ struct BackupPayload {
     name: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct RestorePayload {
+    file: String,
+    target: String,
+    #[serde(default)]
+    sha256: Option<String>,
+}
+
 impl BackupConfig {
     pub fn from_environment() -> anyhow::Result<Option<Self>> {
         let Some(directory) = std::env::var_os("NANPANEL_BACKUP_DIR") else {
@@ -176,6 +184,111 @@ impl BackupConfig {
             .collect::<Vec<_>>()
             .join(",");
         Ok(format!("[{items}]"))
+    }
+
+    /// Restores a managed archive into an **empty** directory.
+    ///
+    /// Restoring over live files is the most destructive thing a panel can do, so this refuses
+    /// a non-empty target instead of merging into it: the operator clears the destination (or
+    /// restores somewhere else) and moves it into place deliberately.
+    pub fn restore(&self, payload_json: Option<&str>) -> Result<String, String> {
+        let Some(payload_json) = payload_json else {
+            return Err("DENIED: restore payload is required".to_owned());
+        };
+        let payload: RestorePayload = serde_json::from_str(payload_json)
+            .map_err(|_| "DENIED: restore payload schema is invalid".to_owned())?;
+        if !Self::validate_target(&payload.file) {
+            return Err("DENIED: restore file must be a managed backup name".to_owned());
+        }
+        if payload.target.len() > MAX_SOURCE_BYTES || !payload.target.starts_with('/') {
+            return Err("DENIED: restore target must be an absolute path".to_owned());
+        }
+        let archive = self.directory.join(&payload.file);
+        if !archive.exists() {
+            return Err("DENIED: restore file does not exist".to_owned());
+        }
+        let target = fs::canonicalize(&payload.target)
+            .map_err(|_| "DENIED: restore target does not exist".to_owned())?;
+        if target.starts_with(&self.directory) || self.directory.starts_with(&target) {
+            return Err("DENIED: restore target overlaps the backup directory".to_owned());
+        }
+        if !fs::metadata(&target)
+            .map_err(|_| "DENIED: restore target cannot be inspected".to_owned())?
+            .is_dir()
+        {
+            return Err("DENIED: restore target must be a directory".to_owned());
+        }
+        let mut existing = fs::read_dir(&target)
+            .map_err(|_| "DENIED: restore target cannot be read".to_owned())?;
+        if existing.next().is_some() {
+            return Err("DENIED: restore target must be empty".to_owned());
+        }
+
+        let sha256 = sha256_of(&archive)?;
+        if let Some(expected) = payload.sha256.as_deref()
+            && (expected.len() != 64 || !expected.eq_ignore_ascii_case(&sha256))
+        {
+            return Err("DENIED: archive checksum does not match the recorded backup".to_owned());
+        }
+
+        // Extract into a sibling scratch directory first: a failure leaves the target untouched.
+        let parent = target
+            .parent()
+            .ok_or("DENIED: restore target has no parent directory")?;
+        let scratch = parent.join(format!(".nanpanel-restore-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&scratch)
+            .map_err(|_| "DENIED: restore scratch directory cannot be created".to_owned())?;
+        let listed = Command::new(&self.tar)
+            .arg("-tzf")
+            .arg(&archive)
+            .output()
+            .map_err(|_| "DENIED: archive cannot be listed".to_owned())?;
+        if !listed.status.success() {
+            let _ = fs::remove_dir_all(&scratch);
+            return Err("DENIED: archive cannot be read".to_owned());
+        }
+        let entries = String::from_utf8_lossy(&listed.stdout)
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count();
+        let extracted = Command::new(&self.tar)
+            .arg("-xzf")
+            .arg(&archive)
+            .arg("-C")
+            .arg(&scratch)
+            .arg("--no-same-owner")
+            .output()
+            .map_err(|_| "DENIED: archive cannot be extracted".to_owned())?;
+        if !extracted.status.success() {
+            let _ = fs::remove_dir_all(&scratch);
+            return Err(format!(
+                "DENIED: extraction failed: {}",
+                String::from_utf8_lossy(&extracted.stderr).trim()
+            ));
+        }
+
+        // Move every extracted entry into the (empty) target.
+        let moved = (|| -> Result<(), String> {
+            for entry in fs::read_dir(&scratch)
+                .map_err(|_| "DENIED: scratch directory cannot be read".to_owned())?
+                .flatten()
+            {
+                let destination = target.join(entry.file_name());
+                fs::rename(entry.path(), &destination)
+                    .map_err(|_| "DENIED: restored entry cannot be moved into place".to_owned())?;
+            }
+            Ok(())
+        })();
+        let _ = fs::remove_dir_all(&scratch);
+        moved?;
+
+        Ok(format!(
+            "{{\"file\":\"{}\",\"target\":\"{}\",\"entries\":{},\"sha256\":\"{}\"}}",
+            payload.file,
+            target.display(),
+            entries,
+            sha256
+        ))
     }
 
     pub fn delete(&self, target: &str) -> Result<String, String> {

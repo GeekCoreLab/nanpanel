@@ -100,10 +100,28 @@ class BackupCapabilityTest {
         "{\"source\":\"/etc/nginx\",\"name\":\"site\"}"));
     assertRejected(submit(session, hostId, "backup.delete", "../" + file, "null"));
 
+    // restore: needs a managed file name, an absolute target and an optional checksum.
+    assertRejected(submit(session, hostId, "backup.restore", "", "null"));
+    assertRejected(submit(session, hostId, "backup.restore", "",
+        "{\"file\":\"site.tar.gz\",\"target\":\"/srv/restore\"}"));
+    assertRejected(submit(session, hostId, "backup.restore", "",
+        "{\"file\":\"" + file + "\",\"target\":\"relative\"}"));
+    assertRejected(submit(session, hostId, "backup.restore", "",
+        "{\"file\":\"" + file + "\",\"target\":\"/srv/../etc\"}"));
+    assertRejected(submit(session, hostId, "backup.restore", "",
+        "{\"file\":\"" + file + "\",\"target\":\"/srv/restore\",\"sha256\":\"abc\"}"));
+    assertRejected(submit(session, hostId, "backup.restore", "",
+        "{\"file\":\"" + file + "\",\"target\":\"/srv/restore\",\"extra\":1}"));
+    assertRejected(submit(session, hostId, "backup.restore", file,
+        "{\"file\":\"" + file + "\",\"target\":\"/srv/restore\"}"));
+
     // Valid shapes pass validation and stop only at the missing agent.
     for (var request : new String[][] {
         {"backup.list", "", "null"},
         {"backup.create", "", "{\"source\":\"/etc/nginx\",\"name\":\"site\"}"},
+        {"backup.restore", "",
+            "{\"file\":\"" + file + "\",\"target\":\"/srv/restore\",\"sha256\":\""
+                + "a".repeat(64) + "\"}"},
         {"backup.delete", file, "null"}}) {
       var accepted = submit(session, hostId, request[0], request[1], request[2]);
       Assertions.assertEquals(503, accepted.statusCode(), request[0] + " " + accepted.asString());

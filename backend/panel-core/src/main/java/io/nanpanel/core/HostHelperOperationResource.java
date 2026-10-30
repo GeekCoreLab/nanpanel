@@ -48,7 +48,7 @@ public class HostHelperOperationResource {
       "file.list", "file.read", "file.write", "file.delete", "k3s.preflight", "k3s.install",
       "k3s.upgrade", "kubeedge.edgecore.join", "nginx.route.set", "nginx.route.remove",
       "nginx.tls.install", "cron.list", "cron.write", "cron.remove", "metrics.read",
-      "backup.list", "backup.create", "backup.delete");
+      "backup.list", "backup.create", "backup.restore", "backup.delete");
   private static final java.util.regex.Pattern BACKUP_FILE =
       java.util.regex.Pattern.compile("[a-z][a-z0-9-]{0,30}[a-z0-9]-\\d{8}T\\d{6}Z\\.tar\\.gz");
   private static final java.util.regex.Pattern BACKUP_NAME =
@@ -462,7 +462,7 @@ public class HostHelperOperationResource {
     boolean validTarget = switch (capability) {
       case "package.install", "container.list", "k3s.preflight", "k3s.install", "k3s.upgrade",
           "kubeedge.edgecore.join", "cron.list", "metrics.read", "backup.list",
-          "backup.create" -> target.isEmpty();
+          "backup.create", "backup.restore" -> target.isEmpty();
       case "file.write.protected" -> FILE_NAME.matcher(target).matches();
       case "file.list" -> validHostPath(target, true);
       case "file.read", "file.write", "file.delete" -> validHostPath(target, false);
@@ -639,6 +639,10 @@ public class HostHelperOperationResource {
       validateBackupRequest(payload);
       return;
     }
+    if (capability.equals("backup.restore")) {
+      validateRestoreRequest(payload);
+      return;
+    }
     if (payload != null && !payload.isNull())
       throw fail(422, "VALIDATION_FAILED", "该 Helper 操作不接受附加参数");
   }
@@ -659,6 +663,30 @@ public class HostHelperOperationResource {
       throw fail(422, "VALIDATION_FAILED", "备份来源必须是绝对路径且不能包含 ..");
     if (!BACKUP_NAME.matcher(name.asText()).matches())
       throw fail(422, "VALIDATION_FAILED", "备份名称需为 2–32 位小写字母、数字或连字符");
+  }
+
+  /** A restore: an existing managed archive and an absolute, empty target directory. */
+  private void validateRestoreRequest(JsonNode payload) {
+    if (payload == null || !payload.isObject())
+      throw fail(422, "VALIDATION_FAILED", "恢复参数缺失");
+    Set<String> fields = fieldSet(payload);
+    if (!Set.of("file", "target", "sha256").containsAll(fields)
+        || !fields.containsAll(Set.of("file", "target")))
+      throw fail(422, "VALIDATION_FAILED", "恢复只接受 file、target 与可选 sha256");
+    JsonNode file = payload.get("file");
+    JsonNode target = payload.get("target");
+    if (file == null || !file.isTextual() || target == null || !target.isTextual())
+      throw fail(422, "VALIDATION_FAILED", "备份文件与目标目录必须为文本");
+    if (!BACKUP_FILE.matcher(file.asText()).matches())
+      throw fail(422, "VALIDATION_FAILED", "备份文件名无效");
+    String path = target.asText();
+    if (!path.startsWith("/") || path.length() > 1024 || path.contains(".."))
+      throw fail(422, "VALIDATION_FAILED", "恢复目标必须是绝对路径且不能包含 ..");
+    JsonNode sha = payload.get("sha256");
+    if (sha != null && !sha.isNull()) {
+      if (!sha.isTextual() || !sha.asText().matches("[0-9A-Fa-f]{64}"))
+        throw fail(422, "VALIDATION_FAILED", "校验和必须是 64 位十六进制");
+    }
   }
 
   /**
