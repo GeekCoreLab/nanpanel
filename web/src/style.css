@@ -29,3 +29,15 @@
 .config-migrate-report .failed{color:#ef4444}
 .config-migrate-report .dry{color:#eab308}
 .config-migrate-report ul{margin:0;padding-left:16px;flex-basis:100%}
+.role-card-heading{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;flex-wrap:wrap}
+.role-entry{padding:12px 0;border-top:1px solid var(--border,rgba(148,163,184,.16))}
+.role-entry h3{display:flex;align-items:center;gap:8px;margin:0 0 6px;font-size:14px}
+.role-entry-permissions{display:flex;flex-wrap:wrap;gap:5px}
+.role-entry-actions{display:flex;gap:10px;margin-top:6px}
+.role-editor{max-width:720px;width:min(94vw,720px)}
+.role-editor-groups{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:10px;max-height:46vh;overflow:auto;padding:4px}
+.role-editor-group{display:flex;flex-direction:column;gap:4px;border:1px solid var(--border,rgba(148,163,184,.16));border-radius:8px;padding:8px}
+.role-editor-group strong{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted,#94a3b8)}
+.role-editor-group label{display:flex;align-items:center;gap:6px;font-size:12px;padding:2px 4px;border-radius:5px;cursor:pointer}
+.role-editor-group label.checked{background:rgba(165,107,196,.14)}
+.role-editor-group input{width:auto}

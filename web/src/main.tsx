@@ -16,7 +16,7 @@ import { api, ApiError, isMock, mockBusiness } from './lib/api';
 import { DEMO_PASSWORD } from './lib/mock';
 import { createUuid } from './lib/uuid.ts';
 import { agentMaintenanceCommand, type AgentMaintenanceMode } from './lib/agent-maintenance.ts';
-import type { Host, HostPage, Agent, AgentInstallation, AgentUpdateOperation, SystemService, SystemServicePage, Operation, OperationPage, SessionContext, AdminOverview, AdminUser, AdminUserPage, PlatformSettings, AuditEventPage, WebSessionList, ApiKeyList, CreatedApiKey, BuiltinRoleList, AgentEnrollmentCreated, HostHelperOperationRequest, HostNetworkInventory, HostNetworkInterface, HostNetworkRoute, HostFileListing, SshProbeResult, SshSystemdStatusResult, SshSystemdJournalResult, HostSshConfig, SshHostKeyProbe, BastionSession, BastionSessionTicket, BastionCommand, BastionRecordingChunk, KubernetesClusterList, KubernetesRuntimeDiscovery, KubernetesRuntimeDiscoveryList, KubernetesClusterImportRequest, KubernetesClusterSummary, KubernetesClusterNodeList, KubernetesClusterNode, KubernetesManagedDeployment, KubernetesManagedDeploymentCreateRequest, KubernetesManagedDeploymentScaleRequest, KubernetesManagedDeploymentList, KubernetesTopologyNamespaceSnapshot, KubernetesApplicationRelease, KubernetesApplicationReleaseCreateRequest, KubernetesApplicationReleaseList, HostApplicationRelease, HostApplicationReleaseCreateRequest, HostApplicationReleaseList, K3sRolloutList, K3sRolloutPlan, K3sInstallationList, K3sInstallationPlan } from './lib/types';
+import type { Host, HostPage, Agent, AgentInstallation, AgentUpdateOperation, SystemService, SystemServicePage, Operation, OperationPage, SessionContext, AdminOverview, AdminUser, AdminUserPage, PlatformSettings, AuditEventPage, WebSessionList, ApiKeyList, CreatedApiKey, BuiltinRole, BuiltinRoleList, AgentEnrollmentCreated, HostHelperOperationRequest, HostNetworkInventory, HostNetworkInterface, HostNetworkRoute, HostFileListing, SshProbeResult, SshSystemdStatusResult, SshSystemdJournalResult, HostSshConfig, SshHostKeyProbe, BastionSession, BastionSessionTicket, BastionCommand, BastionRecordingChunk, KubernetesClusterList, KubernetesRuntimeDiscovery, KubernetesRuntimeDiscoveryList, KubernetesClusterImportRequest, KubernetesClusterSummary, KubernetesClusterNodeList, KubernetesClusterNode, KubernetesManagedDeployment, KubernetesManagedDeploymentCreateRequest, KubernetesManagedDeploymentScaleRequest, KubernetesManagedDeploymentList, KubernetesTopologyNamespaceSnapshot, KubernetesApplicationRelease, KubernetesApplicationReleaseCreateRequest, KubernetesApplicationReleaseList, HostApplicationRelease, HostApplicationReleaseCreateRequest, HostApplicationReleaseList, K3sRolloutList, K3sRolloutPlan, K3sInstallationList, K3sInstallationPlan } from './lib/types';
 import './api-keys.css';
 import './kubernetes-clusters.css';
 import './kubernetes-upgrade.css';
@@ -919,6 +919,77 @@ function operationTitle(operation: Operation) {
  const titles: Record<string, string> = { 'package.install': '安装软件包', 'file.write.protected': '写入受保护文件', 'container.list': '列出容器', 'container.logs': '读取容器日志', 'container.start': '启动容器', 'container.stop': '停止容器', 'container.deploy': '部署容器', 'network.firewall.expose': '临时开放防火墙端口' };
  return titles[operation.capability ?? ''] ?? operation.capability ?? '受限 Helper 操作';
 }
+/** Role editor: the permission vocabulary comes from the server, never from a local list. */
+function RoleAdministration({ roles, notify }: { roles: { data?: BuiltinRoleList; error: string; loading: boolean; refresh: () => void }; notify: (message: string) => void }) {
+ const [editing, setEditing] = useState<{ id: string; name: string; permissions: string[]; isNew: boolean }>();
+ const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
+ const vocabulary = roles.data?.vocabulary ?? [];
+ const groups = vocabulary.reduce<Record<string, string[]>>((all, permission) => {
+  const group = permission.split('.')[0];
+  all[group] = [...(all[group] ?? []), permission];
+  return all;
+ }, {});
+ const togglePermission = (permission: string) => setEditing(current => current && ({
+  ...current,
+  permissions: current.permissions.includes(permission)
+   ? current.permissions.filter(item => item !== permission)
+   : [...current.permissions, permission],
+ }));
+ async function save(event: FormEvent) {
+  event.preventDefault(); if (!editing) return;
+  setBusy(true); setError('');
+  try {
+   if (editing.isNew) await api('/admin/roles', 'POST', { id: editing.id, name: editing.name, permissions: editing.permissions });
+   else await api(`/admin/roles/${editing.id}`, 'PUT', { name: editing.name, permissions: editing.permissions });
+   notify(`角色「${editing.name}」已保存`); setEditing(undefined); roles.refresh();
+  } catch (cause) { setError((cause as Error).message); } finally { setBusy(false); }
+ }
+ async function remove(role: BuiltinRole) {
+  if (!window.confirm(`删除角色「${role.name}」？仍在使用它的账号必须先改派。`)) return;
+  setBusy(true); setError('');
+  try { await api(`/admin/roles/${role.id}`, 'DELETE'); notify(`角色「${role.name}」已删除`); roles.refresh(); }
+  catch (cause) { setError((cause as Error).message); } finally { setBusy(false); }
+ }
+ return <>
+  <section className="card role-card">
+   <div className="role-card-heading"><div><h2>角色与权限</h2>
+    <p className="muted">权限在服务端强制：账号能访问哪些接口由所属角色决定。内置 ADMIN 不可修改或删除。</p></div>
+    <button className="secondary" disabled={busy} onClick={() => { setEditing({ id: '', name: '', permissions: [], isNew: true }); setError(''); }}>＋ 新建角色</button></div>
+   <ResourceState loading={roles.loading} error={roles.error} />
+   {error && !editing && <div className="alert error" role="alert">{error}</div>}
+   {roles.data?.items.map(role => <div key={role.id} className="role-entry">
+    <h3>{role.name} <span className="chip">{role.id}</span>{role.id === 'ADMIN' && <span className="chip">内置</span>}
+     <small className="muted">{role.permissions.length} 项权限</small></h3>
+    <div className="role-entry-permissions">{role.permissions.map(permission => <span className="chip" key={permission}>{permission}</span>)}</div>
+    {role.id !== 'ADMIN' && <div className="role-entry-actions">
+     <button className="link" disabled={busy} onClick={() => { setEditing({ id: role.id, name: role.name, permissions: [...role.permissions], isNew: false }); setError(''); }}>编辑</button>
+     <button className="link" disabled={busy} onClick={() => void remove(role)}>删除</button></div>}
+   </div>)}
+  </section>
+  {editing && <div className="modal-backdrop"><div className="modal role-editor" role="dialog" aria-label="角色编辑">
+   <div className="card-title"><h2>{editing.isNew ? '新建角色' : `编辑角色 ${editing.id}`}</h2>
+    <button className="icon-button" aria-label="关闭角色编辑" onClick={() => setEditing(undefined)}>×</button></div>
+   <form onSubmit={save}>
+    {editing.isNew && <Field label="角色标识（2–64 位字母、数字、_ 或 -）"><input required pattern="[A-Za-z][A-Za-z0-9_-]{1,63}"
+      value={editing.id} onChange={event => setEditing({ ...editing, id: event.target.value })} placeholder="例如 operator" /></Field>}
+    <Field label="名称"><input required maxLength={120} value={editing.name}
+      onChange={event => setEditing({ ...editing, name: event.target.value })} /></Field>
+    <span className="field-label">权限（{editing.permissions.length} / {vocabulary.length}）</span>
+    <div className="role-editor-groups">{Object.entries(groups).map(([group, permissions]) => <div key={group} className="role-editor-group">
+     <strong>{group}</strong>
+     {permissions.map(permission => <label key={permission} className={editing.permissions.includes(permission) ? 'checked' : ''}>
+      <input type="checkbox" checked={editing.permissions.includes(permission)} onChange={() => togglePermission(permission)} />
+      <span>{permission}</span></label>)}
+    </div>)}</div>
+    {error && <div className="alert error" role="alert">{error}</div>}
+    <div className="form-actions">
+     <button className="primary" disabled={busy || editing.permissions.length === 0}>{busy ? '正在保存…' : '保存角色'}</button>
+     <button className="secondary" type="button" onClick={() => setEditing(undefined)}>取消</button>
+    </div>
+   </form>
+  </div></div>}
+ </>;
+}
 function Operations() {
  const [status, setStatus] = useState(''); const [capability, setCapability] = useState(''); const query = [status ? `status=${status}` : '', capability ? `capability=${encodeURIComponent(capability)}` : ''].filter(Boolean).join('&'); const r = useResource<OperationPage>(`/operations${query ? `?${query}` : ''}`, 1500, true); const [selected, setSelected] = useState<string>(); const op = r.data?.items.find(x => x.id === selected);
  const evidence = op?.result && 'evidence' in op.result ? op.result.evidence : undefined;
@@ -1330,7 +1401,7 @@ function Users({ self, notify }: { self: string; notify: (s: string) => void }) 
  async function edit(u: AdminUser) { try { const fresh = await api<AdminUser>(`/admin/users/${u.id}`); setEditing({ user: fresh.data, etag: fresh.etag ?? '' }); setEditMode('profile'); setError(''); } catch (e) { notify((e as Error).message); } }
  async function update(e: FormEvent<HTMLFormElement>) { e.preventDefault(); if (!editing) return; const values = Object.fromEntries(new FormData(e.currentTarget)); setBusy(true); try { await api(`/admin/users/${editing.user.id}${editMode === 'password' ? '/password' : ''}`, editMode === 'password' ? 'PUT' : 'PATCH', values, { 'If-Match': editing.etag }); setEditing(undefined); r.refresh(); notify(editMode === 'password' ? '密码已重置，目标账号下次登录必须改密' : '账号资料已更新'); } catch (e) { setError((e as Error).message); } finally { setBusy(false); } }
  async function toggle(u: AdminUser) { try { const fresh = await api<AdminUser>(`/admin/users/${u.id}`); await api(`/admin/users/${u.id}`, 'PATCH', { status: fresh.data.status === 'ACTIVE' ? 'DISABLED' : 'ACTIVE' }, { 'If-Match': fresh.etag ?? '' }); r.refresh(); notify('账号状态已更新'); } catch (e) { notify((e as Error).message); } }
- return <><PageHeading title="管理员账号" description="平台账号独立于 Linux 用户；角色决定账号能访问哪些接口，权限按角色在服务端强制。" action={<button className="primary" onClick={() => { setCreate(true); setError(''); }}>＋ 创建管理员</button>} /><section className="card"><ResourceState {...r} /><div className="table-wrap"><table><thead><tr><th>账号</th><th>显示名称</th><th>角色</th><th>状态</th><th>首次改密</th><th /></tr></thead><tbody>{r.data?.items.map(u => <tr key={u.id}><td><b>{u.username}</b>{u.id === self && <span className="chip">本人</span>}</td><td>{u.displayName}</td><td><span className="chip">{u.roles?.[0] ?? 'ADMIN'}</span></td><td><Badge value={u.status} /></td><td>{u.mustChangePassword ? '待修改' : '已完成'}</td><td><button className="link" onClick={() => edit(u)}>管理</button><button className="link" disabled={u.id === self} onClick={() => toggle(u)}>{u.status === 'ACTIVE' ? '禁用账号' : '启用账号'}</button></td></tr>)}</tbody></table></div></section><section className="card role-card"><h2>内置角色与权限</h2><ResourceState {...roles} />{roles.data?.items.map(role => <div key={role.name}><h3>{role.name} <span className="chip">{role.id} · 只读</span></h3><p className="muted">平台内置管理员权限，暂不支持自定义角色。</p>{role.permissions.map(p => <span className="chip" key={p}>{p}</span>)}</div>)}</section>{editing && <div className="modal-backdrop"><div className="modal"><div className="card-title"><h2>管理 {editing.user.username}</h2><button className="icon-button" aria-label="关闭账号管理" onClick={() => setEditing(undefined)}>×</button></div><div className="form-actions"><button className="secondary" onClick={() => { setEditMode('profile'); setError(''); }}>修改显示名称</button><button className="secondary" disabled={editing.user.id === self} onClick={() => { setEditMode('password'); setError(''); }}>重置密码</button></div><form key={editMode} onSubmit={update}>{editMode === 'profile' ? <><Field label="显示名称"><input name="displayName" defaultValue={editing.user.displayName} required maxLength={100} /></Field><Field label="角色"><select name="roleId" defaultValue={editing.user.roles?.[0] ?? 'ADMIN'}>{roles.data?.items.map(role => <option key={role.id} value={role.id}>{role.name}（{role.id}）</option>)}</select></Field></> : <><div className="alert">将撤销目标账号的全部会话，要求下次登录修改密码。</div><Field label="新初始密码（15–128 字符）"><input type="password" name="newPassword" required minLength={15} maxLength={128} autoComplete="new-password" /></Field></>}{error && <div className="alert error">{error}</div>}<button className="primary full" disabled={busy}>{busy ? '正在提交…' : '确认保存'}</button></form></div></div>}{create && <div className="modal-backdrop"><div className="modal"><div className="card-title"><h2>创建管理员</h2><button className="icon-button" aria-label="关闭创建管理员" onClick={() => setCreate(false)}>×</button></div><form onSubmit={add}><Field label="用户名（创建后不可更改）"><input name="username" required pattern="[a-z][a-z0-9_.-]{2,63}" placeholder="例如 operator02" /></Field><Field label="显示名称"><input name="displayName" required maxLength={100} /></Field><Field label="初始密码（15–128 字符）"><input name="initialPassword" required type="password" minLength={15} maxLength={128} autoComplete="new-password" /></Field><p className="muted">新账号角色固定为 ADMIN，首次登录必须改密。</p>{error && <div className="alert error">{error}</div>}<button className="primary full" disabled={busy}>{busy ? '正在创建…' : '创建管理员'}</button></form></div></div>}</>;
+ return <><PageHeading title="管理员账号" description="平台账号独立于 Linux 用户；角色决定账号能访问哪些接口，权限按角色在服务端强制。" action={<button className="primary" onClick={() => { setCreate(true); setError(''); }}>＋ 创建管理员</button>} /><section className="card"><ResourceState {...r} /><div className="table-wrap"><table><thead><tr><th>账号</th><th>显示名称</th><th>角色</th><th>状态</th><th>首次改密</th><th /></tr></thead><tbody>{r.data?.items.map(u => <tr key={u.id}><td><b>{u.username}</b>{u.id === self && <span className="chip">本人</span>}</td><td>{u.displayName}</td><td><span className="chip">{u.roles?.[0] ?? 'ADMIN'}</span></td><td><Badge value={u.status} /></td><td>{u.mustChangePassword ? '待修改' : '已完成'}</td><td><button className="link" onClick={() => edit(u)}>管理</button><button className="link" disabled={u.id === self} onClick={() => toggle(u)}>{u.status === 'ACTIVE' ? '禁用账号' : '启用账号'}</button></td></tr>)}</tbody></table></div></section><RoleAdministration roles={roles} notify={notify} />{editing && <div className="modal-backdrop"><div className="modal"><div className="card-title"><h2>管理 {editing.user.username}</h2><button className="icon-button" aria-label="关闭账号管理" onClick={() => setEditing(undefined)}>×</button></div><div className="form-actions"><button className="secondary" onClick={() => { setEditMode('profile'); setError(''); }}>修改显示名称</button><button className="secondary" disabled={editing.user.id === self} onClick={() => { setEditMode('password'); setError(''); }}>重置密码</button></div><form key={editMode} onSubmit={update}>{editMode === 'profile' ? <><Field label="显示名称"><input name="displayName" defaultValue={editing.user.displayName} required maxLength={100} /></Field><Field label="角色"><select name="roleId" defaultValue={editing.user.roles?.[0] ?? 'ADMIN'}>{roles.data?.items.map(role => <option key={role.id} value={role.id}>{role.name}（{role.id}）</option>)}</select></Field></> : <><div className="alert">将撤销目标账号的全部会话，要求下次登录修改密码。</div><Field label="新初始密码（15–128 字符）"><input type="password" name="newPassword" required minLength={15} maxLength={128} autoComplete="new-password" /></Field></>}{error && <div className="alert error">{error}</div>}<button className="primary full" disabled={busy}>{busy ? '正在提交…' : '确认保存'}</button></form></div></div>}{create && <div className="modal-backdrop"><div className="modal"><div className="card-title"><h2>创建管理员</h2><button className="icon-button" aria-label="关闭创建管理员" onClick={() => setCreate(false)}>×</button></div><form onSubmit={add}><Field label="用户名（创建后不可更改）"><input name="username" required pattern="[a-z][a-z0-9_.-]{2,63}" placeholder="例如 operator02" /></Field><Field label="显示名称"><input name="displayName" required maxLength={100} /></Field><Field label="初始密码（15–128 字符）"><input name="initialPassword" required type="password" minLength={15} maxLength={128} autoComplete="new-password" /></Field><p className="muted">新账号角色固定为 ADMIN，首次登录必须改密。</p>{error && <div className="alert error">{error}</div>}<button className="primary full" disabled={busy}>{busy ? '正在创建…' : '创建管理员'}</button></form></div></div>}</>;
 }
 function Settings({ notify }: { notify: (s: string) => void }) {
  const [value, setValue] = useState<PlatformSettings>(); const [tag, setTag] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState(false);

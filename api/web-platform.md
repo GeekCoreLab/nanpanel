@@ -107,11 +107,23 @@ Cookie 生命周期与轮换设计参考 [OWASP Session Management](https://chea
 - 其它角色：从 `panel_role_permission` 读取该角色已授予的权限，交给 `AuthorizationPolicy` 判定；不通过返回 `403 PERMISSION_DENIED` 并写入 `security.permission.deny` 审计。
 - 角色权限以**数据库为准**（`panel_role_permission`），`RoleCatalog` 只负责首次播种，避免代码与库两套事实。
 
+### 角色管理
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/v1/admin/roles` | 角色列表 + `vocabulary`（服务端权限词表，界面据此渲染勾选项） |
+| POST | `/api/v1/admin/roles` | `{id, name, permissions[]}`，id 为 2–64 位字母/数字/`_`/`-` |
+| PUT | `/api/v1/admin/roles/{roleId}` | `{name?, permissions?}`；权限是**整组替换**，不是合并 |
+| DELETE | `/api/v1/admin/roles/{roleId}` | 仍有账号使用时返回 `409 ROLE_IN_USE` |
+
+- 权限必须在 `RoleCatalog` 词表内，否则 `422`；至少一项，重复自动去重。
+- 内置 `ADMIN` **不可修改、不可删除**（`409 ROLE_BUILTIN`），它保证平台始终可被管理。
+- 删除前必须先把账号改派到别的角色；角色标识不可修改（改标识等于换角色）。
+- 控制台「管理员」页的角色卡片可新建、编辑（按模块分组勾选权限）、删除。
+
 ### 尚未实现
 
 - 工作区/项目级隔离：资源目前都是平台级，`resource` 参数统一按 `*` 判定。
-- 界面上的角色管理与账号角色分配：`GET /api/v1/admin/roles` 只读，账号角色通过 `role_id` 直接落库。
-- 自定义角色（非内置）可以在库中创建并被正确判定，但还没有创建入口。
 
 ## 账号角色分配
 
