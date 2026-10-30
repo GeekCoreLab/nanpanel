@@ -48,12 +48,18 @@ npm test                                   # Node 测试
 | 层 | 当前基线 |
 | --- | --- |
 | Rust（`cargo test --all-features`） | **95** |
-| Java `panel-core`（`./mvnw verify` 汇总行） | **176** |
+| Java `panel-core` | **176** |
 | Java `panel-cluster` | **8** |
+| Java 插件（frp 7 / kubeedge 6 / netbird 7） | **20**，其中 **2 项 skipped** |
+| **Java 合计** | **204**，失败 0 |
 | Web（`npm test`） | **98** |
 
-统计以 Maven 的汇总行为准；`backend/*/target/surefire-reports/` 里可能残留已删除测试的旧报告
-（本次收敛就遇到一份 `OperationsResourceTest.xml` 把 Core 算成 177）。
+2 项 skipped 是 `*LiveTest`：它们需要真实外部服务，离线环境按设计跳过——**跳过不等于通过**，不要把
+它们算进「已验证」。
+
+统计以 surefire 的 `TEST-*.xml` 为准（`backend/*/target/...` 与 `plugins/*/target/...` 都要算）；
+清库前可能残留已删除测试的旧报告——本次收敛就遇到一份 `OperationsResourceTest.xml` 把 Core 算成 177，
+所以流程里用 `clean verify`。
 
 数字对不上时：先确认是不是自己新增/删除了用例，再确认**全量**跑完了（见下节），不要用「上次是这么多」搪塞。
 
@@ -82,8 +88,9 @@ git log --oneline -5
 - 2026-10-18 初始化验证：Maven 构建与两项 Core API 测试通过；TypeScript 与 Vite 生产构建通过；
   用临时 PostgreSQL 18 启动打包后的 Core，Liquibase 建表成功、`health` 为 UP、匿名 API 401、
   管理员 API 200；验证后关闭临时 Core 与数据库，未使用持久化数据卷。
-- 2026-10-30 收敛：`./mvnw verify` BUILD SUCCESS（Core 176、cluster 8）、`cargo test --all-features` 95、
-  `cargo fmt --check`/`clippy -D warnings` 干净、`npm run build` 与 `npm test` 98 全绿；
-  基线同步至 `docs/COMPARISON.md`。
+- 2026-10-30 收敛：`./mvnw clean verify` BUILD SUCCESS——Java **204** 项（Core 176、cluster 8、
+  frp 7、kubeedge 6、netbird 7；2 项 LiveTest 按设计跳过），失败 0；`cargo test --all-features` **95**、
+  `cargo fmt --all -- --check` / `cargo check` / `cargo clippy -- -D warnings` 干净；
+  `npm run build` 通过、`npm test` **98** 全绿。基线同步至 `docs/COMPARISON.md`。
 
 历史记录只写**实际跑过的**结果；未跑到的（浏览器交互、Agent mTLS、实际网络连通、真机部署）不写进通过项。

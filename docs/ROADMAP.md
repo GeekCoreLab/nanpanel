@@ -2,6 +2,8 @@
 
 > **功能覆盖自检**：见 [`docs/COMPARISON.md`](./COMPARISON.md) —— 逐项对照 KubeSphere / 1Panel / 宝塔，标注 ✅ 已实现且有离线测试 / 🟡 已实现但需真机验收 / ⛔ 未实现，并列出「明确不做」与真机验收待办。
 
+> **阶段性验收**：三层测试命令、各层边界与已知坑见 [`docs/testing/README.md`](testing/README.md)。
+>
 > **文档版本**：v0.1
 > **编制日期**：2026-10-29
 > **定位基线**：PROJECT_PLAN.md（P0–P6 已实现/验收状态见该文档第 15 节）
@@ -89,7 +91,7 @@ NaNPanel 是 **Java 主控 + Rust 边缘** 的混合云基础设施控制面。�
 
 - [x] 托管数据库实例（2026-10-30）：迁移 054 `database_instance`，`/api/v1/database-instances` 支持 MySQL 8.4 / MariaDB 11.4 / PostgreSQL 16 一键部署（固定镜像、发布到 127.0.0.1、命名卷、同主机端口唯一），口令由面板生成、**只随创建响应返回一次且不入库**，连接信息明确 `passwordStored:false`；主机离线时不留下记录、删除时保留记录。控制台「数据库」页新增「托管实例」。Java 174 项（+6）。
 
-- [x] 命名卷挂载点（2026-10-30）：Helper 新增 `container.volume.path`（`volume inspect` 取 Mountpoint，拒绝非绝对/含 `..`/不存在/非目录的结果），daemon 两层与 `POST /api/v1/database-instances/{id}/volume` 接线。数据库备份**尚未接上**——控制台按钮与备份串联仍待做。Rust 95 项（+2）。
+- [x] 命名卷挂载点（2026-10-30）：Helper 新增 `container.volume.path`（`volume inspect` 取 Mountpoint，拒绝非绝对/含 `..`/不存在/非目录的结果），daemon 两层与 `POST /api/v1/database-instances/{id}/volume` 接线。数据库备份当时尚未接上（控制台串联在「数据卷备份」与「实例备份历史」两步完成）。Rust 95 项（+2）。
 
 - [x] 实例备份历史（2026-10-30）：迁移 055 给 `backup_record` 加 `instance_id`，`GET /api/v1/backups?instanceId=` 过滤、创建时校验「实例属于同一主机」，控制台实例行新增「备份」历史（就地恢复/删除）。Java 176 项（+1）。
 

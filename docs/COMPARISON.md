@@ -11,7 +11,7 @@
 | 🟡 | 已实现，但**端到端验收需要真机或真实集群**（本仓库的测试只到契约层） |
 | ⛔ | 未实现 |
 
-自动化测试基线（最近一次全绿）：Rust **95** · Java Core **176** · Web **98**。验收流程见 `docs/testing/README.md`。
+自动化测试基线（最近一次全绿）：Rust **95** · Java **204**（Core 176，2 项 LiveTest 离线跳过）· Web **98**。验收流程见 `docs/testing/README.md`。
 
 ---
 
