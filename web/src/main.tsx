@@ -1334,7 +1334,7 @@ function Users({ self, notify }: { self: string; notify: (s: string) => void }) 
 }
 function Settings({ notify }: { notify: (s: string) => void }) {
  const [value, setValue] = useState<PlatformSettings>(); const [tag, setTag] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
- const [migrateStrategy, setMigrateStrategy] = useState<'skip' | 'overwrite'>('skip'); const [migrateBusy, setMigrateBusy] = useState(''); const [migrateReport, setMigrateReport] = useState<{ imported: number; skipped: number; failed: { kind: string; name: string | null; reason: string }[] }>(); const [migrateError, setMigrateError] = useState('');
+ const [migrateStrategy, setMigrateStrategy] = useState<'skip' | 'overwrite'>('skip'); const [migrateDryRun, setMigrateDryRun] = useState(false); const [migrateBusy, setMigrateBusy] = useState(''); const [migrateReport, setMigrateReport] = useState<{ dryRun?: boolean; imported: number; skipped: number; failed: { kind: string; name: string | null; reason: string }[] }>(); const [migrateError, setMigrateError] = useState('');
  async function exportConfig() {
   setMigrateBusy('export'); setMigrateError('');
   try {
@@ -1350,8 +1350,8 @@ function Settings({ notify }: { notify: (s: string) => void }) {
   setMigrateBusy('import'); setMigrateError(''); setMigrateReport(undefined);
   try {
    const text = await file.text(); const parsed = JSON.parse(text);
-   const r = await api<{ imported: number; skipped: number; failed: { kind: string; name: string | null; reason: string }[] }>(`/config/import?strategy=${migrateStrategy}`, 'POST', parsed, {}, true);
-   setMigrateReport(r.data); notify(`导入完成：成功 ${r.data.imported}，跳过 ${r.data.skipped}，失败 ${r.data.failed.length}`);
+   const r = await api<{ dryRun?: boolean; imported: number; skipped: number; failed: { kind: string; name: string | null; reason: string }[] }>(`/config/import?strategy=${migrateStrategy}${migrateDryRun ? '&dryRun=true' : ''}`, 'POST', parsed, {}, true);
+   setMigrateReport(r.data); notify(`${r.data.dryRun ? '预演完成（未写入）' : '导入完成'}：成功 ${r.data.imported}，跳过 ${r.data.skipped}，失败 ${r.data.failed.length}`);
   } catch (e) { setMigrateError((e as Error).message); } finally { setMigrateBusy(''); }
  }
  const load = () => api<PlatformSettings>('/admin/settings').then(r => { setValue(r.data); setTag(r.etag ?? ''); setError(''); }).catch(e => setError(e.message)); useEffect(() => { void load(); }, []);
@@ -1368,11 +1368,13 @@ function Settings({ notify }: { notify: (s: string) => void }) {
      <option value="skip">跳过已存在（skip）</option>
      <option value="overwrite">覆盖已存在（overwrite）</option>
     </select></label>
+   <label className="alerts-checkbox"><input type="checkbox" checked={migrateDryRun} onChange={e => setMigrateDryRun(e.target.checked)} /><span>仅预演（不写入）</span></label>
    <label className="secondary config-migrate-file"><input type="file" accept="application/json,.json" disabled={migrateBusy !== ''}
      onChange={e => { const f = e.target.files?.[0]; if (f) void importConfig(f); e.target.value = ''; }} />
-    {migrateBusy === 'import' ? '导入中…' : '选择 JSON 导入'}</label>
+    {migrateBusy === 'import' ? '处理中…' : migrateDryRun ? '选择 JSON 预演' : '选择 JSON 导入'}</label>
   </div>
   {migrateReport && <div className="config-migrate-report">
+   {migrateReport.dryRun && <span className="dry">预演（未写入）</span>}
    <span>成功 {migrateReport.imported}</span><span>跳过 {migrateReport.skipped}</span>
    <span className={migrateReport.failed.length ? 'failed' : ''}>失败 {migrateReport.failed.length}</span>
    {migrateReport.failed.length > 0 && <ul>{migrateReport.failed.map((f, i) => <li key={`${f.kind}-${i}`}>

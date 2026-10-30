@@ -27,4 +27,5 @@
 .config-migrate-file input{display:none}
 .config-migrate-report{display:flex;flex-wrap:wrap;gap:14px;margin-top:12px;font-size:12px}
 .config-migrate-report .failed{color:#ef4444}
+.config-migrate-report .dry{color:#eab308}
 .config-migrate-report ul{margin:0;padding-left:16px;flex-basis:100%}
