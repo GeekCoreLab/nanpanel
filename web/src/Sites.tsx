@@ -4,7 +4,9 @@ import { createUuid } from './lib/uuid.ts';
 import type { AppStoreDeployment, AppStoreDeploymentList, Host, HostPage, ReverseProxySite, ReverseProxySiteList } from './lib/types';
 import './sites.css';
 
-const STATE_LABELS: Record<string, string> = { DRAFT: '草稿', APPLIED: '已生效', DISABLED: '已停用', FAILED: '失败' };
+const STATE_LABELS: Record<string, string> = { DRAFT: '草稿', APPLIED: '已生效', DISABLED: '已停用', FAILED: '失败', UNKNOWN: '状态未定' };
+/** The panel asked the host to change the route; the host has not reported back yet. */
+const inFlight = (site: ReverseProxySite) => site.operationStatus === 'PENDING' || site.operationStatus === 'RUNNING';
 
 /**
  * 网站（反向代理）控制台：把「域名 → 主机上 127.0.0.1:端口」登记为站点，应用时
@@ -241,11 +243,11 @@ export function Sites({ notify }: { notify: (message: string) => void }) {
             <strong>{site.domain}{site.tlsName && <span className="sites-badge">HTTPS</span>}</strong>
             <small>{site.hostname} · {site.listenAddress}:{site.listenPort} → 127.0.0.1:{site.upstreamPort}{site.healthPath}</small>
           </div>
-          <span className={`sites-state sites-state-${site.state.toLowerCase()}`}>{STATE_LABELS[site.state] ?? site.state}</span>
+          <span className={`sites-state sites-state-${site.state.toLowerCase()}`} title={site.state === 'UNKNOWN' ? '主机未确认结果，需先停用再处理' : site.state === 'FAILED' ? '主机执行失败，路由未生效' : undefined}>{STATE_LABELS[site.state] ?? site.state}</span>{inFlight(site) && <span className="sites-state sites-state-pending" title="指令已下发，等待主机回报">处理中</span>}
           <div className="sites-item-actions">
             <button type="button" className="secondary"
-              disabled={isMock || busy === site.id || site.state === 'APPLIED'}
-              title={site.state === 'APPLIED' ? '已生效站点需先停用后再修改' : '修改域名、地址、端口或健康检查路径'}
+              disabled={isMock || busy === site.id || site.state === 'APPLIED' || site.state === 'UNKNOWN'}
+              title={site.state === 'APPLIED' || site.state === 'UNKNOWN' ? '需先停用后再修改' : '修改域名、地址、端口或健康检查路径'}
               onClick={() => startEdit(site)}>编辑</button>
             <button type="button" className="secondary" disabled={isMock || busy === site.id}
               title="粘贴证书与私钥，切换到受管 HTTPS 终止"
@@ -255,8 +257,8 @@ export function Sites({ notify }: { notify: (message: string) => void }) {
                   onClick={() => void disable(site)}>{busy === site.id ? '处理中…' : '停用'}</button>
               : <button type="button" className="secondary" disabled={isMock || busy === site.id}
                   onClick={() => void apply(site)}>{busy === site.id ? '处理中…' : site.state === 'DISABLED' ? '启用' : '应用'}</button>}
-            <button type="button" className="secondary" disabled={isMock || busy === site.id || site.state === 'APPLIED'}
-              title={site.state === 'APPLIED' ? '已生效站点需先停用后再删除' : '删除站点记录'}
+            <button type="button" className="secondary" disabled={isMock || busy === site.id || site.state === 'APPLIED' || site.state === 'UNKNOWN'}
+              title={site.state === 'APPLIED' || site.state === 'UNKNOWN' ? '需先停用后再删除' : '删除站点记录'}
               onClick={() => void remove(site)}>删除</button>
           </div>
         </li>)}</ul>

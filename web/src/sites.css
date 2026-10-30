@@ -29,3 +29,5 @@
 .sites-form-actions{display:flex;align-items:center;gap:8px}
 .sites-form-actions button.primary{align-self:auto;margin-top:0}
 .sites-item-actions button{white-space:nowrap}
+.sites-state-pending{background:rgba(234,179,8,.16);color:#eab308;animation:sites-pulse 1.6s ease-in-out infinite}
+@keyframes sites-pulse{0%,100%{opacity:1}50%{opacity:.55}}
