@@ -12,6 +12,7 @@ JSON），不引入邮件/短信这类需要外部凭据的通道。
 | PUT | `/api/v1/alert-channels/{id}` | 改名 / 改地址 / 启停（字段可选） |
 | DELETE | `/api/v1/alert-channels/{id}` | 删除；**绑定它的规则不删**，只把 `channel_id` 置空 |
 | POST | `/api/v1/alert-channels/{id}/test` | 投递一条测试通知；成功 200，失败 502（带 `error`） |
+| GET | `/api/v1/alert-events?kind=&limit=` | 通知历史（只读，最新在前，`limit` 1–200，默认 30） |
 
 规则通过 `POST /api/v1/alert-rules` 的 `channelId` 字段绑定渠道（未知渠道返回 `404 CHANNEL_NOT_FOUND`）；
 规则列表返回 `channelId` 与 `channelName`。`channelId` 为空表示「仅控制台可见」。
@@ -21,7 +22,8 @@ JSON），不引入邮件/短信这类需要外部凭据的通道。
 - 后台每 60 秒求值一次（`AlertNotifier`），只对**新进入告警**的对象投递；处于告警中的对象不会每分钟重复推送。
 - 去重键是 `规则 + 主机 + 明细`，记录在 `alert_firing_state`。观测恢复后会清除该键，**同一对象再次告警会重新通知**。
 - 投递失败（非 2xx、超时 5 秒、连接错误）**不记录去重键**，下一次求值会重试；失败原因写在渠道的 `lastStatus`/`lastError`。
-- 恢复本身不发送通知（当前只做「进入告警」），这是明确的取舍而不是遗漏。
+- **恢复也通知**：观测恢复时投递 `alert.recovered`，并清除去重键。每个渠道可用 `notifyRecovery=false`（`PUT` 的 `notifyRecovery`）关掉恢复通知——状态仍会清除，下一次故障会照常通知。
+- 每次投递尝试（含失败）都写入 `alert_event`，可通过 `GET /api/v1/alert-events` 查到「什么时候、通知了谁、成功没有」。
 - 生产默认开启定时器；`nanpanel.alerting.dispatch-enabled=false` 可关闭（测试用它把时钟排除在外）。
 
 ## 载荷
@@ -39,6 +41,8 @@ JSON），不引入邮件/短信这类需要外部凭据的通道。
   "source": "nanpanel"
 }
 ```
+
+恢复事件结构相同，`event` 为 `alert.recovered`、时间字段为 `at`。
 
 请求头带 `Content-Type: application/json`、`User-Agent: NaNPanel`、`X-NaNPanel-Event: alert.firing`（测试为 `alert.test`）。
 

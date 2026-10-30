@@ -156,4 +156,12 @@
         <sql>ALTER TABLE alert_rule ADD COLUMN channel_id UUID REFERENCES alert_channel(channel_id) ON DELETE SET NULL;</sql>
         <sql>CREATE TABLE alert_firing_state (dedupe_key VARCHAR(200) PRIMARY KEY, rule_id UUID NOT NULL, channel_id UUID REFERENCES alert_channel(channel_id) ON DELETE CASCADE, hostname VARCHAR(255), since BIGINT NOT NULL, last_sent_at BIGINT);</sql>
     </changeSet>
+    <changeSet id="alert-events-test" author="nanpanel">
+        <sql>ALTER TABLE alert_channel ADD COLUMN notify_recovery BOOLEAN NOT NULL DEFAULT TRUE;</sql>
+        <sql>ALTER TABLE alert_firing_state ADD COLUMN rule_name VARCHAR(120);</sql>
+        <sql>ALTER TABLE alert_firing_state ADD COLUMN severity VARCHAR(16);</sql>
+        <sql>ALTER TABLE alert_firing_state ADD COLUMN condition_kind VARCHAR(32);</sql>
+        <sql>ALTER TABLE alert_firing_state ADD COLUMN detail VARCHAR(500);</sql>
+        <sql>CREATE TABLE alert_event (event_id UUID PRIMARY KEY, dedupe_key VARCHAR(200) NOT NULL, rule_id UUID, rule_name VARCHAR(120) NOT NULL, channel_id UUID, channel_name VARCHAR(120), kind VARCHAR(16) NOT NULL CHECK (kind IN ('FIRING','RECOVERED')), severity VARCHAR(16) NOT NULL, condition_kind VARCHAR(32) NOT NULL, hostname VARCHAR(255), detail VARCHAR(500), status VARCHAR(16) NOT NULL CHECK (status IN ('SUCCEEDED','FAILED')), error VARCHAR(300), created_at BIGINT NOT NULL);</sql>
+    </changeSet>
 </databaseChangeLog>

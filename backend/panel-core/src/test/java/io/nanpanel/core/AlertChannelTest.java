@@ -2,6 +2,7 @@ package io.nanpanel.core;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -192,6 +193,7 @@ class AlertChannelTest {
     String adminId = seedAdmin();
     UUID hostId = seedHost("web-01", "OFFLINE");
     UUID channelId = UUID.randomUUID();
+    UUID ruleId = UUID.randomUUID();
     long now = System.currentTimeMillis();
     store.transaction(c -> {
       AuthStore.update(c, "INSERT INTO alert_channel (channel_id,name,kind,url,enabled,"
@@ -199,8 +201,7 @@ class AlertChannelTest {
           channelId, "值班群", "WEBHOOK", hookUrl, adminId, now, now);
       AuthStore.update(c, "INSERT INTO alert_rule (rule_id,name,condition_kind,host_id,severity,"
               + "enabled,created_by,created_at,channel_id) VALUES (?,?,?,?,?,TRUE,?,?,?)",
-          UUID.randomUUID(), "主机离线", "HOST_NOT_ONLINE", hostId, "CRITICAL", adminId, now,
-          channelId);
+          ruleId, "主机离线", "HOST_NOT_ONLINE", hostId, "CRITICAL", adminId, now, channelId);
       return null;
     });
 
@@ -216,17 +217,25 @@ class AlertChannelTest {
     assertEquals(0, notifier.runOnce());
     assertEquals(1, received.size());
 
-    // Recovery clears the state without notifying.
+    // Recovery notifies too, so an operator knows the incident is over.
     store.transaction(c -> AuthStore.update(c,
         "UPDATE host SET status='ONLINE' WHERE id=?", hostId));
-    assertEquals(0, notifier.runOnce());
-    assertEquals(1, received.size());
+    assertEquals(1, notifier.runOnce());
+    assertEquals(2, received.size());
+    assertTrue(received.get(1).contains("\"event\":\"alert.recovered\""));
 
     // A relapse is a new incident, so it notifies again.
     store.transaction(c -> AuthStore.update(c,
         "UPDATE host SET status='OFFLINE' WHERE id=?", hostId));
     assertEquals(1, notifier.runOnce());
-    assertEquals(2, received.size());
+    assertEquals(3, received.size());
+    // Both edges are recorded, so "was anyone told?" is answerable after the fact.
+    assertEquals(2, store.transaction(c -> AuthStore.query(c,
+        "SELECT event_id FROM alert_event WHERE kind='FIRING' AND rule_id=?",
+        ruleId)).size());
+    assertEquals(1, store.transaction(c -> AuthStore.query(c,
+        "SELECT event_id FROM alert_event WHERE kind='RECOVERED' AND rule_id=?",
+        ruleId)).size());
   }
 
   @Test
@@ -235,6 +244,7 @@ class AlertChannelTest {
     Session session = login();
     UUID hostId = seedHost("web-02", "OFFLINE");
     UUID channelId = UUID.randomUUID();
+    UUID ruleId = UUID.randomUUID();
     long now = System.currentTimeMillis();
     store.transaction(c -> {
       AuthStore.update(c, "INSERT INTO alert_channel (channel_id,name,kind,url,enabled,"
@@ -242,8 +252,7 @@ class AlertChannelTest {
           channelId, "失败重试", "WEBHOOK", hookUrl, adminId, now, now);
       AuthStore.update(c, "INSERT INTO alert_rule (rule_id,name,condition_kind,host_id,severity,"
               + "enabled,created_by,created_at,channel_id) VALUES (?,?,?,?,?,TRUE,?,?,?)",
-          UUID.randomUUID(), "主机离线", "HOST_NOT_ONLINE", hostId, "WARNING", adminId, now,
-          channelId);
+          ruleId, "主机离线", "HOST_NOT_ONLINE", hostId, "WARNING", adminId, now, channelId);
       return null;
     });
 
@@ -259,6 +268,19 @@ class AlertChannelTest {
     assertEquals(2, received.size());
     assertEquals(0, notifier.runOnce());
     assertEquals(2, received.size());
+
+    // Every attempt is recorded, so a failed notification is auditable afterwards.
+    given().cookie("nanpanel_session", session.cookie()).get("/api/v1/alert-events?limit=10")
+        .then().statusCode(200)
+        .body("items[0].kind", equalTo("FIRING"))
+        .body("items[0].status", equalTo("SUCCEEDED"))
+        .body("items[0].channelName", equalTo("失败重试"))
+        .body("items[1].status", equalTo("FAILED"))
+        .body("items[1].error", equalTo("HTTP 500"));
+    given().cookie("nanpanel_session", session.cookie()).get("/api/v1/alert-events?kind=recovered")
+        .then().statusCode(200).body("kinds", hasSize(2));
+    given().cookie("nanpanel_session", session.cookie()).get("/api/v1/alert-events?kind=SOMETHING")
+        .then().statusCode(422).body("code", equalTo("VALIDATION_FAILED"));
   }
 
   /**
@@ -301,5 +323,32 @@ class AlertChannelTest {
       return null;
     });
     return hostId;
+  }
+
+  @Test
+  void aChannelCanOptOutOfRecoveryNotifications() {
+    String adminId = seedAdmin();
+    UUID hostId = seedHost("web-03", "OFFLINE");
+    UUID channelId = UUID.randomUUID();
+    UUID ruleId = UUID.randomUUID();
+    long now = System.currentTimeMillis();
+    store.transaction(c -> {
+      AuthStore.update(c, "INSERT INTO alert_channel (channel_id,name,kind,url,enabled,"
+          + "created_by,created_at,updated_at,notify_recovery) VALUES (?,?,?,?,TRUE,?,?,?,FALSE)",
+          channelId, "只要告警", "WEBHOOK", hookUrl, adminId, now, now);
+      AuthStore.update(c, "INSERT INTO alert_rule (rule_id,name,condition_kind,host_id,severity,"
+              + "enabled,created_by,created_at,channel_id) VALUES (?,?,?,?,?,TRUE,?,?,?)",
+          ruleId, "主机离线", "HOST_NOT_ONLINE", hostId, "WARNING", adminId, now, channelId);
+      return null;
+    });
+
+    assertEquals(1, notifier.runOnce());
+    store.transaction(c -> AuthStore.update(c,
+        "UPDATE host SET status='ONLINE' WHERE id=?", hostId));
+    assertEquals(0, notifier.runOnce());
+    assertEquals(1, received.size());
+    // The state is still cleared, so the next incident is reported rather than suppressed.
+    assertEquals(0, store.transaction(c -> AuthStore.query(c,
+        "SELECT dedupe_key FROM alert_firing_state WHERE rule_id=?", ruleId)).size());
   }
 }

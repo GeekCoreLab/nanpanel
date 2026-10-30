@@ -36,7 +36,8 @@ import java.util.UUID;
 @Produces(MediaType.APPLICATION_JSON)
 public class AlertChannelResource {
 
-  public record ChannelRequest(String name, String url, Boolean enabled) {}
+  public record ChannelRequest(String name, String url, Boolean enabled,
+                               Boolean notifyRecovery) {}
 
   @Inject AuthStore store;
   @Inject AlertNotifier notifier;
@@ -47,8 +48,8 @@ public class AlertChannelResource {
   public Map<String, Object> list() {
     session();
     var rows = store.transaction(c -> query(c, """
-        SELECT ch.channel_id, ch.name, ch.kind, ch.url, ch.enabled, ch.last_status, ch.last_at,
-               ch.last_error, ch.created_at, ch.updated_at,
+        SELECT ch.channel_id, ch.name, ch.kind, ch.url, ch.enabled, ch.notify_recovery,
+               ch.last_status, ch.last_at, ch.last_error, ch.created_at, ch.updated_at,
                (SELECT COUNT(*) FROM alert_rule r WHERE r.channel_id = ch.channel_id) AS rule_count
         FROM alert_channel ch ORDER BY ch.created_at DESC LIMIT 100"""));
     List<Map<String, Object>> items = new ArrayList<>(rows.size());
@@ -65,11 +66,12 @@ public class AlertChannelResource {
     String name = name(input);
     String url = url(input);
     boolean enabled = input.enabled() == null || input.enabled();
+    boolean notifyRecovery = input.notifyRecovery() == null || input.notifyRecovery();
     try {
       store.transaction(c -> {
         update(c, "INSERT INTO alert_channel (channel_id,name,kind,url,enabled,created_by,"
-            + "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)",
-            id, name, "WEBHOOK", url, enabled, actor.get("user_id"), now, now);
+            + "created_at,updated_at,notify_recovery) VALUES (?,?,?,?,?,?,?,?,?)",
+            id, name, "WEBHOOK", url, enabled, actor.get("user_id"), now, now, notifyRecovery);
         audit(c, String.valueOf(actor.get("user_id")), "alert-channel.create",
             "alert_channel", id.toString(), "SUCCEEDED", clientIp(), "登记告警通知渠道 " + name);
         return null;
@@ -92,13 +94,15 @@ public class AlertChannelResource {
     String name = input == null || input.name() == null ? null : name(input);
     String url = input == null || input.url() == null ? null : url(input);
     Boolean enabled = input == null ? null : input.enabled();
-    if (name == null && url == null && enabled == null)
+    Boolean notifyRecovery = input == null ? null : input.notifyRecovery();
+    if (name == null && url == null && enabled == null && notifyRecovery == null)
       throw fail(422, "VALIDATION_FAILED", "没有需要更新的字段");
     try {
       store.transaction(c -> {
         update(c, "UPDATE alert_channel SET name=COALESCE(?,name), url=COALESCE(?,url), "
-                + "enabled=COALESCE(?,enabled), updated_at=? WHERE channel_id=?",
-            name, url, enabled, System.currentTimeMillis(), id);
+                + "enabled=COALESCE(?,enabled), notify_recovery=COALESCE(?,notify_recovery), "
+                + "updated_at=? WHERE channel_id=?",
+            name, url, enabled, notifyRecovery, System.currentTimeMillis(), id);
         audit(c, String.valueOf(actor.get("user_id")), "alert-channel.update",
             "alert_channel", id.toString(), "SUCCEEDED", clientIp(), "更新告警通知渠道");
         return null;
@@ -166,8 +170,8 @@ public class AlertChannelResource {
 
   private Map<String, Object> load(UUID id) {
     var rows = store.transaction(c -> query(c, """
-        SELECT ch.channel_id, ch.name, ch.kind, ch.url, ch.enabled, ch.last_status, ch.last_at,
-               ch.last_error, ch.created_at, ch.updated_at,
+        SELECT ch.channel_id, ch.name, ch.kind, ch.url, ch.enabled, ch.notify_recovery,
+               ch.last_status, ch.last_at, ch.last_error, ch.created_at, ch.updated_at,
                (SELECT COUNT(*) FROM alert_rule r WHERE r.channel_id = ch.channel_id) AS rule_count
         FROM alert_channel ch WHERE ch.channel_id=?""", id));
     if (rows.isEmpty()) throw fail(404, "CHANNEL_NOT_FOUND", "通知渠道不存在");
@@ -181,6 +185,7 @@ public class AlertChannelResource {
     item.put("kind", String.valueOf(row.get("kind")));
     item.put("url", String.valueOf(row.get("url")));
     item.put("enabled", Boolean.TRUE.equals(row.get("enabled")));
+    item.put("notifyRecovery", !Boolean.FALSE.equals(row.get("notify_recovery")));
     item.put("lastStatus", row.get("last_status") == null ? null
         : String.valueOf(row.get("last_status")));
     item.put("lastAt", row.get("last_at") == null ? null
