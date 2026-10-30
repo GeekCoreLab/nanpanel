@@ -76,6 +76,7 @@ public final class EndpointPermissions {
       new Rule("GET", API + "/reverse-proxy-sites", "site.read"),
       new Rule("DELETE", API + "/reverse-proxy-sites", "site.delete"),
       new Rule("*", API + "/reverse-proxy-sites", "site.apply"),
+      new Rule("*", API + "/config", "admin.settings.manage"),
       new Rule("GET", API + "/alert-channels", "alert-rule.read"),
       new Rule("GET", API + "/alert-events", "alert-rule.read"),
       new Rule("DELETE", API + "/alert-channels", "alert-rule.delete"),
